@@ -120,7 +120,7 @@ public class SchemaConverter {
           // Validate element type is FloatType or DoubleType
           if (elementType instanceof FloatType || elementType instanceof DoubleType) {
             // Add metadata for FixedSizeList
-            Long vectorSize = Long.parseLong(properties.get(vectorSizeProperty));
+            long vectorSize = Long.parseLong(properties.get(vectorSizeProperty));
             Metadata newMetadata =
                 new MetadataBuilder()
                     .withMetadata(field.metadata())

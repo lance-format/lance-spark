@@ -77,6 +77,15 @@ object LanceArrowUtils {
         // Lance returns LargeBinary in schema but Struct in data for blob columns
         // We need to handle this as binary to match the schema
         BinaryType
+      case l: ArrowType.List =>
+        val children = field.getChildren
+        if (children.isEmpty) {
+          throw new SparkException(s"List field ${field.getName} has no children")
+        }
+        val elementField = children.get(0)
+        val elementType = fromArrowField(elementField)
+        val containsNull = elementField.isNullable
+        ArrayType(elementType, containsNull)
       case _ => ArrowUtils.fromArrowField(field)
     }
   }

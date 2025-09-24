@@ -19,6 +19,7 @@ import org.apache.arrow.vector.UInt8Vector;
 import org.apache.arrow.vector.ValueVector;
 import org.apache.arrow.vector.complex.FixedSizeListVector;
 import org.apache.arrow.vector.complex.StructVector;
+import org.apache.arrow.vector.complex.ListVector;
 import org.apache.spark.sql.types.Decimal;
 import org.apache.spark.sql.util.LanceArrowUtils;
 import org.apache.spark.unsafe.types.UTF8String;
@@ -27,6 +28,7 @@ public class LanceArrowColumnVector extends ColumnVector {
   private UInt8Accessor uInt8Accessor;
   private FixedSizeListAccessor fixedSizeListAccessor;
   private BlobStructAccessor blobStructAccessor;
+  private LanceArrayAccessor arrayAccessor;
   private ArrowColumnVector arrowColumnVector;
 
   public LanceArrowColumnVector(ValueVector vector) {
@@ -41,6 +43,8 @@ public class LanceArrowColumnVector extends ColumnVector {
       // Handle blob structs with special accessor to avoid unsigned Int64 issues
       // Creating BlobStructAccessor for blob field
       blobStructAccessor = new BlobStructAccessor((StructVector) vector);
+    } else if (vector instanceof ListVector) {
+      arrayAccessor = new LanceArrayAccessor((ListVector) vector);
     } else {
       arrowColumnVector = new ArrowColumnVector(vector);
     }
@@ -56,6 +60,8 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (blobStructAccessor != null) {
       blobStructAccessor.close();
+    if (arrayAccessor != null) {
+      arrayAccessor.close();
     }
     if (arrowColumnVector != null) {
       arrowColumnVector.close();
@@ -72,6 +78,8 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (blobStructAccessor != null) {
       return blobStructAccessor.getNullCount() > 0;
+    if (arrayAccessor != null) {
+      return arrayAccessor.getNullCount() > 0;
     }
     if (arrowColumnVector != null) {
       return arrowColumnVector.hasNull();
@@ -89,6 +97,8 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (blobStructAccessor != null) {
       return blobStructAccessor.getNullCount();
+    if (arrayAccessor != null) {
+      return arrayAccessor.getNullCount();
     }
     if (arrowColumnVector != null) {
       return arrowColumnVector.numNulls();
@@ -106,6 +116,8 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (blobStructAccessor != null) {
       return blobStructAccessor.isNullAt(rowId);
+    if (arrayAccessor != null) {
+      return arrayAccessor.isNullAt(rowId);
     }
     if (arrowColumnVector != null) {
       return arrowColumnVector.isNullAt(rowId);
@@ -176,6 +188,9 @@ public class LanceArrowColumnVector extends ColumnVector {
   public ColumnarArray getArray(int rowId) {
     if (fixedSizeListAccessor != null) {
       return fixedSizeListAccessor.getArray(rowId);
+    }
+    if (arrayAccessor != null) {
+      return arrayAccessor.getArray(rowId);
     }
     if (arrowColumnVector != null) {
       return arrowColumnVector.getArray(rowId);
