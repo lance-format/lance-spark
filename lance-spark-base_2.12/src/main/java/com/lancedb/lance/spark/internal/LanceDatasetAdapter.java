@@ -19,6 +19,12 @@ import com.lancedb.lance.FragmentMetadata;
 import com.lancedb.lance.FragmentOperation;
 import com.lancedb.lance.ReadOptions;
 import com.lancedb.lance.WriteParams;
+import com.lancedb.lance.compaction.Compaction;
+import com.lancedb.lance.compaction.CompactionMetrics;
+import com.lancedb.lance.compaction.CompactionOptions;
+import com.lancedb.lance.compaction.CompactionPlan;
+import com.lancedb.lance.compaction.CompactionTask;
+import com.lancedb.lance.compaction.RewriteResult;
 import com.lancedb.lance.fragment.FragmentMergeResult;
 import com.lancedb.lance.operation.Merge;
 import com.lancedb.lance.operation.Update;
@@ -204,6 +210,32 @@ public class LanceDatasetAdapter {
     try (ArrowArrayStream arrowStream = ArrowArrayStream.allocateNew(allocator)) {
       Data.exportArrayStream(allocator, reader, arrowStream);
       return Fragment.create(datasetUri, arrowStream, params);
+    }
+  }
+
+  public static CompactionPlan planCompaction(
+      LanceConfig config, CompactionOptions compactOptions) {
+    String uri = config.getDatasetUri();
+    ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
+    try (Dataset dataset = Dataset.open(allocator, uri, options)) {
+      return Compaction.planCompaction(dataset, compactOptions);
+    }
+  }
+
+  public static RewriteResult executeCompaction(LanceConfig config, CompactionTask task) {
+    String uri = config.getDatasetUri();
+    ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
+    try (Dataset dataset = Dataset.open(allocator, uri, options)) {
+      return task.execute(dataset);
+    }
+  }
+
+  public static CompactionMetrics commitCompaction(
+      LanceConfig config, List<RewriteResult> results, CompactionOptions compactOptions) {
+    String uri = config.getDatasetUri();
+    ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
+    try (Dataset dataset = Dataset.open(allocator, uri, options)) {
+      return Compaction.commitCompaction(dataset, results, compactOptions);
     }
   }
 

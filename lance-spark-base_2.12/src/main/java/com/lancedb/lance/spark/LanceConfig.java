@@ -17,6 +17,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.jetbrains.annotations.TestOnly;
 
 import java.io.Serializable;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 
@@ -45,7 +46,7 @@ public class LanceConfig implements Serializable {
     this.datasetName = datasetName;
     this.datasetUri = datasetUri;
     this.pushDownFilters = pushDownFilters;
-    this.options = options.asCaseSensitiveMap();
+    this.options = new HashMap<>(options.asCaseSensitiveMap());
   }
 
   public static LanceConfig from(Map<String, String> properties) {

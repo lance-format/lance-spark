@@ -15,7 +15,7 @@ package org.apache.spark.sql.catalyst.parser.extensions
 
 import org.apache.spark.sql.catalyst.analysis.{UnresolvedIdentifier, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.parser.ParserInterface
-import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, LogicalPlan}
+import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, Compact, LogicalPlan, NamedArgument}
 
 import scala.jdk.CollectionConverters._
 
@@ -45,5 +45,40 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
    */
   override def visitColumnList(ctx: LanceSqlExtensionsParser.ColumnListContext): Seq[String] = {
     ctx.columns.asScala.map(_.getText).toSeq
+  }
+
+  override def visitCompact(ctx: LanceSqlExtensionsParser.CompactContext): Compact = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val args = ctx.namedArgument().asScala.map(a =>
+      NamedArgument(
+        a.identifier().getText,
+        a.constant().accept(this)))
+      .toSeq
+
+    Compact(table, args)
+  }
+
+  override def visitStringLiteral(ctx: LanceSqlExtensionsParser.StringLiteralContext): String = {
+    ctx.getText
+  }
+
+  override def visitBooleanValue(ctx: LanceSqlExtensionsParser.BooleanValueContext)
+      : java.lang.Boolean = {
+    java.lang.Boolean.valueOf(ctx.getText)
+  }
+
+  override def visitBigIntLiteral(ctx: LanceSqlExtensionsParser.BigIntLiteralContext)
+      : java.lang.Long = {
+    java.lang.Long.valueOf(ctx.getText)
+  }
+
+  override def visitFloatLiteral(ctx: LanceSqlExtensionsParser.FloatLiteralContext)
+      : java.lang.Float = {
+    java.lang.Float.valueOf(ctx.getText)
+  }
+
+  override def visitDoubleLiteral(ctx: LanceSqlExtensionsParser.DoubleLiteralContext)
+      : java.lang.Double = {
+    java.lang.Double.valueOf(ctx.getText)
   }
 }

@@ -19,7 +19,8 @@ singleStatement
     ;
 
 statement
-    : ALTER TABLE multipartIdentifier ADD COLUMNS columnList FROM identifier        #addColumnsBackfill
+    : ALTER TABLE multipartIdentifier ADD COLUMNS columnList FROM identifier                         #addColumnsBackfill
+    | OPTIMIZE multipartIdentifier COMPACT (WITH '(' (namedArgument (',' namedArgument)*)? ')')?     #compact
     ;
 
 multipartIdentifier
@@ -39,13 +40,59 @@ columnList
     : columns+=identifier (',' columns+=identifier)*
     ;
 
+namedArgument
+    : identifier '=' constant
+    ;
+
+constant
+    : number                          #numericLiteral
+    | booleanValue                    #booleanLiteral
+    | STRING+                         #stringLiteral
+    ;
+
+booleanValue
+    : TRUE | FALSE
+    ;
+
+number
+    : MINUS? BIGINT_LITERAL             #bigIntLiteral
+    | MINUS? FLOAT_LITERAL              #floatLiteral
+    | MINUS? DOUBLE_LITERAL             #doubleLiteral
+    ;
 
 ADD: 'ADD';
 ALTER: 'ALTER';
 COLUMNS: 'COLUMNS';
+COMPACT: 'COMPACT';
 FROM: 'FROM';
+OPTIMIZE: 'OPTIMIZE';
 TABLE: 'TABLE';
+WITH: 'WITH';
 
+TRUE: 'TRUE';
+FALSE: 'FALSE';
+
+PLUS: '+';
+MINUS: '-';
+
+STRING
+    : '\'' ( ~('\''|'\\') | ('\\' .) )* '\''
+    | '"' ( ~('"'|'\\') | ('\\' .) )* '"'
+    ;
+
+BIGINT_LITERAL
+    : DIGIT+
+    ;
+
+FLOAT_LITERAL
+    : FLOAT_FRAGMENT EXP? [fF]
+    | FLOAT_FRAGMENT EXP
+    | DIGIT+ '.' DIGIT+
+    ;
+
+DOUBLE_LITERAL
+    : FLOAT_FRAGMENT EXP? [dD]
+    ;
 
 IDENTIFIER
     : (LETTER | DIGIT | '_')+
@@ -54,6 +101,13 @@ IDENTIFIER
 BACKQUOTED_IDENTIFIER
     : '`' ( ~'`' | '``' )* '`'
     ;
+
+fragment FLOAT_FRAGMENT
+    : DIGIT+ '.' DIGIT*
+    | '.' DIGIT+
+    ;
+
+fragment EXP : [eE] [+-]? DIGIT+ ;
 
 fragment DIGIT
     : [0-9]
