@@ -46,7 +46,11 @@ public class SparkOptions {
     if (maps.containsKey(metadata_cache_size)) {
       builder.setMetadataCacheSize(Integer.parseInt(maps.get(metadata_cache_size)));
     }
-    builder.setStorageOptions(genStorageOptions(config));
+    // Only set storage options if not using namespace
+    // When using namespace, storage options are fetched automatically by OpenDatasetBuilder
+    if (!config.getNamespace().isPresent()) {
+      builder.setStorageOptions(genStorageOptions(config));
+    }
     return builder.build();
   }
 

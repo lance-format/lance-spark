@@ -15,13 +15,10 @@ package com.lancedb.lance.spark;
 
 import com.lancedb.lance.WriteParams;
 import com.lancedb.lance.namespace.LanceNamespace;
-import com.lancedb.lance.namespace.LanceNamespaceException;
 import com.lancedb.lance.namespace.LanceNamespaces;
 import com.lancedb.lance.namespace.ListTablesIterable;
 import com.lancedb.lance.namespace.model.CreateEmptyTableRequest;
 import com.lancedb.lance.namespace.model.CreateEmptyTableResponse;
-import com.lancedb.lance.namespace.model.DescribeTableRequest;
-import com.lancedb.lance.namespace.model.DescribeTableResponse;
 import com.lancedb.lance.namespace.model.DropNamespaceRequest;
 import com.lancedb.lance.namespace.model.DropTableRequest;
 import com.lancedb.lance.namespace.model.ListTablesRequest;
@@ -356,29 +353,19 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
     // Transform identifier for API call
     Identifier actualIdent = transformIdentifierForApi(ident);
 
-    DescribeTableRequest request = new DescribeTableRequest();
+    // Build table ID list from namespace and name
+    List<String> tableId = new ArrayList<>();
     for (String part : actualIdent.namespace()) {
-      request.addIdItem(part);
+      tableId.add(part);
     }
-    request.addIdItem(actualIdent.name());
+    tableId.add(actualIdent.name());
 
-    DescribeTableResponse response;
-    try {
-      response = namespace.describeTable(request);
-    } catch (LanceNamespaceException e) {
-      if (e.getCode() == 404) {
-        throw new NoSuchTableException(ident);
-      }
-      throw e;
-    }
+    // Create LanceConfig with namespace and table ID
+    // The OpenDatasetBuilder will automatically call describeTable to get location and storage
+    // options
+    LanceConfig config =
+        LanceConfig.from(CaseInsensitiveStringMap.empty(), namespace, tableId, actualIdent.name());
 
-    // Pass storage options from the response to LanceConfig, with fallback to empty map
-    Map<String, String> storageOptions = response.getStorageOptions();
-    if (storageOptions == null) {
-      storageOptions = new HashMap<>();
-    }
-
-    LanceConfig config = LanceConfig.from(storageOptions, response.getLocation());
     Optional<StructType> schema = LanceDatasetAdapter.getSchema(config);
     if (!schema.isPresent()) {
       throw new NoSuchTableException(ident);

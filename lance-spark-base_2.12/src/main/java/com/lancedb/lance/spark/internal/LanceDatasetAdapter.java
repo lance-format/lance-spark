@@ -45,9 +45,8 @@ public class LanceDatasetAdapter {
   public static final BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
 
   public static Optional<StructType> getSchema(LanceConfig config) {
-    String uri = config.getDatasetUri();
     ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
-    try (Dataset dataset = Dataset.open(allocator, uri, options)) {
+    try (Dataset dataset = openDataset(config, options)) {
       return Optional.of(LanceArrowUtils.fromArrowSchema(dataset.getSchema()));
     } catch (IllegalArgumentException e) {
       // dataset not found
@@ -65,9 +64,8 @@ public class LanceDatasetAdapter {
   }
 
   public static Optional<Long> getDatasetRowCount(LanceConfig config) {
-    String uri = config.getDatasetUri();
     ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
-    try (Dataset dataset = Dataset.open(allocator, uri, options)) {
+    try (Dataset dataset = openDataset(config, options)) {
       return Optional.of(dataset.countRows());
     } catch (IllegalArgumentException e) {
       // dataset not found
@@ -76,9 +74,8 @@ public class LanceDatasetAdapter {
   }
 
   public static Optional<Long> getDatasetDataSize(LanceConfig config) {
-    String uri = config.getDatasetUri();
     ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
-    try (Dataset dataset = Dataset.open(allocator, uri, options)) {
+    try (Dataset dataset = openDataset(config, options)) {
       return Optional.of(dataset.calculateDataSize());
     } catch (IllegalArgumentException e) {
       // dataset not found
@@ -87,17 +84,15 @@ public class LanceDatasetAdapter {
   }
 
   public static List<Integer> getFragmentIds(LanceConfig config) {
-    String uri = config.getDatasetUri();
     ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
-    try (Dataset dataset = Dataset.open(allocator, uri, options)) {
+    try (Dataset dataset = openDataset(config, options)) {
       return dataset.getFragments().stream().map(Fragment::getId).collect(Collectors.toList());
     }
   }
 
   public static List<FragmentMetadata> getFragments(LanceConfig config) {
-    String uri = config.getDatasetUri();
     ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
-    try (Dataset dataset = Dataset.open(allocator, uri, options)) {
+    try (Dataset dataset = openDataset(config, options)) {
       return dataset.getFragments().stream().map(Fragment::metadata).collect(Collectors.toList());
     }
   }
@@ -109,9 +104,8 @@ public class LanceDatasetAdapter {
 
   public static void appendFragments(LanceConfig config, List<FragmentMetadata> fragments) {
     FragmentOperation.Append appendOp = new FragmentOperation.Append(fragments);
-    String uri = config.getDatasetUri();
     ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
-    try (Dataset datasetRead = Dataset.open(allocator, uri, options)) {
+    try (Dataset datasetRead = openDataset(config, options)) {
       Dataset.commit(
               allocator,
               config.getDatasetUri(),
@@ -126,9 +120,8 @@ public class LanceDatasetAdapter {
       LanceConfig config, List<FragmentMetadata> fragments, StructType sparkSchema) {
     Schema schema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false, false);
     FragmentOperation.Overwrite overwrite = new FragmentOperation.Overwrite(fragments, schema);
-    String uri = config.getDatasetUri();
     ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
-    try (Dataset datasetRead = Dataset.open(allocator, uri, options)) {
+    try (Dataset datasetRead = openDataset(config, options)) {
       Dataset.commit(
               allocator,
               config.getDatasetUri(),
@@ -145,9 +138,8 @@ public class LanceDatasetAdapter {
       List<FragmentMetadata> updatedFragments,
       List<FragmentMetadata> newFragments) {
 
-    String uri = config.getDatasetUri();
     ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
-    try (Dataset dataset = Dataset.open(allocator, uri, options)) {
+    try (Dataset dataset = openDataset(config, options)) {
       Update update =
           Update.builder()
               .removedFragmentIds(removedFragmentIds)
@@ -161,9 +153,8 @@ public class LanceDatasetAdapter {
 
   public static void mergeFragments(
       LanceConfig config, List<FragmentMetadata> fragments, Schema schema) {
-    String uri = config.getDatasetUri();
     ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
-    try (Dataset dataset = Dataset.open(allocator, uri, options)) {
+    try (Dataset dataset = openDataset(config, options)) {
       dataset
           .newTransactionBuilder()
           .operation(Merge.builder().fragments(fragments).schema(schema).build())
@@ -174,9 +165,8 @@ public class LanceDatasetAdapter {
 
   public static FragmentMergeResult mergeFragmentColumn(
       LanceConfig config, int fragmentId, ArrowArrayStream stream, String leftOn, String rightOn) {
-    String uri = config.getDatasetUri();
     ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
-    try (Dataset dataset = Dataset.open(allocator, uri, options)) {
+    try (Dataset dataset = openDataset(config, options)) {
       Fragment fragment = dataset.getFragment(fragmentId);
       return fragment.mergeColumns(stream, leftOn, rightOn);
     }
@@ -184,9 +174,8 @@ public class LanceDatasetAdapter {
 
   public static FragmentMetadata deleteRows(
       LanceConfig config, int fragmentId, List<Integer> rowIndexes) {
-    String uri = config.getDatasetUri();
     ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
-    try (Dataset dataset = Dataset.open(allocator, uri, options)) {
+    try (Dataset dataset = openDataset(config, options)) {
       return dataset.getFragment(fragmentId).deleteRows(rowIndexes);
     }
   }
@@ -220,5 +209,31 @@ public class LanceDatasetAdapter {
     String uri = config.getDatasetUri();
     ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
     Dataset.drop(uri, options.getStorageOptions());
+  }
+
+  /**
+   * Opens a dataset using the appropriate method based on the config.
+   *
+   * <p>If namespace and table ID are present in the config, uses the OpenDatasetBuilder with
+   * namespace support. Otherwise, falls back to the traditional URI-based opening.
+   *
+   * @param config Lance configuration
+   * @param options Read options (without storage options when using namespace)
+   * @return Opened dataset
+   */
+  private static Dataset openDataset(LanceConfig config, ReadOptions options) {
+    if (config.getNamespace().isPresent() && config.getTableId().isPresent()) {
+      // Use OpenDatasetBuilder with namespace
+      return Dataset.open()
+          .allocator(allocator)
+          .namespace(config.getNamespace().get())
+          .tableId(config.getTableId().get())
+          .readOptions(options)
+          .build();
+    } else {
+      // Traditional URI-based opening
+      String uri = config.getDatasetUri();
+      return Dataset.open(allocator, uri, options);
+    }
   }
 }

@@ -13,10 +13,14 @@
  */
 package com.lancedb.lance.spark;
 
+import com.lancedb.lance.namespace.LanceNamespace;
+import com.lancedb.lance.spark.utils.Optional;
+
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.jetbrains.annotations.TestOnly;
 
 import java.io.Serializable;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -34,18 +38,24 @@ public class LanceConfig implements Serializable {
   private final String datasetUri;
   private final boolean pushDownFilters;
   private final Map<String, String> options;
+  private final transient Optional<LanceNamespace> namespace;
+  private final Optional<List<String>> tableId;
 
   private LanceConfig(
       String dbPath,
       String datasetName,
       String datasetUri,
       boolean pushDownFilters,
-      CaseInsensitiveStringMap options) {
+      CaseInsensitiveStringMap options,
+      Optional<LanceNamespace> namespace,
+      Optional<List<String>> tableId) {
     this.dbPath = dbPath;
     this.datasetName = datasetName;
     this.datasetUri = datasetUri;
     this.pushDownFilters = pushDownFilters;
     this.options = options.asCaseSensitiveMap();
+    this.namespace = namespace;
+    this.tableId = tableId;
   }
 
   public static LanceConfig from(Map<String, String> properties) {
@@ -71,7 +81,33 @@ public class LanceConfig implements Serializable {
     boolean pushDownFilters =
         options.getBoolean(CONFIG_PUSH_DOWN_FILTERS, DEFAULT_PUSH_DOWN_FILTERS);
     String[] paths = extractDbPathAndDatasetName(datasetUri);
-    return new LanceConfig(paths[0], paths[1], datasetUri, pushDownFilters, options);
+    return new LanceConfig(
+        paths[0],
+        paths[1],
+        datasetUri,
+        pushDownFilters,
+        options,
+        Optional.empty(),
+        Optional.empty());
+  }
+
+  public static LanceConfig from(
+      CaseInsensitiveStringMap options,
+      LanceNamespace namespace,
+      List<String> tableId,
+      String datasetName) {
+    boolean pushDownFilters =
+        options.getBoolean(CONFIG_PUSH_DOWN_FILTERS, DEFAULT_PUSH_DOWN_FILTERS);
+    // For namespace-based configs, we don't have a traditional URI structure
+    // Use table name as both dbPath and datasetName for compatibility
+    return new LanceConfig(
+        "", // dbPath not applicable for namespace
+        datasetName,
+        "", // datasetUri will be fetched from namespace
+        pushDownFilters,
+        options,
+        Optional.of(namespace),
+        Optional.of(tableId));
   }
 
   @TestOnly
@@ -119,6 +155,14 @@ public class LanceConfig implements Serializable {
     return options;
   }
 
+  public Optional<LanceNamespace> getNamespace() {
+    return namespace;
+  }
+
+  public Optional<List<String>> getTableId() {
+    return tableId;
+  }
+
   @Override
   public boolean equals(Object o) {
     if (o == null || getClass() != o.getClass()) return false;
@@ -127,11 +171,12 @@ public class LanceConfig implements Serializable {
         && Objects.equals(dbPath, config.dbPath)
         && Objects.equals(datasetName, config.datasetName)
         && Objects.equals(datasetUri, config.datasetUri)
-        && Objects.equals(options, config.options);
+        && Objects.equals(options, config.options)
+        && Objects.equals(tableId, config.tableId);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(dbPath, datasetName, datasetUri, pushDownFilters, options);
+    return Objects.hash(dbPath, datasetName, datasetUri, pushDownFilters, options, tableId);
   }
 }

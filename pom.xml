@@ -51,7 +51,7 @@
 
     <properties>
         <lance-spark.version>0.0.15</lance-spark.version>
-        <lance.version>0.38.3</lance.version>
+        <lance.version>0.39.0</lance.version>
         <lance-namespace.version>0.0.19</lance-namespace.version>
 
         <antlr4.version>4.9.3</antlr4.version>
