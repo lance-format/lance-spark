@@ -63,6 +63,58 @@ object LanceArrowWriter {
     new LanceArrowWriter(root, children.toArray)
   }
 
+  def create(
+      root: VectorSchemaRoot,
+      sparkSchema: StructType,
+      batchSize: Int,
+      avgBytesPerVarWidthElement: Int): LanceArrowWriter = {
+    val children = root.getFieldVectors().asScala.zipWithIndex.map { case (vector, index) =>
+      val sparkField = sparkSchema.fields(index)
+      allocateVectorWithSize(vector, batchSize, sparkField.dataType, avgBytesPerVarWidthElement)
+      createFieldWriter(vector, sparkField.dataType, sparkField.metadata)
+    }
+    new LanceArrowWriter(root, children.toArray)
+  }
+
+  private def allocateVectorWithSize(
+      vector: ValueVector,
+      batchSize: Int,
+      sparkType: DataType,
+      avgBytesPerVarWidthElement: Int): Unit = {
+    vector match {
+      // FixedSizeListVector: Calculate exact size = batchSize * listSize * elementSize
+      case fixedSizeList: FixedSizeListVector =>
+        val listSize = fixedSizeList.getListSize()
+        val totalElements = batchSize * listSize
+        val dataVector = fixedSizeList.getDataVector()
+
+        // Allocate the underlying data vector
+        dataVector match {
+          case fwv: FixedWidthVector =>
+            fwv.allocateNew(totalElements)
+          case vwv: BaseVariableWidthVector =>
+            // For variable-width elements in fixed-size lists, use configured estimate
+            vwv.allocateNew(totalElements * avgBytesPerVarWidthElement, totalElements)
+          case _ =>
+            dataVector.allocateNew()
+        }
+        fixedSizeList.setValueCount(batchSize)
+
+      // FixedWidthVectors: Allocate exact count
+      case fixedWidth: FixedWidthVector =>
+        fixedWidth.allocateNew(batchSize)
+
+      // VariableWidthVectors: Allocate with size estimate
+      case varWidth: BaseVariableWidthVector =>
+        // Use configured average bytes per element
+        varWidth.allocateNew(batchSize * avgBytesPerVarWidthElement, batchSize)
+
+      // Default: Use default allocation
+      case _ =>
+        vector.allocateNew()
+    }
+  }
+
   private[arrow] def createFieldWriter(
       vector: ValueVector,
       sparkType: DataType,

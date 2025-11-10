@@ -30,6 +30,8 @@ public class SparkOptions {
   private static final String max_bytes_per_file = "max_bytes_per_file";
   private static final String batch_size = "batch_size";
   private static final String topN_push_down = "topN_push_down";
+  private static final String arrow_max_allocation_bytes = "arrow.max.allocation.bytes";
+  private static final String arrow_var_width_avg_bytes = "arrow.var.width.avg.bytes";
 
   public static ReadOptions genReadOptionFromConfig(LanceConfig config) {
     ReadOptions.Builder builder = new ReadOptions.Builder();
@@ -87,5 +89,37 @@ public class SparkOptions {
 
   public static boolean overwrite(LanceConfig config) {
     return config.getOptions().getOrDefault(write_mode, "append").equalsIgnoreCase("overwrite");
+  }
+
+  /**
+   * Get the maximum allocation size for Arrow buffers in bytes. Default is Long.MAX_VALUE to allow
+   * allocations beyond Integer.MAX_VALUE (2GB). Can be configured to a smaller value if needed to
+   * limit memory usage.
+   *
+   * @param config Lance configuration
+   * @return Maximum allocation size in bytes
+   */
+  public static long getArrowMaxAllocationBytes(LanceConfig config) {
+    Map<String, String> options = config.getOptions();
+    if (options.containsKey(arrow_max_allocation_bytes)) {
+      return Long.parseLong(options.get(arrow_max_allocation_bytes));
+    }
+    return Long.MAX_VALUE;
+  }
+
+  /**
+   * Get the average number of bytes per element for variable-width vectors (strings, binary). This
+   * is used to pre-allocate buffers to avoid frequent reallocations. Default is 64 bytes, which is
+   * a conservative estimate for most workloads.
+   *
+   * @param config Lance configuration
+   * @return Average bytes per variable-width element
+   */
+  public static int getArrowVarWidthAvgBytes(LanceConfig config) {
+    Map<String, String> options = config.getOptions();
+    if (options.containsKey(arrow_var_width_avg_bytes)) {
+      return Integer.parseInt(options.get(arrow_var_width_avg_bytes));
+    }
+    return 64;
   }
 }

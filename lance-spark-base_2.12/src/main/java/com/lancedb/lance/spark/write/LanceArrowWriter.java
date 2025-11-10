@@ -32,6 +32,7 @@ public class LanceArrowWriter extends ArrowReader {
   private final Schema schema;
   private final StructType sparkSchema;
   private final int batchSize;
+  private final int avgBytesPerVarWidthElement;
 
   @GuardedBy("monitor")
   private volatile boolean finished = false;
@@ -43,13 +44,19 @@ public class LanceArrowWriter extends ArrowReader {
   private final Semaphore loadToken;
 
   public LanceArrowWriter(
-      BufferAllocator allocator, Schema schema, StructType sparkSchema, int batchSize) {
+      BufferAllocator allocator,
+      Schema schema,
+      StructType sparkSchema,
+      int batchSize,
+      int avgBytesPerVarWidthElement) {
     super(allocator);
     Preconditions.checkNotNull(schema);
     Preconditions.checkArgument(batchSize > 0);
+    Preconditions.checkArgument(avgBytesPerVarWidthElement > 0);
     this.schema = schema;
     this.sparkSchema = sparkSchema;
     this.batchSize = batchSize;
+    this.avgBytesPerVarWidthElement = avgBytesPerVarWidthElement;
     this.writeToken = new Semaphore(0);
     this.loadToken = new Semaphore(0);
   }
@@ -79,7 +86,7 @@ public class LanceArrowWriter extends ArrowReader {
     super.prepareLoadNextBatch();
     arrowWriter =
         com.lancedb.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(
-            this.getVectorSchemaRoot(), sparkSchema);
+            this.getVectorSchemaRoot(), sparkSchema, batchSize, avgBytesPerVarWidthElement);
     // release batch size token for write
     writeToken.release(batchSize);
   }

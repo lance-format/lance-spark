@@ -121,7 +121,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     @Override
     public DeltaWriter<InternalRow> createWriter(int partitionId, long taskId) {
       int batch_size = SparkOptions.getBatchSize(config);
-      LanceArrowWriter arrowWriter = LanceDatasetAdapter.getArrowWriter(sparkSchema, batch_size);
+      LanceArrowWriter arrowWriter = LanceDatasetAdapter.getArrowWriter(sparkSchema, batch_size, config);
       WriteParams params = SparkOptions.genWriteParamsFromConfig(config);
       Callable<List<FragmentMetadata>> fragmentCreator =
           () -> LanceDatasetAdapter.createFragment(config.getDatasetUri(), arrowWriter, params);

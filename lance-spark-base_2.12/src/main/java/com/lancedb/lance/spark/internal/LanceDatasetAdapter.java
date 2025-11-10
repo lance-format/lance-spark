@@ -191,12 +191,14 @@ public class LanceDatasetAdapter {
     }
   }
 
-  public static LanceArrowWriter getArrowWriter(StructType sparkSchema, int batchSize) {
+  public static LanceArrowWriter getArrowWriter(
+      StructType sparkSchema, int batchSize, LanceConfig config) {
     return new LanceArrowWriter(
         allocator,
         LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false, false),
         sparkSchema,
-        batchSize);
+        batchSize,
+        SparkOptions.getArrowVarWidthAvgBytes(config));
   }
 
   public static List<FragmentMetadata> createFragment(

@@ -53,8 +53,10 @@ public class LanceArrowWriterTest {
 
       final int totalRows = 125;
       final int batchSize = 34;
+      final int avgBytesPerVarWidthElement = 64;
       final LanceArrowWriter arrowWriter =
-          new LanceArrowWriter(allocator, schema, sparkSchema, batchSize);
+          new LanceArrowWriter(
+              allocator, schema, sparkSchema, batchSize, avgBytesPerVarWidthElement);
 
       AtomicInteger rowsWritten = new AtomicInteger(0);
       AtomicInteger rowsRead = new AtomicInteger(0);
