@@ -146,11 +146,23 @@
             <groupId>com.lancedb</groupId>
             <artifactId>lance-core</artifactId>
             <version>${lance.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-api</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <dependency>
             <groupId>com.lancedb</groupId>
             <artifactId>lance-namespace-core</artifactId>
             <version>${lance-namespace.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-api</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
