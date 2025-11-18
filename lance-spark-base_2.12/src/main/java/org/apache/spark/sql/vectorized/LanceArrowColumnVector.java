@@ -60,6 +60,7 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (blobStructAccessor != null) {
       blobStructAccessor.close();
+    }
     if (arrayAccessor != null) {
       arrayAccessor.close();
     }
@@ -78,6 +79,7 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (blobStructAccessor != null) {
       return blobStructAccessor.getNullCount() > 0;
+    }
     if (arrayAccessor != null) {
       return arrayAccessor.getNullCount() > 0;
     }
@@ -97,6 +99,7 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (blobStructAccessor != null) {
       return blobStructAccessor.getNullCount();
+    }
     if (arrayAccessor != null) {
       return arrayAccessor.getNullCount();
     }
@@ -116,6 +119,7 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (blobStructAccessor != null) {
       return blobStructAccessor.isNullAt(rowId);
+    }
     if (arrayAccessor != null) {
       return arrayAccessor.isNullAt(rowId);
     }
