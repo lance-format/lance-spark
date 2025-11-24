@@ -42,10 +42,15 @@ abstract private[arrow] class LanceArrowFieldWriter {
 
   def write(input: SpecializedGetters, ordinal: Int): Unit = {
     if (input.isNullAt(ordinal)) {
-      setNull()
+      writeNull()
     } else {
       setValue(input, ordinal)
+      count += 1
     }
+  }
+
+  private[arrow] def writeNull(): Unit = {
+    setNull()
     count += 1
   }
 

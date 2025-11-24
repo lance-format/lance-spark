@@ -15,9 +15,12 @@ package com.lancedb.lance.spark.write;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.VectorUnloader;
+import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.ipc.message.ArrowRecordBatch;
+import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -33,6 +36,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class LanceArrowWriterTest {
   @Test
@@ -105,6 +109,56 @@ public class LanceArrowWriterTest {
       assertEquals(totalRows, rowsWritten.get());
       assertEquals(totalRows, rowsRead.get());
       arrowWriter.close();
+    }
+  }
+
+  @Test
+  public void propagatesStructNullsToChildren() {
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Field childField =
+          new Field(
+              "child", FieldType.nullable(new ArrowType.Int(32, true)), Collections.emptyList());
+      Field structField =
+          new Field(
+              "struct_col",
+              FieldType.nullable(ArrowType.Struct.INSTANCE),
+              Collections.singletonList(childField));
+      Schema arrowSchema = new Schema(Collections.singletonList(structField));
+
+      StructType childType =
+          new StructType(
+              new StructField[] {
+                DataTypes.createStructField("child", DataTypes.IntegerType, true)
+              });
+      StructType sparkSchema =
+          new StructType(
+              new StructField[] {DataTypes.createStructField("struct_col", childType, true)});
+
+      try (VectorSchemaRoot root = VectorSchemaRoot.create(arrowSchema, allocator)) {
+        com.lancedb.lance.spark.arrow.LanceArrowWriter structWriter =
+            com.lancedb.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(root, sparkSchema);
+
+        InternalRow[] rows =
+            new InternalRow[] {
+              new GenericInternalRow(new Object[] {new GenericInternalRow(new Object[] {1})}),
+              new GenericInternalRow(new Object[] {null}),
+              new GenericInternalRow(new Object[] {new GenericInternalRow(new Object[] {3})})
+            };
+
+        for (InternalRow row : rows) {
+          structWriter.write(row);
+        }
+        structWriter.finish();
+
+        StructVector structVector = (StructVector) root.getVector("struct_col");
+        IntVector childVector = (IntVector) structVector.getChild("child");
+
+        assertEquals(rows.length, structVector.getValueCount());
+        assertEquals(rows.length, childVector.getValueCount());
+        assertTrue(structVector.isNull(1));
+        assertEquals(1, childVector.get(0));
+        assertEquals(3, childVector.get(2));
+      }
     }
   }
 }

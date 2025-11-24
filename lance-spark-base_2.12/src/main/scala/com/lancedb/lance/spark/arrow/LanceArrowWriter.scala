@@ -388,8 +388,18 @@ private[arrow] class MapWriter(
 private[arrow] class StructWriter(
     val valueVector: StructVector,
     val children: Array[LanceArrowFieldWriter]) extends LanceArrowFieldWriter {
-  override def setNull(): Unit = {}
+  override def setNull(): Unit = {
+    // mark the parent struct as null for this row
+    valueVector.setNull(count)
+    var i = 0
+    while (i < children.length) {
+      children(i).writeNull()
+      i += 1
+    }
+  }
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    // mark the parent struct as defined (not null) before writing children
+    valueVector.setIndexDefined(count)
     val struct = input.getStruct(ordinal, children.length)
     var i = 0
     while (i < children.length) {
