@@ -4,7 +4,7 @@ site_url: https://lance.org/integrations/spark/
 docs_dir: src
 
 repo_name: lancedb/lance-spark
-repo_url: https://github.com/lancedb/lance-spark
+repo_url: https://github.com/lance-format/lance-spark
 
 theme:
   name: material
