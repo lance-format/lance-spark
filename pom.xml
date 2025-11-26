@@ -9,7 +9,7 @@
 
     <name>${project.artifactId}</name>
     <description>Lance Spark Connector</description>
-    <url>https://lancedb.github.io/lance-spark</url>
+    <url>https://lance.org/integrations/spark</url>
 
     <developers>
         <developer>

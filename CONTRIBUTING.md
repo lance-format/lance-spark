@@ -54,9 +54,9 @@ The contents in `lance-spark/docs` are for the ease of contributors to edit and 
 After code merge, the contents are added to the 
 [main Lance documentation](https://github.com/lancedb/lance/tree/main/docs) 
 during the Lance doc CI build time, and is presented in the Lance website under 
-[Apache Spark integration](https://lancedb.github.io/lance/integrations/spark).
+[Apache Spark integration](https://lance.org/integrations/spark).
 
-The CONTRIBUTING.md document is auto-built to the [Lance Contributing Guide](https://lancedb.github.io/lance/community/contributing/)
+The CONTRIBUTING.md document is auto-built to the [Lance Contributing Guide](https://lance.org/community/contributing/)
 
 ## Release Process
 

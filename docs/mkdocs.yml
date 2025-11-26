@@ -1,6 +1,6 @@
 site_name: Spark Lance Connector
 site_description: The Apache Spark Connector for Lance allows Apache Spark to efficiently read datasets stored in Lance format.
-site_url: https://lancedb.github.io/lance-spark/
+site_url: https://lance.org/integrations/spark/
 docs_dir: src
 
 repo_name: lancedb/lance-spark
