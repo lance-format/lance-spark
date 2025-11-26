@@ -1,6 +1,6 @@
 # Configuration
 
-Spark DSV2 catalog integrates with Lance through [Lance Namespace](https://github.com/lancedb/lance-namespace).
+Spark DSV2 catalog integrates with Lance through [Lance Namespace](https://github.com/lance-format/lance-namespace).
 
 ## Basic Setup
 

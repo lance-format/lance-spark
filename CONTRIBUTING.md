@@ -1,6 +1,6 @@
 # Contributing to Spark Lance Connector
 
-The Spark Lance connector codebase is at [lancedb/lance-spark](https://github.com/lancedb/lance-spark).
+The Spark Lance connector codebase is at [lancedb/lance-spark](https://github.com/lance-format/lance-spark).
 
 ## Build Commands
 
@@ -52,7 +52,7 @@ make serve-docs
 
 The contents in `lance-spark/docs` are for the ease of contributors to edit and preview.
 After code merge, the contents are added to the 
-[main Lance documentation](https://github.com/lancedb/lance/tree/main/docs) 
+[main Lance documentation](https://github.com/lance-format/lance/tree/main/docs) 
 during the Lance doc CI build time, and is presented in the Lance website under 
 [Apache Spark integration](https://lance.org/integrations/spark).
 

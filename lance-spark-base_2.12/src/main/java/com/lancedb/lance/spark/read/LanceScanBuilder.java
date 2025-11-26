@@ -82,7 +82,7 @@ public class LanceScanBuilder
     if (!config.isPushDownFilters()) {
       return filters;
     }
-    // remove the code after fix this issue https://github.com/lancedb/lance/issues/3578
+    // remove the code after fix this issue https://github.com/lance-format/lance/issues/3578
     boolean hasNestedField = false;
     for (StructField field : this.schema.fields()) {
       if (field.dataType() instanceof ArrayType) {

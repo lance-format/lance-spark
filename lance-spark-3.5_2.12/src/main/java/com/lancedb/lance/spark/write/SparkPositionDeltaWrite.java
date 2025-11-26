@@ -158,7 +158,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
             }
             // Get the row index which is low 32 bits of row address.
             // See
-            // https://github.com/lancedb/lance/blob/main/rust/lance-core/src/utils/address.rs#L36
+            // https://github.com/lance-format/lance/blob/main/rust/lance-core/src/utils/address.rs#L36
             v.add(RowAddress.rowIndex(id.getLong(0)));
             return v;
           });
