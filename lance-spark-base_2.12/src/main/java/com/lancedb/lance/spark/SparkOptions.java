@@ -15,6 +15,7 @@ package com.lancedb.lance.spark;
 
 import com.lancedb.lance.ReadOptions;
 import com.lancedb.lance.WriteParams;
+import com.lancedb.lance.WriteParams.LanceFileVersion;
 
 import java.util.Map;
 
@@ -30,6 +31,7 @@ public class SparkOptions {
   private static final String max_bytes_per_file = "max_bytes_per_file";
   private static final String batch_size = "batch_size";
   private static final String topN_push_down = "topN_push_down";
+  private static final String data_storage_version = "data_storage_version";
 
   public static ReadOptions genReadOptionFromConfig(LanceConfig config) {
     ReadOptions.Builder builder = new ReadOptions.Builder();
@@ -64,6 +66,9 @@ public class SparkOptions {
     }
     if (maps.containsKey(max_bytes_per_file)) {
       builder.withMaxBytesPerFile(Long.parseLong(maps.get(max_bytes_per_file)));
+    }
+    if (maps.containsKey(data_storage_version)) {
+      builder.withDataStorageVersion(LanceFileVersion.valueOf(maps.get(data_storage_version)));
     }
     builder.withStorageOptions(genStorageOptions(config));
     return builder.build();
