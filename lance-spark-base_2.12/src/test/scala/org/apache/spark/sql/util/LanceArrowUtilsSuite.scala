@@ -26,6 +26,7 @@ package org.apache.spark.sql.util
 import com.lancedb.lance.spark.LanceConstant
 
 import org.apache.arrow.vector.types.pojo.ArrowType
+import org.apache.arrow.vector.types.pojo.{Field, FieldType}
 import org.apache.spark.SparkUnsupportedOperationException
 import org.apache.spark.sql.types._
 import org.scalatest.funsuite.AnyFunSuite
@@ -43,11 +44,30 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
     }
   }
 
-  test("unsigned long") {
+  test("unsigned") {
     roundtrip(BooleanType, LanceConstant.ROW_ID)
     val arrowType = LanceArrowUtils.toArrowField(LanceConstant.ROW_ID, LongType, true, "Beijing")
     assert(arrowType.getType.asInstanceOf[ArrowType.Int].getBitWidth === 64)
     assert(!arrowType.getType.asInstanceOf[ArrowType.Int].getIsSigned)
+    // also verify unsigned smaller integers mapping (uint8/uint16/uint32)
+    val u8Field = new Field(
+      "u8",
+      new FieldType(true, new ArrowType.Int(8, /* signed = */ false), null, null),
+      java.util.Collections.emptyList()
+    )
+    val u16Field = new Field(
+      "u16",
+      new FieldType(true, new ArrowType.Int(16, /* signed = */ false), null, null),
+      java.util.Collections.emptyList()
+    )
+    val u32Field = new Field(
+      "u32",
+      new FieldType(true, new ArrowType.Int(32, /* signed = */ false), null, null),
+      java.util.Collections.emptyList()
+    )
+    assert(LanceArrowUtils.fromArrowField(u8Field) === ShortType)
+    assert(LanceArrowUtils.fromArrowField(u16Field) === IntegerType)
+    assert(LanceArrowUtils.fromArrowField(u32Field) === LongType)
   }
 
   test("simple") {
