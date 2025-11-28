@@ -25,8 +25,8 @@ package org.apache.spark.sql.util
 
 import com.lancedb.lance.spark.LanceConstant
 
-import org.apache.arrow.vector.types.pojo.ArrowType
 import org.apache.arrow.vector.types.pojo.{Field, FieldType}
+import org.apache.arrow.vector.types.pojo.ArrowType
 import org.apache.spark.SparkUnsupportedOperationException
 import org.apache.spark.sql.types._
 import org.scalatest.funsuite.AnyFunSuite
@@ -53,18 +53,15 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
     val u8Field = new Field(
       "u8",
       new FieldType(true, new ArrowType.Int(8, /* signed = */ false), null, null),
-      java.util.Collections.emptyList()
-    )
+      java.util.Collections.emptyList())
     val u16Field = new Field(
       "u16",
       new FieldType(true, new ArrowType.Int(16, /* signed = */ false), null, null),
-      java.util.Collections.emptyList()
-    )
+      java.util.Collections.emptyList())
     val u32Field = new Field(
       "u32",
       new FieldType(true, new ArrowType.Int(32, /* signed = */ false), null, null),
-      java.util.Collections.emptyList()
-    )
+      java.util.Collections.emptyList())
     assert(LanceArrowUtils.fromArrowField(u8Field) === ShortType)
     assert(LanceArrowUtils.fromArrowField(u16Field) === IntegerType)
     assert(LanceArrowUtils.fromArrowField(u32Field) === LongType)
