@@ -45,6 +45,14 @@ object LanceArrowUtils {
 
   def fromArrowField(field: Field): DataType = {
     field.getType match {
+      // Handle unsigned integers by mapping to larger signed types
+      // UInt8 -> ShortType (signed 16-bit can hold all UInt8 values 0-255)
+      case int: ArrowType.Int if !int.getIsSigned && int.getBitWidth == 8 => ShortType
+      // UInt16 -> IntegerType (signed 32-bit can hold all UInt16 values 0-65535)
+      case int: ArrowType.Int if !int.getIsSigned && int.getBitWidth == 8 * 2 => IntegerType
+      // UInt32 -> LongType (signed 64-bit can hold all UInt32 values 0-4294967295)
+      case int: ArrowType.Int if !int.getIsSigned && int.getBitWidth == 8 * 4 => LongType
+      // UInt64 -> LongType (may overflow for values > Long.MAX_VALUE, but no better option)
       case int: ArrowType.Int if !int.getIsSigned && int.getBitWidth == 8 * 8 => LongType
       case fixedSizeList: ArrowType.FixedSizeList =>
         // Convert FixedSizeList back to ArrayType for Spark
