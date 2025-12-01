@@ -15,6 +15,9 @@ package org.apache.spark.sql.vectorized;
 
 import com.lancedb.lance.spark.utils.BlobUtils;
 
+import org.apache.arrow.vector.UInt1Vector;
+import org.apache.arrow.vector.UInt2Vector;
+import org.apache.arrow.vector.UInt4Vector;
 import org.apache.arrow.vector.UInt8Vector;
 import org.apache.arrow.vector.ValueVector;
 import org.apache.arrow.vector.complex.FixedSizeListVector;
@@ -25,6 +28,9 @@ import org.apache.spark.sql.util.LanceArrowUtils;
 import org.apache.spark.unsafe.types.UTF8String;
 
 public class LanceArrowColumnVector extends ColumnVector {
+  private UInt1Accessor uInt1Accessor;
+  private UInt2Accessor uInt2Accessor;
+  private UInt4Accessor uInt4Accessor;
   private UInt8Accessor uInt8Accessor;
   private FixedSizeListAccessor fixedSizeListAccessor;
   private BlobStructAccessor blobStructAccessor;
@@ -34,14 +40,17 @@ public class LanceArrowColumnVector extends ColumnVector {
   public LanceArrowColumnVector(ValueVector vector) {
     super(LanceArrowUtils.fromArrowField(vector.getField()));
 
-    if (vector instanceof UInt8Vector) {
+    if (vector instanceof UInt1Vector) {
+      uInt1Accessor = new UInt1Accessor((UInt1Vector) vector);
+    } else if (vector instanceof UInt2Vector) {
+      uInt2Accessor = new UInt2Accessor((UInt2Vector) vector);
+    } else if (vector instanceof UInt4Vector) {
+      uInt4Accessor = new UInt4Accessor((UInt4Vector) vector);
+    } else if (vector instanceof UInt8Vector) {
       uInt8Accessor = new UInt8Accessor((UInt8Vector) vector);
     } else if (vector instanceof FixedSizeListVector) {
-      // Handle FixedSizeListVector with custom accessor
       fixedSizeListAccessor = new FixedSizeListAccessor((FixedSizeListVector) vector);
     } else if (vector instanceof StructVector && BlobUtils.isBlobArrowField(vector.getField())) {
-      // Handle blob structs with special accessor to avoid unsigned Int64 issues
-      // Creating BlobStructAccessor for blob field
       blobStructAccessor = new BlobStructAccessor((StructVector) vector);
     } else if (vector instanceof ListVector) {
       arrayAccessor = new LanceArrayAccessor((ListVector) vector);
@@ -52,6 +61,15 @@ public class LanceArrowColumnVector extends ColumnVector {
 
   @Override
   public void close() {
+    if (uInt1Accessor != null) {
+      uInt1Accessor.close();
+    }
+    if (uInt2Accessor != null) {
+      uInt2Accessor.close();
+    }
+    if (uInt4Accessor != null) {
+      uInt4Accessor.close();
+    }
     if (uInt8Accessor != null) {
       uInt8Accessor.close();
     }
@@ -71,6 +89,15 @@ public class LanceArrowColumnVector extends ColumnVector {
 
   @Override
   public boolean hasNull() {
+    if (uInt1Accessor != null) {
+      return uInt1Accessor.getNullCount() > 0;
+    }
+    if (uInt2Accessor != null) {
+      return uInt2Accessor.getNullCount() > 0;
+    }
+    if (uInt4Accessor != null) {
+      return uInt4Accessor.getNullCount() > 0;
+    }
     if (uInt8Accessor != null) {
       return uInt8Accessor.getNullCount() > 0;
     }
@@ -91,6 +118,15 @@ public class LanceArrowColumnVector extends ColumnVector {
 
   @Override
   public int numNulls() {
+    if (uInt1Accessor != null) {
+      return uInt1Accessor.getNullCount();
+    }
+    if (uInt2Accessor != null) {
+      return uInt2Accessor.getNullCount();
+    }
+    if (uInt4Accessor != null) {
+      return uInt4Accessor.getNullCount();
+    }
     if (uInt8Accessor != null) {
       return uInt8Accessor.getNullCount();
     }
@@ -111,6 +147,15 @@ public class LanceArrowColumnVector extends ColumnVector {
 
   @Override
   public boolean isNullAt(int rowId) {
+    if (uInt1Accessor != null) {
+      return uInt1Accessor.isNullAt(rowId);
+    }
+    if (uInt2Accessor != null) {
+      return uInt2Accessor.isNullAt(rowId);
+    }
+    if (uInt4Accessor != null) {
+      return uInt4Accessor.isNullAt(rowId);
+    }
     if (uInt8Accessor != null) {
       return uInt8Accessor.isNullAt(rowId);
     }
@@ -147,6 +192,9 @@ public class LanceArrowColumnVector extends ColumnVector {
 
   @Override
   public short getShort(int rowId) {
+    if (uInt1Accessor != null) {
+      return uInt1Accessor.getShort(rowId);
+    }
     if (arrowColumnVector != null) {
       return arrowColumnVector.getShort(rowId);
     }
@@ -155,6 +203,9 @@ public class LanceArrowColumnVector extends ColumnVector {
 
   @Override
   public int getInt(int rowId) {
+    if (uInt2Accessor != null) {
+      return uInt2Accessor.getInt(rowId);
+    }
     if (arrowColumnVector != null) {
       return arrowColumnVector.getInt(rowId);
     }
@@ -163,6 +214,9 @@ public class LanceArrowColumnVector extends ColumnVector {
 
   @Override
   public long getLong(int rowId) {
+    if (uInt4Accessor != null) {
+      return uInt4Accessor.getLong(rowId);
+    }
     if (uInt8Accessor != null) {
       return uInt8Accessor.getLong(rowId);
     }
@@ -229,9 +283,6 @@ public class LanceArrowColumnVector extends ColumnVector {
   @Override
   public byte[] getBinary(int rowId) {
     if (blobStructAccessor != null) {
-      // For blob columns, we return empty byte array as we don't materialize the data
-      // The actual blob data can be fetched using the position and size from the struct
-      // Return empty array as we don't materialize blob data
       return new byte[0];
     }
     if (arrowColumnVector != null) {
@@ -245,8 +296,6 @@ public class LanceArrowColumnVector extends ColumnVector {
     if (arrowColumnVector != null) {
       return arrowColumnVector.getChild(ordinal);
     }
-    // For blob structs, create child vectors on demand
-    // This is a simplified implementation - in production would cache these
     return null;
   }
 

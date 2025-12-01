@@ -173,7 +173,7 @@ class LanceArrowColumnVectorSuite extends AnyFunSuite {
     allocator.close()
   }
 
-  test("unsigned long") {
+  test("unsigned long (UInt8)") {
     val allocator = ArrowUtils.rootAllocator.newChildAllocator("unsigned long", 0, Long.MaxValue)
     val vector = LanceArrowUtils.toArrowField(LanceConstant.ROW_ID, LongType, nullable = true, null)
       .createVector(allocator).asInstanceOf[UInt8Vector]
@@ -196,6 +196,91 @@ class LanceArrowColumnVectorSuite extends AnyFunSuite {
     assert(columnVector.isNullAt(10))
 
     assert(columnVector.getLongs(0, 10) === (0 until 10).map(i => i.toLong))
+
+    columnVector.close()
+    allocator.close()
+  }
+
+  test("unsigned byte (UInt1)") {
+    val allocator = ArrowUtils.rootAllocator.newChildAllocator("uint1", 0, Long.MaxValue)
+    val vector = new UInt1Vector("uint1", allocator)
+    vector.allocateNew()
+
+    // Test values including values > 127 to verify unsigned handling
+    val testValues = Array(0, 1, 127, 128, 200, 255)
+    testValues.zipWithIndex.foreach { case (v, i) =>
+      vector.setSafe(i, v.toByte)
+    }
+    vector.setNull(testValues.length)
+    vector.setValueCount(testValues.length + 1)
+
+    val columnVector = new LanceArrowColumnVector(vector)
+    // UInt8 (8-bit unsigned) maps to ShortType
+    assert(columnVector.dataType === ShortType)
+    assert(columnVector.hasNull)
+    assert(columnVector.numNulls === 1)
+
+    testValues.zipWithIndex.foreach { case (expected, i) =>
+      assert(columnVector.getShort(i) === expected.toShort)
+    }
+    assert(columnVector.isNullAt(testValues.length))
+
+    columnVector.close()
+    allocator.close()
+  }
+
+  test("unsigned short (UInt2)") {
+    val allocator = ArrowUtils.rootAllocator.newChildAllocator("uint2", 0, Long.MaxValue)
+    val vector = new UInt2Vector("uint2", allocator)
+    vector.allocateNew()
+
+    // Test values including values > 32767 to verify unsigned handling
+    val testValues = Array(0, 1, 32767, 32768, 50000, 65535)
+    testValues.zipWithIndex.foreach { case (v, i) =>
+      vector.setSafe(i, v.toChar)
+    }
+    vector.setNull(testValues.length)
+    vector.setValueCount(testValues.length + 1)
+
+    val columnVector = new LanceArrowColumnVector(vector)
+    // UInt16 (16-bit unsigned) maps to IntegerType
+    assert(columnVector.dataType === IntegerType)
+    assert(columnVector.hasNull)
+    assert(columnVector.numNulls === 1)
+
+    testValues.zipWithIndex.foreach { case (expected, i) =>
+      assert(columnVector.getInt(i) === expected)
+    }
+    assert(columnVector.isNullAt(testValues.length))
+
+    columnVector.close()
+    allocator.close()
+  }
+
+  test("unsigned int (UInt4)") {
+    val allocator = ArrowUtils.rootAllocator.newChildAllocator("uint4", 0, Long.MaxValue)
+    val vector = new UInt4Vector("uint4", allocator)
+    vector.allocateNew()
+
+    // Test values including values > Int.MaxValue to verify unsigned handling
+    val testValues =
+      Array(0L, 1L, Int.MaxValue.toLong, Int.MaxValue.toLong + 1, 3000000000L, 4294967295L)
+    testValues.zipWithIndex.foreach { case (v, i) =>
+      vector.setSafe(i, v.toInt)
+    }
+    vector.setNull(testValues.length)
+    vector.setValueCount(testValues.length + 1)
+
+    val columnVector = new LanceArrowColumnVector(vector)
+    // UInt32 (32-bit unsigned) maps to LongType
+    assert(columnVector.dataType === LongType)
+    assert(columnVector.hasNull)
+    assert(columnVector.numNulls === 1)
+
+    testValues.zipWithIndex.foreach { case (expected, i) =>
+      assert(columnVector.getLong(i) === expected)
+    }
+    assert(columnVector.isNullAt(testValues.length))
 
     columnVector.close()
     allocator.close()

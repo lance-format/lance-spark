@@ -13,21 +13,22 @@
  */
 package org.apache.spark.sql.vectorized;
 
-import org.apache.arrow.vector.UInt8Vector;
+import org.apache.arrow.vector.UInt2Vector;
 
 /**
- * Accessor for unsigned 64-bit integers (UInt8). Maps to Spark LongType (may overflow for values >
- * Long.MAX_VALUE, but no better option).
+ * Accessor for unsigned 16-bit integers (UInt2). Maps to Spark IntegerType (signed 32-bit can hold
+ * all UInt16 values 0-65535).
  */
-public class UInt8Accessor {
-  private final UInt8Vector accessor;
+public class UInt2Accessor {
+  private final UInt2Vector accessor;
 
-  UInt8Accessor(UInt8Vector vector) {
+  UInt2Accessor(UInt2Vector vector) {
     this.accessor = vector;
   }
 
-  final long getLong(int rowId) {
-    return accessor.getObjectNoOverflow(rowId).longValueExact();
+  final int getInt(int rowId) {
+    // UInt2Vector.get() returns char which is already unsigned 16-bit
+    return accessor.get(rowId);
   }
 
   final boolean isNullAt(int rowId) {
