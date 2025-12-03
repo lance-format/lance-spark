@@ -30,21 +30,32 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
 import java.util.Map;
 
-@Deprecated
+/**
+ * A simple Lance catalog that supports both path-based and catalog-based table access.
+ *
+ * <p>For path-based access (e.g., spark.read.format("lance").load("path")), this catalog is
+ * automatically registered as "lance_default" and uses {@link LanceIdentifier} to identify tables.
+ *
+ * <p>For catalog-based access (e.g., spark.sql.catalog.lance configuration), users should use
+ * {@link BaseLanceNamespaceSparkCatalog} for full namespace support.
+ */
 public class LanceCatalog implements TableCatalog {
   private CaseInsensitiveStringMap options;
+  private String catalogName = "lance";
 
   @Override
   public Identifier[] listTables(String[] namespace) throws NoSuchNamespaceException {
-    throw new UnsupportedOperationException("Please use lancedb catalog for dataset listing");
+    throw new UnsupportedOperationException(
+        "Please use LanceNamespaceSparkCatalog for table listing");
   }
 
   @Override
   public Table loadTable(Identifier ident) throws NoSuchTableException {
-    LanceConfig config = LanceConfig.from(options, ident.name());
+    String datasetUri = getDatasetUri(ident);
+    LanceConfig config = LanceConfig.from(options, datasetUri);
     Optional<StructType> schema = LanceDatasetAdapter.getSchema(config);
     if (schema.isEmpty()) {
-      throw new NoSuchTableException(config.getDbPath(), config.getDatasetName());
+      throw new NoSuchTableException(ident);
     }
     return new LanceDataset(config, schema.get());
   }
@@ -53,12 +64,13 @@ public class LanceCatalog implements TableCatalog {
   public Table createTable(
       Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
       throws TableAlreadyExistsException, NoSuchNamespaceException {
-    LanceConfig config = LanceConfig.from(options, ident.name());
+    String datasetUri = getDatasetUri(ident);
+    LanceConfig config = LanceConfig.from(options, datasetUri);
     try {
       WriteParams params = SparkOptions.genWriteParamsFromConfig(config);
-      LanceDatasetAdapter.createDataset(ident.name(), schema, params);
+      LanceDatasetAdapter.createDataset(datasetUri, schema, params);
     } catch (IllegalArgumentException e) {
-      throw new TableAlreadyExistsException(ident.name());
+      throw new TableAlreadyExistsException(ident);
     }
     return new LanceDataset(config, schema);
   }
@@ -70,7 +82,8 @@ public class LanceCatalog implements TableCatalog {
 
   @Override
   public boolean dropTable(Identifier ident) {
-    LanceConfig config = LanceConfig.from(options, ident.name());
+    String datasetUri = getDatasetUri(ident);
+    LanceConfig config = LanceConfig.from(options, datasetUri);
     LanceDatasetAdapter.dropDataset(config);
     return true;
   }
@@ -83,11 +96,49 @@ public class LanceCatalog implements TableCatalog {
 
   @Override
   public void initialize(String name, CaseInsensitiveStringMap options) {
+    this.catalogName = name;
     this.options = options;
   }
 
   @Override
   public String name() {
-    return "lance";
+    return catalogName;
+  }
+
+  /**
+   * Extracts the full dataset URI from an identifier.
+   *
+   * <p>If the identifier is a {@link LanceIdentifier}, use its location() method. Otherwise,
+   * reconstruct the path from namespace and name.
+   *
+   * @param ident the identifier
+   * @return the full dataset URI
+   */
+  private String getDatasetUri(Identifier ident) {
+    if (ident instanceof LanceIdentifier) {
+      return ((LanceIdentifier) ident).location();
+    }
+
+    // Reconstruct path from namespace and name
+    String[] namespace = ident.namespace();
+    String name = ident.name();
+
+    if (namespace == null || namespace.length == 0) {
+      return name;
+    }
+
+    // Join namespace parts with "/" and append the name
+    StringBuilder sb = new StringBuilder();
+    for (String ns : namespace) {
+      if (sb.length() > 0 && !sb.toString().endsWith("/")) {
+        sb.append("/");
+      }
+      sb.append(ns);
+    }
+    if (!sb.toString().endsWith("/")) {
+      sb.append("/");
+    }
+    sb.append(name);
+    return sb.toString();
   }
 }

@@ -15,12 +15,36 @@ package org.lance.spark;
 
 import org.apache.spark.sql.connector.catalog.Identifier;
 
+/**
+ * A path-based identifier for Lance datasets. This stores the full location/path and provides
+ * methods to access it.
+ *
+ * <p>Similar to Iceberg's PathIdentifier, this allows the catalog to recognize path-based
+ * identifiers and use the full location to load/create tables.
+ */
 public class LanceIdentifier implements Identifier {
-  private final String[] namespace = new String[] {"default"};
-  private final String datasetUri;
+  private final String[] namespace;
+  private final String location;
+  private final String name;
 
-  public LanceIdentifier(String datasetUri) {
-    this.datasetUri = datasetUri;
+  /**
+   * Creates a LanceIdentifier from a full dataset location.
+   *
+   * @param location the full path to the Lance dataset (e.g., "s3://bucket/path/table.lance" or
+   *     "/local/path/table.lance")
+   */
+  public LanceIdentifier(String location) {
+    this.location = location;
+
+    // Split the location into namespace (parent path) and name (dataset name)
+    int lastSlashIndex = location.lastIndexOf('/');
+    if (lastSlashIndex > 0) {
+      this.namespace = new String[] {location.substring(0, lastSlashIndex)};
+      this.name = location.substring(lastSlashIndex + 1);
+    } else {
+      this.namespace = new String[0];
+      this.name = location;
+    }
   }
 
   @Override
@@ -30,6 +54,15 @@ public class LanceIdentifier implements Identifier {
 
   @Override
   public String name() {
-    return datasetUri;
+    return name;
+  }
+
+  /**
+   * Returns the full location/path of the Lance dataset.
+   *
+   * @return the full dataset location
+   */
+  public String location() {
+    return location;
   }
 }
