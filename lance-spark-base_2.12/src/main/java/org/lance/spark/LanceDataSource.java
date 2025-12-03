@@ -30,7 +30,7 @@ import java.util.Map;
 /**
  * Lance DataSource for Spark. Supports both direct path-based access and catalog-based access.
  *
- * <h3>Direct path-based access (no catalog configuration required):</h3>
+ * <p><b>Direct path-based access (no catalog configuration required):</b>
  *
  * <pre>
  * // Reading
@@ -40,7 +40,7 @@ import java.util.Map;
  * df.write.format("lance").save("s3://bucket/path/to/table.lance")
  * </pre>
  *
- * <h3>Catalog-based access (for SQL DDL operations):</h3>
+ * <p><b>Catalog-based access (for SQL DDL operations):</b>
  *
  * <pre>
  * // Configure Lance catalog
