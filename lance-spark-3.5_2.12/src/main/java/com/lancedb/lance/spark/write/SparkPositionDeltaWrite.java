@@ -149,7 +149,14 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
     @Override
     public void delete(InternalRow metadata, InternalRow id) throws IOException {
+      long rowAddr = id.getLong(0);
+      int fragmentIdFromAddr = (int) (rowAddr >> 32);
       int fragmentId = metadata.getInt(0);
+
+      if (fragmentId != fragmentIdFromAddr) {
+        return;
+      }
+
       deletedRows.compute(
           fragmentId,
           (k, v) -> {
@@ -159,7 +166,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
             // Get the row index which is low 32 bits of row address.
             // See
             // https://github.com/lancedb/lance/blob/main/rust/lance-core/src/utils/address.rs#L36
-            v.add(RowAddress.rowIndex(id.getLong(0)));
+            v.add(RowAddress.rowIndex(rowAddr));
             return v;
           });
     }
