@@ -1,7 +1,10 @@
 [tool.bumpversion]
 current_version = "0.1.0"
-parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
-serialize = ["{major}.{minor}.{patch}"]
+parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)(-(?P<pre_label>alpha|beta|rc)\\.(?P<pre_n>\\d+))?"
+serialize = [
+    "{major}.{minor}.{patch}-{pre_label}.{pre_n}",
+    "{major}.{minor}.{patch}"
+]
 search = "{current_version}"
 replace = "{new_version}"
 regex = false
@@ -14,6 +17,15 @@ tag_message = "Release version {new_version}"
 allow_dirty = false
 commit = false
 message = "chore: bump version {current_version} → {new_version}"
+
+[tool.bumpversion.parts.pre_label]
+optional_value = "stable"
+first_value = "stable"
+values = ["stable", "alpha", "beta", "rc"]
+
+[tool.bumpversion.parts.pre_n]
+optional_value = "0"
+first_value = "0"
 
 # Root pom.xml - project version
 [[tool.bumpversion.files]]
