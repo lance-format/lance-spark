@@ -63,41 +63,45 @@ jobs:
         echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
         echo "Current version: $CURRENT_VERSION"
     
-    - name: Calculate new version
-      id: new_version
+    - name: Calculate base version
+      id: base_version
       run: |
         python ci/calculate_version.py \
           --current "${{ steps.current_version.outputs.version }}" \
           --type "${{ inputs.release_type }}" \
           --channel "${{ inputs.release_channel }}"
-    
-    - name: Determine tag name
-      id: tag_name
+
+    - name: Determine tag and pom version
+      id: versions
       run: |
-        VERSION="${{ steps.new_version.outputs.version }}"
+        BASE_VERSION="${{ steps.base_version.outputs.version }}"
         if [ "${{ inputs.release_channel }}" == "stable" ]; then
-          TAG="v${VERSION}"
+          TAG="v${BASE_VERSION}"
+          POM_VERSION="${BASE_VERSION}"
         else
-          # For preview releases, use new version with beta suffix
-          # Find the next beta number for this version
-          BETA_TAGS=$(git tag -l "v${VERSION}-beta.*" | sort -V)
+          # For preview releases, find the next beta number for this base version
+          BETA_TAGS=$(git tag -l "v${BASE_VERSION}-beta.*" | sort -V)
           if [ -z "$BETA_TAGS" ]; then
             BETA_NUM=1
           else
             LAST_BETA=$(echo "$BETA_TAGS" | tail -n 1)
-            LAST_NUM=$(echo "$LAST_BETA" | sed "s/v${VERSION}-beta.//")
+            LAST_NUM=$(echo "$LAST_BETA" | sed "s/v${BASE_VERSION}-beta.//")
             BETA_NUM=$((LAST_NUM + 1))
           fi
-          TAG="v${VERSION}-beta.${BETA_NUM}"
+          TAG="v${BASE_VERSION}-beta.${BETA_NUM}"
+          # For preview releases, pom version should include the beta suffix
+          POM_VERSION="${BASE_VERSION}-beta.${BETA_NUM}"
         fi
 
         echo "tag=$TAG" >> $GITHUB_OUTPUT
+        echo "pom_version=$POM_VERSION" >> $GITHUB_OUTPUT
         echo "Tag will be: $TAG"
+        echo "POM version will be: $POM_VERSION"
 
     - name: Update version (when version changes)
       if: inputs.release_type != 'current'
       run: |
-        python ci/bump_version.py --version "${{ steps.new_version.outputs.version }}"
+        python ci/bump_version.py --version "${{ steps.versions.outputs.pom_version }}"
 
     - name: Configure git identity
       run: |
@@ -108,12 +112,12 @@ jobs:
       if: inputs.release_type != 'current'
       run: |
         git add -A
-        git commit -m "chore: bump version to ${{ steps.new_version.outputs.version }}" || echo "No changes to commit"
-    
+        git commit -m "chore: bump version to ${{ steps.versions.outputs.pom_version }}" || echo "No changes to commit"
+
     - name: Create tag
       run: |
-        git tag -a "${{ steps.tag_name.outputs.tag }}" -m "Release ${{ steps.tag_name.outputs.tag }}"
-    
+        git tag -a "${{ steps.versions.outputs.tag }}" -m "Release ${{ steps.versions.outputs.tag }}"
+
     - name: Push changes (if not dry run)
       if: ${{ !inputs.dry_run }}
       env:
@@ -127,19 +131,19 @@ jobs:
           git push origin main
         fi
         # Always push the tag
-        git push origin "${{ steps.tag_name.outputs.tag }}"
-    
+        git push origin "${{ steps.versions.outputs.tag }}"
+
     - name: Create GitHub Release Draft (if not dry run)
       if: ${{ !inputs.dry_run }}
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: ${{ steps.tag_name.outputs.tag }}
-        name: ${{ steps.tag_name.outputs.tag }}
+        tag_name: ${{ steps.versions.outputs.tag }}
+        name: ${{ steps.versions.outputs.tag }}
         generate_release_notes: true
         draft: true
         prerelease: ${{ inputs.release_channel == 'preview' }}
         token: ${{ secrets.LANCE_RELEASE_TOKEN }}
-    
+
     - name: Summary
       run: |
         echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
@@ -148,9 +152,9 @@ jobs:
         echo "- **Release Channel:** ${{ inputs.release_channel }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Current Version:** ${{ steps.current_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
         if [ "${{ inputs.release_type }}" != "current" ]; then
-          echo "- **New Version:** ${{ steps.new_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **New Version:** ${{ steps.versions.outputs.pom_version }}" >> $GITHUB_STEP_SUMMARY
         fi
-        echo "- **Tag:** ${{ steps.tag_name.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Tag:** ${{ steps.versions.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Dry Run:** ${{ inputs.dry_run }}" >> $GITHUB_STEP_SUMMARY
         
         if [ "${{ inputs.dry_run }}" == "true" ]; then
