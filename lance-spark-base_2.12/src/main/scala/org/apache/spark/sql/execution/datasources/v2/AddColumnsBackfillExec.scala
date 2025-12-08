@@ -13,12 +13,11 @@
  */
 package org.apache.spark.sql.execution.datasources.v2
 
-import com.lancedb.lance.spark.{LanceConstant, LanceDataset}
-
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, Project}
 import org.apache.spark.sql.connector.catalog._
+import org.lance.spark.{LanceConstant, LanceDataset}
 
 case class AddColumnsBackfillExec(
     catalog: TableCatalog,

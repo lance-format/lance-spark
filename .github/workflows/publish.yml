@@ -1,9 +1,7 @@
 name: Publish Spark packages
 on:
   release:
-    # Use released instead of published, since we don't publish preview/beta
-    # versions
-    types: [released]
+    types: [published]
   pull_request:
     paths:
       - .github/workflows/publish.yml
@@ -89,7 +87,7 @@ jobs:
           inputs.mode == 'release'
         run: |
           VERSION="${{ steps.get_version.outputs.version }}"
-          GROUP_ID="com.lancedb"
+          GROUP_ID="org.lance"
           
           # List of artifacts to check (a representative subset)
           ARTIFACTS=(
@@ -110,7 +108,7 @@ jobs:
             ALL_AVAILABLE=true
             
             for ARTIFACT_ID in "${ARTIFACTS[@]}"; do
-              URL="https://repo1.maven.org/maven2/com/lancedb/${ARTIFACT_ID}/${VERSION}/${ARTIFACT_ID}-${VERSION}.pom"
+              URL="https://repo1.maven.org/maven2/org/lance/${ARTIFACT_ID}/${VERSION}/${ARTIFACT_ID}-${VERSION}.pom"
               
               if curl --head --silent --fail "$URL" > /dev/null 2>&1; then
                 echo "✓ ${ARTIFACT_ID} is available"
@@ -128,16 +126,16 @@ jobs:
               echo ""
               echo "Maven:"
               echo "<dependency>"
-              echo "  <groupId>com.lancedb</groupId>"
+              echo "  <groupId>org.lance</groupId>"
               echo "  <artifactId>lance-spark-bundle-3.5_2.12</artifactId>"
               echo "  <version>${VERSION}</version>"
               echo "</dependency>"
               echo ""
               echo "Gradle:"
-              echo "implementation 'com.lancedb:lance-spark-bundle-3.5_2.12:${VERSION}'"
+              echo "implementation 'org.lance:lance-spark-bundle-3.5_2.12:${VERSION}'"
               echo ""
               echo "SBT:"
-              echo "libraryDependencies += \"com.lancedb\" % \"lance-spark-bundle-3.5_2.12\" % \"${VERSION}\""
+              echo "libraryDependencies += \"org.lance\" % \"lance-spark-bundle-3.5_2.12\" % \"${VERSION}\""
               exit 0
             fi
             
@@ -153,7 +151,7 @@ jobs:
           echo ""
           echo "⚠️ WARNING: Artifacts are not yet available in Maven Central after ${MAX_WAIT} seconds."
           echo "This is normal - Maven Central sync can take up to 2 hours."
-          echo "The artifacts will appear at: https://central.sonatype.com/artifact/com.lancedb/lance-spark-bundle-3.5_2.12/${VERSION}"
+          echo "The artifacts will appear at: https://central.sonatype.com/artifact/org.lance/lance-spark-bundle-3.5_2.12/${VERSION}"
           echo ""
           echo "You can check the sync status at: https://s01.oss.sonatype.org/"
           exit 0

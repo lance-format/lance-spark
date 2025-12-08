@@ -13,7 +13,7 @@
  */
 package org.apache.spark.sql.vectorized;
 
-import com.lancedb.lance.spark.utils.BlobUtils;
+import org.lance.spark.utils.BlobUtils;
 
 import org.apache.arrow.vector.UInt1Vector;
 import org.apache.arrow.vector.UInt2Vector;

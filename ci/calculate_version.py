@@ -23,26 +23,28 @@ def calculate_next_version(current_version, release_type, channel):
         minor = int(parts[1]) if len(parts) > 1 else 0
         patch = int(parts[2]) if len(parts) > 2 else 0
     
-    # Calculate new version for stable releases
-    if channel == 'stable':
-        if release_type == 'major':
-            new_version = f"{major + 1}.0.0"
-        elif release_type == 'minor':
-            new_version = f"{major}.{minor + 1}.0"
-        elif release_type == 'patch':
-            new_version = f"{major}.{minor}.{patch + 1}"
-        else:
-            raise ValueError(f"Unknown release type: {release_type}")
-    else:
-        # For preview releases, keep the current version
+    # Calculate new version based on release type
+    # Note: 'current' keeps the same version (used to finalize previews to stable)
+    if release_type == 'major':
+        new_version = f"{major + 1}.0.0"
+    elif release_type == 'minor':
+        new_version = f"{major}.{minor + 1}.0"
+    elif release_type == 'patch':
+        new_version = f"{major}.{minor}.{patch + 1}"
+    elif release_type == 'current':
+        # Keep current version - used for:
+        # - Subsequent preview releases (v0.0.16-beta.2, beta.3, etc.)
+        # - Finalizing preview to stable (v0.0.16-beta.X -> v0.0.16)
         new_version = current_version
+    else:
+        raise ValueError(f"Unknown release type: {release_type}")
     
     return new_version
 
 def main():
     parser = argparse.ArgumentParser(description='Calculate next version')
     parser.add_argument('--current', required=True, help='Current version')
-    parser.add_argument('--type', required=True, choices=['major', 'minor', 'patch'], help='Release type')
+    parser.add_argument('--type', required=True, choices=['major', 'minor', 'patch', 'current'], help='Release type')
     parser.add_argument('--channel', required=True, choices=['stable', 'preview'], help='Release channel')
     
     args = parser.parse_args()

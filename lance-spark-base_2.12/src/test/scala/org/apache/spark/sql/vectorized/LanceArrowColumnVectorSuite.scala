@@ -23,13 +23,12 @@ package org.apache.spark.sql.vectorized
  * It has been modified by the Lance developers to fit the needs of the Lance project.
  */
 
-import com.lancedb.lance.spark.LanceConstant
-
 import org.apache.arrow.vector._
 import org.apache.arrow.vector.complex._
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.{ArrowUtils, LanceArrowUtils}
 import org.apache.spark.unsafe.types.UTF8String
+import org.lance.spark.LanceConstant
 import org.scalatest.funsuite.AnyFunSuite
 
 class LanceArrowColumnVectorSuite extends AnyFunSuite {

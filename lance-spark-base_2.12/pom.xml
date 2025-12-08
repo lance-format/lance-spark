@@ -3,7 +3,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>com.lancedb</groupId>
+        <groupId>org.lance</groupId>
         <artifactId>lance-spark-root</artifactId>
         <version>0.0.15</version>
         <relativePath>../pom.xml</relativePath>
@@ -19,12 +19,6 @@
             <groupId>org.apache.spark</groupId>
             <artifactId>spark-sql_${scala.compat.version}</artifactId>
             <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>com.lancedb</groupId>
-            <artifactId>lance-namespace-glue</artifactId>
-            <version>${lance-namespace.version}</version>
-            <scope>test</scope>
         </dependency>
     </dependencies>
 

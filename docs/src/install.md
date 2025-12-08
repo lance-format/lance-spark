@@ -2,7 +2,7 @@
 
 ## Maven Central Packages
 
-The connector packages are published to Maven Central under the `com.lancedb` namespace. Choose the appropriate artifact based on your use case:
+The connector packages are published to Maven Central under the `org.lance` namespace. Choose the appropriate artifact based on your use case:
 
 ### Available Artifacts
 
@@ -30,7 +30,7 @@ If you want to also include the bundled jar in your own bundle, remove the provi
     ```xml
     <!-- For Spark 3.5 (Scala 2.12) -->
     <dependency>
-        <groupId>com.lancedb</groupId>
+        <groupId>org.lance</groupId>
         <artifactId>lance-spark-bundle-3.5_2.12</artifactId>
         <version>0.0.7</version>
         <scope>provided</scope>
@@ -41,7 +41,7 @@ If you want to also include the bundled jar in your own bundle, remove the provi
     ```gradle   
     dependencies {
         // For Spark 3.5 (Scala 2.12)
-        compileOnly 'com.lancedb:lance-spark-bundle-3.5_2.12:0.0.7'
+        compileOnly 'org.lance:lance-spark-bundle-3.5_2.12:0.0.7'
     }
     ```
 
@@ -49,7 +49,7 @@ If you want to also include the bundled jar in your own bundle, remove the provi
     ```scala
     libraryDependencies ++= Seq(
       // For Spark 3.5 (Scala 2.12)
-      "com.lancedb" %% "lance-spark-bundle-3.5_2.12" % "0.0.7" % "provided"
+      "org.lance" %% "lance-spark-bundle-3.5_2.12" % "0.0.7" % "provided"
     )
     ```
 

@@ -22,7 +22,7 @@ under the License.
         </Console>
     </appenders>
     <loggers>
-        <logger name='com.lancedb.lance' level='DEBUG' additivity='false'>
+        <logger name='org.lance' level='DEBUG' additivity='false'>
             <appender-ref ref='Console'/>
         </logger>
         <root level='INFO'>

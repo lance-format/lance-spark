@@ -23,12 +23,11 @@ package org.apache.spark.sql.util
  * It has been modified by the Lance developers to fit the needs of the Lance project.
  */
 
-import com.lancedb.lance.spark.LanceConstant
-
 import org.apache.arrow.vector.types.pojo.{Field, FieldType}
 import org.apache.arrow.vector.types.pojo.ArrowType
 import org.apache.spark.SparkUnsupportedOperationException
 import org.apache.spark.sql.types._
+import org.lance.spark.LanceConstant
 import org.scalatest.funsuite.AnyFunSuite
 
 import java.time.ZoneId

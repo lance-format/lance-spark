@@ -13,10 +13,6 @@
  */
 package org.apache.spark.sql.execution.datasources.v2
 
-import com.lancedb.lance.compaction.{CompactionOptions, CompactionTask, RewriteResult}
-import com.lancedb.lance.spark.{LanceConfig, LanceDataset}
-import com.lancedb.lance.spark.internal.LanceDatasetAdapter
-
 import com.esotericsoftware.kryo.Kryo
 import com.esotericsoftware.kryo.Kryo.DefaultInstantiatorStrategy
 import com.esotericsoftware.kryo.io.{Input, Output}
@@ -25,6 +21,9 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
 import org.apache.spark.sql.catalyst.plans.logical.{CompactOutputType, NamedArgument}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.execution.datasources.v2.SerializeUtil.{decode, encode}
+import org.lance.compaction.{CompactionOptions, CompactionTask, RewriteResult}
+import org.lance.spark.{LanceConfig, LanceDataset}
+import org.lance.spark.internal.LanceDatasetAdapter
 import org.objenesis.strategy.StdInstantiatorStrategy
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream}

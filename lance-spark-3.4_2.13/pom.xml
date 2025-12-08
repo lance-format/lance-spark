@@ -3,7 +3,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>com.lancedb</groupId>
+        <groupId>org.lance</groupId>
         <artifactId>lance-spark-root</artifactId>
         <version>0.0.15</version>
         <relativePath>../pom.xml</relativePath>
@@ -27,7 +27,7 @@
             <scope>provided</scope>
         </dependency>
         <dependency>
-            <groupId>com.lancedb</groupId>
+            <groupId>org.lance</groupId>
             <artifactId>lance-spark-base_${scala.compat.version}</artifactId>
             <version>${lance-spark.version}</version>
         </dependency>
@@ -44,17 +44,11 @@
             <scope>provided</scope>
         </dependency>
         <dependency>
-            <groupId>com.lancedb</groupId>
+            <groupId>org.lance</groupId>
             <artifactId>lance-spark-base_${scala.compat.version}</artifactId>
             <version>${lance-spark.version}</version>
             <type>test-jar</type>
             <classifier>tests</classifier>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>com.lancedb</groupId>
-            <artifactId>lance-namespace-glue</artifactId>
-            <version>${lance-namespace.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

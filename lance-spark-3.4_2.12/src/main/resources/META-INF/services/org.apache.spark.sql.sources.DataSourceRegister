@@ -1,1 +1,1 @@
-com.lancedb.lance.spark.LanceSparkDataSource
+org.lance.spark.LanceSparkDataSource

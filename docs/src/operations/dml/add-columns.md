@@ -4,7 +4,7 @@ We extend Spark's SQL syntax to support the `ALTER TABLE <table_name> ADD COLUMN
 
 To use this feature, you need to set 
 
-`--conf spark.sql.extensions=com.lancedb.lance.spark.extensions.LanceSparkSessionExtensions` 
+`--conf spark.sql.extensions=org.lance.spark.extensions.LanceSparkSessionExtensions` 
 
 for your Spark application.
 

@@ -3,7 +3,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>com.lancedb</groupId>
+        <groupId>org.lance</groupId>
         <artifactId>lance-spark-root</artifactId>
         <version>0.0.15</version>
         <relativePath>../pom.xml</relativePath>

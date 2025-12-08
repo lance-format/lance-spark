@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_type:
-        description: 'Release type'
+        description: 'Version bump type (patch/minor/major bumps version, current keeps it unchanged)'
         required: true
         default: 'patch'
         type: choice
@@ -12,8 +12,9 @@ on:
           - patch
           - minor
           - major
+          - current
       release_channel:
-        description: 'Release channel'
+        description: 'Release channel (preview creates beta tag, stable creates release tag)'
         required: true
         default: 'preview'
         type: choice
@@ -73,13 +74,12 @@ jobs:
     - name: Determine tag name
       id: tag_name
       run: |
+        VERSION="${{ steps.new_version.outputs.version }}"
         if [ "${{ inputs.release_channel }}" == "stable" ]; then
-          VERSION="${{ steps.new_version.outputs.version }}"
           TAG="v${VERSION}"
         else
-          # For preview releases, use current version with beta suffix
-          VERSION="${{ steps.current_version.outputs.version }}"
-          # Find the next beta number for current version
+          # For preview releases, use new version with beta suffix
+          # Find the next beta number for this version
           BETA_TAGS=$(git tag -l "v${VERSION}-beta.*" | sort -V)
           if [ -z "$BETA_TAGS" ]; then
             BETA_NUM=1
@@ -90,25 +90,25 @@ jobs:
           fi
           TAG="v${VERSION}-beta.${BETA_NUM}"
         fi
-        
+
         echo "tag=$TAG" >> $GITHUB_OUTPUT
         echo "Tag will be: $TAG"
-    
-    - name: Update version (stable releases only)
-      if: inputs.release_channel == 'stable'
+
+    - name: Update version (when version changes)
+      if: inputs.release_type != 'current'
       run: |
         python ci/bump_version.py --version "${{ steps.new_version.outputs.version }}"
-    
+
     - name: Configure git identity
       run: |
         git config user.name 'github-actions[bot]'
         git config user.email 'github-actions[bot]@users.noreply.github.com'
-    
-    - name: Create release commit (stable releases only)
-      if: inputs.release_channel == 'stable'
+
+    - name: Create release commit (when version changes)
+      if: inputs.release_type != 'current'
       run: |
         git add -A
-        git commit -m "chore: release version ${{ steps.new_version.outputs.version }}" || echo "No changes to commit"
+        git commit -m "chore: bump version to ${{ steps.new_version.outputs.version }}" || echo "No changes to commit"
     
     - name: Create tag
       run: |
@@ -117,21 +117,12 @@ jobs:
     - name: Push changes (if not dry run)
       if: ${{ !inputs.dry_run }}
       run: |
-        if [ "${{ inputs.release_channel }}" == "stable" ]; then
-          # Push the commit for stable releases
+        if [ "${{ inputs.release_type }}" != "current" ]; then
+          # Push the version bump commit
           git push origin main
         fi
         # Always push the tag
         git push origin "${{ steps.tag_name.outputs.tag }}"
-    
-    - name: Generate release notes
-      id: release_notes
-      if: ${{ !inputs.dry_run }}
-      run: |
-        python ci/generate_release_notes.py \
-          --tag "${{ steps.tag_name.outputs.tag }}" \
-          --repo "${{ github.repository }}" \
-          --token "${{ secrets.GITHUB_TOKEN }}"
     
     - name: Create GitHub Release Draft (if not dry run)
       if: ${{ !inputs.dry_run }}
@@ -139,7 +130,7 @@ jobs:
       with:
         tag_name: ${{ steps.tag_name.outputs.tag }}
         name: ${{ steps.tag_name.outputs.tag }}
-        body_path: release_notes.md
+        generate_release_notes: true
         draft: true
         prerelease: ${{ inputs.release_channel == 'preview' }}
         token: ${{ secrets.GITHUB_TOKEN }}
@@ -151,7 +142,7 @@ jobs:
         echo "- **Release Type:** ${{ inputs.release_type }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Release Channel:** ${{ inputs.release_channel }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Current Version:** ${{ steps.current_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-        if [ "${{ inputs.release_channel }}" == "stable" ]; then
+        if [ "${{ inputs.release_type }}" != "current" ]; then
           echo "- **New Version:** ${{ steps.new_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
         fi
         echo "- **Tag:** ${{ steps.tag_name.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
@@ -173,6 +164,6 @@ jobs:
             echo "   - Trigger automatic publishing to Maven Central" >> $GITHUB_STEP_SUMMARY
           else
             echo "   - Create a preview/beta release" >> $GITHUB_STEP_SUMMARY
-            echo "   - Note: Preview releases are not published to Maven Central" >> $GITHUB_STEP_SUMMARY
+            echo "   - Trigger automatic publishing to Maven Central (as pre-release version)" >> $GITHUB_STEP_SUMMARY
           fi
         fi

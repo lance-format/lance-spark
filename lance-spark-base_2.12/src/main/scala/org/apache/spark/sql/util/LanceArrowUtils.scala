@@ -23,9 +23,6 @@ package org.apache.spark.sql.util
  * It has been modified by the Lance developers to fit the needs of the Lance project.
  */
 
-import com.lancedb.lance.spark.LanceConstant
-import com.lancedb.lance.spark.utils.{BlobUtils, VectorUtils}
-
 import org.apache.arrow.vector.complex.MapVector
 import org.apache.arrow.vector.types.{DateUnit, FloatingPointPrecision, IntervalUnit, TimeUnit}
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
@@ -33,6 +30,8 @@ import org.apache.spark.{SparkException, SparkUnsupportedOperationException}
 import org.apache.spark.sql.types._
 import org.json4s.{DefaultFormats, Formats}
 import org.json4s.JsonAST.{JObject, JString}
+import org.lance.spark.LanceConstant
+import org.lance.spark.utils.{BlobUtils, VectorUtils}
 
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
