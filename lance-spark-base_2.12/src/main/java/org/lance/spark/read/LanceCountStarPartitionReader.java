@@ -60,6 +60,7 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
   }
 
   private long computeCount() {
+    // This reader is only used when there are filters (metadata-based count uses LocalScan)
     String uri = inputPartition.getConfig().getDatasetUri();
     ReadOptions options = SparkOptions.genReadOptionFromConfig(inputPartition.getConfig());
     long totalCount = 0;

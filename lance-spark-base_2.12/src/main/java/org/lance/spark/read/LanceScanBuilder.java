@@ -19,6 +19,8 @@ import org.lance.spark.SparkOptions;
 import org.lance.spark.internal.LanceDatasetAdapter;
 import org.lance.spark.utils.Optional;
 
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.connector.expressions.FieldReference;
 import org.apache.spark.sql.connector.expressions.NullOrdering;
 import org.apache.spark.sql.connector.expressions.SortDirection;
@@ -35,6 +37,7 @@ import org.apache.spark.sql.connector.read.SupportsPushDownRequiredColumns;
 import org.apache.spark.sql.connector.read.SupportsPushDownTopN;
 import org.apache.spark.sql.sources.Filter;
 import org.apache.spark.sql.types.ArrayType;
+import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
@@ -56,6 +59,7 @@ public class LanceScanBuilder
   private Optional<Integer> offset = Optional.empty();
   private Optional<List<ColumnOrdering>> topNSortOrders = Optional.empty();
   private Optional<Aggregation> pushedAggregation = Optional.empty();
+  private LanceLocalScan localScan = null;
 
   public LanceScanBuilder(StructType schema, LanceConfig config) {
     this.schema = schema;
@@ -64,6 +68,10 @@ public class LanceScanBuilder
 
   @Override
   public Scan build() {
+    // Return LocalScan if we have a metadata-only aggregation result
+    if (localScan != null) {
+      return localScan;
+    }
     Optional<String> whereCondition = FilterPushDown.compileFiltersToSqlWhereClause(pushedFilters);
     return new LanceScan(
         schema, config, whereCondition, limit, offset, topNSortOrders, pushedAggregation);
@@ -159,6 +167,19 @@ public class LanceScanBuilder
       return false;
     }
     if (funcs.length == 1 && funcs[0] instanceof CountStar) {
+      // Check if we can use metadata-based count (no filters pushed)
+      if (pushedFilters.length == 0) {
+        Optional<Long> metadataCount = LanceDatasetAdapter.getCountFromMetadata(config);
+        if (metadataCount.isPresent()) {
+          // Create LocalScan with pre-computed count result
+          StructType countSchema = new StructType().add("count", DataTypes.LongType);
+          InternalRow[] rows = new InternalRow[1];
+          rows[0] = new GenericInternalRow(new Object[] {metadataCount.get()});
+          this.localScan = new LanceLocalScan(countSchema, rows, config.getDatasetUri());
+          return true;
+        }
+      }
+      // Fall back to scan-based count (with filters or metadata unavailable)
       this.pushedAggregation = Optional.of(aggregation);
       return true;
     }

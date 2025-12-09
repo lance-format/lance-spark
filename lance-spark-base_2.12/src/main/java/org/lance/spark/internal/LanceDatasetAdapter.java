@@ -17,6 +17,7 @@ import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.FragmentOperation;
+import org.lance.ManifestSummary;
 import org.lance.ReadOptions;
 import org.lance.WriteParams;
 import org.lance.compaction.Compaction;
@@ -105,6 +106,25 @@ public class LanceDatasetAdapter {
     ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
     try (Dataset dataset = Dataset.open(allocator, uri, options)) {
       return dataset.getFragments().stream().map(Fragment::metadata).collect(Collectors.toList());
+    }
+  }
+
+  /**
+   * Get the row count from manifest summary metadata without scanning data files. This is O(1)
+   * using ManifestSummary.getTotalRows().
+   *
+   * @param config the Lance configuration
+   * @return Optional containing the count if metadata is available, empty otherwise
+   */
+  public static Optional<Long> getCountFromMetadata(LanceConfig config) {
+    String uri = config.getDatasetUri();
+    ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
+    try (Dataset dataset = Dataset.open(allocator, uri, options)) {
+      ManifestSummary summary = dataset.getVersion().getManifestSummary();
+      return Optional.of(summary.getTotalRows());
+    } catch (IllegalArgumentException e) {
+      // dataset not found
+      return Optional.empty();
     }
   }
 

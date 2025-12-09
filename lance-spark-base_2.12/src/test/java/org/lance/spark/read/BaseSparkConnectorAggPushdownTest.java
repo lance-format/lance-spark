@@ -27,6 +27,7 @@ import java.nio.file.Path;
 import java.util.Arrays;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public abstract class BaseSparkConnectorAggPushdownTest {
   private static SparkSession spark;
@@ -176,5 +177,47 @@ public abstract class BaseSparkConnectorAggPushdownTest {
     // COUNT(DISTINCT column) should not be pushed down
     long countDistinct = lanceDataset.selectExpr("count(distinct category)").first().getLong(0);
     assertEquals(3L, countDistinct, "Count(distinct category) should be 3");
+  }
+
+  @Test
+  public void testCountStarWithoutFilterUsesLocalScan() throws Exception {
+    String tableName = "lance.default.count_local_scan_test_dataset";
+    spark.range(0, 50).toDF("id").repartition(4).writeTo(tableName).create();
+
+    Dataset<Row> lanceDataset = spark.table(tableName);
+    Dataset<Row> countDataset = lanceDataset.selectExpr("count(*)");
+
+    // Get the query plan as string
+    String plan = countDataset.queryExecution().executedPlan().toString();
+
+    // Verify LocalScan is used (not BatchScan with partitions)
+    assertTrue(
+        plan.contains("LocalTableScan") || plan.contains("LanceLocalScan"),
+        "COUNT(*) without filter should use LocalScan. Plan: " + plan);
+
+    // Verify the count is correct
+    long count = countDataset.first().getLong(0);
+    assertEquals(50L, count, "Count should be 50");
+  }
+
+  @Test
+  public void testCountStarWithFilterUsesBatchScan() throws Exception {
+    String tableName = "lance.default.count_batch_scan_test_dataset";
+    spark.range(0, 50).toDF("id").repartition(4).writeTo(tableName).create();
+
+    Dataset<Row> lanceDataset = spark.table(tableName);
+    Dataset<Row> countDataset = lanceDataset.filter("id > 10").selectExpr("count(*)");
+
+    // Get the query plan as string
+    String plan = countDataset.queryExecution().executedPlan().toString();
+
+    // Verify BatchScan is used (not LocalScan) because of the filter
+    assertTrue(
+        plan.contains("BatchScan") || plan.contains("LanceScan"),
+        "COUNT(*) with filter should use BatchScan. Plan: " + plan);
+
+    // Verify the count is correct (ids 11 to 49 = 39 rows)
+    long count = countDataset.first().getLong(0);
+    assertEquals(39L, count, "Filtered count should be 39");
   }
 }
