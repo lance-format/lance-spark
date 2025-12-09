@@ -13,6 +13,7 @@
  */
 package org.lance.spark.read;
 
+import org.lance.Dataset;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.spark.LanceConfig;
 import org.lance.spark.SparkOptions;
@@ -61,13 +62,38 @@ public class LanceScanBuilder
   private Optional<Aggregation> pushedAggregation = Optional.empty();
   private LanceLocalScan localScan = null;
 
+  // Lazily opened dataset for reuse during scan building
+  private Dataset lazyDataset = null;
+
   public LanceScanBuilder(StructType schema, LanceConfig config) {
     this.schema = schema;
     this.config = config;
   }
 
+  /**
+   * Gets or opens a dataset for reuse during scan building. The dataset is lazily opened on first
+   * access and reused for subsequent calls.
+   */
+  private Dataset getOrOpenDataset() {
+    if (lazyDataset == null) {
+      lazyDataset = LanceDatasetAdapter.openDataset(config);
+    }
+    return lazyDataset;
+  }
+
+  /** Closes the lazily opened dataset if it was opened. */
+  private void closeLazyDataset() {
+    if (lazyDataset != null) {
+      lazyDataset.close();
+      lazyDataset = null;
+    }
+  }
+
   @Override
   public Scan build() {
+    // Close the lazily opened dataset - it's no longer needed after build
+    closeLazyDataset();
+
     // Return LocalScan if we have a metadata-only aggregation result
     if (localScan != null) {
       return localScan;
@@ -123,7 +149,7 @@ public class LanceScanBuilder
   @Override
   public boolean pushOffset(int offset) {
     // Only one data file can be pushed down the offset.
-    if (LanceDatasetAdapter.getFragmentIds(config).size() == 1) {
+    if (LanceDatasetAdapter.getFragmentIds(getOrOpenDataset()).size() == 1) {
       this.offset = Optional.of(offset);
       return true;
     } else {
@@ -169,7 +195,7 @@ public class LanceScanBuilder
     if (funcs.length == 1 && funcs[0] instanceof CountStar) {
       // Check if we can use metadata-based count (no filters pushed)
       if (pushedFilters.length == 0) {
-        Optional<Long> metadataCount = LanceDatasetAdapter.getCountFromMetadata(config);
+        Optional<Long> metadataCount = LanceDatasetAdapter.getCountFromMetadata(getOrOpenDataset());
         if (metadataCount.isPresent()) {
           // Create LocalScan with pre-computed count result
           StructType countSchema = new StructType().add("count", DataTypes.LongType);
