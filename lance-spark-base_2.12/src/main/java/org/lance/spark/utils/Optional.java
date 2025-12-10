@@ -63,6 +63,10 @@ public class Optional<T> implements Serializable {
     }
   }
 
+  public T orElse(T other) {
+    return value != null ? value : other;
+  }
+
   @Override
   public String toString() {
     return value != null ? String.format("Optional[%s]", value) : "Optional.empty";

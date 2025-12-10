@@ -14,6 +14,7 @@
 package org.lance.spark.read;
 
 import org.lance.Dataset;
+import org.lance.index.Index;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.spark.LanceConfig;
 import org.lance.spark.SparkOptions;
@@ -43,7 +44,10 @@ import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 public class LanceScanBuilder
     implements SupportsPushDownRequiredColumns,
@@ -61,6 +65,7 @@ public class LanceScanBuilder
   private Optional<List<ColumnOrdering>> topNSortOrders = Optional.empty();
   private Optional<Aggregation> pushedAggregation = Optional.empty();
   private LanceLocalScan localScan = null;
+  private LanceSplitCountScan splitCountScan = null;
 
   // Lazily opened dataset for reuse during scan building
   private Dataset lazyDataset = null;
@@ -97,6 +102,10 @@ public class LanceScanBuilder
     // Return LocalScan if we have a metadata-only aggregation result
     if (localScan != null) {
       return localScan;
+    }
+    // Return SplitCountScan if we have partially indexed fragments
+    if (splitCountScan != null) {
+      return splitCountScan;
     }
     Optional<String> whereCondition = FilterPushDown.compileFiltersToSqlWhereClause(pushedFilters);
     return new LanceScan(
@@ -204,7 +213,58 @@ public class LanceScanBuilder
           this.localScan = new LanceLocalScan(countSchema, rows, config.getDatasetUri());
           return true;
         }
+      } else {
+        // Check for indexed column optimization when filters are present
+        Set<String> filterColumns = FilterPushDown.extractFilterColumns(pushedFilters);
+        Dataset dataset = getOrOpenDataset();
+        List<Integer> allFragments = LanceDatasetAdapter.getFragmentIds(dataset);
+
+        for (String column : filterColumns) {
+          List<Index> indexes = LanceDatasetAdapter.getIndexesForColumn(dataset, column);
+          for (Index index : indexes) {
+            if (LanceDatasetAdapter.isExactIndex(index)) {
+              List<Integer> indexedFragments = LanceDatasetAdapter.getIndexedFragments(index);
+
+              if (!indexedFragments.isEmpty()) {
+                Set<Integer> indexedSet = new HashSet<>(indexedFragments);
+                List<Integer> unindexedFragments =
+                    allFragments.stream()
+                        .filter(f -> !indexedSet.contains(f))
+                        .collect(Collectors.toList());
+
+                Optional<String> whereCondition =
+                    FilterPushDown.compileFiltersToSqlWhereClause(pushedFilters);
+
+                if (unindexedFragments.isEmpty()) {
+                  // All fragments indexed - use local scan with index count
+                  long count =
+                      LanceDatasetAdapter.countIndexedRows(
+                          dataset,
+                          index.name(),
+                          whereCondition.orElse(""),
+                          java.util.Optional.empty());
+                  StructType countSchema = new StructType().add("count", DataTypes.LongType);
+                  InternalRow[] rows = new InternalRow[1];
+                  rows[0] = new GenericInternalRow(new Object[] {count});
+                  this.localScan = new LanceLocalScan(countSchema, rows, config.getDatasetUri());
+                  return true;
+                } else {
+                  // Mixed - use split scan
+                  this.splitCountScan =
+                      new LanceSplitCountScan(
+                          new ArrayList<>(indexedSet),
+                          unindexedFragments,
+                          index.name(),
+                          whereCondition,
+                          config);
+                  return true;
+                }
+              }
+            }
+          }
+        }
       }
+
       // Fall back to scan-based count (with filters or metadata unavailable)
       this.pushedAggregation = Optional.of(aggregation);
       return true;

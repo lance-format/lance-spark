@@ -36,7 +36,9 @@ import java.sql.Date;
 import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 public class FilterPushDown {
@@ -190,6 +192,51 @@ public class FilterPushDown {
       return sb.toString();
     } else {
       return value.toString();
+    }
+  }
+
+  /**
+   * Extract column names from filters. Returns columns that are directly compared (EqualTo,
+   * GreaterThan, etc.).
+   *
+   * @param filters the filters to extract columns from
+   * @return set of column names used in the filters
+   */
+  public static Set<String> extractFilterColumns(Filter[] filters) {
+    Set<String> columns = new HashSet<>();
+    for (Filter filter : filters) {
+      extractColumnsFromFilter(filter, columns);
+    }
+    return columns;
+  }
+
+  private static void extractColumnsFromFilter(Filter filter, Set<String> columns) {
+    if (filter instanceof EqualTo) {
+      columns.add(((EqualTo) filter).attribute());
+    } else if (filter instanceof GreaterThan) {
+      columns.add(((GreaterThan) filter).attribute());
+    } else if (filter instanceof GreaterThanOrEqual) {
+      columns.add(((GreaterThanOrEqual) filter).attribute());
+    } else if (filter instanceof LessThan) {
+      columns.add(((LessThan) filter).attribute());
+    } else if (filter instanceof LessThanOrEqual) {
+      columns.add(((LessThanOrEqual) filter).attribute());
+    } else if (filter instanceof In) {
+      columns.add(((In) filter).attribute());
+    } else if (filter instanceof IsNull) {
+      columns.add(((IsNull) filter).attribute());
+    } else if (filter instanceof IsNotNull) {
+      columns.add(((IsNotNull) filter).attribute());
+    } else if (filter instanceof And) {
+      And f = (And) filter;
+      extractColumnsFromFilter(f.left(), columns);
+      extractColumnsFromFilter(f.right(), columns);
+    } else if (filter instanceof Or) {
+      Or f = (Or) filter;
+      extractColumnsFromFilter(f.left(), columns);
+      extractColumnsFromFilter(f.right(), columns);
+    } else if (filter instanceof Not) {
+      extractColumnsFromFilter(((Not) filter).child(), columns);
     }
   }
 }

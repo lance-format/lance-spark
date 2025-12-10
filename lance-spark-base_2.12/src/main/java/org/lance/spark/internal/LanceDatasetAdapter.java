@@ -27,8 +27,12 @@ import org.lance.compaction.CompactionPlan;
 import org.lance.compaction.CompactionTask;
 import org.lance.compaction.RewriteResult;
 import org.lance.fragment.FragmentMergeResult;
+import org.lance.index.Index;
+import org.lance.index.IndexType;
 import org.lance.operation.Merge;
 import org.lance.operation.Update;
+import org.lance.schema.LanceField;
+import org.lance.schema.LanceSchema;
 import org.lance.spark.LanceConfig;
 import org.lance.spark.SparkOptions;
 import org.lance.spark.read.LanceInputPartition;
@@ -45,7 +49,10 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 
 import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 public class LanceDatasetAdapter {
@@ -292,5 +299,96 @@ public class LanceDatasetAdapter {
     String uri = config.getDatasetUri();
     ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
     Dataset.drop(uri, options.getStorageOptions());
+  }
+
+  /**
+   * Get all indexes from the dataset.
+   *
+   * @param dataset the opened Dataset
+   * @return list of Index objects with full metadata
+   */
+  public static List<Index> getIndexes(Dataset dataset) {
+    return dataset.getIndexes();
+  }
+
+  /**
+   * Get indexes that cover the specified column.
+   *
+   * @param dataset the opened Dataset
+   * @param columnName the name of the column
+   * @return list of indexes covering the column
+   */
+  public static List<Index> getIndexesForColumn(Dataset dataset, String columnName) {
+    LanceSchema lanceSchema = dataset.getLanceSchema();
+    Integer fieldId = findFieldIdByName(lanceSchema, columnName);
+    if (fieldId == null) {
+      return new ArrayList<>();
+    }
+
+    List<Index> allIndexes = dataset.getIndexes();
+    return allIndexes.stream()
+        .filter(index -> index.fields().contains(fieldId))
+        .collect(Collectors.toList());
+  }
+
+  private static Integer findFieldIdByName(LanceSchema schema, String columnName) {
+    for (LanceField field : schema.fields()) {
+      if (field.getName().equals(columnName)) {
+        return field.getId();
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Check if an index is an exact index (BTREE or BITMAP). Exact indexes can be used for precise
+   * counting without scanning.
+   *
+   * @param index the index to check
+   * @return true if the index is an exact index
+   */
+  public static boolean isExactIndex(Index index) {
+    IndexType type = index.indexType();
+    return type == IndexType.BTREE || type == IndexType.BITMAP;
+  }
+
+  /**
+   * Get fragment IDs not covered by an index.
+   *
+   * @param dataset the opened Dataset
+   * @param index the index to check coverage for
+   * @return list of fragment IDs not covered by the index
+   */
+  public static List<Integer> getUnindexedFragments(Dataset dataset, Index index) {
+    Set<Integer> allFragments = new HashSet<>(getFragmentIds(dataset));
+    index.fragments().ifPresent(allFragments::removeAll);
+    return new ArrayList<>(allFragments);
+  }
+
+  /**
+   * Get fragment IDs covered by an index.
+   *
+   * @param index the index
+   * @return list of fragment IDs covered by the index, or empty if unknown
+   */
+  public static List<Integer> getIndexedFragments(Index index) {
+    return index.fragments().orElse(new ArrayList<>());
+  }
+
+  /**
+   * Count rows using a specific index.
+   *
+   * @param dataset the opened Dataset
+   * @param indexName the name of the index
+   * @param filter the filter expression
+   * @param fragmentIds optional list of fragment IDs to restrict counting to
+   * @return the count of matching rows
+   */
+  public static long countIndexedRows(
+      Dataset dataset,
+      String indexName,
+      String filter,
+      java.util.Optional<List<Integer>> fragmentIds) {
+    return dataset.countIndexedRows(indexName, filter, fragmentIds);
   }
 }

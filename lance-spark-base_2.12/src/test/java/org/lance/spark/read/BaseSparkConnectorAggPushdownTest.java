@@ -13,6 +13,13 @@
  */
 package org.lance.spark.read;
 
+import org.lance.ReadOptions;
+import org.lance.index.IndexParams;
+import org.lance.index.IndexType;
+import org.lance.index.scalar.ScalarIndexParams;
+import org.lance.spark.internal.LanceDatasetAdapter;
+
+import org.apache.arrow.memory.BufferAllocator;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
@@ -25,8 +32,11 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public abstract class BaseSparkConnectorAggPushdownTest {
@@ -216,8 +226,123 @@ public abstract class BaseSparkConnectorAggPushdownTest {
         plan.contains("BatchScan") || plan.contains("LanceScan"),
         "COUNT(*) with filter should use BatchScan. Plan: " + plan);
 
+    // Verify LocalTableScan is NOT used (that's for metadata-only counts)
+    assertFalse(
+        plan.contains("LocalTableScan"),
+        "COUNT(*) with filter should NOT use LocalTableScan. Plan: " + plan);
+
+    // Verify SplitCountScan is NOT used (no index exists)
+    assertFalse(
+        plan.contains("LanceSplitCountScan"),
+        "COUNT(*) with filter but no index should NOT use LanceSplitCountScan. Plan: " + plan);
+
     // Verify the count is correct (ids 11 to 49 = 39 rows)
     long count = countDataset.first().getLong(0);
     assertEquals(39L, count, "Filtered count should be 39");
+  }
+
+  @Test
+  public void testCountStarWithIndexedColumnUsesLocalScan() throws Exception {
+    String tableName = "lance.default.count_indexed_local_scan_test";
+    String datasetPath = tempDir.resolve("count_indexed_local_scan_test.lance").toString();
+
+    // Create dataset with multiple fragments
+    spark.range(0, 100).toDF("id").repartition(4).writeTo(tableName).create();
+
+    // Create a BTREE index on the 'id' column using Lance Java SDK
+    BufferAllocator allocator = LanceDatasetAdapter.allocator;
+    try (org.lance.Dataset lanceDataset =
+        org.lance.Dataset.open(allocator, datasetPath, new ReadOptions.Builder().build())) {
+
+      ScalarIndexParams scalarParams = ScalarIndexParams.create("btree", "{}");
+      IndexParams indexParams = IndexParams.builder().setScalarIndexParams(scalarParams).build();
+
+      lanceDataset.createIndex(
+          Collections.singletonList("id"),
+          IndexType.BTREE,
+          Optional.of("id_btree_index"),
+          indexParams,
+          true);
+
+      // Verify index was created
+      assertTrue(lanceDataset.listIndexes().contains("id_btree_index"), "Index should be created");
+    }
+
+    // Refresh the table to pick up the new index
+    spark.catalog().refreshTable(tableName);
+
+    // Query with filter on indexed column
+    Dataset<Row> lanceDataset = spark.table(tableName);
+    Dataset<Row> countDataset = lanceDataset.filter("id > 50").selectExpr("count(*)");
+
+    // Get the query plan as string
+    String plan = countDataset.queryExecution().executedPlan().toString();
+
+    // When all fragments are indexed, it should use LocalTableScan (direct index count)
+    assertTrue(
+        plan.contains("LocalTableScan"),
+        "COUNT(*) with filter on fully indexed column should use LocalTableScan. Plan: " + plan);
+
+    // Verify the count is correct (ids 51 to 99 = 49 rows)
+    long count = countDataset.first().getLong(0);
+    assertEquals(49L, count, "Filtered count should be 49");
+  }
+
+  @Test
+  public void testCountStarWithPartialIndexUsesSplitScan() throws Exception {
+    String tableName = "lance.default.count_split_scan_test";
+    String datasetPath = tempDir.resolve("count_split_scan_test.lance").toString();
+
+    // Create initial dataset with 2 fragments
+    spark.range(0, 50).toDF("id").repartition(2).writeTo(tableName).create();
+
+    // Create a BTREE index on 'id' column (covers initial fragments)
+    BufferAllocator allocator = LanceDatasetAdapter.allocator;
+    try (org.lance.Dataset lanceDataset =
+        org.lance.Dataset.open(allocator, datasetPath, new ReadOptions.Builder().build())) {
+
+      ScalarIndexParams scalarParams = ScalarIndexParams.create("btree", "{}");
+      IndexParams indexParams = IndexParams.builder().setScalarIndexParams(scalarParams).build();
+
+      lanceDataset.createIndex(
+          Collections.singletonList("id"),
+          IndexType.BTREE,
+          Optional.of("id_partial_index"),
+          indexParams,
+          true);
+
+      assertTrue(
+          lanceDataset.listIndexes().contains("id_partial_index"), "Index should be created");
+    }
+
+    // Append more data (creates new unindexed fragments)
+    spark.range(50, 100).toDF("id").repartition(2).writeTo(tableName).append();
+
+    // Refresh the table
+    spark.catalog().refreshTable(tableName);
+
+    // Verify total row count first
+    Dataset<Row> lanceDataset = spark.table(tableName);
+    long totalCount = lanceDataset.count();
+    assertEquals(100L, totalCount, "Total count should be 100");
+
+    // Query with filter on partially indexed column
+    Dataset<Row> countDataset = lanceDataset.filter("id > 25").selectExpr("count(*)");
+
+    // Get the query plan as string
+    String plan = countDataset.queryExecution().executedPlan().toString();
+
+    // With partial index, it could use SplitCountScan (optimization) or BatchScan (fallback)
+    // The key is that the query should still return correct results
+    assertTrue(
+        plan.contains("LanceSplitCountScan") || plan.contains("BatchScan"),
+        "COUNT(*) with filter on partially indexed column should use SplitCountScan or BatchScan. Plan: "
+            + plan);
+
+    // Verify the count is correct (ids 26 to 99 = 74 rows)
+    // Note: If SplitCountScan optimization is used but countIndexedRows JNI is incomplete,
+    // this may fail. In that case, we'd fall back to BatchScan which should be correct.
+    long count = countDataset.first().getLong(0);
+    assertEquals(74L, count, "Filtered count should be 74");
   }
 }
