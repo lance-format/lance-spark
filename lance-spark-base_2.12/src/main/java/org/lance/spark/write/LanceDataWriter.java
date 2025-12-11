@@ -30,6 +30,8 @@ import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 public class LanceDataWriter implements DataWriter<InternalRow> {
   private LanceArrowWriter arrowWriter;
@@ -68,8 +70,9 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
   public void abort() throws IOException {
     fragmentCreationThread.interrupt();
     try {
-      fragmentCreationTask.get();
-    } catch (InterruptedException | ExecutionException e) {
+      // Have a timeout to avoid hanging in native method indefinitely
+      fragmentCreationTask.get(5, TimeUnit.MINUTES);
+    } catch (InterruptedException | ExecutionException | TimeoutException e) {
       throw new IOException("Failed to abort the reader thread", e);
     }
     close();
