@@ -32,10 +32,11 @@ def calculate_next_version(current_version, release_type, channel):
     elif release_type == 'patch':
         new_version = f"{major}.{minor}.{patch + 1}"
     elif release_type == 'current':
-        # Keep current version - used for:
+        # Keep current base version - used for:
         # - Subsequent preview releases (v0.0.16-beta.2, beta.3, etc.)
         # - Finalizing preview to stable (v0.0.16-beta.X -> v0.0.16)
-        new_version = current_version
+        # Strip any pre-release suffix to get base version (e.g., 0.1.3-beta.1 -> 0.1.3)
+        new_version = f"{major}.{minor}.{patch}"
     else:
         raise ValueError(f"Unknown release type: {release_type}")
     
