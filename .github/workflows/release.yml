@@ -75,6 +75,7 @@ jobs:
       id: versions
       run: |
         BASE_VERSION="${{ steps.base_version.outputs.version }}"
+        CURRENT_VERSION="${{ steps.current_version.outputs.version }}"
         if [ "${{ inputs.release_channel }}" == "stable" ]; then
           TAG="v${BASE_VERSION}"
           POM_VERSION="${BASE_VERSION}"
@@ -93,13 +94,22 @@ jobs:
           POM_VERSION="${BASE_VERSION}-beta.${BETA_NUM}"
         fi
 
+        # Check if version actually changes (needed for commit/push decisions)
+        if [ "$CURRENT_VERSION" != "$POM_VERSION" ]; then
+          VERSION_CHANGED="true"
+        else
+          VERSION_CHANGED="false"
+        fi
+
         echo "tag=$TAG" >> $GITHUB_OUTPUT
         echo "pom_version=$POM_VERSION" >> $GITHUB_OUTPUT
+        echo "version_changed=$VERSION_CHANGED" >> $GITHUB_OUTPUT
         echo "Tag will be: $TAG"
         echo "POM version will be: $POM_VERSION"
+        echo "Version changed: $VERSION_CHANGED"
 
     - name: Update version (when version changes)
-      if: inputs.release_type != 'current'
+      if: steps.versions.outputs.version_changed == 'true'
       run: |
         python ci/bump_version.py --version "${{ steps.versions.outputs.pom_version }}"
 
@@ -109,7 +119,7 @@ jobs:
         git config user.email 'github-actions[bot]@users.noreply.github.com'
 
     - name: Create release commit (when version changes)
-      if: inputs.release_type != 'current'
+      if: steps.versions.outputs.version_changed == 'true'
       run: |
         git add -A
         git commit -m "chore: bump version to ${{ steps.versions.outputs.pom_version }}" || echo "No changes to commit"
@@ -126,7 +136,7 @@ jobs:
         # Configure git to use the token for authentication
         git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
 
-        if [ "${{ inputs.release_type }}" != "current" ]; then
+        if [ "${{ steps.versions.outputs.version_changed }}" == "true" ]; then
           # Push the version bump commit
           git push origin main
         fi
@@ -151,7 +161,7 @@ jobs:
         echo "- **Release Type:** ${{ inputs.release_type }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Release Channel:** ${{ inputs.release_channel }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Current Version:** ${{ steps.current_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-        if [ "${{ inputs.release_type }}" != "current" ]; then
+        if [ "${{ steps.versions.outputs.version_changed }}" == "true" ]; then
           echo "- **New Version:** ${{ steps.versions.outputs.pom_version }}" >> $GITHUB_STEP_SUMMARY
         fi
         echo "- **Tag:** ${{ steps.versions.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
