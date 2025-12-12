@@ -288,9 +288,9 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
 
     // Set behavior based on cascade flag - let the Lance namespace API handle the logic
     if (cascade) {
-      request.setBehavior(DropNamespaceRequest.BehaviorEnum.CASCADE);
+      request.setBehavior("Cascade");
     } else {
-      request.setBehavior(DropNamespaceRequest.BehaviorEnum.RESTRICT);
+      request.setBehavior("Restrict");
     }
 
     this.namespace.dropNamespace(request);
