@@ -72,7 +72,10 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
     try {
       // Have a timeout to avoid hanging in native method indefinitely
       fragmentCreationTask.get(5, TimeUnit.MINUTES);
-    } catch (InterruptedException | ExecutionException | TimeoutException e) {
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new IOException("Interrupted while waiting for reader thread to finish", e);
+    } catch (ExecutionException | TimeoutException e) {
       throw new IOException("Failed to abort the reader thread", e);
     }
     close();
