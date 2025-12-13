@@ -394,24 +394,21 @@ public abstract class BaseBlobCreateTableTest {
 
   // ==================== Large VarChar Tests ====================
 
-  /**
-   * Helper method to verify a field has large varchar metadata set.
-   */
+  /** Helper method to verify a field has large varchar metadata set. */
   private void assertLargeVarCharMetadata(StructType schema, String fieldName) {
     StructField field = schema.apply(fieldName);
     assertNotNull(field, fieldName + " field should exist in schema");
     assertTrue(
         field.metadata().contains("arrow:large-var-char"),
-        fieldName + " field should have arrow:large-var-char metadata, indicating LargeUtf8 storage");
+        fieldName
+            + " field should have arrow:large-var-char metadata, indicating LargeUtf8 storage");
     assertEquals(
         "true",
         field.metadata().getString("arrow:large-var-char"),
         "arrow:large-var-char metadata should be 'true'");
   }
 
-  /**
-   * Helper method to generate large string content.
-   */
+  /** Helper method to generate large string content. */
   private String generateLargeString(int repeatCount) {
     StringBuilder sb = new StringBuilder();
     for (int i = 0; i < repeatCount; i++) {
@@ -525,21 +522,13 @@ public abstract class BaseBlobCreateTableTest {
     // Verify SQL insert data
     Dataset<Row> sqlData =
         spark.sql(
-            "SELECT id, content FROM "
-                + catalogName
-                + ".default."
-                + tableName
-                + " WHERE id = 1");
+            "SELECT id, content FROM " + catalogName + ".default." + tableName + " WHERE id = 1");
     assertEquals("SQL insert content 1", sqlData.collectAsList().get(0).getString(1));
 
     // Verify DataFrame data with large strings
     Dataset<Row> dfData =
         spark.sql(
-            "SELECT id, content FROM "
-                + catalogName
-                + ".default."
-                + tableName
-                + " WHERE id = 11");
+            "SELECT id, content FROM " + catalogName + ".default." + tableName + " WHERE id = 11");
     List<Row> dfRows = dfData.collectAsList();
     assertEquals(1, dfRows.size());
     assertTrue(dfRows.get(0).getString(1).endsWith(" Row 11"));
