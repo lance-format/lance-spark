@@ -162,78 +162,46 @@ df.writeTo("articles").append()
 
 ### Creating New Tables with DataFrame
 
-When using `createOrReplace()` or writing to a new table without pre-defining the schema, you need to add metadata to the DataFrame schema to enable large string encoding:
+When using `createOrReplace()` to create a new table, use the `tableProperty()` method to specify large string columns:
 
 === "Python"
     ```python
-    from pyspark.sql.types import StructType, StructField, IntegerType, StringType
-
-    # Create schema with large string metadata
-    schema = StructType([
-        StructField("id", IntegerType(), False),
-        StructField("title", StringType(), True),
-        StructField("content", StringType(), True,
-                   metadata={"arrow:large-var-char": "true"})
-    ])
-
     # Create data with large string content
     data = [
         (1, "Article 1", "Very long content..." * 100000),
         (2, "Article 2", "Another long article..." * 100000)
     ]
 
-    df = spark.createDataFrame(data, schema)
+    df = spark.createDataFrame(data, ["id", "title", "content"])
 
-    # Create new table with large string support
-    df.writeTo("articles").createOrReplace()
+    # Create new table with large string support using tableProperty
+    df.writeTo("lance_catalog.default.articles") \
+        .using("lance") \
+        .tableProperty("content.arrow.large_var_char", "true") \
+        .createOrReplace()
     ```
 
 === "Scala"
     ```scala
-    import org.apache.spark.sql.types._
-
-    // Create schema with large string metadata
-    val metadata = new MetadataBuilder()
-      .putString("arrow:large-var-char", "true")
-      .build()
-
-    val schema = StructType(Array(
-      StructField("id", IntegerType, nullable = false),
-      StructField("title", StringType, nullable = true),
-      StructField("content", StringType, nullable = true, metadata)
-    ))
-
     // Create data with large string content
     val data = Seq(
       (1, "Article 1", "Very long content..." * 100000),
       (2, "Article 2", "Another long article..." * 100000)
     )
 
-    val df = spark.createDataFrame(
-      spark.sparkContext.parallelize(data.map(Row.fromTuple)),
-      schema
-    )
+    val df = data.toDF("id", "title", "content")
 
-    // Create new table with large string support
-    df.writeTo("articles").createOrReplace()
+    // Create new table with large string support using tableProperty
+    df.writeTo("lance_catalog.default.articles")
+      .using("lance")
+      .tableProperty("content.arrow.large_var_char", "true")
+      .createOrReplace()
     ```
 
 === "Java"
     ```java
-    import org.apache.spark.sql.types.*;
     import java.util.Arrays;
-    import java.util.List;
-
-    // Create schema with large string metadata
-    Metadata largeStringMetadata = new MetadataBuilder()
-        .putString("arrow:large-var-char", "true")
-        .build();
-
-    StructType schema = new StructType(new StructField[]{
-        DataTypes.createStructField("id", DataTypes.IntegerType, false),
-        DataTypes.createStructField("title", DataTypes.StringType, true),
-        DataTypes.createStructField("content", DataTypes.StringType, true, largeStringMetadata)
-    });
+    import java.util.Collections;
 
     // Create data with large string content
     String largeContent1 = String.join("", Collections.nCopies(100000, "Very long content..."));
@@ -244,14 +212,23 @@ When using `createOrReplace()` or writing to a new table without pre-defining th
         RowFactory.create(2, "Article 2", largeContent2)
     );
 
+    StructType schema = new StructType(new StructField[]{
+        DataTypes.createStructField("id", DataTypes.IntegerType, false),
+        DataTypes.createStructField("title", DataTypes.StringType, true),
+        DataTypes.createStructField("content", DataTypes.StringType, true)
+    });
+
     Dataset<Row> df = spark.createDataFrame(data, schema);
 
-    // Create new table with large string support
-    df.writeTo("articles").createOrReplace();
+    // Create new table with large string support using tableProperty
+    df.writeTo("lance_catalog.default.articles")
+        .using("lance")
+        .tableProperty("content.arrow.large_var_char", "true")
+        .createOrReplace();
     ```
 
 **Important Notes**:
 
 - For existing tables created with `arrow.large_var_char` property, writes automatically use large strings
-- For new tables via DataFrame, add metadata key `"arrow:large-var-char"` with value `"true"` to the schema
+- For new tables via DataFrame, use `.tableProperty("column.arrow.large_var_char", "true")`
 - Use large strings when individual values or total batch data may exceed 2GB

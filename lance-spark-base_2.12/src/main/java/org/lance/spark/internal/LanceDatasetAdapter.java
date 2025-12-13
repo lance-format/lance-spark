@@ -83,6 +83,21 @@ public class LanceDatasetAdapter {
     }
   }
 
+  /**
+   * Get the raw Arrow schema for a dataset. Useful for verifying Arrow types directly.
+   *
+   * @param datasetUri the dataset URI
+   * @return Optional containing the Arrow Schema if found, empty otherwise
+   */
+  public static Optional<Schema> getArrowSchema(String datasetUri) {
+    try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
+      return Optional.of(dataset.getSchema());
+    } catch (IllegalArgumentException e) {
+      // dataset not found
+      return Optional.empty();
+    }
+  }
+
   public static Optional<Long> getDatasetRowCount(LanceConfig config) {
     String uri = config.getDatasetUri();
     ReadOptions options = SparkOptions.genReadOptionFromConfig(config);

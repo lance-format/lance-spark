@@ -32,8 +32,10 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.lance.spark.LanceConstant.BLOB_POSITION_SUFFIX;
@@ -347,7 +349,7 @@ public abstract class BaseBlobCreateTableTest {
     assertEquals(5, resultRows.size());
 
     // Track all positions to verify they are all covered
-    java.util.Set<Long> positions = new java.util.HashSet<>();
+    Set<Long> positions = new HashSet<>();
     int positionCount = 0;
 
     // Verify blob data and virtual columns
@@ -415,6 +417,19 @@ public abstract class BaseBlobCreateTableTest {
     List<Row> tableList = tables.collectAsList();
     boolean found = tableList.stream().anyMatch(row -> tableName.equals(row.getString(1)));
     assertTrue(found, "Table should be created");
+
+    // IMPORTANT: Verify the table schema has large varchar metadata preserved
+    // When Lance stores LargeUtf8, fromArrowSchema adds "arrow:large-var-char" metadata
+    StructType tableSchema = spark.table(catalogName + ".default." + tableName).schema();
+    StructField contentField = tableSchema.apply("content");
+    assertNotNull(contentField, "Content field should exist in schema");
+    assertTrue(
+        contentField.metadata().contains("arrow:large-var-char"),
+        "Content field should have arrow:large-var-char metadata, indicating LargeUtf8 storage");
+    assertEquals(
+        "true",
+        contentField.metadata().getString("arrow:large-var-char"),
+        "arrow:large-var-char metadata should be 'true'");
 
     // Insert data into the table using DataFrame API
     // NO metadata needed - table schema already has large varchar property
@@ -692,6 +707,95 @@ public abstract class BaseBlobCreateTableTest {
     assertTrue(dataRows.get(0).getString(1).endsWith(" Row 12"));
     assertTrue(
         dataRows.get(0).getString(1).length() > 200000, "Content should be larger than 200KB");
+
+    // Clean up
+    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
+  }
+
+  @Test
+  public void testLargeVarCharWithTablePropertyAPI() {
+    // Test creating a table with large varchar using df.writeTo().tableProperty().createOrReplace()
+    // This is the recommended way to create new tables with large varchar columns via DataFrame
+    String tableName = "large_varchar_table_property_" + System.currentTimeMillis();
+
+    // Create data with large strings
+    List<Row> rows = new ArrayList<>();
+    StringBuilder largeString = new StringBuilder();
+    for (int i = 0; i < 5000; i++) {
+      largeString.append("Large content for tableProperty API test. ");
+    }
+    String content = largeString.toString();
+
+    for (int i = 0; i < 5; i++) {
+      rows.add(RowFactory.create(i, content + " Row " + i));
+    }
+
+    // Create DataFrame with plain schema - NO metadata needed
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.IntegerType, false),
+              DataTypes.createStructField("content", DataTypes.StringType, true)
+            });
+
+    Dataset<Row> df = spark.createDataFrame(rows, schema);
+
+    // Use tableProperty API to specify large varchar - this is the recommended approach
+    try {
+      df.writeTo(catalogName + ".default." + tableName)
+          .using("lance")
+          .tableProperty("content.arrow.large_var_char", "true")
+          .createOrReplace();
+    } catch (Exception e) {
+      fail("Failed to create table with tableProperty API: " + e.getMessage());
+    }
+
+    // IMPORTANT: Verify the table schema has large varchar metadata preserved
+    // When Lance stores LargeUtf8, fromArrowSchema adds "arrow:large-var-char" metadata
+    StructType tableSchema = spark.table(catalogName + ".default." + tableName).schema();
+    StructField contentField = tableSchema.apply("content");
+    assertNotNull(contentField, "Content field should exist in schema");
+    assertTrue(
+        contentField.metadata().contains("arrow:large-var-char"),
+        "Content field should have arrow:large-var-char metadata, indicating LargeUtf8 storage");
+    assertEquals(
+        "true",
+        contentField.metadata().getString("arrow:large-var-char"),
+        "arrow:large-var-char metadata should be 'true'");
+
+    // Verify data was written correctly
+    Dataset<Row> result =
+        spark.sql("SELECT COUNT(*) FROM " + catalogName + ".default." + tableName);
+    assertEquals(5L, result.collectAsList().get(0).getLong(0));
+
+    // Verify we can read the large string data back correctly
+    Dataset<Row> dataResult =
+        spark.sql(
+            "SELECT id, content FROM " + catalogName + ".default." + tableName + " WHERE id = 2");
+
+    List<Row> dataRows = dataResult.collectAsList();
+    assertEquals(1, dataRows.size());
+    assertEquals(2, dataRows.get(0).getInt(0));
+    assertTrue(dataRows.get(0).getString(1).endsWith(" Row 2"));
+    assertTrue(
+        dataRows.get(0).getString(1).length() > 200000, "Content should be larger than 200KB");
+
+    // Verify subsequent writes also work without specifying metadata
+    List<Row> moreRows = new ArrayList<>();
+    for (int i = 10; i < 15; i++) {
+      moreRows.add(RowFactory.create(i, content + " Row " + i));
+    }
+    Dataset<Row> df2 = spark.createDataFrame(moreRows, schema);
+    try {
+      df2.writeTo(catalogName + ".default." + tableName).append();
+    } catch (Exception e) {
+      fail("Failed to append data after tableProperty create: " + e.getMessage());
+    }
+
+    // Verify total count
+    Dataset<Row> finalResult =
+        spark.sql("SELECT COUNT(*) FROM " + catalogName + ".default." + tableName);
+    assertEquals(10L, finalResult.collectAsList().get(0).getLong(0));
 
     // Clean up
     spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);

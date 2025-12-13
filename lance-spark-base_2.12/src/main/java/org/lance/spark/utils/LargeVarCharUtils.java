@@ -13,8 +13,11 @@
  */
 package org.lance.spark.utils;
 
+import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.spark.sql.types.StringType;
 import org.apache.spark.sql.types.StructField;
+
+import java.util.Map;
 
 public class LargeVarCharUtils {
 
@@ -54,12 +57,12 @@ public class LargeVarCharUtils {
    * @param field the Arrow field to check
    * @return true if the field is a large varchar field, false otherwise
    */
-  public static boolean isLargeVarCharArrowField(org.apache.arrow.vector.types.pojo.Field field) {
+  public static boolean isLargeVarCharArrowField(Field field) {
     if (field == null) {
       return false;
     }
 
-    java.util.Map<String, String> metadata = field.getMetadata();
+    Map<String, String> metadata = field.getMetadata();
     if (metadata == null) {
       return false;
     }
