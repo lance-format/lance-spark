@@ -30,6 +30,7 @@ import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 public abstract class BaseSparkConnectorReadTest {
   private static SparkSession spark;
@@ -184,5 +185,34 @@ public abstract class BaseSparkConnectorReadTest {
             .collectAsList();
     assertEquals(1, desc.size());
     assertTrue(desc.get(0).getString(0).contains("BroadcastHashJoin"));
+  }
+
+  @Test
+  public void readWithInvalidBatchSizeFails() {
+    Dataset<Row> df =
+        spark
+            .read()
+            .format(LanceDataSource.name)
+            .option(
+                LanceConfig.CONFIG_DATASET_URI,
+                TestUtils.getDatasetUri(dbPath, TestUtils.TestTable1Config.datasetName))
+            .option("batch_size", "-1")
+            .load();
+    try {
+      df.collect();
+      fail("Expected exception for invalid batch_size");
+    } catch (Exception e) {
+      Throwable cause = e;
+      boolean found = false;
+      while (cause != null) {
+        if (cause.getMessage() != null
+            && cause.getMessage().contains("batch_size must be positive")) {
+          found = true;
+          break;
+        }
+        cause = cause.getCause();
+      }
+      assertTrue(found, "Expected batch_size validation error, got: " + e.getMessage());
+    }
   }
 }

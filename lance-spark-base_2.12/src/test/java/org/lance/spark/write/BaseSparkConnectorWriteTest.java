@@ -40,6 +40,8 @@ import java.util.List;
 import static org.apache.spark.sql.functions.col;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 public abstract class BaseSparkConnectorWriteTest {
   private static SparkSession spark;
@@ -281,5 +283,27 @@ public abstract class BaseSparkConnectorWriteTest {
     spark.sql("CREATE OR REPLACE TABLE lance.`" + path + "` AS SELECT * FROM tmp_view");
     spark.sql("CREATE OR REPLACE TABLE lance.`" + path + "` AS SELECT * FROM tmp_view");
     spark.sql("DROP TABLE lance.`" + path + "`");
+  }
+
+  @Test
+  public void writeWithInvalidBatchSizeFails(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    try {
+      testData
+          .write()
+          .format(LanceDataSource.name)
+          .option(
+              LanceConfig.CONFIG_DATASET_URI,
+              TestUtils.getDatasetUri(dbPath.toString(), datasetName))
+          .option("batch_size", "-1")
+          .save();
+      fail("Expected exception for invalid batch_size");
+    } catch (Exception e) {
+      assertTrue(
+          e.getMessage().contains("batch_size must be positive")
+              || (e.getCause() != null
+                  && e.getCause().getMessage().contains("batch_size must be positive")),
+          "Expected batch_size validation error, got: " + e.getMessage());
+    }
   }
 }

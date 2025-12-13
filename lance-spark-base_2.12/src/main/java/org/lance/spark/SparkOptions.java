@@ -17,6 +17,8 @@ import org.lance.ReadOptions;
 import org.lance.WriteParams;
 import org.lance.WriteParams.LanceFileVersion;
 
+import com.google.common.base.Preconditions;
+
 import java.util.Map;
 
 public class SparkOptions {
@@ -81,7 +83,9 @@ public class SparkOptions {
   public static int getBatchSize(LanceConfig config) {
     Map<String, String> options = config.getOptions();
     if (options.containsKey(batch_size)) {
-      return Integer.parseInt(options.get(batch_size));
+      int value = Integer.parseInt(options.get(batch_size));
+      Preconditions.checkArgument(value > 0, "batch_size must be positive, got: %s", value);
+      return value;
     }
     return 512;
   }

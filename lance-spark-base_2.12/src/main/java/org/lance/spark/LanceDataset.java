@@ -35,7 +35,9 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -117,7 +119,14 @@ public class LanceDataset implements SupportsRead, SupportsWrite, SupportsMetada
 
   @Override
   public ScanBuilder newScanBuilder(CaseInsensitiveStringMap caseInsensitiveStringMap) {
-    return new LanceScanBuilder(sparkSchema, config);
+    // Merge scan-time options with the existing config options
+    LanceConfig scanConfig = config;
+    if (!caseInsensitiveStringMap.isEmpty()) {
+      Map<String, String> mergedOptions = new HashMap<>(config.getOptions());
+      mergedOptions.putAll(caseInsensitiveStringMap.asCaseSensitiveMap());
+      scanConfig = LanceConfig.from(mergedOptions, config.getDatasetUri());
+    }
+    return new LanceScanBuilder(sparkSchema, scanConfig);
   }
 
   @Override
@@ -137,21 +146,26 @@ public class LanceDataset implements SupportsRead, SupportsWrite, SupportsMetada
 
   @Override
   public WriteBuilder newWriteBuilder(LogicalWriteInfo logicalWriteInfo) {
+    // Merge write-time options with the existing config options
+    CaseInsensitiveStringMap writeOptions = logicalWriteInfo.options();
+    LanceConfig writeConfig = config;
+    if (!writeOptions.isEmpty()) {
+      Map<String, String> mergedOptions = new HashMap<>(config.getOptions());
+      mergedOptions.putAll(writeOptions.asCaseSensitiveMap());
+      writeConfig = LanceConfig.from(mergedOptions, config.getDatasetUri());
+    }
+
     List<String> backfillColumns =
-        Arrays.stream(
-                logicalWriteInfo
-                    .options()
-                    .getOrDefault(LanceConstant.BACKFILL_COLUMNS_KEY, "")
-                    .split(","))
+        Arrays.stream(writeOptions.getOrDefault(LanceConstant.BACKFILL_COLUMNS_KEY, "").split(","))
             .map(String::trim)
             .filter(t -> !t.isEmpty())
             .collect(Collectors.toList());
     if (!backfillColumns.isEmpty()) {
       return new AddColumnsBackfillWrite.AddColumnsWriteBuilder(
-          sparkSchema, config, backfillColumns);
+          sparkSchema, writeConfig, backfillColumns);
     }
 
-    return new SparkWrite.SparkWriteBuilder(sparkSchema, config);
+    return new SparkWrite.SparkWriteBuilder(sparkSchema, writeConfig);
   }
 
   @Override
