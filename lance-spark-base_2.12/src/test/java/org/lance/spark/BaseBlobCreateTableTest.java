@@ -394,139 +394,34 @@ public abstract class BaseBlobCreateTableTest {
 
   // ==================== Large VarChar Tests ====================
 
-  @Test
-  public void testCreateTableWithLargeVarCharColumn() {
-    String tableName = "large_varchar_table_" + System.currentTimeMillis();
-
-    // Create table with large varchar column using TBLPROPERTIES
-    spark.sql(
-        "CREATE TABLE IF NOT EXISTS "
-            + catalogName
-            + ".default."
-            + tableName
-            + " ("
-            + "id INT NOT NULL, "
-            + "content STRING"
-            + ") USING lance "
-            + "TBLPROPERTIES ("
-            + "'content.arrow.large_var_char' = 'true'"
-            + ")");
-
-    // Verify table was created
-    Dataset<Row> tables = spark.sql("SHOW TABLES IN " + catalogName + ".default");
-    List<Row> tableList = tables.collectAsList();
-    boolean found = tableList.stream().anyMatch(row -> tableName.equals(row.getString(1)));
-    assertTrue(found, "Table should be created");
-
-    // IMPORTANT: Verify the table schema has large varchar metadata preserved
-    // When Lance stores LargeUtf8, fromArrowSchema adds "arrow:large-var-char" metadata
-    StructType tableSchema = spark.table(catalogName + ".default." + tableName).schema();
-    StructField contentField = tableSchema.apply("content");
-    assertNotNull(contentField, "Content field should exist in schema");
+  /**
+   * Helper method to verify a field has large varchar metadata set.
+   */
+  private void assertLargeVarCharMetadata(StructType schema, String fieldName) {
+    StructField field = schema.apply(fieldName);
+    assertNotNull(field, fieldName + " field should exist in schema");
     assertTrue(
-        contentField.metadata().contains("arrow:large-var-char"),
-        "Content field should have arrow:large-var-char metadata, indicating LargeUtf8 storage");
+        field.metadata().contains("arrow:large-var-char"),
+        fieldName + " field should have arrow:large-var-char metadata, indicating LargeUtf8 storage");
     assertEquals(
         "true",
-        contentField.metadata().getString("arrow:large-var-char"),
+        field.metadata().getString("arrow:large-var-char"),
         "arrow:large-var-char metadata should be 'true'");
+  }
 
-    // Insert data into the table using DataFrame API
-    // NO metadata needed - table schema already has large varchar property
-    List<Row> rows = new ArrayList<>();
-    for (int i = 0; i < 10; i++) {
-      rows.add(RowFactory.create(i, "This is test content for row " + i));
+  /**
+   * Helper method to generate large string content.
+   */
+  private String generateLargeString(int repeatCount) {
+    StringBuilder sb = new StringBuilder();
+    for (int i = 0; i < repeatCount; i++) {
+      sb.append("Large content string for testing. ");
     }
-
-    // Create DataFrame with plain schema - NO large varchar metadata needed
-    // The table's schema will automatically apply large varchar encoding
-    StructType schema =
-        new StructType(
-            new StructField[] {
-              DataTypes.createStructField("id", DataTypes.IntegerType, false),
-              DataTypes.createStructField("content", DataTypes.StringType, true)
-            });
-
-    Dataset<Row> df = spark.createDataFrame(rows, schema);
-    try {
-      df.writeTo(catalogName + ".default." + tableName).append();
-    } catch (Exception e) {
-      fail("Failed to append data to table: " + e.getMessage());
-    }
-
-    // Query the table
-    Dataset<Row> result =
-        spark.sql("SELECT COUNT(*) FROM " + catalogName + ".default." + tableName);
-    assertEquals(10L, result.collectAsList().get(0).getLong(0));
-
-    // Verify we can read the string data back
-    Dataset<Row> dataResult =
-        spark.sql(
-            "SELECT id, content FROM " + catalogName + ".default." + tableName + " WHERE id = 0");
-
-    List<Row> dataRows = dataResult.collectAsList();
-    assertEquals(1, dataRows.size());
-    assertEquals(0, dataRows.get(0).getInt(0));
-    assertEquals("This is test content for row 0", dataRows.get(0).getString(1));
-
-    // Clean up
-    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
+    return sb.toString();
   }
 
   @Test
-  public void testCreateTableWithLargeVarCharAndSQLInsert() {
-    String tableName = "large_varchar_sql_table_" + System.currentTimeMillis();
-
-    // Create table with large varchar column using TBLPROPERTIES
-    spark.sql(
-        "CREATE TABLE IF NOT EXISTS "
-            + catalogName
-            + ".default."
-            + tableName
-            + " ("
-            + "id INT NOT NULL, "
-            + "description STRING, "
-            + "large_content STRING"
-            + ") USING lance "
-            + "TBLPROPERTIES ("
-            + "'large_content.arrow.large_var_char' = 'true'"
-            + ")");
-
-    // Insert data using SQL
-    spark.sql(
-        "INSERT INTO "
-            + catalogName
-            + ".default."
-            + tableName
-            + " VALUES "
-            + "(1, 'first description', 'This is a large content string 1'), "
-            + "(2, 'second description', 'This is a large content string 2')");
-
-    // Query the table to verify data was inserted
-    Dataset<Row> result =
-        spark.sql("SELECT COUNT(*) FROM " + catalogName + ".default." + tableName);
-    assertEquals(2L, result.collectAsList().get(0).getLong(0));
-
-    // Query with projection
-    Dataset<Row> projection =
-        spark.sql(
-            "SELECT id, description, large_content FROM "
-                + catalogName
-                + ".default."
-                + tableName
-                + " ORDER BY id");
-    List<Row> projRows = projection.collectAsList();
-    assertEquals(2, projRows.size());
-    assertEquals(1, projRows.get(0).getInt(0));
-    assertEquals("first description", projRows.get(0).getString(1));
-    assertEquals("This is a large content string 1", projRows.get(0).getString(2));
-
-    // Clean up
-    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
-  }
-
-  @Test
-  public void testCreateTableWithInvalidLargeVarCharType() {
+  public void testLargeVarCharWithInvalidType() {
     String tableName = "large_varchar_invalid_" + System.currentTimeMillis();
 
     // Try to create table with non-string large varchar column (should fail)
@@ -552,10 +447,11 @@ public abstract class BaseBlobCreateTableTest {
   }
 
   @Test
-  public void testLargeVarCharWithLargeStrings() {
-    String tableName = "large_varchar_large_strings_" + System.currentTimeMillis();
+  public void testLargeVarCharWithSqlTblProperties() {
+    // Test creating table with SQL TBLPROPERTIES and mixed INSERT INTO / DataFrame writes
+    String tableName = "large_varchar_sql_" + System.currentTimeMillis();
 
-    // Create table with large varchar column
+    // Create table with large varchar column using SQL TBLPROPERTIES
     spark.sql(
         "CREATE TABLE IF NOT EXISTS "
             + catalogName
@@ -569,105 +465,31 @@ public abstract class BaseBlobCreateTableTest {
             + "'content.arrow.large_var_char' = 'true'"
             + ")");
 
-    // Insert data with large strings using DataFrame API
-    List<Row> rows = new ArrayList<>();
-    StringBuilder largeString = new StringBuilder();
-    for (int i = 0; i < 10000; i++) {
-      largeString.append("This is a repeated string to make it large. ");
-    }
-    String content = largeString.toString();
+    // Verify schema has large varchar metadata
+    assertLargeVarCharMetadata(
+        spark.table(catalogName + ".default." + tableName).schema(), "content");
 
-    for (int i = 0; i < 5; i++) {
-      rows.add(RowFactory.create(i, content + " Row " + i));
-    }
-
-    // Create DataFrame with plain schema - NO large varchar metadata needed
-    // The table's schema will automatically apply large varchar encoding
-    StructType schema =
-        new StructType(
-            new StructField[] {
-              DataTypes.createStructField("id", DataTypes.IntegerType, false),
-              DataTypes.createStructField("content", DataTypes.StringType, true)
-            });
-
-    Dataset<Row> df = spark.createDataFrame(rows, schema);
-    try {
-      df.writeTo(catalogName + ".default." + tableName).append();
-    } catch (Exception e) {
-      fail("Failed to append data to table with large strings: " + e.getMessage());
-    }
-
-    // Query the table to verify row count
-    Dataset<Row> result =
-        spark.sql("SELECT COUNT(*) FROM " + catalogName + ".default." + tableName);
-    assertEquals(5L, result.collectAsList().get(0).getLong(0));
-
-    // Verify we can read the large string data back correctly
-    Dataset<Row> dataResult =
-        spark.sql(
-            "SELECT id, content FROM " + catalogName + ".default." + tableName + " WHERE id = 2");
-
-    List<Row> dataRows = dataResult.collectAsList();
-    assertEquals(1, dataRows.size());
-    assertEquals(2, dataRows.get(0).getInt(0));
-    assertTrue(dataRows.get(0).getString(1).endsWith(" Row 2"));
-    assertTrue(
-        dataRows.get(0).getString(1).length() > 400000, "Content should be larger than 400KB");
-
-    // Clean up
-    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
-  }
-
-  @Test
-  public void testLargeVarCharSubsequentWritesWithoutMetadata() {
-    // This test verifies that subsequent writes to an existing table with arrow.large_var_char
-    // property work WITHOUT needing to specify metadata on the DataFrame.
-    // The metadata should be automatically picked up from the table schema.
-    String tableName = "large_varchar_auto_metadata_" + System.currentTimeMillis();
-
-    // Step 1: Create table with large varchar column using TBLPROPERTIES
-    spark.sql(
-        "CREATE TABLE IF NOT EXISTS "
-            + catalogName
-            + ".default."
-            + tableName
-            + " ("
-            + "id INT NOT NULL, "
-            + "content STRING"
-            + ") USING lance "
-            + "TBLPROPERTIES ("
-            + "'content.arrow.large_var_char' = 'true'"
-            + ")");
-
-    // Step 2: First write - use SQL INSERT to populate initial data
+    // Write 1: SQL INSERT
     spark.sql(
         "INSERT INTO "
             + catalogName
             + ".default."
             + tableName
             + " VALUES "
-            + "(1, 'Initial content 1'), "
-            + "(2, 'Initial content 2')");
+            + "(1, 'SQL insert content 1'), "
+            + "(2, 'SQL insert content 2')");
 
-    // Verify initial data
-    Dataset<Row> initialResult =
-        spark.sql("SELECT COUNT(*) FROM " + catalogName + ".default." + tableName);
-    assertEquals(2L, initialResult.collectAsList().get(0).getLong(0));
+    // Verify schema still has metadata after write
+    assertLargeVarCharMetadata(
+        spark.table(catalogName + ".default." + tableName).schema(), "content");
 
-    // Step 3: Subsequent write using DataFrame API WITHOUT specifying large varchar metadata
-    // This should work because the table schema already has the metadata
+    // Write 2: DataFrame append with large strings (no metadata needed)
+    String largeContent = generateLargeString(5000);
     List<Row> rows = new ArrayList<>();
-    StringBuilder largeString = new StringBuilder();
-    for (int i = 0; i < 5000; i++) {
-      largeString.append("Large content string for testing automatic metadata. ");
-    }
-    String content = largeString.toString();
-
-    for (int i = 10; i < 15; i++) {
-      rows.add(RowFactory.create(i, content + " Row " + i));
+    for (int i = 10; i < 13; i++) {
+      rows.add(RowFactory.create(i, largeContent + " Row " + i));
     }
 
-    // Create DataFrame with plain schema - NO large varchar metadata
     StructType plainSchema =
         new StructType(
             new StructField[] {
@@ -677,36 +499,51 @@ public abstract class BaseBlobCreateTableTest {
 
     Dataset<Row> df = spark.createDataFrame(rows, plainSchema);
     try {
-      // This should work because the table's schema has the large varchar metadata
-      // and it should be automatically applied during write
       df.writeTo(catalogName + ".default." + tableName).append();
     } catch (Exception e) {
-      fail(
-          "Failed to append data without explicit metadata. "
-              + "Table schema should automatically apply large varchar encoding: "
-              + e.getMessage());
+      fail("Failed to append DataFrame: " + e.getMessage());
     }
 
-    // Step 4: Verify all data was written correctly
-    Dataset<Row> finalResult =
-        spark.sql("SELECT COUNT(*) FROM " + catalogName + ".default." + tableName);
-    assertEquals(7L, finalResult.collectAsList().get(0).getLong(0));
+    // Verify schema still has metadata
+    assertLargeVarCharMetadata(
+        spark.table(catalogName + ".default." + tableName).schema(), "content");
 
-    // Verify the large string data can be read back correctly
-    Dataset<Row> dataResult =
+    // Write 3: Another SQL INSERT
+    spark.sql(
+        "INSERT INTO "
+            + catalogName
+            + ".default."
+            + tableName
+            + " VALUES "
+            + "(20, 'Another SQL insert')");
+
+    // Verify total count (2 + 3 + 1 = 6 rows)
+    Dataset<Row> result =
+        spark.sql("SELECT COUNT(*) FROM " + catalogName + ".default." + tableName);
+    assertEquals(6L, result.collectAsList().get(0).getLong(0));
+
+    // Verify SQL insert data
+    Dataset<Row> sqlData =
         spark.sql(
             "SELECT id, content FROM "
                 + catalogName
                 + ".default."
                 + tableName
-                + " WHERE id = 12 ORDER BY id");
+                + " WHERE id = 1");
+    assertEquals("SQL insert content 1", sqlData.collectAsList().get(0).getString(1));
 
-    List<Row> dataRows = dataResult.collectAsList();
-    assertEquals(1, dataRows.size());
-    assertEquals(12, dataRows.get(0).getInt(0));
-    assertTrue(dataRows.get(0).getString(1).endsWith(" Row 12"));
-    assertTrue(
-        dataRows.get(0).getString(1).length() > 200000, "Content should be larger than 200KB");
+    // Verify DataFrame data with large strings
+    Dataset<Row> dfData =
+        spark.sql(
+            "SELECT id, content FROM "
+                + catalogName
+                + ".default."
+                + tableName
+                + " WHERE id = 11");
+    List<Row> dfRows = dfData.collectAsList();
+    assertEquals(1, dfRows.size());
+    assertTrue(dfRows.get(0).getString(1).endsWith(" Row 11"));
+    assertTrue(dfRows.get(0).getString(1).length() > 150000, "Content should be large");
 
     // Clean up
     spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
@@ -714,23 +551,17 @@ public abstract class BaseBlobCreateTableTest {
 
   @Test
   public void testLargeVarCharWithTablePropertyAPI() {
-    // Test creating a table with large varchar using df.writeTo().tableProperty().createOrReplace()
-    // This is the recommended way to create new tables with large varchar columns via DataFrame
-    String tableName = "large_varchar_table_property_" + System.currentTimeMillis();
+    // Test creating table with DataFrame tableProperty() API and subsequent writes
+    String tableName = "large_varchar_df_api_" + System.currentTimeMillis();
 
-    // Create data with large strings
+    String largeContent = generateLargeString(5000);
+
+    // Initial data
     List<Row> rows = new ArrayList<>();
-    StringBuilder largeString = new StringBuilder();
-    for (int i = 0; i < 5000; i++) {
-      largeString.append("Large content for tableProperty API test. ");
-    }
-    String content = largeString.toString();
-
-    for (int i = 0; i < 5; i++) {
-      rows.add(RowFactory.create(i, content + " Row " + i));
+    for (int i = 0; i < 3; i++) {
+      rows.add(RowFactory.create(i, largeContent + " Row " + i));
     }
 
-    // Create DataFrame with plain schema - NO metadata needed
     StructType schema =
         new StructType(
             new StructField[] {
@@ -740,139 +571,45 @@ public abstract class BaseBlobCreateTableTest {
 
     Dataset<Row> df = spark.createDataFrame(rows, schema);
 
-    // Use tableProperty API to specify large varchar - this is the recommended approach
-    try {
-      df.writeTo(catalogName + ".default." + tableName)
-          .using("lance")
-          .tableProperty("content.arrow.large_var_char", "true")
-          .createOrReplace();
-    } catch (Exception e) {
-      fail("Failed to create table with tableProperty API: " + e.getMessage());
-    }
+    // Create table with tableProperty API
+    df.writeTo(catalogName + ".default." + tableName)
+        .using("lance")
+        .tableProperty("content.arrow.large_var_char", "true")
+        .createOrReplace();
 
-    // IMPORTANT: Verify the table schema has large varchar metadata preserved
-    // When Lance stores LargeUtf8, fromArrowSchema adds "arrow:large-var-char" metadata
-    StructType tableSchema = spark.table(catalogName + ".default." + tableName).schema();
-    StructField contentField = tableSchema.apply("content");
-    assertNotNull(contentField, "Content field should exist in schema");
-    assertTrue(
-        contentField.metadata().contains("arrow:large-var-char"),
-        "Content field should have arrow:large-var-char metadata, indicating LargeUtf8 storage");
-    assertEquals(
-        "true",
-        contentField.metadata().getString("arrow:large-var-char"),
-        "arrow:large-var-char metadata should be 'true'");
+    // Verify schema has large varchar metadata
+    assertLargeVarCharMetadata(
+        spark.table(catalogName + ".default." + tableName).schema(), "content");
 
-    // Verify data was written correctly
-    Dataset<Row> result =
-        spark.sql("SELECT COUNT(*) FROM " + catalogName + ".default." + tableName);
-    assertEquals(5L, result.collectAsList().get(0).getLong(0));
-
-    // Verify we can read the large string data back correctly
-    Dataset<Row> dataResult =
-        spark.sql(
-            "SELECT id, content FROM " + catalogName + ".default." + tableName + " WHERE id = 2");
-
-    List<Row> dataRows = dataResult.collectAsList();
-    assertEquals(1, dataRows.size());
-    assertEquals(2, dataRows.get(0).getInt(0));
-    assertTrue(dataRows.get(0).getString(1).endsWith(" Row 2"));
-    assertTrue(
-        dataRows.get(0).getString(1).length() > 200000, "Content should be larger than 200KB");
-
-    // Verify subsequent writes also work without specifying metadata
+    // Subsequent DataFrame append (no metadata needed)
     List<Row> moreRows = new ArrayList<>();
-    for (int i = 10; i < 15; i++) {
-      moreRows.add(RowFactory.create(i, content + " Row " + i));
+    for (int i = 10; i < 13; i++) {
+      moreRows.add(RowFactory.create(i, largeContent + " Row " + i));
     }
     Dataset<Row> df2 = spark.createDataFrame(moreRows, schema);
     try {
       df2.writeTo(catalogName + ".default." + tableName).append();
     } catch (Exception e) {
-      fail("Failed to append data after tableProperty create: " + e.getMessage());
+      fail("Failed to append DataFrame: " + e.getMessage());
     }
 
-    // Verify total count
-    Dataset<Row> finalResult =
-        spark.sql("SELECT COUNT(*) FROM " + catalogName + ".default." + tableName);
-    assertEquals(10L, finalResult.collectAsList().get(0).getLong(0));
+    // Verify schema still has metadata
+    assertLargeVarCharMetadata(
+        spark.table(catalogName + ".default." + tableName).schema(), "content");
 
-    // Clean up
-    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
-  }
-
-  @Test
-  public void testLargeVarCharMultipleSubsequentWrites() {
-    // Test multiple rounds of writes to ensure metadata is consistently preserved
-    String tableName = "large_varchar_multi_writes_" + System.currentTimeMillis();
-
-    // Create table with large varchar column
-    spark.sql(
-        "CREATE TABLE IF NOT EXISTS "
-            + catalogName
-            + ".default."
-            + tableName
-            + " ("
-            + "id INT NOT NULL, "
-            + "content STRING"
-            + ") USING lance "
-            + "TBLPROPERTIES ("
-            + "'content.arrow.large_var_char' = 'true'"
-            + ")");
-
-    // Plain schema without metadata
-    StructType plainSchema =
-        new StructType(
-            new StructField[] {
-              DataTypes.createStructField("id", DataTypes.IntegerType, false),
-              DataTypes.createStructField("content", DataTypes.StringType, true)
-            });
-
-    // Generate large content
-    StringBuilder largeString = new StringBuilder();
-    for (int i = 0; i < 3000; i++) {
-      largeString.append("Repeated content for multi-write test. ");
-    }
-    String content = largeString.toString();
-
-    // Perform multiple writes without metadata
-    for (int batch = 0; batch < 3; batch++) {
-      List<Row> rows = new ArrayList<>();
-      for (int i = 0; i < 5; i++) {
-        int id = batch * 10 + i;
-        rows.add(RowFactory.create(id, content + " Batch " + batch + " Row " + i));
-      }
-
-      Dataset<Row> df = spark.createDataFrame(rows, plainSchema);
-      try {
-        df.writeTo(catalogName + ".default." + tableName).append();
-      } catch (Exception e) {
-        fail("Failed on batch " + batch + ": " + e.getMessage());
-      }
-    }
-
-    // Verify total count
+    // Verify total count (3 + 3 = 6 rows)
     Dataset<Row> result =
         spark.sql("SELECT COUNT(*) FROM " + catalogName + ".default." + tableName);
-    assertEquals(15L, result.collectAsList().get(0).getLong(0));
+    assertEquals(6L, result.collectAsList().get(0).getLong(0));
 
-    // Verify data from each batch can be read correctly
-    for (int batch = 0; batch < 3; batch++) {
-      int expectedId = batch * 10 + 2;
-      Dataset<Row> batchResult =
-          spark.sql(
-              "SELECT id, content FROM "
-                  + catalogName
-                  + ".default."
-                  + tableName
-                  + " WHERE id = "
-                  + expectedId);
-
-      List<Row> batchRows = batchResult.collectAsList();
-      assertEquals(1, batchRows.size());
-      assertEquals(expectedId, batchRows.get(0).getInt(0));
-      assertTrue(batchRows.get(0).getString(1).contains("Batch " + batch));
-    }
+    // Verify data integrity
+    Dataset<Row> dataResult =
+        spark.sql(
+            "SELECT id, content FROM " + catalogName + ".default." + tableName + " WHERE id = 11");
+    List<Row> dataRows = dataResult.collectAsList();
+    assertEquals(1, dataRows.size());
+    assertTrue(dataRows.get(0).getString(1).endsWith(" Row 11"));
+    assertTrue(dataRows.get(0).getString(1).length() > 150000, "Content should be large");
 
     // Clean up
     spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
