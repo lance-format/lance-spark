@@ -15,6 +15,7 @@ package org.apache.spark.sql.vectorized;
 
 import org.lance.spark.utils.BlobUtils;
 
+import org.apache.arrow.vector.LargeVarCharVector;
 import org.apache.arrow.vector.UInt1Vector;
 import org.apache.arrow.vector.UInt2Vector;
 import org.apache.arrow.vector.UInt4Vector;
@@ -35,6 +36,7 @@ public class LanceArrowColumnVector extends ColumnVector {
   private FixedSizeListAccessor fixedSizeListAccessor;
   private BlobStructAccessor blobStructAccessor;
   private LanceArrayAccessor arrayAccessor;
+  private LargeVarCharAccessor largeVarCharAccessor;
   private ArrowColumnVector arrowColumnVector;
 
   public LanceArrowColumnVector(ValueVector vector) {
@@ -54,6 +56,8 @@ public class LanceArrowColumnVector extends ColumnVector {
       blobStructAccessor = new BlobStructAccessor((StructVector) vector);
     } else if (vector instanceof ListVector) {
       arrayAccessor = new LanceArrayAccessor((ListVector) vector);
+    } else if (vector instanceof LargeVarCharVector) {
+      largeVarCharAccessor = new LargeVarCharAccessor((LargeVarCharVector) vector);
     } else {
       arrowColumnVector = new ArrowColumnVector(vector);
     }
@@ -82,6 +86,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     if (arrayAccessor != null) {
       arrayAccessor.close();
     }
+    if (largeVarCharAccessor != null) {
+      largeVarCharAccessor.close();
+    }
     if (arrowColumnVector != null) {
       arrowColumnVector.close();
     }
@@ -109,6 +116,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (arrayAccessor != null) {
       return arrayAccessor.getNullCount() > 0;
+    }
+    if (largeVarCharAccessor != null) {
+      return largeVarCharAccessor.getNullCount() > 0;
     }
     if (arrowColumnVector != null) {
       return arrowColumnVector.hasNull();
@@ -139,6 +149,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     if (arrayAccessor != null) {
       return arrayAccessor.getNullCount();
     }
+    if (largeVarCharAccessor != null) {
+      return largeVarCharAccessor.getNullCount();
+    }
     if (arrowColumnVector != null) {
       return arrowColumnVector.numNulls();
     }
@@ -167,6 +180,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (arrayAccessor != null) {
       return arrayAccessor.isNullAt(rowId);
+    }
+    if (largeVarCharAccessor != null) {
+      return largeVarCharAccessor.isNullAt(rowId);
     }
     if (arrowColumnVector != null) {
       return arrowColumnVector.isNullAt(rowId);
@@ -274,6 +290,9 @@ public class LanceArrowColumnVector extends ColumnVector {
 
   @Override
   public UTF8String getUTF8String(int rowId) {
+    if (largeVarCharAccessor != null) {
+      return largeVarCharAccessor.getUTF8String(rowId);
+    }
     if (arrowColumnVector != null) {
       return arrowColumnVector.getUTF8String(rowId);
     }

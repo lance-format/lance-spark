@@ -49,6 +49,8 @@ import java.util.Map;
 
 import static org.lance.spark.utils.BlobUtils.LANCE_ENCODING_BLOB_KEY;
 import static org.lance.spark.utils.BlobUtils.LANCE_ENCODING_BLOB_VALUE;
+import static org.lance.spark.utils.LargeVarCharUtils.ARROW_LARGE_VAR_CHAR_KEY;
+import static org.lance.spark.utils.LargeVarCharUtils.ARROW_LARGE_VAR_CHAR_VALUE;
 import static org.lance.spark.utils.VectorUtils.ARROW_FIXED_SIZE_LIST_SIZE_KEY;
 
 /**
@@ -89,7 +91,8 @@ public class SchemaConverter {
   public static StructType processSchemaWithProperties(
       StructType sparkSchema, Map<String, String> properties) {
     StructType schemaWithVectors = addVectorMetadata(sparkSchema, properties);
-    return addBlobMetadata(schemaWithVectors, properties);
+    StructType schemaWithBlobs = addBlobMetadata(schemaWithVectors, properties);
+    return addLargeVarCharMetadata(schemaWithBlobs, properties);
   }
 
   /**
@@ -192,6 +195,59 @@ public class SchemaConverter {
           }
         } else {
           // Keep field as-is if encoding value is not blob
+          newFields[i] = field;
+        }
+      } else {
+        // Keep field as-is
+        newFields[i] = field;
+      }
+    }
+
+    return new StructType(newFields);
+  }
+
+  /**
+   * Adds metadata to StringType fields based on table properties for large varchar columns.
+   * Properties with pattern "<column_name>.lance.large_var_char" = "true" are applied to matching
+   * columns.
+   *
+   * @param sparkSchema the original Spark StructType
+   * @param properties table properties that may contain large varchar column metadata
+   * @return StructType with metadata added for large varchar columns
+   */
+  private static StructType addLargeVarCharMetadata(
+      StructType sparkSchema, Map<String, String> properties) {
+    if (properties == null || properties.isEmpty()) {
+      return sparkSchema;
+    }
+
+    StructField[] newFields = new StructField[sparkSchema.fields().length];
+    for (int i = 0; i < sparkSchema.fields().length; i++) {
+      StructField field = sparkSchema.fields()[i];
+      String largeVarCharProperty = LargeVarCharUtils.createPropertyKey(field.name());
+
+      if (properties.containsKey(largeVarCharProperty)) {
+        // This field should be a large varchar column
+        String encodingValue = properties.get(largeVarCharProperty);
+        if ("true".equalsIgnoreCase(encodingValue)) {
+          if (field.dataType() instanceof StringType) {
+            // Add metadata for large varchar
+            Metadata newMetadata =
+                new MetadataBuilder()
+                    .withMetadata(field.metadata())
+                    .putString(ARROW_LARGE_VAR_CHAR_KEY, ARROW_LARGE_VAR_CHAR_VALUE)
+                    .build();
+            newFields[i] =
+                new StructField(field.name(), field.dataType(), field.nullable(), newMetadata);
+          } else {
+            throw new IllegalArgumentException(
+                "Large varchar column '"
+                    + field.name()
+                    + "' must have STRING type, found: "
+                    + field.dataType());
+          }
+        } else {
+          // Keep field as-is if value is not "true"
           newFields[i] = field;
         }
       } else {

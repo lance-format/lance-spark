@@ -140,4 +140,44 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
       MapType(StringType, new StructType().add("i_0", IntegerType).add("i_1", StringType)))
   }
 
+  test("large varchar metadata produces LargeUtf8 arrow type") {
+    import org.lance.spark.utils.LargeVarCharUtils
+
+    val largeVarCharMetadata = new MetadataBuilder()
+      .putString(
+        LargeVarCharUtils.ARROW_LARGE_VAR_CHAR_KEY,
+        LargeVarCharUtils.ARROW_LARGE_VAR_CHAR_VALUE)
+      .build()
+
+    val schema = new StructType()
+      .add("regular_string", StringType, nullable = true)
+      .add("large_string", StringType, nullable = true, largeVarCharMetadata)
+
+    val arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", false, false)
+
+    // Regular string should use Utf8
+    val regularField = arrowSchema.findField("regular_string")
+    assert(regularField.getType === ArrowType.Utf8.INSTANCE)
+
+    // Large string with metadata should use LargeUtf8
+    val largeField = arrowSchema.findField("large_string")
+    assert(largeField.getType === ArrowType.LargeUtf8.INSTANCE)
+  }
+
+  test("largeVarTypes parameter produces LargeUtf8 for all strings") {
+    val schema = new StructType()
+      .add("string1", StringType, nullable = true)
+      .add("string2", StringType, nullable = true)
+
+    // Without largeVarTypes, should use Utf8
+    val arrowSchemaSmall = LanceArrowUtils.toArrowSchema(schema, "UTC", false, false)
+    assert(arrowSchemaSmall.findField("string1").getType === ArrowType.Utf8.INSTANCE)
+    assert(arrowSchemaSmall.findField("string2").getType === ArrowType.Utf8.INSTANCE)
+
+    // With largeVarTypes=true, should use LargeUtf8
+    val arrowSchemaLarge = LanceArrowUtils.toArrowSchema(schema, "UTC", false, true)
+    assert(arrowSchemaLarge.findField("string1").getType === ArrowType.LargeUtf8.INSTANCE)
+    assert(arrowSchemaLarge.findField("string2").getType === ArrowType.LargeUtf8.INSTANCE)
+  }
+
 }

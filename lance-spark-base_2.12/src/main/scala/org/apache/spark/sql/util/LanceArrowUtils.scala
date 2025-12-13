@@ -31,7 +31,7 @@ import org.apache.spark.sql.types._
 import org.json4s.{DefaultFormats, Formats}
 import org.json4s.JsonAST.{JObject, JString}
 import org.lance.spark.LanceConstant
-import org.lance.spark.utils.{BlobUtils, VectorUtils}
+import org.lance.spark.utils.{BlobUtils, LargeVarCharUtils, VectorUtils}
 
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
@@ -41,6 +41,7 @@ import scala.collection.JavaConverters._
 object LanceArrowUtils {
   val ARROW_FIXED_SIZE_LIST_SIZE_KEY = VectorUtils.ARROW_FIXED_SIZE_LIST_SIZE_KEY
   val ENCODING_BLOB = BlobUtils.LANCE_ENCODING_BLOB_KEY
+  val ARROW_LARGE_VAR_CHAR_KEY = LargeVarCharUtils.ARROW_LARGE_VAR_CHAR_KEY
 
   def fromArrowField(field: Field): DataType = {
     field.getType match {
@@ -83,6 +84,12 @@ object LanceArrowUtils {
       case largeBinary: ArrowType.LargeBinary if isBlobField(field) =>
         // Lance returns LargeBinary in schema but Struct in data for blob columns
         // We need to handle this as binary to match the schema
+        BinaryType
+      case _: ArrowType.LargeUtf8 =>
+        // LargeUtf8 maps back to StringType in Spark
+        StringType
+      case _: ArrowType.LargeBinary =>
+        // LargeBinary maps back to BinaryType in Spark
         BinaryType
       case l: ArrowType.List =>
         val children = field.getChildren
@@ -142,6 +149,10 @@ object LanceArrowUtils {
     if (metadata != null) {
       if (metadata.contains(ENCODING_BLOB)
         && metadata.getString(ENCODING_BLOB).equalsIgnoreCase("true")) {
+        large = true
+      }
+      if (metadata.contains(ARROW_LARGE_VAR_CHAR_KEY)
+        && metadata.getString(ARROW_LARGE_VAR_CHAR_KEY).equalsIgnoreCase("true")) {
         large = true
       }
 
