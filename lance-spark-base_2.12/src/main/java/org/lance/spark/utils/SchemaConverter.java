@@ -208,7 +208,7 @@ public class SchemaConverter {
 
   /**
    * Adds metadata to StringType fields based on table properties for large varchar columns.
-   * Properties with pattern "<column_name>.lance.large_var_char" = "true" are applied to matching
+   * Properties with pattern "<column_name>.arrow.large_var_char" = "true" are applied to matching
    * columns.
    *
    * @param sparkSchema the original Spark StructType

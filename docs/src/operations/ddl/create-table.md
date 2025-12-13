@@ -184,3 +184,63 @@ These virtual columns can be used to:
 - Verify that blob data was written successfully
 - Implement custom blob retrieval logic
 - Monitor blob storage statistics
+
+## Large String Columns
+
+Lance supports large string columns for storing very large text data. By default, Arrow uses `Utf8` (VarChar) type with 32-bit offsets, which limits total string data to 2GB per batch. For columns containing very large strings (e.g., document content, base64-encoded data), you can use `LargeUtf8` (LargeVarChar) with 64-bit offsets.
+
+### When to Use Large Strings
+
+Use large string columns when:
+
+- Individual string values may exceed several MB
+- Total string data per batch may exceed 2GB
+- You encounter `OversizedAllocationException` errors during writes
+
+### Creating Large String Columns
+
+To create a table with large string columns, use the table property pattern `<column_name>.arrow.large_var_char` with the value `'true'`:
+
+```sql
+CREATE TABLE articles (
+    id INT NOT NULL,
+    title STRING,
+    content STRING
+) USING lance
+TBLPROPERTIES (
+    'content.arrow.large_var_char' = 'true'
+);
+```
+
+Create table with multiple large string columns:
+
+```sql
+CREATE TABLE documents (
+    id INT NOT NULL,
+    title STRING,
+    body STRING,
+    raw_html STRING
+) USING lance
+TBLPROPERTIES (
+    'body.arrow.large_var_char' = 'true',
+    'raw_html.arrow.large_var_char' = 'true'
+);
+```
+
+### Working with Large String Tables
+
+Insert and query large string data using standard SQL:
+
+```sql
+-- Insert data
+INSERT INTO articles VALUES
+    (1, 'Article 1', 'Very long article content...'),
+    (2, 'Article 2', 'Another long article...');
+
+-- Query data
+SELECT id, title, length(content) as content_length
+FROM articles
+WHERE id = 1;
+```
+
+**Note**: When reading large string columns, they are returned as standard Spark `STRING` type. The large string encoding is transparent to read operations.

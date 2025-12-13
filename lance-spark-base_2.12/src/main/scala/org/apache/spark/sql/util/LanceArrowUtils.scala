@@ -107,11 +107,16 @@ object LanceArrowUtils {
   def fromArrowSchema(schema: Schema): StructType = {
     StructType(schema.getFields.asScala.map { field =>
       val dt = fromArrowField(field)
-      // If the Arrow field was a FixedSizeList, add metadata to preserve the size information
+      // Preserve type information in metadata for types that need special handling on write
       val metadata = field.getType match {
         case fixedSizeList: ArrowType.FixedSizeList =>
           new MetadataBuilder()
             .putLong(ARROW_FIXED_SIZE_LIST_SIZE_KEY, fixedSizeList.getListSize)
+            .build()
+        case _: ArrowType.LargeUtf8 =>
+          // Preserve LargeUtf8 type info so subsequent writes use LargeVarCharVector
+          new MetadataBuilder()
+            .putString(ARROW_LARGE_VAR_CHAR_KEY, "true")
             .build()
         case _ => Metadata.fromJObject(
             JObject(field.getMetadata.asScala.map { case (k, v) => (k, JString(v)) }.toList))
