@@ -20,8 +20,6 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.types.DataTypes;
-import org.apache.spark.sql.types.Metadata;
-import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterEach;
@@ -67,11 +65,29 @@ public abstract class BaseBlobCreateTableTest {
     }
   }
 
-  @Test
-  public void testCreateTableWithBlobColumn() {
-    String tableName = "blob_table_" + System.currentTimeMillis();
+  // ==================== Blob Encoding Tests ====================
+  // These tests verify that when a table is created with blob encoding property,
+  // subsequent DataFrame writes don't need to set the blob encoding metadata.
 
-    // Create table with blob column using TBLPROPERTIES
+  /** Helper method to verify a field has blob encoding metadata set. */
+  private void assertBlobMetadata(StructType schema, String fieldName) {
+    StructField field = schema.apply(fieldName);
+    assertNotNull(field, fieldName + " field should exist in schema");
+    assertTrue(
+        field.metadata().contains(BlobUtils.LANCE_ENCODING_BLOB_KEY),
+        fieldName + " field should have " + BlobUtils.LANCE_ENCODING_BLOB_KEY + " metadata");
+    assertEquals(
+        BlobUtils.LANCE_ENCODING_BLOB_VALUE,
+        field.metadata().getString(BlobUtils.LANCE_ENCODING_BLOB_KEY),
+        BlobUtils.LANCE_ENCODING_BLOB_KEY + " metadata should be 'true'");
+  }
+
+  @Test
+  public void testBlobWithSqlTblProperties() {
+    // Test creating table with SQL TBLPROPERTIES and mixed INSERT INTO / DataFrame writes
+    String tableName = "blob_sql_" + System.currentTimeMillis();
+
+    // Create table with blob column using SQL TBLPROPERTIES
     spark.sql(
         "CREATE TABLE IF NOT EXISTS "
             + catalogName
@@ -85,65 +101,151 @@ public abstract class BaseBlobCreateTableTest {
             + "'data.lance.encoding' = 'blob'"
             + ")");
 
-    // Verify table was created
-    Dataset<Row> tables = spark.sql("SHOW TABLES IN " + catalogName + ".default");
-    List<Row> tableList = tables.collectAsList();
-    boolean found = tableList.stream().anyMatch(row -> tableName.equals(row.getString(1)));
-    assertTrue(found, "Table should be created");
+    // Verify schema has blob metadata
+    assertBlobMetadata(spark.table(catalogName + ".default." + tableName).schema(), "data");
 
-    // Insert data into the table
+    // Write 1: SQL INSERT
+    String testData1 = "SQL insert content 1";
+    String testData2 = "SQL insert content 2";
+    spark.sql(
+        "INSERT INTO "
+            + catalogName
+            + ".default."
+            + tableName
+            + " VALUES "
+            + "(1, X'"
+            + bytesToHex(testData1.getBytes(StandardCharsets.UTF_8))
+            + "'), "
+            + "(2, X'"
+            + bytesToHex(testData2.getBytes(StandardCharsets.UTF_8))
+            + "')");
+
+    // Verify schema still has metadata after write
+    assertBlobMetadata(spark.table(catalogName + ".default." + tableName).schema(), "data");
+
+    // Write 2: DataFrame append with plain schema (no metadata needed)
     List<Row> rows = new ArrayList<>();
     Random random = new Random(42);
-    for (int i = 0; i < 10; i++) {
-      // Create large binary data (> 64KB to ensure blob encoding is needed)
+    for (int i = 10; i < 13; i++) {
       byte[] largeData = new byte[100000]; // 100KB
       random.nextBytes(largeData);
       rows.add(RowFactory.create(i, largeData));
     }
 
-    // Create DataFrame with proper schema
-    Metadata blobMetadata =
-        new MetadataBuilder()
-            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
-            .build();
+    // Plain schema WITHOUT blob metadata
+    StructType plainSchema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.IntegerType, false),
+              DataTypes.createStructField("data", DataTypes.BinaryType, true)
+            });
+
+    Dataset<Row> df = spark.createDataFrame(rows, plainSchema);
+    try {
+      df.writeTo(catalogName + ".default." + tableName).append();
+    } catch (Exception e) {
+      fail("Failed to append DataFrame: " + e.getMessage());
+    }
+
+    // Verify schema still has metadata
+    assertBlobMetadata(spark.table(catalogName + ".default." + tableName).schema(), "data");
+
+    // Write 3: Another SQL INSERT
+    String testData3 = "Another SQL insert";
+    spark.sql(
+        "INSERT INTO "
+            + catalogName
+            + ".default."
+            + tableName
+            + " VALUES "
+            + "(20, X'"
+            + bytesToHex(testData3.getBytes(StandardCharsets.UTF_8))
+            + "')");
+
+    // Verify total count (2 + 3 + 1 = 6 rows)
+    Dataset<Row> result =
+        spark.sql("SELECT COUNT(*) FROM " + catalogName + ".default." + tableName);
+    assertEquals(6L, result.collectAsList().get(0).getLong(0));
+
+    // Verify blob data is returned as empty (not materialized)
+    Dataset<Row> blobData =
+        spark.sql(
+            "SELECT id, data FROM " + catalogName + ".default." + tableName + " WHERE id = 11");
+    List<Row> blobRows = blobData.collectAsList();
+    assertEquals(1, blobRows.size());
+    Object blob = blobRows.get(0).get(1);
+    assertNotNull(blob);
+    assertTrue(blob instanceof byte[], "Blob data should be byte array");
+    assertEquals(0, ((byte[]) blob).length, "Blob data should be empty (not materialized)");
+
+    // Clean up
+    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
+  }
+
+  @Test
+  public void testBlobWithTablePropertyAPI() {
+    // Test creating table with DataFrame tableProperty() API and subsequent writes
+    String tableName = "blob_df_api_" + System.currentTimeMillis();
+
+    // Initial data
+    List<Row> rows = new ArrayList<>();
+    Random random = new Random(42);
+    for (int i = 0; i < 3; i++) {
+      byte[] largeData = new byte[100000]; // 100KB
+      random.nextBytes(largeData);
+      rows.add(RowFactory.create(i, largeData));
+    }
+
+    // Plain schema WITHOUT blob metadata
     StructType schema =
         new StructType(
             new StructField[] {
               DataTypes.createStructField("id", DataTypes.IntegerType, false),
-              DataTypes.createStructField("data", DataTypes.BinaryType, true, blobMetadata)
+              DataTypes.createStructField("data", DataTypes.BinaryType, true)
             });
 
     Dataset<Row> df = spark.createDataFrame(rows, schema);
+
+    // Create table with tableProperty API
+    df.writeTo(catalogName + ".default." + tableName)
+        .tableProperty("data.lance.encoding", "blob")
+        .createOrReplace();
+
+    // Verify schema has blob metadata
+    assertBlobMetadata(spark.table(catalogName + ".default." + tableName).schema(), "data");
+
+    // Subsequent DataFrame append (no metadata needed)
+    List<Row> moreRows = new ArrayList<>();
+    for (int i = 10; i < 13; i++) {
+      byte[] largeData = new byte[100000]; // 100KB
+      random.nextBytes(largeData);
+      moreRows.add(RowFactory.create(i, largeData));
+    }
+    Dataset<Row> df2 = spark.createDataFrame(moreRows, schema);
     try {
-      df.writeTo(catalogName + ".default." + tableName).append();
+      df2.writeTo(catalogName + ".default." + tableName).append();
     } catch (Exception e) {
-      fail("Failed to append data to table: " + e.getMessage());
+      fail("Failed to append DataFrame: " + e.getMessage());
     }
 
-    // Query the table
+    // Verify schema still has metadata
+    assertBlobMetadata(spark.table(catalogName + ".default." + tableName).schema(), "data");
+
+    // Verify total count (3 + 3 = 6 rows)
     Dataset<Row> result =
         spark.sql("SELECT COUNT(*) FROM " + catalogName + ".default." + tableName);
-    assertEquals(10L, result.collectAsList().get(0).getLong(0));
+    assertEquals(6L, result.collectAsList().get(0).getLong(0));
 
-    // Verify we can read the blob data back
-    Dataset<Row> dataResult =
+    // Verify blob data is returned as empty (not materialized)
+    Dataset<Row> blobData =
         spark.sql(
-            "SELECT id, data FROM " + catalogName + ".default." + tableName + " WHERE id = 0");
-
-    List<Row> dataRows = dataResult.collectAsList();
-    assertEquals(1, dataRows.size());
-    assertEquals(0, dataRows.get(0).getInt(0));
-
-    // Verify blob column is returned as empty byte array
-    // Lance stores blobs out-of-line and returns position/size references internally,
-    // but Spark sees them as empty byte arrays since we don't materialize the data
-    Object blobData = dataRows.get(0).get(1);
-    assertNotNull(blobData);
-    assertTrue(blobData instanceof byte[], "Blob data should be byte array");
-
-    byte[] blobBytes = (byte[]) blobData;
-    // Blob data is not materialized, so we get empty array
-    assertEquals(0, blobBytes.length, "Blob data should be empty (not materialized)");
+            "SELECT id, data FROM " + catalogName + ".default." + tableName + " WHERE id = 11");
+    List<Row> blobRows = blobData.collectAsList();
+    assertEquals(1, blobRows.size());
+    Object blob = blobRows.get(0).get(1);
+    assertNotNull(blob);
+    assertTrue(blob instanceof byte[], "Blob data should be byte array");
+    assertEquals(0, ((byte[]) blob).length, "Blob data should be empty (not materialized)");
 
     // Clean up
     spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
@@ -303,7 +405,7 @@ public abstract class BaseBlobCreateTableTest {
             + "'data.lance.encoding' = 'blob'"
             + ")");
 
-    // Insert test data
+    // Insert test data using plain schema (no metadata needed)
     List<Row> rows = new ArrayList<>();
     Random random = new Random(42);
     for (int i = 0; i < 5; i++) {
@@ -312,15 +414,12 @@ public abstract class BaseBlobCreateTableTest {
       rows.add(RowFactory.create(i, largeData));
     }
 
-    Metadata blobMetadata =
-        new MetadataBuilder()
-            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
-            .build();
+    // Plain schema WITHOUT blob metadata
     StructType schema =
         new StructType(
             new StructField[] {
               DataTypes.createStructField("id", DataTypes.IntegerType, false),
-              DataTypes.createStructField("data", DataTypes.BinaryType, true, blobMetadata)
+              DataTypes.createStructField("data", DataTypes.BinaryType, true)
             });
 
     Dataset<Row> df = spark.createDataFrame(rows, schema);
