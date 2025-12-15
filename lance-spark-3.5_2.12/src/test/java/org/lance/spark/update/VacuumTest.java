@@ -13,4 +13,4 @@
  */
 package org.lance.spark.update;
 
-public class CleanupTest extends BaseCleanupTest {}
+public class VacuumTest extends BaseVacuumTest {}

@@ -5,7 +5,8 @@ nav:
   - show-namespaces.md
   - describe-namespace.md
   - create-table.md
-  - dataframe-create-table.md
   - show-tables.md
   - describe-table.md
   - drop-table.md
+  - optimize.md
+  - vacuum.md

@@ -13,4 +13,4 @@
  */
 package org.lance.spark.update;
 
-public class CompactTest extends BaseCompactTest {}
+public class OptimizeTest extends BaseOptimizeTest {}

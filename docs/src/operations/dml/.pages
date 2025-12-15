@@ -3,5 +3,4 @@ nav:
   - insert-into.md
   - update.md
   - delete.md
-  - dataframe-write.md
   - add-columns.md

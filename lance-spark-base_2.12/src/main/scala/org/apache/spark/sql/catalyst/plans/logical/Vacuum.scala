@@ -16,24 +16,24 @@ package org.apache.spark.sql.catalyst.plans.logical
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference}
 import org.apache.spark.sql.types.{DataTypes, StructField, StructType}
 
-case class Cleanup(
+case class Vacuum(
     table: LogicalPlan,
     args: Seq[NamedArgument]) extends Command {
 
   override def children: Seq[LogicalPlan] = Seq(table)
 
-  override def output: Seq[Attribute] = CleanupOutputType.SCHEMA
+  override def output: Seq[Attribute] = VacuumOutputType.SCHEMA
 
   override def simpleString(maxFields: Int): String = {
-    "CleanupLanceDataset"
+    "VacuumLanceDataset"
   }
 
-  override protected def withNewChildrenInternal(newChildren: IndexedSeq[LogicalPlan]): Cleanup = {
+  override protected def withNewChildrenInternal(newChildren: IndexedSeq[LogicalPlan]): Vacuum = {
     copy(newChildren(0), this.args)
   }
 }
 
-object CleanupOutputType {
+object VacuumOutputType {
   val SCHEMA = StructType(
     Array(
       StructField("bytes_removed", DataTypes.LongType, nullable = true),

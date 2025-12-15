@@ -2,6 +2,57 @@
 
 Spark DSV2 catalog integrates with Lance through [Lance Namespace](https://github.com/lance-format/lance-namespace).
 
+## Spark SQL Extensions
+
+Lance provides SQL extensions that add additional functionality beyond standard Spark SQL. To enable these extensions, configure your Spark application with:
+
+=== "PySpark"
+    ```python
+    spark = SparkSession.builder \
+        .appName("lance-example") \
+        .config("spark.sql.extensions", "org.lance.spark.extensions.LanceSparkSessionExtensions") \
+        .getOrCreate()
+    ```
+
+=== "Scala"
+    ```scala
+    val spark = SparkSession.builder()
+        .appName("lance-example")
+        .config("spark.sql.extensions", "org.lance.spark.extensions.LanceSparkSessionExtensions")
+        .getOrCreate()
+    ```
+
+=== "Java"
+    ```java
+    SparkSession spark = SparkSession.builder()
+        .appName("lance-example")
+        .config("spark.sql.extensions", "org.lance.spark.extensions.LanceSparkSessionExtensions")
+        .getOrCreate();
+    ```
+
+=== "Spark Shell"
+    ```shell
+    spark-shell \
+      --packages org.lance:lance-spark-bundle-3.5_2.12:0.0.7 \
+      --conf spark.sql.extensions=org.lance.spark.extensions.LanceSparkSessionExtensions
+    ```
+
+=== "Spark Submit"
+    ```shell
+    spark-submit \
+      --packages org.lance:lance-spark-bundle-3.5_2.12:0.0.7 \
+      --conf spark.sql.extensions=org.lance.spark.extensions.LanceSparkSessionExtensions \
+      your-application.jar
+    ```
+
+### Features Requiring Extensions
+
+The following features require the Lance Spark SQL extension to be enabled:
+
+- [ADD COLUMN with backfill](operations/dml/add-columns.md) - Add new columns and backfill existing rows with data
+- [OPTIMIZE](operations/ddl/optimize.md) - Compact table fragments for improved query performance
+- [VACUUM](operations/ddl/vacuum.md) - Remove old versions and reclaim storage space
+
 ## Basic Setup
 
 Configure Spark with the `LanceNamespaceSparkCatalog` by setting the appropriate Spark catalog implementation 

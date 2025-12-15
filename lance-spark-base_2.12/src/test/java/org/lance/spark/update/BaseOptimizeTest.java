@@ -27,9 +27,9 @@ import java.nio.file.Path;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-public abstract class BaseCompactTest {
+public abstract class BaseOptimizeTest {
   protected String catalogName = "lance_test";
-  protected String tableName = "compact_test";
+  protected String tableName = "optimize_test";
   protected String fullTable = catalogName + ".default." + tableName;
 
   protected SparkSession spark;
@@ -40,7 +40,7 @@ public abstract class BaseCompactTest {
   public void setup() throws IOException {
     spark =
         SparkSession.builder()
-            .appName("lance-compact-test")
+            .appName("lance-optimize-test")
             .master("local[10]") // 10 tasks to make sure that the fragment number is 10
             .config(
                 "spark.sql.catalog." + catalogName, "org.lance.spark.LanceNamespaceSparkCatalog")
@@ -71,12 +71,11 @@ public abstract class BaseCompactTest {
   }
 
   @Test
-  public void testCompactToOneFragment() {
+  public void testOptimizeToOneFragment() {
     prepareDataset();
 
     Dataset<Row> result =
-        spark.sql(
-            String.format("optimize %s compact with (target_rows_per_fragment=20000)", fullTable));
+        spark.sql(String.format("optimize %s with (target_rows_per_fragment=20000)", fullTable));
 
     Assertions.assertEquals(
         "StructType(StructField(fragments_removed,LongType,true),StructField(fragments_added,LongType,true),StructField(files_removed,LongType,true),StructField(files_added,LongType,true))",
@@ -85,23 +84,21 @@ public abstract class BaseCompactTest {
   }
 
   @Test
-  public void testCompactToTwoFragments() {
+  public void testOptimizeToTwoFragments() {
     prepareDataset();
 
     Dataset<Row> result =
-        spark.sql(
-            String.format("optimize %s compact with (target_rows_per_fragment=5)", fullTable));
+        spark.sql(String.format("optimize %s with (target_rows_per_fragment=5)", fullTable));
 
     Assertions.assertEquals("[10,2,10,2]", result.collectAsList().get(0).toString());
   }
 
   @Test
-  public void testNoCompact() {
+  public void testNoOptimize() {
     prepareDataset();
 
     Dataset<Row> result =
-        spark.sql(
-            String.format("optimize %s compact with (target_rows_per_fragment=1)", fullTable));
+        spark.sql(String.format("optimize %s with (target_rows_per_fragment=1)", fullTable));
 
     Assertions.assertEquals("[0,0,0,0]", result.collectAsList().get(0).toString());
   }
@@ -113,7 +110,7 @@ public abstract class BaseCompactTest {
     Dataset<Row> result =
         spark.sql(
             String.format(
-                "optimize %s compact with "
+                "optimize %s with "
                     + "("
                     + "target_rows_per_fragment=20000,"
                     + "max_rows_per_group=20000,"
@@ -133,7 +130,7 @@ public abstract class BaseCompactTest {
   public void testWithoutArgs() {
     prepareDataset();
 
-    Dataset<Row> result = spark.sql(String.format("optimize %s compact", fullTable));
+    Dataset<Row> result = spark.sql(String.format("optimize %s", fullTable));
 
     Assertions.assertEquals("[10,1,10,1]", result.collectAsList().get(0).toString());
   }

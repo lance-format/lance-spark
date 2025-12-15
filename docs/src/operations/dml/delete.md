@@ -1,4 +1,4 @@
-# DELETE
+# DELETE FROM
 
 Currently, delete only supports for Spark 3.5+.
 

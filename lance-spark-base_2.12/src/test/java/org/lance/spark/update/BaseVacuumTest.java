@@ -27,9 +27,9 @@ import java.nio.file.Path;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-public abstract class BaseCleanupTest {
+public abstract class BaseVacuumTest {
   protected String catalogName = "lance_test";
-  protected String tableName = "cleanup_test";
+  protected String tableName = "vacuum_test";
   protected String fullTable = catalogName + ".default." + tableName;
 
   protected SparkSession spark;
@@ -40,7 +40,7 @@ public abstract class BaseCleanupTest {
   public void setup() throws IOException {
     spark =
         SparkSession.builder()
-            .appName("lance-cleanup-test")
+            .appName("lance-vacuum-test")
             .master("local[4]")
             .config(
                 "spark.sql.catalog." + catalogName, "org.lance.spark.LanceNamespaceSparkCatalog")
@@ -84,10 +84,10 @@ public abstract class BaseCleanupTest {
   }
 
   @Test
-  public void testCleanupWithoutArgs() {
+  public void testVacuumWithoutArgs() {
     prepareDataset();
 
-    Dataset<Row> result = spark.sql(String.format("optimize %s cleanup", fullTable));
+    Dataset<Row> result = spark.sql(String.format("vacuum %s", fullTable));
 
     Row row = result.collectAsList().get(0);
     Assertions.assertTrue(row.getLong(0) >= 0);
@@ -95,7 +95,7 @@ public abstract class BaseCleanupTest {
   }
 
   @Test
-  public void testCleanupRemovesOldVersionsByVersionThreshold() {
+  public void testVacuumRemovesOldVersionsByVersionThreshold() {
     // Prepare initial dataset
     prepareDataset();
     // Append multiple times to generate multiple versions
@@ -104,7 +104,7 @@ public abstract class BaseCleanupTest {
     }
 
     Dataset<Row> result =
-        spark.sql(String.format("optimize %s cleanup with (before_version=1000000)", fullTable));
+        spark.sql(String.format("vacuum %s with (before_version=1000000)", fullTable));
 
     Row row = result.collectAsList().get(0);
     long bytesRemoved = row.getLong(0);
@@ -114,7 +114,7 @@ public abstract class BaseCleanupTest {
   }
 
   @Test
-  public void testCleanupRemovesOldVersionsByTimestampThreshold() throws InterruptedException {
+  public void testVacuumRemovesOldVersionsByTimestampThreshold() throws InterruptedException {
     // Prepare initial dataset, which becomes the 'old' version after timestamp
     prepareDataset();
 
@@ -129,8 +129,7 @@ public abstract class BaseCleanupTest {
 
     Dataset<Row> result =
         spark.sql(
-            String.format(
-                "optimize %s cleanup with (before_timestamp_millis=%d)", fullTable, beforeTs));
+            String.format("vacuum %s with (before_timestamp_millis=%d)", fullTable, beforeTs));
 
     Row row = result.collectAsList().get(0);
     long bytesRemoved = row.getLong(0);
@@ -140,7 +139,7 @@ public abstract class BaseCleanupTest {
   }
 
   @Test
-  public void testCleanupAfterCompactRemovesBytes() {
+  public void testVacuumAfterOptimizeRemovesBytes() {
     prepareDataset();
     spark.sql(
         String.format(
@@ -151,14 +150,13 @@ public abstract class BaseCleanupTest {
                 .map(i -> String.format("(%d, 'text_%d')", i, i))
                 .collect(Collectors.joining(","))));
 
-    Dataset<Row> compactResult =
-        spark.sql(
-            String.format("optimize %s compact with (target_rows_per_fragment=20000)", fullTable));
+    Dataset<Row> optimizeResult =
+        spark.sql(String.format("optimize %s with (target_rows_per_fragment=20000)", fullTable));
 
-    Dataset<Row> cleanupResult =
-        spark.sql(String.format("optimize %s cleanup with (before_version=1000000)", fullTable));
+    Dataset<Row> vacuumResult =
+        spark.sql(String.format("vacuum %s with (before_version=1000000)", fullTable));
 
-    Row row = cleanupResult.collectAsList().get(0);
+    Row row = vacuumResult.collectAsList().get(0);
     Assertions.assertTrue(row.getLong(0) > 0);
     Assertions.assertTrue(row.getLong(1) >= 0);
   }

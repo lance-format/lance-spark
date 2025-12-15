@@ -16,24 +16,24 @@ package org.apache.spark.sql.catalyst.plans.logical
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference}
 import org.apache.spark.sql.types.{DataTypes, StructField, StructType}
 
-case class Compact(
+case class Optimize(
     table: LogicalPlan,
     args: Seq[NamedArgument]) extends Command {
 
   override def children: Seq[LogicalPlan] = Seq(table)
 
-  override def output: Seq[Attribute] = CompactOutputType.SCHEMA
+  override def output: Seq[Attribute] = OptimizeOutputType.SCHEMA
 
   override def simpleString(maxFields: Int): String = {
-    "CompactLanceDataset"
+    "OptimizeLanceDataset"
   }
 
-  override protected def withNewChildrenInternal(newChildren: IndexedSeq[LogicalPlan]): Compact = {
+  override protected def withNewChildrenInternal(newChildren: IndexedSeq[LogicalPlan]): Optimize = {
     copy(newChildren(0), this.args)
   }
 }
 
-object CompactOutputType {
+object OptimizeOutputType {
   val SCHEMA = StructType(
     Array(
       StructField("fragments_removed", DataTypes.LongType, nullable = true),

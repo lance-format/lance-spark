@@ -19,9 +19,9 @@ singleStatement
     ;
 
 statement
-    : ALTER TABLE multipartIdentifier ADD COLUMNS columnList FROM identifier                         #addColumnsBackfill
-    | OPTIMIZE multipartIdentifier COMPACT (WITH '(' (namedArgument (',' namedArgument)*)? ')')?     #compact
-    | OPTIMIZE multipartIdentifier CLEANUP (WITH '(' (namedArgument (',' namedArgument)*)? ')')?     #cleanup
+    : ALTER TABLE multipartIdentifier ADD COLUMNS columnList FROM identifier                    #addColumnsBackfill
+    | OPTIMIZE multipartIdentifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')?        #optimize
+    | VACUUM multipartIdentifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')?          #vacuum
     ;
 
 multipartIdentifier
@@ -64,11 +64,10 @@ number
 ADD: 'ADD';
 ALTER: 'ALTER';
 COLUMNS: 'COLUMNS';
-COMPACT: 'COMPACT';
-CLEANUP: 'CLEANUP';
 FROM: 'FROM';
 OPTIMIZE: 'OPTIMIZE';
 TABLE: 'TABLE';
+VACUUM: 'VACUUM';
 WITH: 'WITH';
 
 TRUE: 'TRUE';

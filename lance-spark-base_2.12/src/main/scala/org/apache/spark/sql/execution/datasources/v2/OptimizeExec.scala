@@ -18,7 +18,7 @@ import com.esotericsoftware.kryo.Kryo.DefaultInstantiatorStrategy
 import com.esotericsoftware.kryo.io.{Input, Output}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
-import org.apache.spark.sql.catalyst.plans.logical.{CompactOutputType, NamedArgument}
+import org.apache.spark.sql.catalyst.plans.logical.{NamedArgument, OptimizeOutputType}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.execution.datasources.v2.SerializeUtil.{decode, encode}
 import org.lance.compaction.{CompactionOptions, CompactionTask, RewriteResult}
@@ -31,12 +31,12 @@ import java.util.Base64
 
 import scala.jdk.CollectionConverters._
 
-case class CompactExec(
+case class OptimizeExec(
     catalog: TableCatalog,
     ident: Identifier,
     args: Seq[NamedArgument]) extends LeafV2CommandExec {
 
-  override def output: Seq[Attribute] = CompactOutputType.SCHEMA
+  override def output: Seq[Attribute] = OptimizeOutputType.SCHEMA
 
   private def buildOptions(): CompactionOptions = {
     val builder = CompactionOptions.builder()
@@ -64,7 +64,7 @@ case class CompactExec(
     val lanceDataset = catalog.loadTable(ident) match {
       case lanceDataset: LanceDataset => lanceDataset
       case _ =>
-        throw new UnsupportedOperationException("Compact only supports for LanceDataset")
+        throw new UnsupportedOperationException("Optimize only supports LanceDataset")
     }
 
     // Build compaction options from arguments
@@ -80,8 +80,8 @@ case class CompactExec(
     }
 
     // Run compaction tasks in parallel
-    val rdd: org.apache.spark.rdd.RDD[CompactionTaskExecutor] = session.sparkContext.parallelize(
-      tasks.asScala.toSeq.map(t => CompactionTaskExecutor.create(lanceDataset.config(), t)),
+    val rdd: org.apache.spark.rdd.RDD[OptimizeTaskExecutor] = session.sparkContext.parallelize(
+      tasks.asScala.toSeq.map(t => OptimizeTaskExecutor.create(lanceDataset.config(), t)),
       tasks.size)
     val result = rdd.map(f => f.execute())
       .collect()
@@ -101,7 +101,7 @@ case class CompactExec(
   }
 }
 
-case class CompactionTaskExecutor(lanceConf: String, task: String) extends Serializable {
+case class OptimizeTaskExecutor(lanceConf: String, task: String) extends Serializable {
   def execute(): String = {
     val res = LanceDatasetAdapter.executeCompaction(
       decode[LanceConfig](lanceConf),
@@ -110,9 +110,9 @@ case class CompactionTaskExecutor(lanceConf: String, task: String) extends Seria
   }
 }
 
-object CompactionTaskExecutor {
-  def create(lanceConf: LanceConfig, task: CompactionTask): CompactionTaskExecutor = {
-    CompactionTaskExecutor(encode(lanceConf), encode(task))
+object OptimizeTaskExecutor {
+  def create(lanceConf: LanceConfig, task: CompactionTask): OptimizeTaskExecutor = {
+    OptimizeTaskExecutor(encode(lanceConf), encode(task))
   }
 }
 

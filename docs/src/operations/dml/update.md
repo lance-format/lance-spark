@@ -1,4 +1,4 @@
-# UPDATE
+# UPDATE SET
 
 Currently, update only supports for Spark 3.5+.
 

@@ -15,7 +15,7 @@ package org.apache.spark.sql.execution.datasources.v2
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
-import org.apache.spark.sql.catalyst.plans.logical.{CleanupOutputType, NamedArgument}
+import org.apache.spark.sql.catalyst.plans.logical.{NamedArgument, VacuumOutputType}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.lance.cleanup.CleanupPolicy
 import org.lance.spark.LanceDataset
@@ -23,12 +23,12 @@ import org.lance.spark.internal.LanceDatasetAdapter
 
 import scala.jdk.CollectionConverters._
 
-case class CleanupExec(
+case class VacuumExec(
     catalog: TableCatalog,
     ident: Identifier,
     args: Seq[NamedArgument]) extends LeafV2CommandExec {
 
-  override def output: Seq[Attribute] = CleanupOutputType.SCHEMA
+  override def output: Seq[Attribute] = VacuumOutputType.SCHEMA
 
   private def buildPolicy(): CleanupPolicy = {
     val builder = CleanupPolicy.builder()
@@ -51,7 +51,7 @@ case class CleanupExec(
     val lanceDataset = catalog.loadTable(ident) match {
       case lanceDataset: LanceDataset => lanceDataset
       case _ =>
-        throw new UnsupportedOperationException("Cleanup only supports for LanceDataset")
+        throw new UnsupportedOperationException("Vacuum only supports LanceDataset")
     }
 
     val policy = buildPolicy()

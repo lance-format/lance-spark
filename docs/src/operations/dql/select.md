@@ -1,105 +1,153 @@
 # SELECT
 
-Query data from Lance tables using standard SQL SELECT statements.
+Query data from Lance tables using SQL or DataFrames.
 
-Select all data from a table:
+## Basic Queries
 
-```sql
-SELECT * FROM users;
-```
+=== "SQL"
+    ```sql
+    SELECT * FROM users;
+    ```
 
-Select specific columns:
+=== "Python"
+    ```python
+    # Load table as DataFrame
+    users_df = spark.table("users")
 
-```sql
-SELECT id, name, email FROM users;
-```
+    # Use DataFrame operations
+    filtered_users = users_df.filter("age > 25").select("name", "email")
+    filtered_users.show()
+    ```
 
-Query with WHERE clause:
+=== "Scala"
+    ```scala
+    // Load table as DataFrame
+    val usersDF = spark.table("users")
 
-```sql
-SELECT * FROM users WHERE age > 25;
-```
+    // Use DataFrame operations
+    val filteredUsers = usersDF.filter("age > 25").select("name", "email")
+    filteredUsers.show()
+    ```
 
-Aggregate queries:
+=== "Java"
+    ```java
+    // Load table as DataFrame
+    Dataset<Row> usersDF = spark.table("users");
 
-```sql
-SELECT department, COUNT(*) as employee_count
-FROM users
-GROUP BY department;
-```
+    // Use DataFrame operations
+    Dataset<Row> filteredUsers = usersDF.filter("age > 25").select("name", "email");
+    filteredUsers.show();
+    ```
 
-### Count Star Optimization
+## Select Specific Columns
 
-Lance-Spark automatically optimizes `COUNT(*)` queries through aggregate pushdown. When you use `COUNT(*)`, the query scans only the `_rowid` metadata column instead of reading all data columns, which significantly improves performance especially for tables with large binary data or many columns.
+=== "SQL"
+    ```sql
+    SELECT id, name, email FROM users;
+    ```
 
-```sql
--- Optimized count query
-SELECT COUNT(*) FROM users;
+## Query with WHERE Clause
 
--- Count with filter (also optimized)
-SELECT COUNT(*) FROM users WHERE age > 25;
+=== "SQL"
+    ```sql
+    SELECT * FROM users WHERE age > 25;
+    ```
 
--- Group by count (optimized)
-SELECT department, COUNT(*)
-FROM users
-GROUP BY department;
-```
+## Aggregate Queries
 
-This optimization is automatic and requires no special configuration. For tables with blob columns or large datasets, `COUNT(*)` queries can be orders of magnitude faster than scanning all columns.
+=== "SQL"
+    ```sql
+    SELECT department, COUNT(*) as employee_count
+    FROM users
+    GROUP BY department;
+    ```
 
-Join queries:
+## Join Queries
 
-```sql
-SELECT u.name, p.title
-FROM users u
-JOIN projects p ON u.id = p.user_id;
-```
+=== "SQL"
+    ```sql
+    SELECT u.name, p.title
+    FROM users u
+    JOIN projects p ON u.id = p.user_id;
+    ```
 
 ## Querying Blob Columns
 
-When querying tables with blob columns, the blob data itself is not materialized by default. Instead, you can access blob metadata through virtual columns.
+When querying tables with blob columns, the blob data itself is not materialized by default. 
+Instead, you can access blob metadata through virtual columns.
+For each blob column, Lance provides two virtual columns:
 
-### Selecting Blob Metadata
+- `<column_name>__blob_pos` - The byte position of the blob in the blob file
+- `<column_name>__blob_size` - The size of the blob in bytes
 
-Query blob position and size information:
+These virtual columns can be used for:
 
-```sql
-SELECT id, title, content__blob_pos, content__blob_size
-FROM documents
-WHERE id = 1;
-```
+- Monitoring blob storage statistics
+- Filtering rows by blob size
+- Implementing custom blob retrieval logic
+- Verifying successful blob writes
 
-The virtual columns available for blob columns are:
-- `<column_name>__blob_pos` - Byte position in the blob file
-- `<column_name>__blob_size` - Size of the blob in bytes
 
-### Filtering and Aggregating
+=== "SQL"
+    ```sql
+    SELECT id, title, content__blob_pos, content__blob_size
+    FROM documents
+    WHERE id = 1;
+    ```
 
-You can filter and aggregate using blob metadata:
+=== "Python"
+    ```python
+    # Read table with blob column
+    documents_df = spark.table("documents")
 
-```sql
--- Find large blobs
-SELECT id, title, content__blob_size
-FROM documents
-WHERE content__blob_size > 1000000;
+    # Access blob metadata using virtual columns
+    blob_metadata = documents_df.select(
+        "id",
+        "title",
+        "content__blob_pos",
+        "content__blob_size"
+    )
+    blob_metadata.show()
 
--- Get blob statistics
-SELECT
-    COUNT(*) as blob_count,
-    AVG(content__blob_size) as avg_size,
-    MAX(content__blob_size) as max_size
-FROM documents;
-```
+    # Filter by blob size
+    large_blobs = documents_df.filter("content__blob_size > 1000000")
+    large_blobs.select("id", "title", "content__blob_size").show()
+    ```
 
-### Selecting Non-Blob Columns
+=== "Scala"
+    ```scala
+    // Read table with blob column
+    val documentsDF = spark.table("documents")
 
-When you don't need the blob data, select only the non-blob columns for better performance:
+    // Access blob metadata using virtual columns
+    val blobMetadata = documentsDF.select(
+      "id",
+      "title",
+      "content__blob_pos",
+      "content__blob_size"
+    )
+    blobMetadata.show()
 
-```sql
--- Select without blob column
-SELECT id, title, created_at
-FROM documents
-WHERE title LIKE '%report%';
-```
+    // Filter by blob size
+    val largeBlobs = documentsDF.filter("content__blob_size > 1000000")
+    largeBlobs.select("id", "title", "content__blob_size").show()
+    ```
 
-**Note**: The blob column itself returns empty byte arrays when selected. To access actual blob data, you would need to use the position and size information to read from the blob file using external tools or custom logic.
+=== "Java"
+    ```java
+    // Read table with blob column
+    Dataset<Row> documentsDF = spark.table("documents");
+
+    // Access blob metadata using virtual columns
+    Dataset<Row> blobMetadata = documentsDF.select(
+        "id",
+        "title",
+        "content__blob_pos",
+        "content__blob_size"
+    );
+    blobMetadata.show();
+
+    // Filter by blob size
+    Dataset<Row> largeBlobs = documentsDF.filter("content__blob_size > 1000000");
+    largeBlobs.select("id", "title", "content__blob_size").show();
+    ```
