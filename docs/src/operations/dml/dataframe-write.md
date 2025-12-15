@@ -232,3 +232,95 @@ When using `createOrReplace()` to create a new table, use the `tableProperty()` 
 - For existing tables created with `arrow.large_var_char` property, writes automatically use large strings
 - For new tables via DataFrame, use `.tableProperty("column.arrow.large_var_char", "true")`
 - Use large strings when individual values or total batch data may exceed 2GB
+
+## Writing Vector Data
+
+Lance supports vector (embedding) columns stored as Arrow `FixedSizeList`. When writing vector data to existing tables, the behavior depends on how the table was created.
+
+### Appending to Existing Tables
+
+If you created a table with the `arrow.fixed-size-list.size` property (see [CREATE TABLE](../ddl/create-table.md#vector-columns)), subsequent DataFrame writes will automatically use `FixedSizeList`. No additional configuration is needed:
+
+```python
+# Table was created with: 'embeddings.arrow.fixed-size-list.size' = '128'
+# Subsequent writes automatically use FixedSizeList encoding
+
+# Plain schema WITHOUT metadata - it just works!
+data = [(i, [float(j) for j in range(128)]) for i in range(10, 20)]
+df = spark.createDataFrame(data, ["id", "embeddings"])
+
+df.writeTo("embeddings_table").append()
+```
+
+### Creating New Tables with DataFrame
+
+When using `createOrReplace()` to create a new table, use the `tableProperty()` method to specify vector columns:
+
+=== "Python"
+    ```python
+    import numpy as np
+
+    # Create data with vector content
+    data = [(i, np.random.rand(128).astype(np.float32).tolist()) for i in range(100)]
+    df = spark.createDataFrame(data, ["id", "embeddings"])
+
+    # Create new table with vector support using tableProperty
+    df.writeTo("lance_catalog.default.vectors") \
+        .using("lance") \
+        .tableProperty("embeddings.arrow.fixed-size-list.size", "128") \
+        .createOrReplace()
+    ```
+
+=== "Scala"
+    ```scala
+    import scala.util.Random
+
+    // Create data with vector content
+    val data = (0 until 100).map { i =>
+      (i, Array.fill(128)(Random.nextFloat()))
+    }
+    val df = data.toDF("id", "embeddings")
+
+    // Create new table with vector support using tableProperty
+    df.writeTo("lance_catalog.default.vectors")
+      .using("lance")
+      .tableProperty("embeddings.arrow.fixed-size-list.size", "128")
+      .createOrReplace()
+    ```
+
+=== "Java"
+    ```java
+    import java.util.Random;
+
+    // Create data with vector content
+    List<Row> data = new ArrayList<>();
+    Random random = new Random();
+    for (int i = 0; i < 100; i++) {
+        float[] vector = new float[128];
+        for (int j = 0; j < 128; j++) {
+            vector[j] = random.nextFloat();
+        }
+        data.add(RowFactory.create(i, vector));
+    }
+
+    StructType schema = new StructType(new StructField[]{
+        DataTypes.createStructField("id", DataTypes.IntegerType, false),
+        DataTypes.createStructField("embeddings",
+            DataTypes.createArrayType(DataTypes.FloatType, false), false)
+    });
+
+    Dataset<Row> df = spark.createDataFrame(data, schema);
+
+    // Create new table with vector support using tableProperty
+    df.writeTo("lance_catalog.default.vectors")
+        .using("lance")
+        .tableProperty("embeddings.arrow.fixed-size-list.size", "128")
+        .createOrReplace();
+    ```
+
+**Important Notes**:
+
+- For existing tables created with `arrow.fixed-size-list.size` property, writes automatically use `FixedSizeList`
+- For new tables via DataFrame, use `.tableProperty("column.arrow.fixed-size-list.size", "dimension")`
+- All vectors in a column must have the same dimension
+- Supported element types: `FLOAT` (float32), `DOUBLE` (float64)

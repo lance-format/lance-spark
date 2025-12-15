@@ -75,71 +75,43 @@ The metadata key `"arrow.fixed-size-list.size"` with a value like `128` tells th
 
 ### Examples
 
+Use the `tableProperty()` API to specify vector column dimensions:
+
 === "Python"
     ```python
-    from pyspark.sql.types import StructType, StructField, IntegerType, ArrayType, FloatType
-    from pyspark.sql.types import Metadata
-    
-    # Create schema with vector column
-    vector_metadata = {"arrow.fixed-size-list.size": 128}
-    schema = StructType([
-        StructField("id", IntegerType(), False),
-        StructField("embeddings", ArrayType(FloatType(), False), False, vector_metadata)
-    ])
-    
-    # Create DataFrame with vector data
     import numpy as np
+
+    # Create DataFrame with vector data (no special metadata needed)
     data = [(i, np.random.rand(128).astype(np.float32).tolist()) for i in range(100)]
-    df = spark.createDataFrame(data, schema)
-    
-    # Write to Lance format
-    df.writeTo("vectors_table").create()
+    df = spark.createDataFrame(data, ["id", "embeddings"])
+
+    # Write to Lance format with tableProperty
+    df.writeTo("vectors_table") \
+        .using("lance") \
+        .tableProperty("embeddings.arrow.fixed-size-list.size", "128") \
+        .createOrReplace()
     ```
 
 === "Scala"
     ```scala
-    import org.apache.spark.sql.types._
-    
-    // Create metadata for vector column
-    val vectorMetadata = new MetadataBuilder()
-      .putLong("arrow.fixed-size-list.size", 128)
-      .build()
-    
-    // Create schema with vector column
-    val schema = StructType(Array(
-      StructField("id", IntegerType, false),
-      StructField("embeddings", ArrayType(FloatType, false), false, vectorMetadata)
-    ))
-    
-    // Create DataFrame with vector data
     import scala.util.Random
+
+    // Create DataFrame with vector data (no special metadata needed)
     val data = (0 until 100).map { i =>
       (i, Array.fill(128)(Random.nextFloat()))
     }
-    val df = spark.createDataFrame(data).toDF("id", "embeddings")
-    
-    // Write to Lance format
-    df.writeTo("vectors_table").create()
+    val df = data.toDF("id", "embeddings")
+
+    // Write to Lance format with tableProperty
+    df.writeTo("vectors_table")
+      .using("lance")
+      .tableProperty("embeddings.arrow.fixed-size-list.size", "128")
+      .createOrReplace()
     ```
 
 === "Java"
     ```java
-    import org.apache.spark.sql.types.*;
-    
-    // Create metadata for vector column
-    Metadata vectorMetadata = new MetadataBuilder()
-        .putLong("arrow.fixed-size-list.size", 128)
-        .build();
-    
-    // Create schema with vector column
-    StructType schema = new StructType(new StructField[] {
-        DataTypes.createStructField("id", DataTypes.IntegerType, false),
-        DataTypes.createStructField("embeddings", 
-            DataTypes.createArrayType(DataTypes.FloatType, false),
-            false, vectorMetadata)
-    });
-    
-    // Create DataFrame with vector data
+    // Create DataFrame with vector data (no special metadata needed)
     List<Row> rows = new ArrayList<>();
     Random random = new Random();
     for (int i = 0; i < 100; i++) {
@@ -149,11 +121,25 @@ The metadata key `"arrow.fixed-size-list.size"` with a value like `128` tells th
         }
         rows.add(RowFactory.create(i, vector));
     }
+
+    StructType schema = new StructType(new StructField[] {
+        DataTypes.createStructField("id", DataTypes.IntegerType, false),
+        DataTypes.createStructField("embeddings",
+            DataTypes.createArrayType(DataTypes.FloatType, false), false)
+    });
+
     Dataset<Row> df = spark.createDataFrame(rows, schema);
-    
-    // Write to Lance format
-    df.writeTo("vectors_table").create();
+
+    // Write to Lance format with tableProperty
+    df.writeTo("vectors_table")
+        .using("lance")
+        .tableProperty("embeddings.arrow.fixed-size-list.size", "128")
+        .createOrReplace();
     ```
+
+**Note**: After creating the table with `tableProperty()`, 
+subsequent DataFrame writes will automatically use `FixedSizeList` encoding without requiring any metadata. 
+See [DataFrame Write](../dml/dataframe-write.md#writing-vector-data) for details.
 
 ### Creating Multiple Vector Columns
 
@@ -161,55 +147,70 @@ You can create DataFrames with multiple vector columns, each with different dime
 
 === "Python"
     ```python
-    from pyspark.sql.types import DoubleType
-    
-    # Create schema with multiple vector columns
-    text_metadata = {"arrow.fixed-size-list.size": 384}
-    image_metadata = {"arrow.fixed-size-list.size": 512}
-    
-    schema = StructType([
-        StructField("id", IntegerType(), False),
-        StructField("text_embeddings", ArrayType(FloatType(), False), False, text_metadata),
-        StructField("image_embeddings", ArrayType(DoubleType(), False), False, image_metadata)
-    ])
-    
+    import numpy as np
+
     # Create DataFrame with multiple vector columns
     data = [
-        (i, 
+        (i,
          np.random.rand(384).astype(np.float32).tolist(),
          np.random.rand(512).tolist())
         for i in range(100)
     ]
-    df = spark.createDataFrame(data, schema)
-    
-    # Write to Lance format
-    df.writeTo("multi_vectors_table").create()
+    df = spark.createDataFrame(data, ["id", "text_embeddings", "image_embeddings"])
+
+    # Write to Lance format with multiple tableProperty calls
+    df.writeTo("multi_vectors_table") \
+        .using("lance") \
+        .tableProperty("text_embeddings.arrow.fixed-size-list.size", "384") \
+        .tableProperty("image_embeddings.arrow.fixed-size-list.size", "512") \
+        .createOrReplace()
     ```
 
-### Vector Indexing
+=== "Scala"
+    ```scala
+    import scala.util.Random
 
-After creating tables with vector columns, you can create vector indexes for efficient similarity search using the Lance Python API:
+    // Create DataFrame with multiple vector columns
+    val data = (0 until 100).map { i =>
+      (i, Array.fill(384)(Random.nextFloat()), Array.fill(512)(Random.nextDouble()))
+    }
+    val df = data.toDF("id", "text_embeddings", "image_embeddings")
 
-```python
-import lance
-import numpy as np
+    // Write to Lance format with multiple tableProperty calls
+    df.writeTo("multi_vectors_table")
+      .using("lance")
+      .tableProperty("text_embeddings.arrow.fixed-size-list.size", "384")
+      .tableProperty("image_embeddings.arrow.fixed-size-list.size", "512")
+      .createOrReplace()
+    ```
 
-# Open the dataset
-ds = lance.dataset("/path/to/vectors_table.lance")
+=== "Java"
+    ```java
+    // Create DataFrame with multiple vector columns
+    List<Row> rows = new ArrayList<>();
+    Random random = new Random();
+    for (int i = 0; i < 100; i++) {
+        float[] textVec = new float[384];
+        double[] imageVec = new double[512];
+        for (int j = 0; j < 384; j++) textVec[j] = random.nextFloat();
+        for (int j = 0; j < 512; j++) imageVec[j] = random.nextDouble();
+        rows.add(RowFactory.create(i, textVec, imageVec));
+    }
 
-# Create a vector index on the embeddings column
-ds.create_index(
-    "embeddings",
-    index_type="IVF_PQ",
-    num_partitions=256,
-    num_sub_vectors=16
-)
+    StructType schema = new StructType(new StructField[] {
+        DataTypes.createStructField("id", DataTypes.IntegerType, false),
+        DataTypes.createStructField("text_embeddings",
+            DataTypes.createArrayType(DataTypes.FloatType, false), false),
+        DataTypes.createStructField("image_embeddings",
+            DataTypes.createArrayType(DataTypes.DoubleType, false), false)
+    });
 
-# Perform similarity search
-query_vector = np.random.rand(128).astype(np.float32)
-results = ds.to_table(
-    nearest={"column": "embeddings", "q": query_vector, "k": 10}
-).to_pandas()
-```
+    Dataset<Row> df = spark.createDataFrame(rows, schema);
 
-Note: When reading vector columns back into Spark DataFrames, they are automatically converted to regular `ArrayType(FloatType)` or `ArrayType(DoubleType)` for compatibility with Spark operations.
+    // Write to Lance format with multiple tableProperty calls
+    df.writeTo("multi_vectors_table")
+        .using("lance")
+        .tableProperty("text_embeddings.arrow.fixed-size-list.size", "384")
+        .tableProperty("image_embeddings.arrow.fixed-size-list.size", "512")
+        .createOrReplace();
+    ```

@@ -3,4 +3,5 @@ nav:
   - Install: install.md
   - Config: config.md
   - Options: options.md
+  - Performance: performance.md
   - Operations: operations

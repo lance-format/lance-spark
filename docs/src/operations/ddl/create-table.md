@@ -94,7 +94,12 @@ SELECT id, text FROM embeddings_table WHERE id = 1;
 -- Count rows
 SELECT COUNT(*) FROM embeddings_table;
 ```
-Note: When reading vector columns back, they are automatically converted to Spark's `ARRAY<FLOAT>` or `ARRAY<DOUBLE>` types for compatibility with Spark operations.
+
+**Note**: When reading vector columns back, they are automatically converted to 
+Spark's `ARRAY<FLOAT>` or `ARRAY<DOUBLE>` types for compatibility with Spark operations. 
+The fixed-size-list metadata is preserved in the schema, so subsequent DataFrame writes will automatically 
+use the correct Arrow `FixedSizeList` type without requiring additional configuration. 
+See [DataFrame Write](../dml/dataframe-write.md#writing-vector-data) for details.
 
 ### Vector Indexing
 

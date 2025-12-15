@@ -314,4 +314,203 @@ public abstract class BaseVectorCreateTableTest {
               || e.getCause().getMessage().contains("must have element type FLOAT or DOUBLE"));
     }
   }
+
+  // ==================== Fixed-Size-List Tests ====================
+  // These tests verify that when a table is created with fixed-size-list property,
+  // subsequent DataFrame writes don't need to set the arrow type extension metadata.
+
+  /** Helper method to verify a field has fixed-size-list metadata set. */
+  private void assertFixedSizeListMetadata(StructType schema, String fieldName, long expectedSize) {
+    StructField field = schema.apply(fieldName);
+    assertNotNull(field, fieldName + " field should exist in schema");
+    assertTrue(
+        field.metadata().contains("arrow.fixed-size-list.size"),
+        fieldName + " field should have arrow.fixed-size-list.size metadata");
+    assertEquals(
+        expectedSize,
+        field.metadata().getLong("arrow.fixed-size-list.size"),
+        "arrow.fixed-size-list.size metadata should be " + expectedSize);
+  }
+
+  @Test
+  public void testFixedSizeListWithSqlTblProperties() {
+    // Test creating table with SQL TBLPROPERTIES and mixed INSERT INTO / DataFrame writes
+    String tableName = "fixed_size_list_sql_" + System.currentTimeMillis();
+
+    // Create table with fixed-size-list column using SQL TBLPROPERTIES
+    spark.sql(
+        "CREATE TABLE IF NOT EXISTS "
+            + catalogName
+            + ".default."
+            + tableName
+            + " ("
+            + "id INT NOT NULL, "
+            + "embeddings ARRAY<FLOAT> NOT NULL"
+            + ") USING lance "
+            + "TBLPROPERTIES ("
+            + "'embeddings.arrow.fixed-size-list.size' = '128'"
+            + ")");
+
+    // Verify schema has fixed-size-list metadata
+    assertFixedSizeListMetadata(
+        spark.table(catalogName + ".default." + tableName).schema(), "embeddings", 128L);
+
+    // Write 1: SQL INSERT
+    spark.sql(
+        "INSERT INTO "
+            + catalogName
+            + ".default."
+            + tableName
+            + " VALUES "
+            + "(1, array("
+            + generateFloatArray(128)
+            + ")), "
+            + "(2, array("
+            + generateFloatArray(128)
+            + "))");
+
+    // Verify schema still has metadata after write
+    assertFixedSizeListMetadata(
+        spark.table(catalogName + ".default." + tableName).schema(), "embeddings", 128L);
+
+    // Write 2: DataFrame append with plain schema (no metadata needed)
+    List<Row> rows = new ArrayList<>();
+    Random random = new Random(42);
+    for (int i = 10; i < 13; i++) {
+      float[] vector = new float[128];
+      for (int j = 0; j < 128; j++) {
+        vector[j] = random.nextFloat();
+      }
+      rows.add(RowFactory.create(i, vector));
+    }
+
+    // Plain schema WITHOUT fixed-size-list metadata
+    StructType plainSchema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.IntegerType, false),
+              DataTypes.createStructField(
+                  "embeddings", DataTypes.createArrayType(DataTypes.FloatType, false), false)
+            });
+
+    Dataset<Row> df = spark.createDataFrame(rows, plainSchema);
+    try {
+      df.writeTo(catalogName + ".default." + tableName).append();
+    } catch (Exception e) {
+      fail("Failed to append DataFrame: " + e.getMessage());
+    }
+
+    // Verify schema still has metadata
+    assertFixedSizeListMetadata(
+        spark.table(catalogName + ".default." + tableName).schema(), "embeddings", 128L);
+
+    // Write 3: Another SQL INSERT
+    spark.sql(
+        "INSERT INTO "
+            + catalogName
+            + ".default."
+            + tableName
+            + " VALUES "
+            + "(20, array("
+            + generateFloatArray(128)
+            + "))");
+
+    // Verify total count (2 + 3 + 1 = 6 rows)
+    Dataset<Row> result =
+        spark.sql("SELECT COUNT(*) FROM " + catalogName + ".default." + tableName);
+    assertEquals(6L, result.collectAsList().get(0).getLong(0));
+
+    // Verify data integrity - check embeddings size
+    Dataset<Row> embData =
+        spark.sql(
+            "SELECT id, size(embeddings) as emb_size FROM "
+                + catalogName
+                + ".default."
+                + tableName
+                + " WHERE id = 11");
+    List<Row> embRows = embData.collectAsList();
+    assertEquals(1, embRows.size());
+    assertEquals(128, embRows.get(0).getInt(1), "Embeddings should have 128 elements");
+
+    // Clean up
+    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
+  }
+
+  @Test
+  public void testFixedSizeListWithTablePropertyAPI() {
+    // Test creating table with DataFrame tableProperty() API and subsequent writes
+    String tableName = "fixed_size_list_df_api_" + System.currentTimeMillis();
+
+    // Initial data
+    List<Row> rows = new ArrayList<>();
+    Random random = new Random(42);
+    for (int i = 0; i < 3; i++) {
+      float[] vector = new float[128];
+      for (int j = 0; j < 128; j++) {
+        vector[j] = random.nextFloat();
+      }
+      rows.add(RowFactory.create(i, vector));
+    }
+
+    // Plain schema WITHOUT fixed-size-list metadata
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.IntegerType, false),
+              DataTypes.createStructField(
+                  "embeddings", DataTypes.createArrayType(DataTypes.FloatType, false), false)
+            });
+
+    Dataset<Row> df = spark.createDataFrame(rows, schema);
+
+    // Create table with tableProperty API
+    df.writeTo(catalogName + ".default." + tableName)
+        .using("lance")
+        .tableProperty("embeddings.arrow.fixed-size-list.size", "128")
+        .createOrReplace();
+
+    // Verify schema has fixed-size-list metadata
+    assertFixedSizeListMetadata(
+        spark.table(catalogName + ".default." + tableName).schema(), "embeddings", 128L);
+
+    // Subsequent DataFrame append (no metadata needed)
+    List<Row> moreRows = new ArrayList<>();
+    for (int i = 10; i < 13; i++) {
+      float[] vector = new float[128];
+      for (int j = 0; j < 128; j++) {
+        vector[j] = random.nextFloat();
+      }
+      moreRows.add(RowFactory.create(i, vector));
+    }
+    Dataset<Row> df2 = spark.createDataFrame(moreRows, schema);
+    try {
+      df2.writeTo(catalogName + ".default." + tableName).append();
+    } catch (Exception e) {
+      fail("Failed to append DataFrame: " + e.getMessage());
+    }
+
+    // Verify schema still has metadata
+    assertFixedSizeListMetadata(
+        spark.table(catalogName + ".default." + tableName).schema(), "embeddings", 128L);
+
+    // Verify total count (3 + 3 = 6 rows)
+    Dataset<Row> result =
+        spark.sql("SELECT COUNT(*) FROM " + catalogName + ".default." + tableName);
+    assertEquals(6L, result.collectAsList().get(0).getLong(0));
+
+    // Verify data integrity
+    Dataset<Row> dataResult =
+        spark.sql(
+            "SELECT id, size(embeddings) as emb_size FROM "
+                + catalogName
+                + ".default."
+                + tableName
+                + " WHERE id = 11");
+    List<Row> dataRows = dataResult.collectAsList();
+    assertEquals(1, dataRows.size());
+    assertEquals(128, dataRows.get(0).getInt(1), "Embeddings should have 128 elements");
+
+    // Clean up
+    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
+  }
 }
