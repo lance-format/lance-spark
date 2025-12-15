@@ -13,38 +13,40 @@
  */
 package org.lance.spark.read;
 
-import org.lance.spark.LanceConfig;
-import org.lance.spark.internal.LanceDatasetAdapter;
-import org.lance.spark.utils.Optional;
+import org.lance.ManifestSummary;
 
 import org.apache.spark.sql.connector.read.Statistics;
 
+import java.io.Serializable;
 import java.util.OptionalLong;
 
-public class LanceStatistics implements Statistics {
-  private final Optional<Long> rowNumber;
-  private final Optional<Long> dataBytesSize;
+/**
+ * Lance dataset statistics based on ManifestSummary. This provides O(1) access to pre-computed
+ * statistics from the manifest metadata.
+ */
+public class LanceStatistics implements Statistics, Serializable {
+  private static final long serialVersionUID = 1L;
 
-  public LanceStatistics(LanceConfig config) {
-    this.rowNumber = LanceDatasetAdapter.getDatasetRowCount(config);
-    this.dataBytesSize = LanceDatasetAdapter.getDatasetDataSize(config);
+  private final long numRows;
+  private final long sizeInBytes;
+
+  /**
+   * Create statistics from a ManifestSummary.
+   *
+   * @param summary the manifest summary containing pre-computed statistics
+   */
+  public LanceStatistics(ManifestSummary summary) {
+    this.numRows = summary.getTotalRows();
+    this.sizeInBytes = summary.getTotalFilesSize();
   }
 
   @Override
   public OptionalLong sizeInBytes() {
-    if (dataBytesSize.isPresent()) {
-      return OptionalLong.of(dataBytesSize.get());
-    } else {
-      return OptionalLong.empty();
-    }
+    return OptionalLong.of(sizeInBytes);
   }
 
   @Override
   public OptionalLong numRows() {
-    if (rowNumber.isPresent()) {
-      return OptionalLong.of(rowNumber.get());
-    } else {
-      return OptionalLong.empty();
-    }
+    return OptionalLong.of(numRows);
   }
 }

@@ -14,6 +14,7 @@
 package org.lance.spark.read;
 
 import org.lance.Dataset;
+import org.lance.ManifestSummary;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.spark.LanceConfig;
 import org.lance.spark.SparkOptions;
@@ -91,16 +92,29 @@ public class LanceScanBuilder
 
   @Override
   public Scan build() {
+    // Return LocalScan if we have a metadata-only aggregation result
+    if (localScan != null) {
+      closeLazyDataset();
+      return localScan;
+    }
+
+    // Get statistics from manifest summary before closing dataset
+    ManifestSummary summary = getOrOpenDataset().getVersion().getManifestSummary();
+    LanceStatistics statistics = new LanceStatistics(summary);
+
     // Close the lazily opened dataset - it's no longer needed after build
     closeLazyDataset();
 
-    // Return LocalScan if we have a metadata-only aggregation result
-    if (localScan != null) {
-      return localScan;
-    }
     Optional<String> whereCondition = FilterPushDown.compileFiltersToSqlWhereClause(pushedFilters);
     return new LanceScan(
-        schema, config, whereCondition, limit, offset, topNSortOrders, pushedAggregation);
+        schema,
+        config,
+        whereCondition,
+        limit,
+        offset,
+        topNSortOrders,
+        pushedAggregation,
+        statistics);
   }
 
   @Override

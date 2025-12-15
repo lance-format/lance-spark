@@ -50,6 +50,7 @@ public class LanceScan
   private final Optional<Integer> offset;
   private final Optional<List<ColumnOrdering>> topNSortOrders;
   private final Optional<Aggregation> pushedAggregation;
+  private final LanceStatistics statistics;
   private final String scanId = UUID.randomUUID().toString();
 
   public LanceScan(
@@ -59,7 +60,8 @@ public class LanceScan
       Optional<Integer> limit,
       Optional<Integer> offset,
       Optional<List<ColumnOrdering>> topNSortOrders,
-      Optional<Aggregation> pushedAggregation) {
+      Optional<Aggregation> pushedAggregation,
+      LanceStatistics statistics) {
     this.schema = schema;
     this.config = config;
     this.whereConditions = whereConditions;
@@ -67,6 +69,7 @@ public class LanceScan
     this.offset = offset;
     this.topNSortOrders = topNSortOrders;
     this.pushedAggregation = pushedAggregation;
+    this.statistics = statistics;
   }
 
   @Override
@@ -122,7 +125,7 @@ public class LanceScan
 
   @Override
   public Statistics estimateStatistics() {
-    return new LanceStatistics(config);
+    return statistics;
   }
 
   private static class LanceReaderFactory implements PartitionReaderFactory {
