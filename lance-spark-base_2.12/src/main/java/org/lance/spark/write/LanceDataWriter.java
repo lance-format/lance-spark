@@ -34,27 +34,27 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 public class LanceDataWriter implements DataWriter<InternalRow> {
-  private ArrowBatchProducer batchBuffer;
+  private ArrowBatchWriteBuffer writeBuffer;
   private FutureTask<List<FragmentMetadata>> fragmentCreationTask;
   private Thread fragmentCreationThread;
 
   public LanceDataWriter(
-      ArrowBatchProducer batchBuffer,
+      ArrowBatchWriteBuffer writeBuffer,
       FutureTask<List<FragmentMetadata>> fragmentCreationTask,
       Thread fragmentCreationThread) {
-    this.batchBuffer = batchBuffer;
+    this.writeBuffer = writeBuffer;
     this.fragmentCreationThread = fragmentCreationThread;
     this.fragmentCreationTask = fragmentCreationTask;
   }
 
   @Override
   public void write(InternalRow record) throws IOException {
-    batchBuffer.write(record);
+    writeBuffer.write(record);
   }
 
   @Override
   public WriterCommitMessage commit() throws IOException {
-    batchBuffer.setFinished();
+    writeBuffer.setFinished();
 
     try {
       List<FragmentMetadata> fragmentMetadata = fragmentCreationTask.get();
@@ -84,7 +84,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
 
   @Override
   public void close() throws IOException {
-    batchBuffer.close();
+    writeBuffer.close();
   }
 
   public static class WriterFactory implements DataWriterFactory {
@@ -104,25 +104,23 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       WriteParams params = SparkOptions.genWriteParamsFromConfig(config);
 
       // Select buffer type based on configuration
-      ArrowBatchProducer batchBuffer;
+      ArrowBatchWriteBuffer writeBuffer;
       if (useQueuedBuffer) {
         int queueDepth = SparkOptions.getQueueDepth(config);
-        batchBuffer =
+        writeBuffer =
             LanceDatasetAdapter.getQueuedArrowBatchWriteBuffer(schema, batchSize, queueDepth);
       } else {
-        batchBuffer = LanceDatasetAdapter.getArrowBatchWriteBuffer(schema, batchSize);
+        writeBuffer = LanceDatasetAdapter.getSemaphoreArrowBatchWriteBuffer(schema, batchSize);
       }
 
       // Create fragment in background thread
       Callable<List<FragmentMetadata>> fragmentCreator =
-          () ->
-              LanceDatasetAdapter.createFragment(
-                  config.getDatasetUri(), batchBuffer.asArrowReader(), params);
+          () -> LanceDatasetAdapter.createFragment(config.getDatasetUri(), writeBuffer, params);
       FutureTask<List<FragmentMetadata>> fragmentCreationTask = new FutureTask<>(fragmentCreator);
       Thread fragmentCreationThread = new Thread(fragmentCreationTask);
       fragmentCreationThread.start();
 
-      return new LanceDataWriter(batchBuffer, fragmentCreationTask, fragmentCreationThread);
+      return new LanceDataWriter(writeBuffer, fragmentCreationTask, fragmentCreationThread);
     }
   }
 }

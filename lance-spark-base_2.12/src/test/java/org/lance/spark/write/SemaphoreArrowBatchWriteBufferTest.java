@@ -34,7 +34,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-public class ArrowBatchWriteBufferTest {
+public class SemaphoreArrowBatchWriteBufferTest {
   @Test
   public void test() throws Exception {
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
@@ -53,8 +53,8 @@ public class ArrowBatchWriteBufferTest {
 
       final int totalRows = 125;
       final int batchSize = 34;
-      final ArrowBatchWriteBuffer batchBuffer =
-          new ArrowBatchWriteBuffer(allocator, schema, sparkSchema, batchSize);
+      final SemaphoreArrowBatchWriteBuffer writeBuffer =
+          new SemaphoreArrowBatchWriteBuffer(allocator, schema, sparkSchema, batchSize);
 
       AtomicInteger rowsWritten = new AtomicInteger(0);
       AtomicInteger rowsRead = new AtomicInteger(0);
@@ -67,9 +67,9 @@ public class ArrowBatchWriteBufferTest {
                   for (int i = 0; i < totalRows; i++) {
                     InternalRow row =
                         new GenericInternalRow(new Object[] {rowsWritten.incrementAndGet()});
-                    batchBuffer.write(row);
+                    writeBuffer.write(row);
                   }
-                  batchBuffer.setFinished();
+                  writeBuffer.setFinished();
                 } catch (Exception e) {
                   e.printStackTrace();
                   throw e;
@@ -80,8 +80,8 @@ public class ArrowBatchWriteBufferTest {
           new Thread(
               () -> {
                 try {
-                  while (batchBuffer.loadNextBatch()) {
-                    VectorSchemaRoot root = batchBuffer.getVectorSchemaRoot();
+                  while (writeBuffer.loadNextBatch()) {
+                    VectorSchemaRoot root = writeBuffer.getVectorSchemaRoot();
                     int rowCount = root.getRowCount();
                     rowsRead.addAndGet(rowCount);
                     try (ArrowRecordBatch recordBatch = new VectorUnloader(root).getRecordBatch()) {
@@ -104,7 +104,7 @@ public class ArrowBatchWriteBufferTest {
       readerThread.join();
       assertEquals(totalRows, rowsWritten.get());
       assertEquals(totalRows, rowsRead.get());
-      batchBuffer.close();
+      writeBuffer.close();
     }
   }
 }

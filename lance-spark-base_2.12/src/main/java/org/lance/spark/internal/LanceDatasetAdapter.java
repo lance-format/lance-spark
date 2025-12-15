@@ -35,8 +35,8 @@ import org.lance.spark.LanceConfig;
 import org.lance.spark.SparkOptions;
 import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.utils.Optional;
-import org.lance.spark.write.ArrowBatchWriteBuffer;
 import org.lance.spark.write.QueuedArrowBatchWriteBuffer;
+import org.lance.spark.write.SemaphoreArrowBatchWriteBuffer;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
@@ -255,9 +255,9 @@ public class LanceDatasetAdapter {
     }
   }
 
-  public static ArrowBatchWriteBuffer getArrowBatchWriteBuffer(
+  public static SemaphoreArrowBatchWriteBuffer getSemaphoreArrowBatchWriteBuffer(
       StructType sparkSchema, int batchSize) {
-    return new ArrowBatchWriteBuffer(
+    return new SemaphoreArrowBatchWriteBuffer(
         allocator,
         LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false, false),
         sparkSchema,

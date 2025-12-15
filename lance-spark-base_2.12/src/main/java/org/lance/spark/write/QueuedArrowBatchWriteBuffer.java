@@ -16,7 +16,6 @@ package org.lance.spark.write;
 import com.google.common.base.Preconditions;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.types.StructType;
@@ -30,9 +29,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Queue-based buffer for Arrow batches that enables pipelined batch processing.
  *
- * <p>Unlike the semaphore-based {@link ArrowBatchWriteBuffer} which blocks on every row write, this
- * implementation uses a bounded queue to allow multiple batches to be in flight simultaneously.
- * This enables better pipelining between Spark row ingestion and Lance fragment creation.
+ * <p>Unlike the semaphore-based {@link SemaphoreArrowBatchWriteBuffer} which blocks on every row
+ * write, this implementation uses a bounded queue to allow multiple batches to be in flight
+ * simultaneously. This enables better pipelining between Spark row ingestion and Lance fragment
+ * creation.
  *
  * <p>Architecture:
  *
@@ -43,7 +43,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * - Only blocks if queue is full     - Processes batches in parallel with producer
  * </pre>
  */
-public class QueuedArrowBatchWriteBuffer extends ArrowReader implements ArrowBatchProducer {
+public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
   /** Default queue depth - number of batches that can be buffered. */
   private static final int DEFAULT_QUEUE_DEPTH = 8;
 
@@ -179,11 +179,6 @@ public class QueuedArrowBatchWriteBuffer extends ArrowReader implements ArrowBat
       Thread.currentThread().interrupt();
       throw new RuntimeException("Interrupted while finishing", e);
     }
-  }
-
-  @Override
-  public ArrowReader asArrowReader() {
-    return this;
   }
 
   // ========== ArrowReader interface for consumer ==========

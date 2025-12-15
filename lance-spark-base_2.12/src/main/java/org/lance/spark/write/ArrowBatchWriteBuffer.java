@@ -13,136 +13,31 @@
  */
 package org.lance.spark.write;
 
-import com.google.common.base.Preconditions;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.ipc.ArrowReader;
-import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.InternalRow;
-import org.apache.spark.sql.types.StructType;
-
-import javax.annotation.concurrent.GuardedBy;
-
-import java.io.IOException;
-import java.util.concurrent.Semaphore;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Buffers Spark rows into Arrow batches for consumption by Lance fragment creation.
+ * Abstract base class for Arrow batch write buffers that bridge Spark row writing and Lance
+ * fragment creation.
  *
- * <p>This class bridges the producer (Spark thread writing rows) and consumer (Lance native code
- * pulling batches via ArrowReader interface). It uses semaphores to synchronize between the two
- * threads - the producer blocks until the consumer is ready for more data, and vice versa.
- *
- * @see QueuedArrowBatchWriteBuffer for a queue-based alternative with better pipelining
+ * <p>Both {@link SemaphoreArrowBatchWriteBuffer} (semaphore-based) and {@link
+ * QueuedArrowBatchWriteBuffer} (queue-based) extend this class, allowing the write path to be
+ * configured at runtime.
  */
-public class ArrowBatchWriteBuffer extends ArrowReader implements ArrowBatchProducer {
-  private final Schema schema;
-  private final StructType sparkSchema;
-  private final int batchSize;
+public abstract class ArrowBatchWriteBuffer extends ArrowReader {
 
-  @GuardedBy("monitor")
-  private volatile boolean finished = false;
-
-  private org.lance.spark.arrow.LanceArrowWriter arrowWriter = null;
-  private final AtomicInteger count = new AtomicInteger(0);
-  private final Semaphore writeToken;
-  private final Semaphore loadToken;
-
-  public ArrowBatchWriteBuffer(
-      BufferAllocator allocator, Schema schema, StructType sparkSchema, int batchSize) {
+  protected ArrowBatchWriteBuffer(BufferAllocator allocator) {
     super(allocator);
-    Preconditions.checkNotNull(schema);
-    Preconditions.checkArgument(batchSize > 0);
-    this.schema = schema;
-    this.sparkSchema = sparkSchema;
-    this.batchSize = batchSize;
-    this.writeToken = new Semaphore(0);
-    this.loadToken = new Semaphore(0);
   }
 
-  @Override
-  public void write(InternalRow row) {
-    Preconditions.checkNotNull(row);
-    try {
-      // wait util prepareLoadNextBatch to release write token
-      writeToken.acquire();
+  /**
+   * Writes a single row to the buffer.
+   *
+   * @param row the row to write
+   */
+  public abstract void write(InternalRow row);
 
-      // Write to Arrow buffer
-      arrowWriter.write(row);
-
-      if (count.incrementAndGet() == batchSize) {
-        // notify loadNextBatch to take the batch
-        loadToken.release();
-      }
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    }
-  }
-
-  @Override
-  public void setFinished() {
-    finished = true;
-    loadToken.release();
-  }
-
-  @Override
-  public ArrowReader asArrowReader() {
-    return this;
-  }
-
-  @Override
-  public void prepareLoadNextBatch() throws IOException {
-    super.prepareLoadNextBatch();
-    arrowWriter =
-        org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(
-            this.getVectorSchemaRoot(), sparkSchema);
-    // release batch size token for write
-    writeToken.release(batchSize);
-  }
-
-  @Override
-  public boolean loadNextBatch() throws IOException {
-    prepareLoadNextBatch();
-    try {
-      if (finished && count.get() == 0) {
-        return false;
-      }
-
-      // wait util batch is full or finished
-      loadToken.acquire();
-
-      // Finish the batch (flush Arrow vectors)
-      arrowWriter.finish();
-
-      if (!finished) {
-        count.set(0);
-        return true;
-      } else {
-        // true if it has some rows and return false if there is no record
-        if (count.get() > 0) {
-          count.set(0);
-          return true;
-        } else {
-          return false;
-        }
-      }
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    }
-  }
-
-  @Override
-  public long bytesRead() {
-    throw new UnsupportedOperationException();
-  }
-
-  @Override
-  protected synchronized void closeReadSource() throws IOException {
-    // Implement if needed
-  }
-
-  @Override
-  protected Schema readSchema() {
-    return this.schema;
-  }
+  /** Signals that writing is complete. Any buffered data should be flushed. */
+  public abstract void setFinished();
 }
