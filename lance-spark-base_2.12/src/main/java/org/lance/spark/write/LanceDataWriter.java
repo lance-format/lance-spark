@@ -34,35 +34,36 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 public class LanceDataWriter implements DataWriter<InternalRow> {
-  private LanceArrowWriter arrowWriter;
+  private ArrowBatchProducer batchBuffer;
   private FutureTask<List<FragmentMetadata>> fragmentCreationTask;
   private Thread fragmentCreationThread;
 
   public LanceDataWriter(
-      LanceArrowWriter arrowWriter,
+      ArrowBatchProducer batchBuffer,
       FutureTask<List<FragmentMetadata>> fragmentCreationTask,
       Thread fragmentCreationThread) {
-    this.arrowWriter = arrowWriter;
+    this.batchBuffer = batchBuffer;
     this.fragmentCreationThread = fragmentCreationThread;
     this.fragmentCreationTask = fragmentCreationTask;
   }
 
   @Override
   public void write(InternalRow record) throws IOException {
-    arrowWriter.write(record);
+    batchBuffer.write(record);
   }
 
   @Override
   public WriterCommitMessage commit() throws IOException {
-    arrowWriter.setFinished();
+    batchBuffer.setFinished();
+
     try {
       List<FragmentMetadata> fragmentMetadata = fragmentCreationTask.get();
       return new LanceBatchWrite.TaskCommit(fragmentMetadata);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      throw new IOException("Interrupted while waiting for reader thread to finish", e);
+      throw new IOException("Interrupted while waiting for fragment creation thread to finish", e);
     } catch (ExecutionException e) {
-      throw new IOException("Exception in reader thread", e);
+      throw new IOException("Exception in fragment creation thread", e);
     }
   }
 
@@ -74,16 +75,16 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       fragmentCreationTask.get(5, TimeUnit.MINUTES);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      throw new IOException("Interrupted while waiting for reader thread to finish", e);
+      throw new IOException("Interrupted while waiting for fragment creation thread to finish", e);
     } catch (ExecutionException | TimeoutException e) {
-      throw new IOException("Failed to abort the reader thread", e);
+      throw new IOException("Failed to abort the fragment creation thread", e);
     }
     close();
   }
 
   @Override
   public void close() throws IOException {
-    arrowWriter.close();
+    batchBuffer.close();
   }
 
   public static class WriterFactory implements DataWriterFactory {
@@ -98,16 +99,30 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
 
     @Override
     public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
-      int batch_size = SparkOptions.getBatchSize(config);
-      LanceArrowWriter arrowWriter = LanceDatasetAdapter.getArrowWriter(schema, batch_size);
+      int batchSize = SparkOptions.getBatchSize(config);
+      boolean useQueuedBuffer = SparkOptions.useQueuedWriteBuffer(config);
       WriteParams params = SparkOptions.genWriteParamsFromConfig(config);
+
+      // Select buffer type based on configuration
+      ArrowBatchProducer batchBuffer;
+      if (useQueuedBuffer) {
+        int queueDepth = SparkOptions.getQueueDepth(config);
+        batchBuffer =
+            LanceDatasetAdapter.getQueuedArrowBatchWriteBuffer(schema, batchSize, queueDepth);
+      } else {
+        batchBuffer = LanceDatasetAdapter.getArrowBatchWriteBuffer(schema, batchSize);
+      }
+
+      // Create fragment in background thread
       Callable<List<FragmentMetadata>> fragmentCreator =
-          () -> LanceDatasetAdapter.createFragment(config.getDatasetUri(), arrowWriter, params);
+          () ->
+              LanceDatasetAdapter.createFragment(
+                  config.getDatasetUri(), batchBuffer.asArrowReader(), params);
       FutureTask<List<FragmentMetadata>> fragmentCreationTask = new FutureTask<>(fragmentCreator);
       Thread fragmentCreationThread = new Thread(fragmentCreationTask);
       fragmentCreationThread.start();
 
-      return new LanceDataWriter(arrowWriter, fragmentCreationTask, fragmentCreationThread);
+      return new LanceDataWriter(batchBuffer, fragmentCreationTask, fragmentCreationThread);
     }
   }
 }

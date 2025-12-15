@@ -35,7 +35,8 @@ import org.lance.spark.LanceConfig;
 import org.lance.spark.SparkOptions;
 import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.utils.Optional;
-import org.lance.spark.write.LanceArrowWriter;
+import org.lance.spark.write.ArrowBatchWriteBuffer;
+import org.lance.spark.write.QueuedArrowBatchWriteBuffer;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
@@ -254,12 +255,23 @@ public class LanceDatasetAdapter {
     }
   }
 
-  public static LanceArrowWriter getArrowWriter(StructType sparkSchema, int batchSize) {
-    return new LanceArrowWriter(
+  public static ArrowBatchWriteBuffer getArrowBatchWriteBuffer(
+      StructType sparkSchema, int batchSize) {
+    return new ArrowBatchWriteBuffer(
         allocator,
         LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false, false),
         sparkSchema,
         batchSize);
+  }
+
+  public static QueuedArrowBatchWriteBuffer getQueuedArrowBatchWriteBuffer(
+      StructType sparkSchema, int batchSize, int queueDepth) {
+    return new QueuedArrowBatchWriteBuffer(
+        allocator,
+        LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false, false),
+        sparkSchema,
+        batchSize,
+        queueDepth);
   }
 
   public static List<FragmentMetadata> createFragment(

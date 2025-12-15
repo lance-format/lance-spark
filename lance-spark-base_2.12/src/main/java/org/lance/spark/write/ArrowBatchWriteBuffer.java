@@ -25,10 +25,17 @@ import javax.annotation.concurrent.GuardedBy;
 import java.io.IOException;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 
-/** A custom arrow reader that supports writes Spark internal rows while reading data in batches. */
-public class LanceArrowWriter extends ArrowReader {
+/**
+ * Buffers Spark rows into Arrow batches for consumption by Lance fragment creation.
+ *
+ * <p>This class bridges the producer (Spark thread writing rows) and consumer (Lance native code
+ * pulling batches via ArrowReader interface). It uses semaphores to synchronize between the two
+ * threads - the producer blocks until the consumer is ready for more data, and vice versa.
+ *
+ * @see QueuedArrowBatchWriteBuffer for a queue-based alternative with better pipelining
+ */
+public class ArrowBatchWriteBuffer extends ArrowReader implements ArrowBatchProducer {
   private final Schema schema;
   private final StructType sparkSchema;
   private final int batchSize;
@@ -36,13 +43,12 @@ public class LanceArrowWriter extends ArrowReader {
   @GuardedBy("monitor")
   private volatile boolean finished = false;
 
-  private final AtomicLong totalBytesRead = new AtomicLong();
   private org.lance.spark.arrow.LanceArrowWriter arrowWriter = null;
   private final AtomicInteger count = new AtomicInteger(0);
   private final Semaphore writeToken;
   private final Semaphore loadToken;
 
-  public LanceArrowWriter(
+  public ArrowBatchWriteBuffer(
       BufferAllocator allocator, Schema schema, StructType sparkSchema, int batchSize) {
     super(allocator);
     Preconditions.checkNotNull(schema);
@@ -54,12 +60,16 @@ public class LanceArrowWriter extends ArrowReader {
     this.loadToken = new Semaphore(0);
   }
 
-  void write(InternalRow row) {
+  @Override
+  public void write(InternalRow row) {
     Preconditions.checkNotNull(row);
     try {
-      // wait util prepareLoadNextBatch to release write token,
+      // wait util prepareLoadNextBatch to release write token
       writeToken.acquire();
+
+      // Write to Arrow buffer
       arrowWriter.write(row);
+
       if (count.incrementAndGet() == batchSize) {
         // notify loadNextBatch to take the batch
         loadToken.release();
@@ -69,9 +79,15 @@ public class LanceArrowWriter extends ArrowReader {
     }
   }
 
-  void setFinished() {
+  @Override
+  public void setFinished() {
     finished = true;
     loadToken.release();
+  }
+
+  @Override
+  public ArrowReader asArrowReader() {
+    return this;
   }
 
   @Override
@@ -91,9 +107,13 @@ public class LanceArrowWriter extends ArrowReader {
       if (finished && count.get() == 0) {
         return false;
       }
-      // wait util batch if full or finished
+
+      // wait util batch is full or finished
       loadToken.acquire();
+
+      // Finish the batch (flush Arrow vectors)
       arrowWriter.finish();
+
       if (!finished) {
         count.set(0);
         return true;

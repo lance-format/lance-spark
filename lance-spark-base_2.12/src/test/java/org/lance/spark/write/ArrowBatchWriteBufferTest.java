@@ -34,7 +34,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-public class LanceArrowWriterTest {
+public class ArrowBatchWriteBufferTest {
   @Test
   public void test() throws Exception {
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
@@ -53,8 +53,8 @@ public class LanceArrowWriterTest {
 
       final int totalRows = 125;
       final int batchSize = 34;
-      final LanceArrowWriter arrowWriter =
-          new LanceArrowWriter(allocator, schema, sparkSchema, batchSize);
+      final ArrowBatchWriteBuffer batchBuffer =
+          new ArrowBatchWriteBuffer(allocator, schema, sparkSchema, batchSize);
 
       AtomicInteger rowsWritten = new AtomicInteger(0);
       AtomicInteger rowsRead = new AtomicInteger(0);
@@ -67,9 +67,9 @@ public class LanceArrowWriterTest {
                   for (int i = 0; i < totalRows; i++) {
                     InternalRow row =
                         new GenericInternalRow(new Object[] {rowsWritten.incrementAndGet()});
-                    arrowWriter.write(row);
+                    batchBuffer.write(row);
                   }
-                  arrowWriter.setFinished();
+                  batchBuffer.setFinished();
                 } catch (Exception e) {
                   e.printStackTrace();
                   throw e;
@@ -80,8 +80,8 @@ public class LanceArrowWriterTest {
           new Thread(
               () -> {
                 try {
-                  while (arrowWriter.loadNextBatch()) {
-                    VectorSchemaRoot root = arrowWriter.getVectorSchemaRoot();
+                  while (batchBuffer.loadNextBatch()) {
+                    VectorSchemaRoot root = batchBuffer.getVectorSchemaRoot();
                     int rowCount = root.getRowCount();
                     rowsRead.addAndGet(rowCount);
                     try (ArrowRecordBatch recordBatch = new VectorUnloader(root).getRecordBatch()) {
@@ -104,7 +104,7 @@ public class LanceArrowWriterTest {
       readerThread.join();
       assertEquals(totalRows, rowsWritten.get());
       assertEquals(totalRows, rowsRead.get());
-      arrowWriter.close();
+      batchBuffer.close();
     }
   }
 }

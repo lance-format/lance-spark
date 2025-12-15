@@ -34,6 +34,8 @@ public class SparkOptions {
   private static final String batch_size = "batch_size";
   private static final String topN_push_down = "topN_push_down";
   private static final String data_storage_version = "data_storage_version";
+  private static final String use_queued_write_buffer = "use_queued_write_buffer";
+  private static final String queue_depth = "queue_depth";
 
   public static ReadOptions genReadOptionFromConfig(LanceConfig config) {
     ReadOptions.Builder builder = new ReadOptions.Builder();
@@ -96,5 +98,29 @@ public class SparkOptions {
 
   public static boolean overwrite(LanceConfig config) {
     return config.getOptions().getOrDefault(write_mode, "append").equalsIgnoreCase("overwrite");
+  }
+
+  /**
+   * Returns whether to use the queued buffer for better pipelining. Defaults to false.
+   *
+   * @param config the Lance configuration
+   * @return true if queued buffer should be used
+   */
+  public static boolean useQueuedWriteBuffer(LanceConfig config) {
+    return Boolean.parseBoolean(config.getOptions().getOrDefault(use_queued_write_buffer, "false"));
+  }
+
+  /**
+   * Returns the queue depth for the queued writer. Defaults to 8.
+   *
+   * @param config the Lance configuration
+   * @return the queue depth
+   */
+  public static int getQueueDepth(LanceConfig config) {
+    Map<String, String> options = config.getOptions();
+    if (options.containsKey(queue_depth)) {
+      return Integer.parseInt(options.get(queue_depth));
+    }
+    return 8;
   }
 }
