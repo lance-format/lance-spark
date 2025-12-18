@@ -361,8 +361,8 @@ public abstract class BaseSparkConnectorReadTest {
     List<Row> selectRows = selectResult.collectAsList();
     assertEquals(1, selectRows.size());
     // The array should have exactly 3 elements
-    scala.collection.mutable.WrappedArray<?> arr =
-        (scala.collection.mutable.WrappedArray<?>) selectRows.get(0).get(0);
+    // Use scala.collection.Seq for Scala 2.12/2.13 compatibility
+    scala.collection.Seq<?> arr = (scala.collection.Seq<?>) selectRows.get(0).get(0);
     assertEquals(3, arr.size());
   }
 }
