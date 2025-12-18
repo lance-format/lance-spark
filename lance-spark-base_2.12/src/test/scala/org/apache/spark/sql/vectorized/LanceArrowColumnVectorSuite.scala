@@ -603,4 +603,72 @@ class LanceArrowColumnVectorSuite extends AnyFunSuite {
     columnVector.close()
     allocator.close()
   }
+
+  test("nested struct with array") {
+    val allocator = ArrowUtils.rootAllocator.newChildAllocator("nested_struct", 0, Long.MaxValue)
+    // Schema: features: struct<feature_1: struct<feature_version: int, feature_values: array<double>>>
+    val innerSchema = new StructType()
+      .add("feature_version", IntegerType)
+      .add("feature_values", ArrayType(DoubleType))
+    val outerSchema = new StructType().add("feature_1", innerSchema)
+
+    val vector = LanceArrowUtils.toArrowField("features", outerSchema, nullable = true, null)
+      .createVector(allocator).asInstanceOf[StructVector]
+    vector.allocateNew()
+
+    // Get the inner struct vector (feature_1)
+    val feature1Vector = vector.getChildByOrdinal(0).asInstanceOf[StructVector]
+    val versionVector = feature1Vector.getChildByOrdinal(0).asInstanceOf[IntVector]
+    val valuesVector = feature1Vector.getChildByOrdinal(1).asInstanceOf[ListVector]
+    val valuesDataVector = valuesVector.getDataVector.asInstanceOf[Float8Vector]
+
+    // Row 0: feature_1: {feature_version: 1, feature_values: [0.5, 0.8, 0.3]}
+    vector.setIndexDefined(0)
+    feature1Vector.setIndexDefined(0)
+    versionVector.setSafe(0, 1)
+    valuesVector.startNewValue(0)
+    valuesDataVector.setSafe(0, 0.5)
+    valuesDataVector.setSafe(1, 0.8)
+    valuesDataVector.setSafe(2, 0.3)
+    valuesVector.endValue(0, 3)
+
+    // Row 1: feature_1: {feature_version: 2, feature_values: [0.9, 0.7]}
+    vector.setIndexDefined(1)
+    feature1Vector.setIndexDefined(1)
+    versionVector.setSafe(1, 2)
+    valuesVector.startNewValue(1)
+    valuesDataVector.setSafe(3, 0.9)
+    valuesDataVector.setSafe(4, 0.7)
+    valuesVector.endValue(1, 2)
+
+    valuesDataVector.setValueCount(5)
+    versionVector.setValueCount(2)
+    feature1Vector.setValueCount(2)
+    vector.setValueCount(2)
+
+    val columnVector = new LanceArrowColumnVector(vector)
+    assert(columnVector.dataType === outerSchema)
+
+    // Access nested struct: features.feature_1
+    val row0 = columnVector.getStruct(0)
+    val feature1Row0 = row0.getStruct(0, 2) // 2 fields in inner struct
+
+    // Access array: features.feature_1.feature_values
+    val arrayRow0 = feature1Row0.getArray(1)
+    assert(arrayRow0.numElements() === 3)
+    assert(arrayRow0.getDouble(0) === 0.5)
+    assert(arrayRow0.getDouble(1) === 0.8)
+    assert(arrayRow0.getDouble(2) === 0.3)
+
+    // Row 1
+    val row1 = columnVector.getStruct(1)
+    val feature1Row1 = row1.getStruct(0, 2) // 2 fields in inner struct
+    val arrayRow1 = feature1Row1.getArray(1)
+    assert(arrayRow1.numElements() === 2)
+    assert(arrayRow1.getDouble(0) === 0.9)
+    assert(arrayRow1.getDouble(1) === 0.7)
+
+    columnVector.close()
+    allocator.close()
+  }
 }
