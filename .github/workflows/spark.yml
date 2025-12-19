@@ -80,8 +80,7 @@ jobs:
   test:
     name: Test Spark ${{ matrix.spark-version }} / Scala ${{ matrix.scala-version }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    needs: [lint, install]
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
