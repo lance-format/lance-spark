@@ -23,7 +23,6 @@ import org.lance.namespace.model.ListTablesResponse;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.SchemaConverter;
 
-import org.apache.arrow.memory.BufferAllocator;
 import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
@@ -89,7 +88,6 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
   private Optional<List<String>> parentPrefix;
   private LanceSparkCatalogConfig catalogConfig;
   private Map<String, String> storageOptions;
-  private LanceRuntime runtime;
 
   @Override
   public void initialize(String name, CaseInsensitiveStringMap options) {
@@ -98,9 +96,6 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
 
     // Parse catalog configuration
     this.catalogConfig = LanceSparkCatalogConfig.from(this.storageOptions);
-
-    // Initialize runtime with driver allocator (catalog runs on driver)
-    this.runtime = new LanceRuntime(catalogConfig, false);
 
     if (!options.containsKey(CONFIG_IMPL)) {
       throw new IllegalArgumentException("Missing required configuration: " + CONFIG_IMPL);
@@ -121,8 +116,8 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
     // Initialize the namespace with proper configuration
     Map<String, String> namespaceOptions = new HashMap<>(options);
 
-    // Use the catalog's buffer allocator
-    this.namespace = LanceNamespace.connect(impl, namespaceOptions, getBufferAllocator());
+    // Use the global buffer allocator
+    this.namespace = LanceNamespace.connect(impl, namespaceOptions, LanceRuntime.allocator());
 
     // Handle extra level name configuration
     if (options.containsKey(CONFIG_EXTRA_LEVEL)) {
@@ -365,7 +360,7 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
     String location;
     try (Dataset dataset =
         Dataset.open()
-            .allocator(getBufferAllocator())
+            .allocator(LanceRuntime.allocator())
             .namespace(namespace)
             .tableId(tableId)
             .build()) {
@@ -396,15 +391,6 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
         .build();
   }
 
-  /**
-   * Returns the buffer allocator for this catalog.
-   *
-   * @return the buffer allocator to use
-   */
-  private BufferAllocator getBufferAllocator() {
-    return runtime.getBufferAllocator();
-  }
-
   @Override
   public Table createTable(
       Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
@@ -418,7 +404,7 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
 
     // Create dataset using namespace - WriteDatasetBuilder handles createEmptyTable internally
     Dataset.write()
-        .allocator(getBufferAllocator())
+        .allocator(LanceRuntime.allocator())
         .namespace(namespace)
         .tableId(tableIdList)
         .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false))
@@ -430,7 +416,7 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
     String location;
     try (Dataset dataset =
         Dataset.open()
-            .allocator(getBufferAllocator())
+            .allocator(LanceRuntime.allocator())
             .namespace(namespace)
             .tableId(tableIdList)
             .build()) {

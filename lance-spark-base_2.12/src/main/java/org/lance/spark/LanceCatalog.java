@@ -16,7 +16,6 @@ package org.lance.spark;
 import org.lance.Dataset;
 import org.lance.WriteParams;
 
-import org.apache.arrow.memory.BufferAllocator;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException;
@@ -44,7 +43,6 @@ public class LanceCatalog implements TableCatalog {
   private CaseInsensitiveStringMap options;
   private String catalogName = "lance";
   private LanceSparkCatalogConfig catalogConfig;
-  private LanceRuntime runtime;
 
   @Override
   public Identifier[] listTables(String[] namespace) throws NoSuchNamespaceException {
@@ -59,7 +57,7 @@ public class LanceCatalog implements TableCatalog {
     StructType schema;
     try (Dataset dataset =
         Dataset.open()
-            .allocator(getBufferAllocator())
+            .allocator(LanceRuntime.allocator())
             .uri(datasetUri)
             .readOptions(readOptions.toReadOptions())
             .build()) {
@@ -78,7 +76,7 @@ public class LanceCatalog implements TableCatalog {
     LanceSparkReadOptions readOptions = createReadOptions(datasetUri);
     try {
       Dataset.write()
-          .allocator(getBufferAllocator())
+          .allocator(LanceRuntime.allocator())
           .uri(datasetUri)
           .schema(LanceArrowUtils.toArrowSchema(schema, "UTC", true, false))
           .mode(WriteParams.WriteMode.CREATE)
@@ -115,8 +113,6 @@ public class LanceCatalog implements TableCatalog {
     this.options = options;
     // Parse catalog configuration
     this.catalogConfig = LanceSparkCatalogConfig.from(options.asCaseSensitiveMap());
-    // Initialize runtime with driver allocator (catalog runs on driver)
-    this.runtime = new LanceRuntime(catalogConfig, false);
   }
 
   /**
@@ -130,15 +126,6 @@ public class LanceCatalog implements TableCatalog {
         .datasetUri(datasetUri)
         .withCatalogDefaults(catalogConfig)
         .build();
-  }
-
-  /**
-   * Returns the buffer allocator for this catalog.
-   *
-   * @return the buffer allocator to use
-   */
-  private BufferAllocator getBufferAllocator() {
-    return runtime.getBufferAllocator();
   }
 
   @Override

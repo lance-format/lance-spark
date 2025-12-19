@@ -58,16 +58,22 @@ The following features require the Lance Spark SQL extension to be enabled:
 Configure Spark with the `LanceNamespaceSparkCatalog` by setting the appropriate Spark catalog implementation
 and namespace-specific options:
 
-| Parameter                                          | Type   | Required | Description                                                                                                                                |
-|----------------------------------------------------|--------|----------|--------------------------------------------------------------------------------------------------------------------------------------------|
-| `spark.sql.catalog.{name}`                         | String | ✓        | Set to `org.lance.spark.LanceNamespaceSparkCatalog`                                                                                        |
-| `spark.sql.catalog.{name}.impl`                    | String | ✓        | Namespace implementation, short name like `dir`, `rest`, `hive3`, `glue` or full Java implementation class                                 |
-| `spark.sql.catalog.{name}.driver_allocator_size`   | Long   | ✗        | Arrow allocator size in bytes for the driver. If not set, uses the global allocator.                                                       |
-| `spark.sql.catalog.{name}.executor_allocator_size` | Long   | ✗        | Arrow allocator size in bytes for executors. If not set, uses the global allocator.                                                        |
-| `spark.sql.catalog.{name}.storage.*`               | -      | ✗        | Lance IO storage options. See [Lance Object Store Guide](https://lance.org/guide/object_store) for all available options.                  |
-| `spark.sql.catalog.{name}.single_level_ns`         | String | ✗        | Virtual level for 2-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                                           |
-| `spark.sql.catalog.{name}.parent`                  | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                                       |
-| `spark.sql.catalog.{name}.parent_delimiter`        | String | ✗        | Delimiter for parent prefix (default: `$`). See [Note on Namespace Levels](#note-on-namespace-levels).                                     |
+| Parameter                                   | Type   | Required | Description                                                                                                                |
+|---------------------------------------------|--------|----------|----------------------------------------------------------------------------------------------------------------------------|
+| `spark.sql.catalog.{name}`                  | String | ✓        | Set to `org.lance.spark.LanceNamespaceSparkCatalog`                                                                        |
+| `spark.sql.catalog.{name}.impl`             | String | ✓        | Namespace implementation, short name like `dir`, `rest`, `hive3`, `glue` or full Java implementation class                 |
+| `spark.sql.catalog.{name}.storage.*`        | -      | ✗        | Lance IO storage options. See [Lance Object Store Guide](https://lance.org/guide/object_store) for all available options.  |
+| `spark.sql.catalog.{name}.single_level_ns`  | String | ✗        | Virtual level for 2-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                           |
+| `spark.sql.catalog.{name}.parent`           | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                       |
+| `spark.sql.catalog.{name}.parent_delimiter` | String | ✗        | Delimiter for parent prefix (default: `$`). See [Note on Namespace Levels](#note-on-namespace-levels).                     |
+
+### Arrow Allocator
+
+The Arrow buffer allocator size can be configured via environment variable:
+
+| Environment Variable    | Default          | Description                             |
+|-------------------------|------------------|-----------------------------------------|
+| `LANCE_ALLOCATOR_SIZE`  | `Long.MAX_VALUE` | Arrow allocator size in bytes (global). |
 
 ## Example Namespace Implementations
 

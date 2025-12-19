@@ -28,27 +28,15 @@ import java.util.Objects;
  *
  * <pre>{@code
  * LanceSparkCatalogConfig config = LanceSparkCatalogConfig.builder()
- *     .driverAllocatorSize(1024L * 1024 * 1024)
- *     .executorAllocatorSize(512L * 1024 * 1024)
  *     .storageOptions(options)
  *     .build();
  * }</pre>
  */
 public class LanceSparkCatalogConfig {
 
-  /** Catalog config key for driver allocator size. */
-  public static final String DRIVER_ALLOCATOR_SIZE_KEY = "driver_allocator_size";
-
-  /** Catalog config key for executor allocator size. */
-  public static final String EXECUTOR_ALLOCATOR_SIZE_KEY = "executor_allocator_size";
-
-  private final Long driverAllocatorSize;
-  private final Long executorAllocatorSize;
   private final Map<String, String> storageOptions;
 
   private LanceSparkCatalogConfig(Builder builder) {
-    this.driverAllocatorSize = builder.driverAllocatorSize;
-    this.executorAllocatorSize = builder.executorAllocatorSize;
     this.storageOptions = Collections.unmodifiableMap(new HashMap<>(builder.storageOptions));
   }
 
@@ -67,26 +55,6 @@ public class LanceSparkCatalogConfig {
     return builder().storageOptions(options).build();
   }
 
-  // ========== Getters ==========
-
-  /**
-   * Returns the driver allocator size in bytes.
-   *
-   * @return the driver allocator size, or null to use global allocator
-   */
-  public Long getDriverAllocatorSize() {
-    return driverAllocatorSize;
-  }
-
-  /**
-   * Returns the executor allocator size in bytes.
-   *
-   * @return the executor allocator size, or null to use global allocator
-   */
-  public Long getExecutorAllocatorSize() {
-    return executorAllocatorSize;
-  }
-
   /**
    * Returns the storage options for cloud storage access.
    *
@@ -100,45 +68,19 @@ public class LanceSparkCatalogConfig {
   public boolean equals(Object o) {
     if (o == null || getClass() != o.getClass()) return false;
     LanceSparkCatalogConfig that = (LanceSparkCatalogConfig) o;
-    return Objects.equals(driverAllocatorSize, that.driverAllocatorSize)
-        && Objects.equals(executorAllocatorSize, that.executorAllocatorSize)
-        && Objects.equals(storageOptions, that.storageOptions);
+    return Objects.equals(storageOptions, that.storageOptions);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(driverAllocatorSize, executorAllocatorSize, storageOptions);
+    return Objects.hash(storageOptions);
   }
 
   /** Builder for creating LanceSparkCatalogConfig instances. */
   public static class Builder {
-    private Long driverAllocatorSize;
-    private Long executorAllocatorSize;
     private Map<String, String> storageOptions = new HashMap<>();
 
     private Builder() {}
-
-    /**
-     * Sets the driver allocator size in bytes.
-     *
-     * @param driverAllocatorSize the size in bytes, or null to use global allocator
-     * @return this builder
-     */
-    public Builder driverAllocatorSize(Long driverAllocatorSize) {
-      this.driverAllocatorSize = driverAllocatorSize;
-      return this;
-    }
-
-    /**
-     * Sets the executor allocator size in bytes.
-     *
-     * @param executorAllocatorSize the size in bytes, or null to use global allocator
-     * @return this builder
-     */
-    public Builder executorAllocatorSize(Long executorAllocatorSize) {
-      this.executorAllocatorSize = executorAllocatorSize;
-      return this;
-    }
 
     /**
      * Sets the storage options for cloud storage access.
@@ -148,14 +90,6 @@ public class LanceSparkCatalogConfig {
      */
     public Builder storageOptions(Map<String, String> storageOptions) {
       this.storageOptions = new HashMap<>(storageOptions);
-      // Parse allocator sizes from options if present
-      if (storageOptions.containsKey(DRIVER_ALLOCATOR_SIZE_KEY)) {
-        this.driverAllocatorSize = Long.parseLong(storageOptions.get(DRIVER_ALLOCATOR_SIZE_KEY));
-      }
-      if (storageOptions.containsKey(EXECUTOR_ALLOCATOR_SIZE_KEY)) {
-        this.executorAllocatorSize =
-            Long.parseLong(storageOptions.get(EXECUTOR_ALLOCATOR_SIZE_KEY));
-      }
       return this;
     }
 
