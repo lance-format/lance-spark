@@ -7,32 +7,51 @@ The Spark Lance connector codebase is at [lancedb/lance-spark](https://github.co
 This connector is built using Maven. You can run the following make commands:
 
 ```shell
-# Build all
+# Install a specific Spark/Scala version (defaults: SPARK_VERSION=3.5, SCALA_VERSION=2.12)
+make install
+make install SPARK_VERSION=3.4 SCALA_VERSION=2.13
+
+# Run tests for a specific Spark/Scala version
+make test
+make test SPARK_VERSION=4.0 SCALA_VERSION=2.13
+
+# Build (lint + install) for a specific version
 make build
 
-# Clean all
+# Build the runtime bundle for a specific version
+make bundle
+make bundle SPARK_VERSION=3.5 SCALA_VERSION=2.13
+
+# Install all modules (without tests)
+make install-all
+
+# Run all tests
+make test-all
+
+# Clean a specific module
+make clean-module
+
+# Clean all modules
 make clean
 
-# Build Spark 3.5 Scala 2.12
-make build-35-212
-
-# Clean build of Spark 3.5 Scala 2.12
-make clean-35-212
-
-# Build the runtime bundle of Spark 3.5 Scala 2.12
-make bundle-35-212
+# Show all available commands
+make help
 ```
 
 ## Styling Guide
 
 We use checkstyle and spotless to lint the code.
 
-All the `make build` commands automatically perform `spotless:apply` to the code.
-
 To verify style, run:
 
 ```shell
 make lint
+```
+
+To auto-format the code, run:
+
+```shell
+make format
 ```
 
 ## Documentation

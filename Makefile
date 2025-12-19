@@ -10,97 +10,77 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.PHONY: build-34-212
-build-34-212:
-	./mvnw spotless:apply install -pl lance-spark-3.4_2.12 -am
+# Version parameters (can be overridden from command line)
+# Example: make install SPARK_VERSION=3.5 SCALA_VERSION=2.13
+SPARK_VERSION ?= 3.5
+SCALA_VERSION ?= 2.12
 
-.PHONY: build-34-213
-build-34-213:
-	./mvnw spotless:apply install -pl lance-spark-3.4_2.13 -am
+# Derived module names
+MODULE := lance-spark-$(SPARK_VERSION)_$(SCALA_VERSION)
+BUNDLE_MODULE := lance-spark-bundle-$(SPARK_VERSION)_$(SCALA_VERSION)
+BASE_MODULE := lance-spark-base_$(SCALA_VERSION)
 
-.PHONY: build-35-212
-build-35-212:
-	./mvnw spotless:apply install -pl lance-spark-3.5_2.12 -am
+# =============================================================================
+# Parameterized commands (use SPARK_VERSION and SCALA_VERSION)
+# =============================================================================
 
-.PHONY: build-35-213
-build-35-213:
-	./mvnw spotless:apply install -pl lance-spark-3.5_2.13 -am
+.PHONY: install
+install:
+	./mvnw install -pl $(MODULE) -am -DskipTests
 
-.PHONY: build-40-212
-build-40-212:
-	./mvnw spotless:apply install -pl lance-spark-4.0_2.12 -am
-
-.PHONY: build-40-213
-build-40-213:
-	./mvnw spotless:apply install -pl lance-spark-4.0_2.13 -am
-
-# Clean targets for each Spark/Scala combination
-.PHONY: clean-34-212
-clean-34-212:
-	./mvnw clean -pl lance-spark-3.4_2.12
-
-.PHONY: clean-34-213
-clean-34-213:
-	./mvnw clean -pl lance-spark-3.4_2.13
-
-.PHONY: clean-35-212
-clean-35-212:
-	./mvnw clean -pl lance-spark-3.5_2.12
-
-.PHONY: clean-35-213
-clean-35-213:
-	./mvnw clean -pl lance-spark-3.5_2.13
-
-.PHONY: clean-40-212
-clean-40-212:
-	./mvnw clean -pl lance-spark-4.0_2.12
-
-.PHONY: clean-40-213
-clean-40-213:
-	./mvnw clean -pl lance-spark-4.0_2.13
-
-.PHONY: bundle-34-212
-bundle-34-212:
-	./mvnw install -pl lance-spark-bundle-3.4_2.12 -am
-
-.PHONY: bundle-34-213
-bundle-34-213:
-	./mvnw install -pl lance-spark-bundle-3.4_2.13 -am
-
-.PHONY: bundle-35-212
-bundle-35-212:
-	./mvnw install -pl lance-spark-bundle-3.5_2.12 -am
-
-.PHONY: bundle-35-213
-bundle-35-213:
-	./mvnw install -pl lance-spark-bundle-3.5_2.13 -am
-
-.PHONY: bundle-40-212
-bundle-40-212:
-	./mvnw install -pl lance-spark-bundle-4.0_2.12 -am
-
-.PHONY: bundle-40-213
-bundle-40-213:
-	./mvnw install -pl lance-spark-bundle-4.0_2.13 -am
+.PHONY: test
+test:
+	./mvnw test -pl $(MODULE)
 
 .PHONY: build
-build:
-	./mvnw spotless:apply install
+build: lint install
+
+.PHONY: clean-module
+clean-module:
+	./mvnw clean -pl $(MODULE)
+
+.PHONY: bundle
+bundle:
+	./mvnw install -pl $(BUNDLE_MODULE) -am -DskipTests
+
+.PHONY: install-base
+install-base:
+	./mvnw install -pl $(BASE_MODULE) -am -DskipTests
+
+# =============================================================================
+# Global commands (all modules)
+# =============================================================================
+
+.PHONY: lint
+lint:
+	./mvnw checkstyle:check spotless:check
+
+.PHONY: format
+format:
+	./mvnw spotless:apply
+
+.PHONY: install-all
+install-all:
+	./mvnw install -DskipTests
+
+.PHONY: test-all
+test-all:
+	./mvnw test
+
+.PHONY: build-all
+build-all: lint install-all
 
 .PHONY: clean
 clean:
 	./mvnw clean
 
-.PHONY: build-base-212
-build-base:
-	./mvnw spotless:apply install -pl lance-spark-base_2.12 -am
-
-.PHONY: build-base-213
-build-base:
-	./mvnw spotless:apply install -pl lance-spark-base_2.13 -am
+# =============================================================================
+# Docker commands
+# =============================================================================
 
 .PHONY: docker-build
-docker-build: bundle-35-212
+docker-build:
+	$(MAKE) bundle SPARK_VERSION=3.5 SCALA_VERSION=2.12
 	cp lance-spark-bundle-3.5_2.12/target/lance-spark-bundle-3.5_2.12-*.jar docker/
 	cd docker && docker compose build --no-cache spark-lance
 
@@ -116,10 +96,46 @@ docker-shell:
 docker-down:
 	cd docker && docker-compose down
 
+# =============================================================================
+# Documentation
+# =============================================================================
+
 .PHONY: serve-docs
 serve-docs:
 	cd docs && uv pip install -r requirements.txt && uv run mkdocs serve
 
-.PHONY: lint
-lint:
-	./mvnw checkstyle:check spotless:check
+# =============================================================================
+# Help
+# =============================================================================
+
+.PHONY: help
+help:
+	@echo "Lance Spark Makefile"
+	@echo ""
+	@echo "Version parameters (defaults: SPARK_VERSION=3.5, SCALA_VERSION=2.12):"
+	@echo "  Example: make install SPARK_VERSION=3.4 SCALA_VERSION=2.13"
+	@echo ""
+	@echo "Parameterized commands (use SPARK_VERSION and SCALA_VERSION):"
+	@echo "  install        - Install module without tests"
+	@echo "  test           - Run tests for module"
+	@echo "  build          - Lint and install module"
+	@echo "  clean-module   - Clean module"
+	@echo "  bundle         - Build bundle module"
+	@echo "  install-base   - Install base module"
+	@echo ""
+	@echo "Global commands (all modules):"
+	@echo "  lint           - Check code style (checkstyle + spotless)"
+	@echo "  format         - Apply spotless formatting"
+	@echo "  install-all    - Install all modules without tests"
+	@echo "  test-all       - Run all tests"
+	@echo "  build-all      - Lint and install all modules"
+	@echo "  clean          - Clean all modules"
+	@echo ""
+	@echo "Docker commands:"
+	@echo "  docker-build   - Build docker image with Spark 3.5/Scala 2.12 bundle"
+	@echo "  docker-up      - Start docker containers"
+	@echo "  docker-shell   - Open shell in spark-lance container"
+	@echo "  docker-down    - Stop docker containers"
+	@echo ""
+	@echo "Documentation:"
+	@echo "  serve-docs     - Serve documentation locally"
