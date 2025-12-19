@@ -13,8 +13,8 @@
  */
 package org.lance.spark.write;
 
-import org.lance.spark.LanceConfig;
 import org.lance.spark.LanceDataSource;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 
 import org.apache.spark.sql.Dataset;
@@ -84,7 +84,8 @@ public class SparkConnectorWriteSemaphoreTest {
         .write()
         .format(LanceDataSource.name)
         .option(
-            LanceConfig.CONFIG_DATASET_URI, TestUtils.getDatasetUri(dbPath.toString(), datasetName))
+            LanceSparkReadOptions.CONFIG_DATASET_URI,
+            TestUtils.getDatasetUri(dbPath.toString(), datasetName))
         .option("use_queued_write_buffer", "false") // Explicitly use semaphore-based writer
         .save();
 
@@ -93,7 +94,7 @@ public class SparkConnectorWriteSemaphoreTest {
             .read()
             .format("lance")
             .option(
-                LanceConfig.CONFIG_DATASET_URI,
+                LanceSparkReadOptions.CONFIG_DATASET_URI,
                 TestUtils.getDatasetUri(dbPath.toString(), datasetName))
             .load();
 
@@ -111,7 +112,8 @@ public class SparkConnectorWriteSemaphoreTest {
         .write()
         .format(LanceDataSource.name)
         .option(
-            LanceConfig.CONFIG_DATASET_URI, TestUtils.getDatasetUri(dbPath.toString(), datasetName))
+            LanceSparkReadOptions.CONFIG_DATASET_URI,
+            TestUtils.getDatasetUri(dbPath.toString(), datasetName))
         .option("use_queued_write_buffer", "false")
         .save();
 
@@ -120,7 +122,8 @@ public class SparkConnectorWriteSemaphoreTest {
         .write()
         .format(LanceDataSource.name)
         .option(
-            LanceConfig.CONFIG_DATASET_URI, TestUtils.getDatasetUri(dbPath.toString(), datasetName))
+            LanceSparkReadOptions.CONFIG_DATASET_URI,
+            TestUtils.getDatasetUri(dbPath.toString(), datasetName))
         .option("use_queued_write_buffer", "false")
         .mode("append")
         .save();
@@ -130,7 +133,7 @@ public class SparkConnectorWriteSemaphoreTest {
             .read()
             .format("lance")
             .option(
-                LanceConfig.CONFIG_DATASET_URI,
+                LanceSparkReadOptions.CONFIG_DATASET_URI,
                 TestUtils.getDatasetUri(dbPath.toString(), datasetName))
             .load();
 

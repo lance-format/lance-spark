@@ -151,3 +151,75 @@ These virtual columns can be used for:
     Dataset<Row> largeBlobs = documentsDF.filter("content__blob_size > 1000000");
     largeBlobs.select("id", "title", "content__blob_size").show();
     ```
+
+## Read Options
+
+These options control how data is read from Lance datasets. They can be set using the `.option()` method when reading data.
+
+| Option                | Type    | Default | Description                                                                                                       |
+|-----------------------|---------|---------|-------------------------------------------------------------------------------------------------------------------|
+| `batch_size`          | Integer | `512`   | Number of rows to read per batch during scanning. Larger values may improve throughput but increase memory usage. |
+| `version`             | Integer | Latest  | Specific dataset version to read. If not specified, reads the latest version.                                     |
+| `block_size`          | Integer | -       | Block size in bytes for reading data.                                                                             |
+| `index_cache_size`    | Integer | -       | Size of the index cache in number of entries.                                                                     |
+| `metadata_cache_size` | Integer | -       | Size of the metadata cache in number of entries.                                                                  |
+| `pushDownFilters`     | Boolean | `true`  | Whether to push down filter predicates to the Lance reader for optimized scanning.                                |
+| `topN_push_down`      | Boolean | `true`  | Whether to push down TopN (ORDER BY ... LIMIT) operations to Lance for optimized sorting.                         |
+
+### Example: Reading with Options
+
+=== "SQL"
+    ```sql
+    -- Read a specific version using table options
+    SELECT * FROM lance.`/path/to/dataset.lance` VERSION AS OF 10;
+    ```
+
+=== "Python"
+    ```python
+    # Reading with options
+    df = spark.read \
+        .format("lance") \
+        .option("batch_size", "1024") \
+        .option("version", "5") \
+        .load("/path/to/dataset.lance")
+    ```
+
+=== "Scala"
+    ```scala
+    // Reading with options
+    val df = spark.read
+        .format("lance")
+        .option("batch_size", "1024")
+        .option("version", "5")
+        .load("/path/to/dataset.lance")
+    ```
+
+=== "Java"
+    ```java
+    // Reading with options
+    Dataset<Row> df = spark.read()
+        .format("lance")
+        .option("batch_size", "1024")
+        .option("version", "5")
+        .load("/path/to/dataset.lance");
+    ```
+
+### Example: Tuning Batch Size for Performance
+
+=== "Python"
+    ```python
+    # Larger batch size for better throughput on large scans
+    df = spark.read \
+        .format("lance") \
+        .option("batch_size", "4096") \
+        .load("/path/to/dataset.lance")
+    ```
+
+=== "Scala"
+    ```scala
+    // Larger batch size for better throughput on large scans
+    val df = spark.read
+        .format("lance")
+        .option("batch_size", "4096")
+        .load("/path/to/dataset.lance")
+    ```

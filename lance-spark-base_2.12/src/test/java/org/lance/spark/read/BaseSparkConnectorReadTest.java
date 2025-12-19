@@ -13,8 +13,8 @@
  */
 package org.lance.spark.read;
 
-import org.lance.spark.LanceConfig;
 import org.lance.spark.LanceDataSource;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 
 import org.apache.spark.sql.Dataset;
@@ -55,7 +55,7 @@ public abstract class BaseSparkConnectorReadTest {
             .read()
             .format(LanceDataSource.name)
             .option(
-                LanceConfig.CONFIG_DATASET_URI,
+                LanceSparkReadOptions.CONFIG_DATASET_URI,
                 TestUtils.getDatasetUri(dbPath, TestUtils.TestTable1Config.datasetName))
             .load();
     data.createOrReplaceTempView("test_dataset1");
@@ -193,17 +193,15 @@ public abstract class BaseSparkConnectorReadTest {
 
   @Test
   public void readWithInvalidBatchSizeFails() {
-    Dataset<Row> df =
-        spark
-            .read()
-            .format(LanceDataSource.name)
-            .option(
-                LanceConfig.CONFIG_DATASET_URI,
-                TestUtils.getDatasetUri(dbPath, TestUtils.TestTable1Config.datasetName))
-            .option("batch_size", "-1")
-            .load();
     try {
-      df.collect();
+      spark
+          .read()
+          .format(LanceDataSource.name)
+          .option(
+              LanceSparkReadOptions.CONFIG_DATASET_URI,
+              TestUtils.getDatasetUri(dbPath, TestUtils.TestTable1Config.datasetName))
+          .option("batch_size", "-1")
+          .load();
       fail("Expected exception for invalid batch_size");
     } catch (Exception e) {
       Throwable cause = e;

@@ -250,3 +250,87 @@ subsequent writes will automatically use `LargeVarCharVector`. No additional con
 
     df.writeTo("articles").append();
     ```
+
+## Write Options
+
+These options control how data is written to Lance datasets. They can be set using the `.option()` method when writing data.
+
+| Option                   | Type    | Default  | Description                                                                          |
+|--------------------------|---------|----------|--------------------------------------------------------------------------------------|
+| `write_mode`             | String  | `append` | Write mode: `append` to add to existing data, `overwrite` to replace existing data. |
+| `max_row_per_file`       | Integer | -        | Maximum number of rows per Lance file.                                               |
+| `max_rows_per_group`     | Integer | -        | Maximum number of rows per row group within a file.                                  |
+| `max_bytes_per_file`     | Long    | -        | Maximum size in bytes per Lance file.                                                |
+| `data_storage_version`   | String  | -        | Lance file format version: `LEGACY` or `STABLE`.                                     |
+| `batch_size`             | Integer | `512`    | Number of rows per batch during writing.                                             |
+| `use_queued_write_buffer`| Boolean | `false`  | Use pipelined write buffer for improved throughput.                                  |
+| `queue_depth`            | Integer | `8`      | Queue depth for pipelined writes (only used when `use_queued_write_buffer=true`).    |
+
+### Example: Controlling File Size
+
+=== "Python"
+    ```python
+    df.write \
+        .format("lance") \
+        .option("max_row_per_file", "100000") \
+        .option("max_rows_per_group", "10000") \
+        .save("/path/to/output.lance")
+    ```
+
+=== "Scala"
+    ```scala
+    df.write
+        .format("lance")
+        .option("max_row_per_file", "100000")
+        .option("max_rows_per_group", "10000")
+        .save("/path/to/output.lance")
+    ```
+
+=== "Java"
+    ```java
+    df.write()
+        .format("lance")
+        .option("max_row_per_file", "100000")
+        .option("max_rows_per_group", "10000")
+        .save("/path/to/output.lance");
+    ```
+
+### Example: Using Stable Storage Format
+
+=== "Python"
+    ```python
+    df.write \
+        .format("lance") \
+        .option("data_storage_version", "STABLE") \
+        .save("/path/to/output.lance")
+    ```
+
+=== "Scala"
+    ```scala
+    df.write
+        .format("lance")
+        .option("data_storage_version", "STABLE")
+        .save("/path/to/output.lance")
+    ```
+
+### Example: Using Pipelined Writes
+
+=== "Python"
+    ```python
+    # Enable pipelined writes for improved throughput
+    df.write \
+        .format("lance") \
+        .option("use_queued_write_buffer", "true") \
+        .option("queue_depth", "4") \
+        .save("/path/to/output.lance")
+    ```
+
+=== "Scala"
+    ```scala
+    // Enable pipelined writes for improved throughput
+    df.write
+        .format("lance")
+        .option("use_queued_write_buffer", "true")
+        .option("queue_depth", "4")
+        .save("/path/to/output.lance")
+    ```

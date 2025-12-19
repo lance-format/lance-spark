@@ -21,9 +21,9 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
 import org.apache.spark.sql.catalyst.plans.logical.{NamedArgument, OptimizeOutputType}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.execution.datasources.v2.SerializeUtil.{decode, encode}
-import org.lance.compaction.{CompactionOptions, CompactionTask, RewriteResult}
-import org.lance.spark.{LanceConfig, LanceDataset}
-import org.lance.spark.internal.LanceDatasetAdapter
+import org.lance.Dataset
+import org.lance.compaction.{Compaction, CompactionOptions, CompactionTask, RewriteResult}
+import org.lance.spark.{LanceDataset, LanceRuntime, LanceSparkReadOptions}
 import org.objenesis.strategy.StdInstantiatorStrategy
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
@@ -69,10 +69,17 @@ case class OptimizeExec(
 
     // Build compaction options from arguments
     val options = buildOptions()
+    val readOptions = lanceDataset.readOptions()
 
     // Plan compaction tasks
-    val tasks =
-      LanceDatasetAdapter.planCompaction(lanceDataset.config(), options).getCompactionTasks
+    val tasks = {
+      val dataset = openDataset(readOptions)
+      try {
+        Compaction.planCompaction(dataset, options).getCompactionTasks
+      } finally {
+        dataset.close()
+      }
+    }
 
     // Need not to run compaction if there is no task
     if (tasks.isEmpty) {
@@ -81,7 +88,7 @@ case class OptimizeExec(
 
     // Run compaction tasks in parallel
     val rdd: org.apache.spark.rdd.RDD[OptimizeTaskExecutor] = session.sparkContext.parallelize(
-      tasks.asScala.toSeq.map(t => OptimizeTaskExecutor.create(lanceDataset.config(), t)),
+      tasks.asScala.toSeq.map(t => OptimizeTaskExecutor.create(readOptions, t)),
       tasks.size)
     val result = rdd.map(f => f.execute())
       .collect()
@@ -90,7 +97,14 @@ case class OptimizeExec(
       .asJava
 
     // Commit compaction results
-    val metrics = LanceDatasetAdapter.commitCompaction(lanceDataset.config(), result, options)
+    val metrics = {
+      val dataset = openDataset(readOptions)
+      try {
+        Compaction.commitCompaction(dataset, result, options)
+      } finally {
+        dataset.close()
+      }
+    }
 
     Seq(new GenericInternalRow(
       Array[Any](
@@ -99,20 +113,53 @@ case class OptimizeExec(
         metrics.getFilesRemoved,
         metrics.getFilesAdded)))
   }
+
+  private def openDataset(readOptions: LanceSparkReadOptions): Dataset = {
+    if (readOptions.hasNamespace) {
+      Dataset.open()
+        .allocator(LanceRuntime.allocator())
+        .namespace(readOptions.getNamespace)
+        .tableId(readOptions.getTableId)
+        .build()
+    } else {
+      Dataset.open()
+        .allocator(LanceRuntime.allocator())
+        .uri(readOptions.getDatasetUri)
+        .readOptions(readOptions.toReadOptions())
+        .build()
+    }
+  }
 }
 
 case class OptimizeTaskExecutor(lanceConf: String, task: String) extends Serializable {
   def execute(): String = {
-    val res = LanceDatasetAdapter.executeCompaction(
-      decode[LanceConfig](lanceConf),
-      decode[CompactionTask](task))
-    encode(res)
+    val readOptions = decode[LanceSparkReadOptions](lanceConf)
+    val compactionTask = decode[CompactionTask](task)
+    val dataset = if (readOptions.hasNamespace) {
+      Dataset.open()
+        .allocator(LanceRuntime.allocator())
+        .namespace(readOptions.getNamespace)
+        .tableId(readOptions.getTableId)
+        .build()
+    } else {
+      Dataset.open()
+        .allocator(LanceRuntime.allocator())
+        .uri(readOptions.getDatasetUri)
+        .readOptions(readOptions.toReadOptions())
+        .build()
+    }
+    try {
+      val res = compactionTask.execute(dataset)
+      encode(res)
+    } finally {
+      dataset.close()
+    }
   }
 }
 
 object OptimizeTaskExecutor {
-  def create(lanceConf: LanceConfig, task: CompactionTask): OptimizeTaskExecutor = {
-    OptimizeTaskExecutor(encode(lanceConf), encode(task))
+  def create(readOptions: LanceSparkReadOptions, task: CompactionTask): OptimizeTaskExecutor = {
+    OptimizeTaskExecutor(encode(readOptions), encode(task))
   }
 }
 

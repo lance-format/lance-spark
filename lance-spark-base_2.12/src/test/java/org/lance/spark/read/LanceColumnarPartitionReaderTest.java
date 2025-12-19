@@ -36,7 +36,7 @@ public class LanceColumnarPartitionReaderTest {
             TestUtils.TestTable1Config.schema,
             0,
             split,
-            TestUtils.TestTable1Config.lanceConfig,
+            TestUtils.TestTable1Config.readOptions,
             Optional.empty(),
             "test");
     try (LanceColumnarPartitionReader reader = new LanceColumnarPartitionReader(partition)) {
@@ -71,7 +71,7 @@ public class LanceColumnarPartitionReaderTest {
             TestUtils.TestTable1Config.schema,
             0,
             split,
-            TestUtils.TestTable1Config.lanceConfig,
+            TestUtils.TestTable1Config.readOptions,
             Optional.empty(),
             Optional.of(1),
             Optional.of(1),
@@ -112,7 +112,7 @@ public class LanceColumnarPartitionReaderTest {
             TestUtils.TestTable1Config.schema,
             0,
             split,
-            TestUtils.TestTable1Config.lanceConfig,
+            TestUtils.TestTable1Config.readOptions,
             Optional.empty(),
             Optional.of(1),
             Optional.empty(),

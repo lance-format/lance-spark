@@ -13,14 +13,19 @@
  */
 package org.lance.spark.write;
 
+import org.lance.Dataset;
+import org.lance.Fragment;
 import org.lance.FragmentMetadata;
+import org.lance.ReadOptions;
 import org.lance.fragment.FragmentMergeResult;
-import org.lance.spark.LanceConfig;
+import org.lance.operation.Merge;
 import org.lance.spark.LanceDataset;
-import org.lance.spark.internal.LanceDatasetAdapter;
+import org.lance.spark.LanceRuntime;
+import org.lance.spark.LanceSparkWriteOptions;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
+import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import org.apache.arrow.vector.ipc.ArrowStreamWriter;
@@ -50,19 +55,19 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
   private static final Logger logger = LoggerFactory.getLogger(AddColumnsBackfillBatchWrite.class);
 
   private final StructType schema;
-  private final LanceConfig config;
+  private final LanceSparkWriteOptions writeOptions;
   private final List<String> newColumns;
 
   public AddColumnsBackfillBatchWrite(
-      StructType schema, LanceConfig config, List<String> newColumns) {
+      StructType schema, LanceSparkWriteOptions writeOptions, List<String> newColumns) {
     this.schema = schema;
-    this.config = config;
+    this.writeOptions = writeOptions;
     this.newColumns = newColumns;
   }
 
   @Override
   public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
-    return new AddColumnsWriterFactory(schema, config, newColumns);
+    return new AddColumnsWriterFactory(schema, writeOptions, newColumns);
   }
 
   @Override
@@ -101,16 +106,43 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
     // So the unmerged Fragments should be added back to the fragments list.
     Set<Integer> mergedFragmentIds =
         fragments.stream().map(FragmentMetadata::getId).collect(Collectors.toSet());
-    LanceDatasetAdapter.getFragments(config).stream()
-        .filter(f -> !mergedFragmentIds.contains(f.getId()))
-        .forEach(fragments::add);
 
-    Schema schema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false, false);
-    LanceDatasetAdapter.mergeFragments(config, fragments, schema);
+    // Get existing fragments
+    try (Dataset dataset = openDataset(writeOptions)) {
+      dataset.getFragments().stream()
+          .filter(f -> !mergedFragmentIds.contains(f.getId()))
+          .map(Fragment::metadata)
+          .forEach(fragments::add);
+    }
+
+    // Commit merge operation using transaction builder
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false, false);
+    try (Dataset dataset = openDataset(writeOptions)) {
+      Merge merge = Merge.builder().fragments(fragments).schema(arrowSchema).build();
+      dataset.newTransactionBuilder().operation(merge).build().commit();
+    }
+  }
+
+  private static Dataset openDataset(LanceSparkWriteOptions writeOptions) {
+    if (writeOptions.hasNamespace()) {
+      return Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .namespace(writeOptions.getNamespace())
+          .tableId(writeOptions.getTableId())
+          .build();
+    } else {
+      ReadOptions readOptions =
+          new ReadOptions.Builder().setStorageOptions(writeOptions.getStorageOptions()).build();
+      return Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .uri(writeOptions.getDatasetUri())
+          .readOptions(readOptions)
+          .build();
+    }
   }
 
   public static class AddColumnsWriter implements DataWriter<InternalRow> {
-    private final LanceConfig config;
+    private final LanceSparkWriteOptions writeOptions;
     private final StructType schema;
     private final int fragmentIdField;
     private final List<FragmentMetadata> fragments;
@@ -121,8 +153,9 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
     private VectorSchemaRoot data;
     private org.lance.spark.arrow.LanceArrowWriter writer = null;
 
-    public AddColumnsWriter(LanceConfig config, StructType schema, List<String> newColumns) {
-      this.config = config;
+    public AddColumnsWriter(
+        LanceSparkWriteOptions writeOptions, StructType schema, List<String> newColumns) {
+      this.writeOptions = writeOptions;
       this.schema = schema;
       this.fragmentIdField = schema.fieldIndex(LanceDataset.FRAGMENT_ID_COLUMN.name());
       this.fragments = new ArrayList<>();
@@ -160,10 +193,10 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
     }
 
     private void createWriter() {
+      BufferAllocator allocator = LanceRuntime.allocator();
       data =
           VectorSchemaRoot.create(
-              LanceArrowUtils.toArrowSchema(writerSchema, "UTC", false, false),
-              LanceDatasetAdapter.allocator);
+              LanceArrowUtils.toArrowSchema(writerSchema, "UTC", false, false), allocator);
 
       writer = org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(data, writerSchema);
     }
@@ -182,21 +215,24 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
 
       byte[] arrowData = out.toByteArray();
       ByteArrayInputStream in = new ByteArrayInputStream(arrowData);
+      BufferAllocator allocator = LanceRuntime.allocator();
 
-      try (ArrowStreamReader reader = new ArrowStreamReader(in, LanceDatasetAdapter.allocator);
-          ArrowArrayStream stream = ArrowArrayStream.allocateNew(LanceDatasetAdapter.allocator)) {
-        Data.exportArrayStream(LanceDatasetAdapter.allocator, reader, stream);
+      try (ArrowStreamReader reader = new ArrowStreamReader(in, allocator);
+          ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator)) {
+        Data.exportArrayStream(allocator, reader, stream);
 
-        FragmentMergeResult result =
-            LanceDatasetAdapter.mergeFragmentColumn(
-                config,
-                fragmentId,
-                stream,
-                LanceDataset.ROW_ADDRESS_COLUMN.name(),
-                LanceDataset.ROW_ADDRESS_COLUMN.name());
+        // Use Dataset to get the fragment and merge columns
+        try (Dataset dataset = openDataset(writeOptions)) {
+          Fragment fragment = new Fragment(dataset, fragmentId);
+          FragmentMergeResult result =
+              fragment.mergeColumns(
+                  stream,
+                  LanceDataset.ROW_ADDRESS_COLUMN.name(),
+                  LanceDataset.ROW_ADDRESS_COLUMN.name());
 
-        fragments.add(result.getFragmentMetadata());
-        mergedSchema = result.getSchema().asArrowSchema();
+          fragments.add(result.getFragmentMetadata());
+          mergedSchema = result.getSchema().asArrowSchema();
+        }
       } catch (Exception e) {
         throw new RuntimeException("Cannot read arrow stream.", e);
       }
@@ -222,21 +258,21 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
   }
 
   public static class AddColumnsWriterFactory implements DataWriterFactory {
-    private final LanceConfig config;
+    private final LanceSparkWriteOptions writeOptions;
     private final StructType schema;
     private final List<String> newColumns;
 
     protected AddColumnsWriterFactory(
-        StructType schema, LanceConfig config, List<String> newColumns) {
+        StructType schema, LanceSparkWriteOptions writeOptions, List<String> newColumns) {
       // Everything passed to writer factory should be serializable
       this.schema = schema;
-      this.config = config;
+      this.writeOptions = writeOptions;
       this.newColumns = newColumns;
     }
 
     @Override
     public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
-      return new AddColumnsWriter(config, schema, newColumns);
+      return new AddColumnsWriter(writeOptions, schema, newColumns);
     }
   }
 
@@ -247,7 +283,7 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
 
   @Override
   public String toString() {
-    return String.format("AddColumnsWriterFactory(datasetUri=%s)", config.getDatasetUri());
+    return String.format("AddColumnsWriterFactory(datasetUri=%s)", writeOptions.getDatasetUri());
   }
 
   public static class TaskCommit implements WriterCommitMessage {

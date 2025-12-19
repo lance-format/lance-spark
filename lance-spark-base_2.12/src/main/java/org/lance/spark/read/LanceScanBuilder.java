@@ -14,11 +14,11 @@
 package org.lance.spark.read;
 
 import org.lance.Dataset;
+import org.lance.Fragment;
 import org.lance.ManifestSummary;
 import org.lance.ipc.ColumnOrdering;
-import org.lance.spark.LanceConfig;
-import org.lance.spark.SparkOptions;
-import org.lance.spark.internal.LanceDatasetAdapter;
+import org.lance.spark.LanceRuntime;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Optional;
 
 import org.apache.spark.sql.catalyst.InternalRow;
@@ -45,6 +45,7 @@ import org.apache.spark.sql.types.StructType;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
 
 public class LanceScanBuilder
     implements SupportsPushDownRequiredColumns,
@@ -53,7 +54,7 @@ public class LanceScanBuilder
         SupportsPushDownOffset,
         SupportsPushDownTopN,
         SupportsPushDownAggregates {
-  private final LanceConfig config;
+  private final LanceSparkReadOptions readOptions;
   private StructType schema;
 
   private Filter[] pushedFilters = new Filter[0];
@@ -66,9 +67,9 @@ public class LanceScanBuilder
   // Lazily opened dataset for reuse during scan building
   private Dataset lazyDataset = null;
 
-  public LanceScanBuilder(StructType schema, LanceConfig config) {
+  public LanceScanBuilder(StructType schema, LanceSparkReadOptions readOptions) {
     this.schema = schema;
-    this.config = config;
+    this.readOptions = readOptions;
   }
 
   /**
@@ -77,7 +78,21 @@ public class LanceScanBuilder
    */
   private Dataset getOrOpenDataset() {
     if (lazyDataset == null) {
-      lazyDataset = LanceDatasetAdapter.openDataset(config);
+      if (readOptions.hasNamespace()) {
+        lazyDataset =
+            Dataset.open()
+                .allocator(LanceRuntime.allocator())
+                .namespace(readOptions.getNamespace())
+                .tableId(readOptions.getTableId())
+                .build();
+      } else {
+        lazyDataset =
+            Dataset.open()
+                .allocator(LanceRuntime.allocator())
+                .uri(readOptions.getDatasetUri())
+                .readOptions(readOptions.toReadOptions())
+                .build();
+      }
     }
     return lazyDataset;
   }
@@ -108,7 +123,7 @@ public class LanceScanBuilder
     Optional<String> whereCondition = FilterPushDown.compileFiltersToSqlWhereClause(pushedFilters);
     return new LanceScan(
         schema,
-        config,
+        readOptions,
         whereCondition,
         limit,
         offset,
@@ -127,7 +142,7 @@ public class LanceScanBuilder
 
   @Override
   public Filter[] pushFilters(Filter[] filters) {
-    if (!config.isPushDownFilters()) {
+    if (!readOptions.isPushDownFilters()) {
       return filters;
     }
     // remove the code after fix this issue https://github.com/lance-format/lance/issues/3578
@@ -163,7 +178,11 @@ public class LanceScanBuilder
   @Override
   public boolean pushOffset(int offset) {
     // Only one data file can be pushed down the offset.
-    if (LanceDatasetAdapter.getFragmentIds(getOrOpenDataset()).size() == 1) {
+    List<Integer> fragmentIds =
+        getOrOpenDataset().getFragments().stream()
+            .map(Fragment::getId)
+            .collect(Collectors.toList());
+    if (fragmentIds.size() == 1) {
       this.offset = Optional.of(offset);
       return true;
     } else {
@@ -180,7 +199,7 @@ public class LanceScanBuilder
   public boolean pushTopN(SortOrder[] orders, int limit) {
     // The Order by operator will use compute thread in lance.
     // So it's better to have an option to enable it.
-    if (!SparkOptions.enableTopNPushDown(this.config)) {
+    if (!readOptions.isTopNPushDown()) {
       return false;
     }
     this.limit = Optional.of(limit);
@@ -209,13 +228,13 @@ public class LanceScanBuilder
     if (funcs.length == 1 && funcs[0] instanceof CountStar) {
       // Check if we can use metadata-based count (no filters pushed)
       if (pushedFilters.length == 0) {
-        Optional<Long> metadataCount = LanceDatasetAdapter.getCountFromMetadata(getOrOpenDataset());
+        Optional<Long> metadataCount = getCountFromMetadata(getOrOpenDataset());
         if (metadataCount.isPresent()) {
           // Create LocalScan with pre-computed count result
           StructType countSchema = new StructType().add("count", DataTypes.LongType);
           InternalRow[] rows = new InternalRow[1];
           rows[0] = new GenericInternalRow(new Object[] {metadataCount.get()});
-          this.localScan = new LanceLocalScan(countSchema, rows, config.getDatasetUri());
+          this.localScan = new LanceLocalScan(countSchema, rows, readOptions.getDatasetUri());
           return true;
         }
       }
@@ -225,5 +244,14 @@ public class LanceScanBuilder
     }
 
     return false;
+  }
+
+  private static Optional<Long> getCountFromMetadata(Dataset dataset) {
+    try {
+      ManifestSummary summary = dataset.getVersion().getManifestSummary();
+      return Optional.of(summary.getTotalRows());
+    } catch (Exception e) {
+      return Optional.empty();
+    }
   }
 }

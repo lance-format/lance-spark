@@ -14,11 +14,10 @@
 package org.lance.spark.read;
 
 import org.lance.Dataset;
-import org.lance.ReadOptions;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
-import org.lance.spark.SparkOptions;
-import org.lance.spark.internal.LanceDatasetAdapter;
+import org.lance.spark.LanceRuntime;
+import org.lance.spark.LanceSparkReadOptions;
 
 import com.google.common.collect.Lists;
 import org.apache.arrow.memory.BufferAllocator;
@@ -46,7 +45,7 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
 
   public LanceCountStarPartitionReader(LanceInputPartition inputPartition) {
     this.inputPartition = inputPartition;
-    this.allocator = LanceDatasetAdapter.allocator;
+    this.allocator = LanceRuntime.allocator();
   }
 
   @Override
@@ -61,11 +60,10 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
 
   private long computeCount() {
     // This reader is only used when there are filters (metadata-based count uses LocalScan)
-    String uri = inputPartition.getConfig().getDatasetUri();
-    ReadOptions options = SparkOptions.genReadOptionFromConfig(inputPartition.getConfig());
+    LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
     long totalCount = 0;
 
-    try (Dataset dataset = Dataset.open(allocator, uri, options)) {
+    try (Dataset dataset = openDataset(readOptions)) {
       List<Integer> fragmentIds = inputPartition.getLanceSplit().getFragments();
       if (fragmentIds.isEmpty()) {
         return 0;
@@ -90,6 +88,22 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
     }
 
     return totalCount;
+  }
+
+  private Dataset openDataset(LanceSparkReadOptions readOptions) {
+    if (readOptions.hasNamespace()) {
+      return Dataset.open()
+          .allocator(allocator)
+          .namespace(readOptions.getNamespace())
+          .tableId(readOptions.getTableId())
+          .build();
+    } else {
+      return Dataset.open()
+          .allocator(allocator)
+          .uri(readOptions.getDatasetUri())
+          .readOptions(readOptions.toReadOptions())
+          .build();
+    }
   }
 
   private ColumnarBatch createCountResultBatch(long count, StructType resultSchema) {

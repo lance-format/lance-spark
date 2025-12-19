@@ -13,8 +13,10 @@
  */
 package org.lance.spark.read;
 
-import org.lance.spark.LanceConfig;
-import org.lance.spark.internal.LanceDatasetAdapter;
+import org.lance.Dataset;
+import org.lance.Fragment;
+import org.lance.spark.LanceRuntime;
+import org.lance.spark.LanceSparkReadOptions;
 
 import java.io.Serializable;
 import java.util.Collections;
@@ -34,9 +36,28 @@ public class LanceSplit implements Serializable {
     return fragments;
   }
 
-  public static List<LanceSplit> generateLanceSplits(LanceConfig config) {
-    return LanceDatasetAdapter.getFragmentIds(config).stream()
-        .map(id -> new LanceSplit(Collections.singletonList(id)))
-        .collect(Collectors.toList());
+  public static List<LanceSplit> generateLanceSplits(LanceSparkReadOptions readOptions) {
+    try (Dataset dataset = openDataset(readOptions)) {
+      return dataset.getFragments().stream()
+          .map(Fragment::getId)
+          .map(id -> new LanceSplit(Collections.singletonList(id)))
+          .collect(Collectors.toList());
+    }
+  }
+
+  private static Dataset openDataset(LanceSparkReadOptions readOptions) {
+    if (readOptions.hasNamespace()) {
+      return Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .namespace(readOptions.getNamespace())
+          .tableId(readOptions.getTableId())
+          .build();
+    } else {
+      return Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .uri(readOptions.getDatasetUri())
+          .readOptions(readOptions.toReadOptions())
+          .build();
+    }
   }
 }

@@ -14,7 +14,7 @@
 package org.lance.spark.read;
 
 import org.lance.ipc.ColumnOrdering;
-import org.lance.spark.LanceConfig;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Optional;
 
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
@@ -29,7 +29,7 @@ public class LanceInputPartition implements InputPartition {
   private final StructType schema;
   private final int partitionId;
   private final LanceSplit lanceSplit;
-  private final LanceConfig config;
+  private final LanceSparkReadOptions readOptions;
   private final Optional<String> whereCondition;
   private final Optional<Integer> limit;
   private final Optional<Integer> offset;
@@ -41,14 +41,14 @@ public class LanceInputPartition implements InputPartition {
       StructType schema,
       int partitionId,
       LanceSplit lanceSplit,
-      LanceConfig config,
+      LanceSparkReadOptions readOptions,
       Optional<String> whereCondition,
       String scanId) {
     this(
         schema,
         partitionId,
         lanceSplit,
-        config,
+        readOptions,
         whereCondition,
         Optional.empty(),
         Optional.empty(),
@@ -61,7 +61,7 @@ public class LanceInputPartition implements InputPartition {
       StructType schema,
       int partitionId,
       LanceSplit lanceSplit,
-      LanceConfig config,
+      LanceSparkReadOptions readOptions,
       Optional<String> whereCondition,
       Optional<Integer> limit,
       Optional<Integer> offset,
@@ -71,7 +71,7 @@ public class LanceInputPartition implements InputPartition {
     this.schema = schema;
     this.partitionId = partitionId;
     this.lanceSplit = lanceSplit;
-    this.config = config;
+    this.readOptions = readOptions;
     this.whereCondition = whereCondition;
     this.limit = limit;
     this.offset = offset;
@@ -92,8 +92,8 @@ public class LanceInputPartition implements InputPartition {
     return lanceSplit;
   }
 
-  public LanceConfig getConfig() {
-    return config;
+  public LanceSparkReadOptions getReadOptions() {
+    return readOptions;
   }
 
   public Optional<String> getWhereCondition() {

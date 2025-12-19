@@ -13,10 +13,10 @@
  */
 package org.lance.spark;
 
+import org.lance.Dataset;
 import org.lance.WriteParams;
-import org.lance.spark.internal.LanceDatasetAdapter;
-import org.lance.spark.utils.Optional;
 
+import org.apache.arrow.memory.BufferAllocator;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException;
@@ -27,6 +27,7 @@ import org.apache.spark.sql.connector.catalog.TableChange;
 import org.apache.spark.sql.connector.expressions.Transform;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
+import org.apache.spark.sql.util.LanceArrowUtils;
 
 import java.util.Map;
 
@@ -42,6 +43,8 @@ import java.util.Map;
 public class LanceCatalog implements TableCatalog {
   private CaseInsensitiveStringMap options;
   private String catalogName = "lance";
+  private LanceSparkCatalogConfig catalogConfig;
+  private LanceRuntime runtime;
 
   @Override
   public Identifier[] listTables(String[] namespace) throws NoSuchNamespaceException {
@@ -52,12 +55,19 @@ public class LanceCatalog implements TableCatalog {
   @Override
   public Table loadTable(Identifier ident) throws NoSuchTableException {
     String datasetUri = getDatasetUri(ident);
-    LanceConfig config = LanceConfig.from(options, datasetUri);
-    Optional<StructType> schema = LanceDatasetAdapter.getSchema(config);
-    if (schema.isEmpty()) {
+    LanceSparkReadOptions readOptions = createReadOptions(datasetUri);
+    StructType schema;
+    try (Dataset dataset =
+        Dataset.open()
+            .allocator(getBufferAllocator())
+            .uri(datasetUri)
+            .readOptions(readOptions.toReadOptions())
+            .build()) {
+      schema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
+    } catch (IllegalArgumentException e) {
       throw new NoSuchTableException(ident);
     }
-    return new LanceDataset(config, schema.get());
+    return new LanceDataset(readOptions, schema);
   }
 
   @Override
@@ -65,14 +75,20 @@ public class LanceCatalog implements TableCatalog {
       Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
       throws TableAlreadyExistsException, NoSuchNamespaceException {
     String datasetUri = getDatasetUri(ident);
-    LanceConfig config = LanceConfig.from(options, datasetUri);
+    LanceSparkReadOptions readOptions = createReadOptions(datasetUri);
     try {
-      WriteParams params = SparkOptions.genWriteParamsFromConfig(config);
-      LanceDatasetAdapter.createDataset(datasetUri, schema, params);
+      Dataset.write()
+          .allocator(getBufferAllocator())
+          .uri(datasetUri)
+          .schema(LanceArrowUtils.toArrowSchema(schema, "UTC", true, false))
+          .mode(WriteParams.WriteMode.CREATE)
+          .storageOptions(readOptions.getStorageOptions())
+          .execute()
+          .close();
     } catch (IllegalArgumentException e) {
       throw new TableAlreadyExistsException(ident);
     }
-    return new LanceDataset(config, schema);
+    return new LanceDataset(readOptions, schema);
   }
 
   @Override
@@ -83,8 +99,7 @@ public class LanceCatalog implements TableCatalog {
   @Override
   public boolean dropTable(Identifier ident) {
     String datasetUri = getDatasetUri(ident);
-    LanceConfig config = LanceConfig.from(options, datasetUri);
-    LanceDatasetAdapter.dropDataset(config);
+    Dataset.drop(datasetUri, catalogConfig.getStorageOptions());
     return true;
   }
 
@@ -98,6 +113,32 @@ public class LanceCatalog implements TableCatalog {
   public void initialize(String name, CaseInsensitiveStringMap options) {
     this.catalogName = name;
     this.options = options;
+    // Parse catalog configuration
+    this.catalogConfig = LanceSparkCatalogConfig.from(options.asCaseSensitiveMap());
+    // Initialize runtime with driver allocator (catalog runs on driver)
+    this.runtime = new LanceRuntime(catalogConfig, false);
+  }
+
+  /**
+   * Creates LanceSparkReadOptions for this catalog.
+   *
+   * @param datasetUri the dataset URI
+   * @return a new LanceSparkReadOptions with catalog settings
+   */
+  private LanceSparkReadOptions createReadOptions(String datasetUri) {
+    return LanceSparkReadOptions.builder()
+        .datasetUri(datasetUri)
+        .withCatalogDefaults(catalogConfig)
+        .build();
+  }
+
+  /**
+   * Returns the buffer allocator for this catalog.
+   *
+   * @return the buffer allocator to use
+   */
+  private BufferAllocator getBufferAllocator() {
+    return runtime.getBufferAllocator();
   }
 
   @Override

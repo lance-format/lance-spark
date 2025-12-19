@@ -13,12 +13,15 @@
  */
 package org.lance.spark.write;
 
+import org.lance.spark.LanceRuntime;
+
 import com.google.common.base.Preconditions;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
 
 import java.io.IOException;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -79,6 +82,21 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
   public QueuedArrowBatchWriteBuffer(
       BufferAllocator allocator, Schema schema, StructType sparkSchema, int batchSize) {
     this(allocator, schema, sparkSchema, batchSize, DEFAULT_QUEUE_DEPTH);
+  }
+
+  /** Simplified constructor that uses LanceRuntime allocator and converts Spark schema to Arrow. */
+  public QueuedArrowBatchWriteBuffer(StructType sparkSchema, int batchSize) {
+    this(sparkSchema, batchSize, DEFAULT_QUEUE_DEPTH);
+  }
+
+  /** Simplified constructor that uses LanceRuntime allocator and converts Spark schema to Arrow. */
+  public QueuedArrowBatchWriteBuffer(StructType sparkSchema, int batchSize, int queueDepth) {
+    this(
+        LanceRuntime.allocator(),
+        LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false, false),
+        sparkSchema,
+        batchSize,
+        queueDepth);
   }
 
   public QueuedArrowBatchWriteBuffer(

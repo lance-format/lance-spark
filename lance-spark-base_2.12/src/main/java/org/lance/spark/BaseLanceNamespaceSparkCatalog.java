@@ -13,20 +13,17 @@
  */
 package org.lance.spark;
 
+import org.lance.Dataset;
 import org.lance.WriteParams;
 import org.lance.namespace.LanceNamespace;
-import org.lance.namespace.model.CreateEmptyTableRequest;
-import org.lance.namespace.model.CreateEmptyTableResponse;
-import org.lance.namespace.model.DescribeTableRequest;
-import org.lance.namespace.model.DescribeTableResponse;
 import org.lance.namespace.model.DropNamespaceRequest;
 import org.lance.namespace.model.DropTableRequest;
 import org.lance.namespace.model.ListTablesRequest;
 import org.lance.namespace.model.ListTablesResponse;
-import org.lance.spark.internal.LanceDatasetAdapter;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.SchemaConverter;
 
+import org.apache.arrow.memory.BufferAllocator;
 import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
@@ -40,6 +37,7 @@ import org.apache.spark.sql.connector.catalog.TableChange;
 import org.apache.spark.sql.connector.expressions.Transform;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
+import org.apache.spark.sql.util.LanceArrowUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -51,6 +49,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, SupportsNamespaces {
 
@@ -88,10 +87,20 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
   private String name;
   private Optional<String> extraLevel;
   private Optional<List<String>> parentPrefix;
+  private LanceSparkCatalogConfig catalogConfig;
+  private Map<String, String> storageOptions;
+  private LanceRuntime runtime;
 
   @Override
   public void initialize(String name, CaseInsensitiveStringMap options) {
     this.name = name;
+    this.storageOptions = new HashMap<>(options.asCaseSensitiveMap());
+
+    // Parse catalog configuration
+    this.catalogConfig = LanceSparkCatalogConfig.from(this.storageOptions);
+
+    // Initialize runtime with driver allocator (catalog runs on driver)
+    this.runtime = new LanceRuntime(catalogConfig, false);
 
     if (!options.containsKey(CONFIG_IMPL)) {
       throw new IllegalArgumentException("Missing required configuration: " + CONFIG_IMPL);
@@ -112,7 +121,8 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
     // Initialize the namespace with proper configuration
     Map<String, String> namespaceOptions = new HashMap<>(options);
 
-    this.namespace = LanceNamespace.connect(impl, namespaceOptions, LanceDatasetAdapter.allocator);
+    // Use the catalog's buffer allocator
+    this.namespace = LanceNamespace.connect(impl, namespaceOptions, getBufferAllocator());
 
     // Handle extra level name configuration
     if (options.containsKey(CONFIG_EXTRA_LEVEL)) {
@@ -347,74 +357,89 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
     // Transform identifier for API call
     Identifier actualIdent = transformIdentifierForApi(ident);
 
-    DescribeTableRequest request = new DescribeTableRequest();
-    for (String part : actualIdent.namespace()) {
-      request.addIdItem(part);
-    }
-    request.addIdItem(actualIdent.name());
+    // Build the table ID for credential vending
+    List<String> tableId = buildTableId(actualIdent);
 
-    DescribeTableResponse response;
-    try {
-      response = namespace.describeTable(request);
-    } catch (RuntimeException e) {
-      String message = e.getMessage();
-      if (message != null
-          && (message.contains("not found")
-              || message.contains("Not found")
-              || message.contains("does not exist"))) {
-        throw new NoSuchTableException(ident);
-      }
-      throw e;
-    }
-
-    // Pass storage options from the response to LanceConfig, with fallback to empty map
-    Map<String, String> storageOptions = response.getStorageOptions();
-    if (storageOptions == null) {
-      storageOptions = new HashMap<>();
-    }
-
-    LanceConfig config = LanceConfig.from(storageOptions, response.getLocation());
-    Optional<StructType> schema = LanceDatasetAdapter.getSchema(config);
-    if (!schema.isPresent()) {
+    // Open dataset using namespace for credential vending
+    StructType schema;
+    String location;
+    try (Dataset dataset =
+        Dataset.open()
+            .allocator(getBufferAllocator())
+            .namespace(namespace)
+            .tableId(tableId)
+            .build()) {
+      schema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
+      location = dataset.uri();
+    } catch (IllegalArgumentException e) {
       throw new NoSuchTableException(ident);
     }
 
-    return createDataset(config, schema.get());
+    // Create read options with namespace support
+    LanceSparkReadOptions readOptions = createReadOptions(location, tableId);
+    return createDataset(readOptions, schema);
+  }
+
+  /**
+   * Creates LanceSparkReadOptions with namespace settings for this catalog.
+   *
+   * @param location the dataset location URI
+   * @param tableId the table identifier within the namespace
+   * @return a new LanceSparkReadOptions with all catalog settings
+   */
+  private LanceSparkReadOptions createReadOptions(String location, List<String> tableId) {
+    return LanceSparkReadOptions.builder()
+        .datasetUri(location)
+        .withCatalogDefaults(catalogConfig)
+        .namespace(namespace)
+        .tableId(tableId)
+        .build();
+  }
+
+  /**
+   * Returns the buffer allocator for this catalog.
+   *
+   * @return the buffer allocator to use
+   */
+  private BufferAllocator getBufferAllocator() {
+    return runtime.getBufferAllocator();
   }
 
   @Override
   public Table createTable(
       Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
       throws TableAlreadyExistsException, NoSuchNamespaceException {
-    Identifier tableId = transformIdentifierForApi(ident);
-    CreateEmptyTableRequest createRequest = new CreateEmptyTableRequest();
-    for (String part : tableId.namespace()) {
-      createRequest.addIdItem(part);
-    }
-    createRequest.addIdItem(tableId.name());
+    Identifier actualIdent = transformIdentifierForApi(ident);
 
-    if (properties != null && properties.containsKey(CREATE_TABLE_PROPERTY_LOCATION)) {
-      createRequest.setLocation(properties.get(CREATE_TABLE_PROPERTY_LOCATION));
-    }
+    // Build the table ID for credential vending
+    List<String> tableIdList = buildTableId(actualIdent);
 
-    if (properties != null && !properties.isEmpty()) {
-      createRequest.setProperties(properties);
-    }
-
-    CreateEmptyTableResponse response = namespace.createEmptyTable(createRequest);
-    WriteParams.Builder writeParams = new WriteParams.Builder();
-    writeParams.withStorageOptions(response.getStorageOptions());
     StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
-    LanceDatasetAdapter.createDataset(response.getLocation(), processedSchema, writeParams.build());
 
-    // Pass storage options from the response to LanceConfig, with fallback to empty map
-    Map<String, String> storageOptions = response.getStorageOptions();
-    if (storageOptions == null) {
-      storageOptions = new HashMap<>();
+    // Create dataset using namespace - WriteDatasetBuilder handles createEmptyTable internally
+    Dataset.write()
+        .allocator(getBufferAllocator())
+        .namespace(namespace)
+        .tableId(tableIdList)
+        .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false))
+        .mode(WriteParams.WriteMode.CREATE)
+        .execute()
+        .close();
+
+    // Open the created dataset to get location for config
+    String location;
+    try (Dataset dataset =
+        Dataset.open()
+            .allocator(getBufferAllocator())
+            .namespace(namespace)
+            .tableId(tableIdList)
+            .build()) {
+      location = dataset.uri();
     }
 
-    LanceConfig config = LanceConfig.from(storageOptions, response.getLocation());
-    return createDataset(config, processedSchema);
+    // Create read options with namespace settings
+    LanceSparkReadOptions readOptions = createReadOptions(location, tableIdList);
+    return createDataset(readOptions, processedSchema);
   }
 
   @Override
@@ -554,5 +579,15 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
     return namespace;
   }
 
-  public abstract LanceDataset createDataset(LanceConfig config, StructType sparkSchema);
+  /**
+   * Builds the table ID list from an identifier for use with namespace operations. The table ID
+   * includes both the namespace parts and the table name.
+   */
+  private List<String> buildTableId(Identifier ident) {
+    return Stream.concat(Arrays.stream(ident.namespace()), Stream.of(ident.name()))
+        .collect(Collectors.toList());
+  }
+
+  public abstract LanceDataset createDataset(
+      LanceSparkReadOptions readOptions, StructType sparkSchema);
 }

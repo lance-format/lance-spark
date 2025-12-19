@@ -13,7 +13,7 @@
  */
 package org.lance.spark.write;
 
-import org.lance.spark.LanceConfig;
+import org.lance.spark.LanceSparkWriteOptions;
 
 import org.apache.spark.sql.connector.write.DeltaWrite;
 import org.apache.spark.sql.connector.write.DeltaWriteBuilder;
@@ -21,14 +21,15 @@ import org.apache.spark.sql.types.StructType;
 
 public class SparkPositionDeltaWriteBuilder implements DeltaWriteBuilder {
   private final StructType sparkSchema;
-  private final LanceConfig config;
+  private final LanceSparkWriteOptions writeOptions;
 
-  public SparkPositionDeltaWriteBuilder(StructType sparkSchema, LanceConfig config) {
+  public SparkPositionDeltaWriteBuilder(
+      StructType sparkSchema, LanceSparkWriteOptions writeOptions) {
     this.sparkSchema = sparkSchema;
-    this.config = config;
+    this.writeOptions = writeOptions;
   }
 
   public DeltaWrite build() {
-    return new SparkPositionDeltaWrite(sparkSchema, config);
+    return new SparkPositionDeltaWrite(sparkSchema, writeOptions);
   }
 }

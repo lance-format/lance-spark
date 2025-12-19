@@ -55,13 +55,19 @@ The following features require the Lance Spark SQL extension to be enabled:
 
 ## Basic Setup
 
-Configure Spark with the `LanceNamespaceSparkCatalog` by setting the appropriate Spark catalog implementation 
+Configure Spark with the `LanceNamespaceSparkCatalog` by setting the appropriate Spark catalog implementation
 and namespace-specific options:
 
-| Parameter                              | Type   | Required | Description                                                                                                |
-|----------------------------------------|--------|----------|------------------------------------------------------------------------------------------------------------|
-| `spark.sql.catalog.{name}`             | String | ✓        | Set to `org.lance.spark.LanceNamespaceSparkCatalog`                                                |
-| `spark.sql.catalog.{name}.impl`        | String | ✓        | Namespace implementation, short name like `dir`, `rest`, `hive3`, `glue` or full Java implementation class |
+| Parameter                                          | Type   | Required | Description                                                                                                                                |
+|----------------------------------------------------|--------|----------|--------------------------------------------------------------------------------------------------------------------------------------------|
+| `spark.sql.catalog.{name}`                         | String | ✓        | Set to `org.lance.spark.LanceNamespaceSparkCatalog`                                                                                        |
+| `spark.sql.catalog.{name}.impl`                    | String | ✓        | Namespace implementation, short name like `dir`, `rest`, `hive3`, `glue` or full Java implementation class                                 |
+| `spark.sql.catalog.{name}.driver_allocator_size`   | Long   | ✗        | Arrow allocator size in bytes for the driver. If not set, uses the global allocator.                                                       |
+| `spark.sql.catalog.{name}.executor_allocator_size` | Long   | ✗        | Arrow allocator size in bytes for executors. If not set, uses the global allocator.                                                        |
+| `spark.sql.catalog.{name}.storage.*`               | -      | ✗        | Lance IO storage options. See [Lance Object Store Guide](https://lance.org/guide/object_store) for all available options.                  |
+| `spark.sql.catalog.{name}.single_level_ns`         | String | ✗        | Virtual level for 2-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                                           |
+| `spark.sql.catalog.{name}.parent`                  | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                                       |
+| `spark.sql.catalog.{name}.parent_delimiter`        | String | ✗        | Delimiter for parent prefix (default: `$`). See [Note on Namespace Levels](#note-on-namespace-levels).                                     |
 
 ## Example Namespace Implementations
 
@@ -112,11 +118,9 @@ and namespace-specific options:
 
 #### Directory Configuration Parameters
 
-| Parameter                              | Required | Description                                                                                                                               |
-|----------------------------------------|----------|-------------------------------------------------------------------------------------------------------------------------------------------|
-| `spark.sql.catalog.{name}.root`        | ✗        | Storage root location (default: current directory)                                                                                        |
-| `spark.sql.catalog.{name}.storage.*`   | ✗        | Additional OpenDAL storage configuration options                                                                                          |
-| `spark.sql.catalog.{name}.extra_level` | ✗        | Virtual level for 2-level namespaces (auto-set to `default`). See [Note on Namespace Levels](#note-on-namespace-levels) for more details. |
+| Parameter                       | Required | Description                                        |
+|---------------------------------|----------|----------------------------------------------------|
+| `spark.sql.catalog.{name}.root` | ✗        | Storage root location (default: current directory) |
 
 Example settings:
 
@@ -305,7 +309,6 @@ spark-shell \
 | `spark.sql.catalog.{name}.secret_access_key` | ✗        | AWS secret access key for static credentials                                                                    |
 | `spark.sql.catalog.{name}.session_token`     | ✗        | AWS session token for temporary credentials                                                                     |
 | `spark.sql.catalog.{name}.root`              | ✗        | Storage root location (e.g., `s3://bucket/path`), defaults to current directory                                 |
-| `spark.sql.catalog.{name}.storage.*`         | ✗        | Additional storage configuration options                                                                        |
 
 ### Apache Hive Namespace
 
@@ -320,7 +323,6 @@ Lance supports both Hive 2.x and Hive 3.x metastores for metadata management.
         .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog") \
         .config("spark.sql.catalog.lance.impl", "hive3") \
         .config("spark.sql.catalog.lance.parent", "hive") \
-        .config("spark.sql.catalog.lance.parent_delimiter", ".") \
         .config("spark.sql.catalog.lance.hadoop.hive.metastore.uris", "thrift://metastore:9083") \
         .config("spark.sql.catalog.lance.client.pool-size", "5") \
         .config("spark.sql.catalog.lance.root", "hdfs://namenode:8020/lance") \
@@ -334,7 +336,6 @@ Lance supports both Hive 2.x and Hive 3.x metastores for metadata management.
         .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
         .config("spark.sql.catalog.lance.impl", "hive3")
         .config("spark.sql.catalog.lance.parent", "hive")
-        .config("spark.sql.catalog.lance.parent_delimiter", ".")
         .config("spark.sql.catalog.lance.hadoop.hive.metastore.uris", "thrift://metastore:9083")
         .config("spark.sql.catalog.lance.client.pool-size", "5")
         .config("spark.sql.catalog.lance.root", "hdfs://namenode:8020/lance")
@@ -348,7 +349,6 @@ Lance supports both Hive 2.x and Hive 3.x metastores for metadata management.
         .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
         .config("spark.sql.catalog.lance.impl", "hive3")
         .config("spark.sql.catalog.lance.parent", "hive")
-        .config("spark.sql.catalog.lance.parent_delimiter", ".")
         .config("spark.sql.catalog.lance.hadoop.hive.metastore.uris", "thrift://metastore:9083")
         .config("spark.sql.catalog.lance.client.pool-size", "5")
         .config("spark.sql.catalog.lance.root", "hdfs://namenode:8020/lance")
@@ -411,13 +411,11 @@ spark-shell \
 
 #### Hive Configuration Parameters
 
-| Parameter                                   | Required | Description                                                                                                                                            |
-|---------------------------------------------|----------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `spark.sql.catalog.{name}.hadoop.*`         | ✗        | Additional Hadoop configuration options, will override the default Hadoop configuration                                                                |
-| `spark.sql.catalog.{name}.client.pool-size` | ✗        | Connection pool size for metastore clients (default: 3)                                                                                                |
-| `spark.sql.catalog.{name}.root`             | ✗        | Storage root location for Lance tables (default: current directory)                                                                                    |
-| `spark.sql.catalog.{name}.storage.*`        | ✗        | Additional storage configuration options                                                                                                               |
-| `spark.sql.catalog.{name}.parent`           | ✗        | Parent prefix for multi-level namespaces (Hive 3.x only, default: `hive`). See [Note on Namespace Levels](#note-on-namespace-levels) for more details. |
+| Parameter                                   | Required | Description                                                                             |
+|---------------------------------------------|----------|-----------------------------------------------------------------------------------------|
+| `spark.sql.catalog.{name}.hadoop.*`         | ✗        | Additional Hadoop configuration options, will override the default Hadoop configuration |
+| `spark.sql.catalog.{name}.client.pool-size` | ✗        | Connection pool size for metastore clients (default: 3)                                 |
+| `spark.sql.catalog.{name}.root`             | ✗        | Storage root location for Lance tables (default: current directory)                     |
 
 ## Note on Namespace Levels
 
@@ -427,26 +425,26 @@ Most users treat Spark as a 3 level hierarchy with 1 level namespace.
 ### For Namespaces with Less Than 3 Levels
 
 Since Lance allows a 2 level hierarchy of **root namespace → table** for namespaces like `DirectoryNamespace`,
-the `LanceNamespaceSparkCatalog` provides a configuration `extra_level` which puts an additional dummy level
+the `LanceNamespaceSparkCatalog` provides a configuration `single_level_ns` which puts an additional dummy level
 to match the Spark hierarchy and make it **root namespace → dummy extra level → table**.
 
-Currently, this is automatically set with `extra_level=default` for `DirectoryNamespace`
+Currently, this is automatically set with `single_level_ns=default` for `DirectoryNamespace`
 and when `RestNamespace` if it cannot respond to `ListNamespaces` operation.
 If you have a custom namespace implementation of the same behavior, you can also set the config to add the extra level.
 
 ### For Namespaces with More Than 3 Levels
 
-Some namespace implementations like Hive3 support more than 3 levels of hierarchy. For example, Hive3 has a 
-4 level hierarchy: **root metastore → catalog → database → table**.
+Some namespace implementations like Hive3 and DirectoryNamespace support more than 3 levels of hierarchy.
+For example, Hive3 has a 4 level hierarchy: **root metastore → catalog → database → table**.
 
 To handle this, the `LanceNamespaceSparkCatalog` provides `parent` and `parent_delimiter` configurations which
 allow you to specify a parent prefix that gets prepended to all namespace operations.
 
 For example, with Hive3:
-- 
-- Setting `parent=hive` and `parent_delimiter=.` 
-- When Spark requests namespace `["database1"]`, it gets transformed to `["hive", "database1"]` for the API call
-- This allows the 4-level Hive 3 structure to work within Spark's 3-level model.
+
+- Setting `parent=hive` (using default `parent_delimiter=$`)
+- When Spark requests namespace `["database1"]`, it gets transformed to `["hive$database1"]` for the API call
+- This allows the 4-level Hive 3 structure to work within Spark's 3-level model
 
 The parent configuration effectively "anchors" your Spark catalog at a specific level within the deeper namespace
 hierarchy, making the extra levels transparent to Spark users while maintaining compatibility with the underlying

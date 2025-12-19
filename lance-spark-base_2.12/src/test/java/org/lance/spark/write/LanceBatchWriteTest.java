@@ -15,7 +15,7 @@ package org.lance.spark.write;
 
 import org.lance.Dataset;
 import org.lance.WriteParams;
-import org.lance.spark.LanceConfig;
+import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
 
 import org.apache.arrow.dataset.scanner.Scanner;
@@ -57,9 +57,9 @@ public class LanceBatchWriteTest {
       Dataset.create(allocator, datasetUri, schema, new WriteParams.Builder().build()).close();
 
       // Append data to lance dataset
-      LanceConfig config = LanceConfig.from(datasetUri);
+      LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
       StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
-      LanceBatchWrite lanceBatchWrite = new LanceBatchWrite(sparkSchema, config, false);
+      LanceBatchWrite lanceBatchWrite = new LanceBatchWrite(sparkSchema, writeOptions, false);
       DataWriterFactory factor = lanceBatchWrite.createBatchWriterFactory(() -> 1);
 
       int rows = 132;

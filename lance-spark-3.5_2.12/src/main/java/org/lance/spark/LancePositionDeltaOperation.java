@@ -29,12 +29,13 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 public class LancePositionDeltaOperation implements RowLevelOperation, SupportsDelta {
   private final Command command;
   private final StructType sparkSchema;
-  private final LanceConfig config;
+  private final LanceSparkReadOptions readOptions;
 
-  public LancePositionDeltaOperation(Command command, StructType sparkSchema, LanceConfig config) {
+  public LancePositionDeltaOperation(
+      Command command, StructType sparkSchema, LanceSparkReadOptions readOptions) {
     this.command = command;
     this.sparkSchema = sparkSchema;
-    this.config = config;
+    this.readOptions = readOptions;
   }
 
   @Override
@@ -44,12 +45,20 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
 
   @Override
   public ScanBuilder newScanBuilder(CaseInsensitiveStringMap caseInsensitiveStringMap) {
-    return new LanceScanBuilder(sparkSchema, config);
+    return new LanceScanBuilder(sparkSchema, readOptions);
   }
 
   @Override
   public DeltaWriteBuilder newWriteBuilder(LogicalWriteInfo logicalWriteInfo) {
-    return new SparkPositionDeltaWriteBuilder(sparkSchema, config);
+    // Create write options from read options for delta operations
+    LanceSparkWriteOptions writeOptions =
+        LanceSparkWriteOptions.builder()
+            .datasetUri(readOptions.getDatasetUri())
+            .storageOptions(readOptions.getStorageOptions())
+            .namespace(readOptions.getNamespace())
+            .tableId(readOptions.getTableId())
+            .build();
+    return new SparkPositionDeltaWriteBuilder(sparkSchema, writeOptions);
   }
 
   @Override

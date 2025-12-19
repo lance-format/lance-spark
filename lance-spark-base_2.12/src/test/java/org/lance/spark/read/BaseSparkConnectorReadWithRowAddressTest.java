@@ -13,8 +13,8 @@
  */
 package org.lance.spark.read;
 
-import org.lance.spark.LanceConfig;
 import org.lance.spark.LanceDataSource;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 
 import org.apache.spark.sql.Dataset;
@@ -49,7 +49,7 @@ public abstract class BaseSparkConnectorReadWithRowAddressTest {
             .read()
             .format(LanceDataSource.name)
             .option(
-                LanceConfig.CONFIG_DATASET_URI,
+                LanceSparkReadOptions.CONFIG_DATASET_URI,
                 TestUtils.getDatasetUri(dbPath, TestUtils.TestTable1Config.datasetName))
             .load();
   }

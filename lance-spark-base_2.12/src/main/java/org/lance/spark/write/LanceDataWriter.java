@@ -13,12 +13,15 @@
  */
 package org.lance.spark.write;
 
+import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.WriteParams;
-import org.lance.spark.LanceConfig;
-import org.lance.spark.SparkOptions;
-import org.lance.spark.internal.LanceDatasetAdapter;
+import org.lance.io.StorageOptionsProvider;
+import org.lance.spark.LanceRuntime;
+import org.lance.spark.LanceSparkWriteOptions;
 
+import org.apache.arrow.c.ArrowArrayStream;
+import org.apache.arrow.c.Data;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.write.DataWriter;
 import org.apache.spark.sql.connector.write.DataWriterFactory;
@@ -88,34 +91,43 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
   }
 
   public static class WriterFactory implements DataWriterFactory {
-    private final LanceConfig config;
+    private final LanceSparkWriteOptions writeOptions;
     private final StructType schema;
 
-    protected WriterFactory(StructType schema, LanceConfig config) {
+    protected WriterFactory(StructType schema, LanceSparkWriteOptions writeOptions) {
       // Everything passed to writer factory should be serializable
       this.schema = schema;
-      this.config = config;
+      this.writeOptions = writeOptions;
     }
 
     @Override
     public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
-      int batchSize = SparkOptions.getBatchSize(config);
-      boolean useQueuedBuffer = SparkOptions.useQueuedWriteBuffer(config);
-      WriteParams params = SparkOptions.genWriteParamsFromConfig(config);
+      int batchSize = writeOptions.getBatchSize();
+      boolean useQueuedBuffer = writeOptions.isUseQueuedWriteBuffer();
+      WriteParams params = writeOptions.toWriteParams();
 
       // Select buffer type based on configuration
       ArrowBatchWriteBuffer writeBuffer;
       if (useQueuedBuffer) {
-        int queueDepth = SparkOptions.getQueueDepth(config);
-        writeBuffer =
-            LanceDatasetAdapter.getQueuedArrowBatchWriteBuffer(schema, batchSize, queueDepth);
+        int queueDepth = writeOptions.getQueueDepth();
+        writeBuffer = new QueuedArrowBatchWriteBuffer(schema, batchSize, queueDepth);
       } else {
-        writeBuffer = LanceDatasetAdapter.getSemaphoreArrowBatchWriteBuffer(schema, batchSize);
+        writeBuffer = new SemaphoreArrowBatchWriteBuffer(schema, batchSize);
       }
+
+      // Get storage options provider for credential refresh if namespace is configured
+      StorageOptionsProvider storageOptionsProvider = writeOptions.getStorageOptionsProvider();
 
       // Create fragment in background thread
       Callable<List<FragmentMetadata>> fragmentCreator =
-          () -> LanceDatasetAdapter.createFragment(config.getDatasetUri(), writeBuffer, params);
+          () -> {
+            try (ArrowArrayStream arrowStream =
+                ArrowArrayStream.allocateNew(LanceRuntime.allocator())) {
+              Data.exportArrayStream(LanceRuntime.allocator(), writeBuffer, arrowStream);
+              return Fragment.create(
+                  writeOptions.getDatasetUri(), arrowStream, params, storageOptionsProvider);
+            }
+          };
       FutureTask<List<FragmentMetadata>> fragmentCreationTask = new FutureTask<>(fragmentCreator);
       Thread fragmentCreationThread = new Thread(fragmentCreationTask);
       fragmentCreationThread.start();

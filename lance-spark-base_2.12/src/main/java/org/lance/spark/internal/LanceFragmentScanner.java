@@ -15,18 +15,16 @@ package org.lance.spark.internal;
 
 import org.lance.Dataset;
 import org.lance.Fragment;
-import org.lance.ReadOptions;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
-import org.lance.spark.LanceConfig;
 import org.lance.spark.LanceConstant;
-import org.lance.spark.SparkOptions;
+import org.lance.spark.LanceRuntime;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.read.LanceInputPartition;
 
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
-import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
@@ -48,10 +46,23 @@ public class LanceFragmentScanner implements AutoCloseable {
               new CacheLoader<CacheKey, Map<Integer, Fragment>>() {
                 @Override
                 public Map<Integer, Fragment> load(CacheKey key) throws Exception {
-                  BufferAllocator allocator = LanceDatasetAdapter.allocator;
-                  LanceConfig config = key.getConfig();
-                  ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
-                  Dataset dataset = Dataset.open(allocator, config.getDatasetUri(), options);
+                  LanceSparkReadOptions readOptions = key.getReadOptions();
+                  Dataset dataset;
+                  if (readOptions.hasNamespace()) {
+                    dataset =
+                        Dataset.open()
+                            .allocator(LanceRuntime.allocator())
+                            .namespace(readOptions.getNamespace())
+                            .tableId(readOptions.getTableId())
+                            .build();
+                  } else {
+                    dataset =
+                        Dataset.open()
+                            .allocator(LanceRuntime.allocator())
+                            .uri(readOptions.getDatasetUri())
+                            .readOptions(readOptions.toReadOptions())
+                            .build();
+                  }
                   return dataset.getFragments().stream()
                       .collect(Collectors.toMap(Fragment::getId, f -> f));
                 }
@@ -74,8 +85,8 @@ public class LanceFragmentScanner implements AutoCloseable {
 
   public static LanceFragmentScanner create(int fragmentId, LanceInputPartition inputPartition) {
     try {
-      LanceConfig config = inputPartition.getConfig();
-      CacheKey key = new CacheKey(config, inputPartition.getScanId());
+      LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
+      CacheKey key = new CacheKey(readOptions, inputPartition.getScanId());
       Map<Integer, Fragment> cachedFragments = LOADING_CACHE.get(key);
       Fragment fragment = cachedFragments.get(fragmentId);
       ScanOptions.Builder scanOptions = new ScanOptions.Builder();
@@ -83,7 +94,7 @@ public class LanceFragmentScanner implements AutoCloseable {
       if (inputPartition.getWhereCondition().isPresent()) {
         scanOptions.filter(inputPartition.getWhereCondition().get());
       }
-      scanOptions.batchSize(SparkOptions.getBatchSize(config));
+      scanOptions.batchSize(readOptions.getBatchSize());
       scanOptions.withRowId(getWithRowId(inputPartition.getSchema()));
       scanOptions.withRowAddress(getWithRowAddress(inputPartition.getSchema()));
       if (inputPartition.getLimit().isPresent()) {
@@ -158,28 +169,29 @@ public class LanceFragmentScanner implements AutoCloseable {
   }
 
   private static class CacheKey {
-    private final LanceConfig config;
+    private final LanceSparkReadOptions readOptions;
     private final String scanId;
 
-    CacheKey(LanceConfig config, String scanId) {
-      this.config = config;
+    CacheKey(LanceSparkReadOptions readOptions, String scanId) {
+      this.readOptions = readOptions;
       this.scanId = scanId;
     }
 
-    public LanceConfig getConfig() {
-      return config;
+    public LanceSparkReadOptions getReadOptions() {
+      return readOptions;
     }
 
     @Override
     public boolean equals(Object o) {
       if (o == null || getClass() != o.getClass()) return false;
       CacheKey cacheKey = (CacheKey) o;
-      return Objects.equals(config, cacheKey.config) && Objects.equals(scanId, cacheKey.scanId);
+      return Objects.equals(readOptions, cacheKey.readOptions)
+          && Objects.equals(scanId, cacheKey.scanId);
     }
 
     @Override
     public int hashCode() {
-      return Objects.hash(config, scanId);
+      return Objects.hash(readOptions, scanId);
     }
   }
 }

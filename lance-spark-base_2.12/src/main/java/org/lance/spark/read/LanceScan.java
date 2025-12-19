@@ -14,7 +14,7 @@
 package org.lance.spark.read;
 
 import org.lance.ipc.ColumnOrdering;
-import org.lance.spark.LanceConfig;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Optional;
 
 import org.apache.arrow.util.Preconditions;
@@ -44,7 +44,7 @@ public class LanceScan
   private static final long serialVersionUID = 947284762748623947L;
 
   private final StructType schema;
-  private final LanceConfig config;
+  private final LanceSparkReadOptions readOptions;
   private final Optional<String> whereConditions;
   private final Optional<Integer> limit;
   private final Optional<Integer> offset;
@@ -55,7 +55,7 @@ public class LanceScan
 
   public LanceScan(
       StructType schema,
-      LanceConfig config,
+      LanceSparkReadOptions readOptions,
       Optional<String> whereConditions,
       Optional<Integer> limit,
       Optional<Integer> offset,
@@ -63,7 +63,7 @@ public class LanceScan
       Optional<Aggregation> pushedAggregation,
       LanceStatistics statistics) {
     this.schema = schema;
-    this.config = config;
+    this.readOptions = readOptions;
     this.whereConditions = whereConditions;
     this.limit = limit;
     this.offset = offset;
@@ -79,7 +79,7 @@ public class LanceScan
 
   @Override
   public InputPartition[] planInputPartitions() {
-    List<LanceSplit> splits = LanceSplit.generateLanceSplits(config);
+    List<LanceSplit> splits = LanceSplit.generateLanceSplits(readOptions);
     return IntStream.range(0, splits.size())
         .mapToObj(
             i ->
@@ -87,7 +87,7 @@ public class LanceScan
                     schema,
                     i,
                     splits.get(i),
-                    config,
+                    readOptions,
                     whereConditions,
                     limit,
                     offset,

@@ -50,8 +50,7 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
 
   public static LanceFragmentColumnarBatchScanner create(
       int fragmentId, LanceInputPartition inputPartition) {
-    LanceFragmentScanner fragmentScanner =
-        LanceDatasetAdapter.getFragmentScanner(fragmentId, inputPartition);
+    LanceFragmentScanner fragmentScanner = LanceFragmentScanner.create(fragmentId, inputPartition);
     return new LanceFragmentColumnarBatchScanner(fragmentScanner, fragmentScanner.getArrowReader());
   }
 

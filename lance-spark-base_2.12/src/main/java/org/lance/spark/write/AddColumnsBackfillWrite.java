@@ -13,8 +13,8 @@
  */
 package org.lance.spark.write;
 
-import org.lance.spark.LanceConfig;
 import org.lance.spark.LanceConstant;
+import org.lance.spark.LanceSparkWriteOptions;
 
 import org.apache.spark.sql.connector.distributions.Distribution;
 import org.apache.spark.sql.connector.distributions.Distributions;
@@ -35,19 +35,20 @@ import java.util.List;
 
 /** Spark write builder. */
 public class AddColumnsBackfillWrite implements Write, RequiresDistributionAndOrdering {
-  private final LanceConfig config;
+  private final LanceSparkWriteOptions writeOptions;
   private final StructType schema;
   private final List<String> newColumns;
 
-  AddColumnsBackfillWrite(StructType schema, LanceConfig config, List<String> newColumns) {
+  AddColumnsBackfillWrite(
+      StructType schema, LanceSparkWriteOptions writeOptions, List<String> newColumns) {
     this.schema = schema;
-    this.config = config;
+    this.writeOptions = writeOptions;
     this.newColumns = newColumns;
   }
 
   @Override
   public BatchWrite toBatch() {
-    return new AddColumnsBackfillBatchWrite(schema, config, newColumns);
+    return new AddColumnsBackfillBatchWrite(schema, writeOptions, newColumns);
   }
 
   @Override
@@ -71,19 +72,20 @@ public class AddColumnsBackfillWrite implements Write, RequiresDistributionAndOr
 
   /** Task commit. */
   public static class AddColumnsWriteBuilder implements WriteBuilder {
-    private final LanceConfig config;
+    private final LanceSparkWriteOptions writeOptions;
     private final StructType schema;
     private final List<String> newColumns;
 
-    public AddColumnsWriteBuilder(StructType schema, LanceConfig config, List<String> newColumns) {
+    public AddColumnsWriteBuilder(
+        StructType schema, LanceSparkWriteOptions writeOptions, List<String> newColumns) {
       this.schema = schema;
-      this.config = config;
+      this.writeOptions = writeOptions;
       this.newColumns = newColumns;
     }
 
     @Override
     public Write build() {
-      return new AddColumnsBackfillWrite(schema, config, newColumns);
+      return new AddColumnsBackfillWrite(schema, writeOptions, newColumns);
     }
   }
 }

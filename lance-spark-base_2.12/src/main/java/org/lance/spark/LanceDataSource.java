@@ -13,8 +13,7 @@
  */
 package org.lance.spark;
 
-import org.lance.spark.internal.LanceDatasetAdapter;
-import org.lance.spark.utils.Optional;
+import org.lance.Dataset;
 
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.connector.catalog.Identifier;
@@ -24,6 +23,7 @@ import org.apache.spark.sql.connector.expressions.Transform;
 import org.apache.spark.sql.sources.DataSourceRegister;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
+import org.apache.spark.sql.util.LanceArrowUtils;
 
 import java.util.Map;
 
@@ -67,14 +67,27 @@ public abstract class LanceDataSource implements SupportsCatalogOptions, DataSou
 
   @Override
   public StructType inferSchema(CaseInsensitiveStringMap options) {
-    Optional<StructType> schema = LanceDatasetAdapter.getSchema(LanceConfig.from(options));
-    return schema.isPresent() ? schema.get() : null;
+    String datasetUri = options.get(LanceSparkReadOptions.CONFIG_DATASET_URI);
+    if (datasetUri == null) {
+      return null;
+    }
+    LanceSparkReadOptions readOptions = LanceSparkReadOptions.from(options.asCaseSensitiveMap());
+    try (Dataset dataset =
+        Dataset.open()
+            .allocator(LanceRuntime.allocator())
+            .uri(readOptions.getDatasetUri())
+            .readOptions(readOptions.toReadOptions())
+            .build()) {
+      return LanceArrowUtils.fromArrowSchema(dataset.getSchema());
+    } catch (IllegalArgumentException e) {
+      return null;
+    }
   }
 
   @Override
   public Table getTable(
       StructType schema, Transform[] partitioning, Map<String, String> properties) {
-    return createDataset(LanceConfig.from(properties), schema);
+    return createDataset(LanceSparkReadOptions.from(properties), schema);
   }
 
   @Override
@@ -93,8 +106,8 @@ public abstract class LanceDataSource implements SupportsCatalogOptions, DataSou
 
   @Override
   public Identifier extractIdentifier(CaseInsensitiveStringMap options) {
-    LanceConfig config = LanceConfig.from(options);
-    return new LanceIdentifier(config.getDatasetUri());
+    LanceSparkReadOptions readOptions = LanceSparkReadOptions.from(options.asCaseSensitiveMap());
+    return new LanceIdentifier(readOptions.getDatasetUri());
   }
 
   @Override
@@ -130,5 +143,6 @@ public abstract class LanceDataSource implements SupportsCatalogOptions, DataSou
     }
   }
 
-  public abstract LanceDataset createDataset(LanceConfig config, StructType sparkSchema);
+  public abstract LanceDataset createDataset(
+      LanceSparkReadOptions readOptions, StructType sparkSchema);
 }

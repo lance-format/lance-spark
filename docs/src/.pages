@@ -2,6 +2,5 @@ nav:
   - Welcome: index.md
   - Install: install.md
   - Config: config.md
-  - Options: options.md
   - Performance: performance.md
   - Operations: operations

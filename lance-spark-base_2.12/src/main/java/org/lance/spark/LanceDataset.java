@@ -99,39 +99,45 @@ public class LanceDataset implements SupportsRead, SupportsWrite, SupportsMetada
   public static final MetadataColumn[] METADATA_COLUMNS =
       new MetadataColumn[] {ROW_ID_COLUMN, ROW_ADDRESS_COLUMN, FRAGMENT_ID_COLUMN};
 
-  LanceConfig config;
+  private final LanceSparkReadOptions readOptions;
   protected final StructType sparkSchema;
 
   /**
    * Creates a Lance dataset.
    *
-   * @param config read config
+   * @param readOptions read options including dataset URI and settings
    * @param sparkSchema spark struct type
    */
-  public LanceDataset(LanceConfig config, StructType sparkSchema) {
-    this.config = config;
+  public LanceDataset(LanceSparkReadOptions readOptions, StructType sparkSchema) {
+    this.readOptions = readOptions;
     this.sparkSchema = sparkSchema;
   }
 
-  public LanceConfig config() {
-    return config;
+  public LanceSparkReadOptions readOptions() {
+    return readOptions;
   }
 
   @Override
   public ScanBuilder newScanBuilder(CaseInsensitiveStringMap caseInsensitiveStringMap) {
-    // Merge scan-time options with the existing config options
-    LanceConfig scanConfig = config;
+    // Merge scan-time options with the existing read options
+    LanceSparkReadOptions scanOptions = readOptions;
     if (!caseInsensitiveStringMap.isEmpty()) {
-      Map<String, String> mergedOptions = new HashMap<>(config.getOptions());
+      Map<String, String> mergedOptions = new HashMap<>(readOptions.getStorageOptions());
       mergedOptions.putAll(caseInsensitiveStringMap.asCaseSensitiveMap());
-      scanConfig = LanceConfig.from(mergedOptions, config.getDatasetUri());
+      scanOptions =
+          LanceSparkReadOptions.builder()
+              .datasetUri(readOptions.getDatasetUri())
+              .namespace(readOptions.getNamespace())
+              .tableId(readOptions.getTableId())
+              .fromOptions(mergedOptions)
+              .build();
     }
-    return new LanceScanBuilder(sparkSchema, scanConfig);
+    return new LanceScanBuilder(sparkSchema, scanOptions);
   }
 
   @Override
   public String name() {
-    return this.config.getDatasetName();
+    return this.readOptions.getDatasetName();
   }
 
   @Override
@@ -146,26 +152,31 @@ public class LanceDataset implements SupportsRead, SupportsWrite, SupportsMetada
 
   @Override
   public WriteBuilder newWriteBuilder(LogicalWriteInfo logicalWriteInfo) {
-    // Merge write-time options with the existing config options
-    CaseInsensitiveStringMap writeOptions = logicalWriteInfo.options();
-    LanceConfig writeConfig = config;
-    if (!writeOptions.isEmpty()) {
-      Map<String, String> mergedOptions = new HashMap<>(config.getOptions());
-      mergedOptions.putAll(writeOptions.asCaseSensitiveMap());
-      writeConfig = LanceConfig.from(mergedOptions, config.getDatasetUri());
-    }
+    // Merge write-time options with the base options from read options
+    CaseInsensitiveStringMap sparkWriteOptions = logicalWriteInfo.options();
+    Map<String, String> mergedOptions = new HashMap<>(readOptions.getStorageOptions());
+    mergedOptions.putAll(sparkWriteOptions.asCaseSensitiveMap());
+
+    LanceSparkWriteOptions writeOptions =
+        LanceSparkWriteOptions.builder()
+            .datasetUri(readOptions.getDatasetUri())
+            .namespace(readOptions.getNamespace())
+            .tableId(readOptions.getTableId())
+            .fromOptions(mergedOptions)
+            .build();
 
     List<String> backfillColumns =
-        Arrays.stream(writeOptions.getOrDefault(LanceConstant.BACKFILL_COLUMNS_KEY, "").split(","))
+        Arrays.stream(
+                sparkWriteOptions.getOrDefault(LanceConstant.BACKFILL_COLUMNS_KEY, "").split(","))
             .map(String::trim)
             .filter(t -> !t.isEmpty())
             .collect(Collectors.toList());
     if (!backfillColumns.isEmpty()) {
       return new AddColumnsBackfillWrite.AddColumnsWriteBuilder(
-          sparkSchema, writeConfig, backfillColumns);
+          sparkSchema, writeOptions, backfillColumns);
     }
 
-    return new SparkWrite.SparkWriteBuilder(sparkSchema, writeConfig);
+    return new SparkWrite.SparkWriteBuilder(sparkSchema, writeOptions);
   }
 
   @Override

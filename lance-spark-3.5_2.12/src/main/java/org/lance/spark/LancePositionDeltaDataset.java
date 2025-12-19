@@ -19,13 +19,14 @@ import org.apache.spark.sql.connector.write.RowLevelOperationInfo;
 import org.apache.spark.sql.types.StructType;
 
 public class LancePositionDeltaDataset extends LanceDataset implements SupportsRowLevelOperations {
-  public LancePositionDeltaDataset(LanceConfig config, StructType sparkSchema) {
-    super(config, sparkSchema);
+  public LancePositionDeltaDataset(LanceSparkReadOptions readOptions, StructType sparkSchema) {
+    super(readOptions, sparkSchema);
   }
 
   @Override
   public RowLevelOperationBuilder newRowLevelOperationBuilder(
       RowLevelOperationInfo rowLevelOperationInfo) {
-    return new LanceRowLevelOperationBuilder(rowLevelOperationInfo.command(), sparkSchema, config);
+    return new LanceRowLevelOperationBuilder(
+        rowLevelOperationInfo.command(), sparkSchema, readOptions());
   }
 }

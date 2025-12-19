@@ -48,7 +48,7 @@ public class TestUtils {
             Arrays.asList(1L, 2L, 3L, -1L, 1L),
             Arrays.asList(2L, 4L, 6L, -2L, (1L << 32) + 0L),
             Arrays.asList(3L, 6L, 9L, -3L, (1L << 32) + 1L));
-    public static final LanceConfig lanceConfig;
+    public static final LanceSparkReadOptions readOptions;
 
     public static final StructType schema =
         new StructType(
@@ -69,13 +69,13 @@ public class TestUtils {
         throw new IllegalArgumentException("example_db not found in resources directory");
       }
       datasetUri = getDatasetUri(dbPath, datasetName);
-      lanceConfig = LanceConfig.from(datasetUri);
+      readOptions = LanceSparkReadOptions.from(datasetUri);
       inputPartition =
           new LanceInputPartition(
               schema,
               0,
               new LanceSplit(Arrays.asList(0, 1)),
-              lanceConfig,
+              readOptions,
               Optional.empty(),
               "test");
     }

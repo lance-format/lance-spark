@@ -13,8 +13,8 @@
  */
 package org.lance.spark.write;
 
-import org.lance.spark.LanceConfig;
 import org.lance.spark.LanceDataSource;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 
 import org.apache.spark.sql.Dataset;
@@ -92,7 +92,8 @@ public class SparkConnectorWriteQueuedBufferTest {
         .write()
         .format(LanceDataSource.name)
         .option(
-            LanceConfig.CONFIG_DATASET_URI, TestUtils.getDatasetUri(dbPath.toString(), datasetName))
+            LanceSparkReadOptions.CONFIG_DATASET_URI,
+            TestUtils.getDatasetUri(dbPath.toString(), datasetName))
         .option("use_queued_write_buffer", "true")
         .save();
 
@@ -106,14 +107,16 @@ public class SparkConnectorWriteQueuedBufferTest {
         .write()
         .format(LanceDataSource.name)
         .option(
-            LanceConfig.CONFIG_DATASET_URI, TestUtils.getDatasetUri(dbPath.toString(), datasetName))
+            LanceSparkReadOptions.CONFIG_DATASET_URI,
+            TestUtils.getDatasetUri(dbPath.toString(), datasetName))
         .option("use_queued_write_buffer", "true")
         .save();
     testData
         .write()
         .format(LanceDataSource.name)
         .option(
-            LanceConfig.CONFIG_DATASET_URI, TestUtils.getDatasetUri(dbPath.toString(), datasetName))
+            LanceSparkReadOptions.CONFIG_DATASET_URI,
+            TestUtils.getDatasetUri(dbPath.toString(), datasetName))
         .option("use_queued_write_buffer", "true")
         .mode("append")
         .save();
@@ -127,14 +130,16 @@ public class SparkConnectorWriteQueuedBufferTest {
         .write()
         .format(LanceDataSource.name)
         .option(
-            LanceConfig.CONFIG_DATASET_URI, TestUtils.getDatasetUri(dbPath.toString(), datasetName))
+            LanceSparkReadOptions.CONFIG_DATASET_URI,
+            TestUtils.getDatasetUri(dbPath.toString(), datasetName))
         .option("use_queued_write_buffer", "true")
         .save();
     testData
         .write()
         .format(LanceDataSource.name)
         .option(
-            LanceConfig.CONFIG_DATASET_URI, TestUtils.getDatasetUri(dbPath.toString(), datasetName))
+            LanceSparkReadOptions.CONFIG_DATASET_URI,
+            TestUtils.getDatasetUri(dbPath.toString(), datasetName))
         .option("use_queued_write_buffer", "true")
         .mode("overwrite")
         .save();
@@ -149,7 +154,8 @@ public class SparkConnectorWriteQueuedBufferTest {
         .write()
         .format(LanceDataSource.name)
         .option(
-            LanceConfig.CONFIG_DATASET_URI, TestUtils.getDatasetUri(dbPath.toString(), datasetName))
+            LanceSparkReadOptions.CONFIG_DATASET_URI,
+            TestUtils.getDatasetUri(dbPath.toString(), datasetName))
         .option("use_queued_write_buffer", "true")
         .option("queue_depth", "4")
         .save();
@@ -164,7 +170,7 @@ public class SparkConnectorWriteQueuedBufferTest {
     testData
         .write()
         .format(LanceDataSource.name)
-        .option(LanceConfig.CONFIG_DATASET_URI, filePath)
+        .option(LanceSparkReadOptions.CONFIG_DATASET_URI, filePath)
         .option("use_queued_write_buffer", "true")
         .save();
 
@@ -181,7 +187,7 @@ public class SparkConnectorWriteQueuedBufferTest {
         .repartition(4)
         .write()
         .format(LanceDataSource.name)
-        .option(LanceConfig.CONFIG_DATASET_URI, filePath)
+        .option(LanceSparkReadOptions.CONFIG_DATASET_URI, filePath)
         .option("use_queued_write_buffer", "true")
         .save();
 
@@ -195,7 +201,7 @@ public class SparkConnectorWriteQueuedBufferTest {
             .read()
             .format("lance")
             .option(
-                LanceConfig.CONFIG_DATASET_URI,
+                LanceSparkReadOptions.CONFIG_DATASET_URI,
                 TestUtils.getDatasetUri(dbPath.toString(), datasetName))
             .load();
 

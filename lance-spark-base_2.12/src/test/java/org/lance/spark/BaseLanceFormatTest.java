@@ -87,7 +87,11 @@ public abstract class BaseLanceFormatTest {
   public void testReadWithPathOption() {
     // Test reading using spark.read.format("lance").option("path", ...).load()
     Dataset<Row> df =
-        spark.read().format("lance").option(LanceConfig.CONFIG_DATASET_URI, datasetUri).load();
+        spark
+            .read()
+            .format("lance")
+            .option(LanceSparkReadOptions.CONFIG_DATASET_URI, datasetUri)
+            .load();
     validateData(df, TestUtils.TestTable1Config.expectedValues);
   }
 

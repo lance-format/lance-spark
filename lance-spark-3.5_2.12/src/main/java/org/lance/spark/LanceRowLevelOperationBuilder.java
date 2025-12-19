@@ -20,17 +20,19 @@ import org.apache.spark.sql.types.StructType;
 public class LanceRowLevelOperationBuilder implements RowLevelOperationBuilder {
   private final RowLevelOperation.Command command;
   private final StructType sparkSchema;
-  private final LanceConfig config;
+  private final LanceSparkReadOptions readOptions;
 
   public LanceRowLevelOperationBuilder(
-      RowLevelOperation.Command command, StructType sparkSchema, LanceConfig config) {
+      RowLevelOperation.Command command,
+      StructType sparkSchema,
+      LanceSparkReadOptions readOptions) {
     this.command = command;
     this.sparkSchema = sparkSchema;
-    this.config = config;
+    this.readOptions = readOptions;
   }
 
   @Override
   public RowLevelOperation build() {
-    return new LancePositionDeltaOperation(command, sparkSchema, config);
+    return new LancePositionDeltaOperation(command, sparkSchema, readOptions);
   }
 }

@@ -17,9 +17,9 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
 import org.apache.spark.sql.catalyst.plans.logical.{NamedArgument, VacuumOutputType}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
+import org.lance.Dataset
 import org.lance.cleanup.CleanupPolicy
-import org.lance.spark.LanceDataset
-import org.lance.spark.internal.LanceDatasetAdapter
+import org.lance.spark.{LanceDataset, LanceRuntime, LanceSparkReadOptions}
 
 import scala.jdk.CollectionConverters._
 
@@ -55,8 +55,33 @@ case class VacuumExec(
     }
 
     val policy = buildPolicy()
-    val stats = LanceDatasetAdapter.cleanup(lanceDataset.config(), policy)
+    val readOptions = lanceDataset.readOptions()
+
+    val stats = {
+      val dataset = openDataset(readOptions)
+      try {
+        dataset.cleanupWithPolicy(policy)
+      } finally {
+        dataset.close()
+      }
+    }
 
     Seq(new GenericInternalRow(Array[Any](stats.getBytesRemoved, stats.getOldVersions)))
+  }
+
+  private def openDataset(readOptions: LanceSparkReadOptions): Dataset = {
+    if (readOptions.hasNamespace) {
+      Dataset.open()
+        .allocator(LanceRuntime.allocator())
+        .namespace(readOptions.getNamespace)
+        .tableId(readOptions.getTableId)
+        .build()
+    } else {
+      Dataset.open()
+        .allocator(LanceRuntime.allocator())
+        .uri(readOptions.getDatasetUri)
+        .readOptions(readOptions.toReadOptions())
+        .build()
+    }
   }
 }

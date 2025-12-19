@@ -13,35 +13,41 @@
  */
 package org.lance.spark.write;
 
+import org.lance.Dataset;
 import org.lance.FragmentMetadata;
-import org.lance.spark.LanceConfig;
-import org.lance.spark.SparkOptions;
-import org.lance.spark.internal.LanceDatasetAdapter;
+import org.lance.FragmentOperation;
+import org.lance.ReadOptions;
+import org.lance.spark.LanceRuntime;
+import org.lance.spark.LanceSparkWriteOptions;
 
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.connector.write.BatchWrite;
 import org.apache.spark.sql.connector.write.DataWriterFactory;
 import org.apache.spark.sql.connector.write.PhysicalWriteInfo;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 public class LanceBatchWrite implements BatchWrite {
   private final StructType schema;
-  private final LanceConfig config;
+  private final LanceSparkWriteOptions writeOptions;
   private final boolean overwrite;
 
-  public LanceBatchWrite(StructType schema, LanceConfig config, boolean overwrite) {
+  public LanceBatchWrite(
+      StructType schema, LanceSparkWriteOptions writeOptions, boolean overwrite) {
     this.schema = schema;
-    this.config = config;
+    this.writeOptions = writeOptions;
     this.overwrite = overwrite;
   }
 
   @Override
   public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
-    return new LanceDataWriter.WriterFactory(schema, config);
+    return new LanceDataWriter.WriterFactory(schema, writeOptions);
   }
 
   @Override
@@ -57,11 +63,32 @@ public class LanceBatchWrite implements BatchWrite {
             .map(TaskCommit::getFragments)
             .flatMap(List::stream)
             .collect(Collectors.toList());
-    if (overwrite || SparkOptions.overwrite(this.config)) {
-      LanceDatasetAdapter.overwriteFragments(config, fragments, schema);
-    } else {
-      LanceDatasetAdapter.appendFragments(config, fragments);
+
+    String uri = writeOptions.getDatasetUri();
+    Map<String, String> storageOptions = writeOptions.getStorageOptions();
+
+    // Open dataset to get current version
+    long version;
+    ReadOptions readOptions = new ReadOptions.Builder().setStorageOptions(storageOptions).build();
+    try (Dataset dataset =
+        Dataset.open()
+            .allocator(LanceRuntime.allocator())
+            .uri(uri)
+            .readOptions(readOptions)
+            .build()) {
+      version = dataset.version();
     }
+
+    FragmentOperation operation;
+    if (overwrite || writeOptions.isOverwrite()) {
+      Schema arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", true, false);
+      operation = new FragmentOperation.Overwrite(fragments, arrowSchema);
+    } else {
+      operation = new FragmentOperation.Append(fragments);
+    }
+
+    Dataset.commit(
+        LanceRuntime.allocator(), uri, operation, java.util.Optional.of(version), storageOptions);
   }
 
   @Override
@@ -71,7 +98,7 @@ public class LanceBatchWrite implements BatchWrite {
 
   @Override
   public String toString() {
-    return String.format("LanceBatchWrite(datasetUri=%s)", config.getDatasetUri());
+    return String.format("LanceBatchWrite(datasetUri=%s)", writeOptions.getDatasetUri());
   }
 
   public static class TaskCommit implements WriterCommitMessage {

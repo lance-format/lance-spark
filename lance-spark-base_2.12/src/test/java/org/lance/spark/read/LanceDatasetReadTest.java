@@ -13,8 +13,11 @@
  */
 package org.lance.spark.read;
 
+import org.lance.Dataset;
+import org.lance.Fragment;
+import org.lance.spark.LanceRuntime;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
-import org.lance.spark.internal.LanceDatasetAdapter;
 import org.lance.spark.internal.LanceFragmentScanner;
 import org.lance.spark.utils.Optional;
 
@@ -23,11 +26,13 @@ import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -37,16 +42,14 @@ public class LanceDatasetReadTest {
   @Test
   public void testSchema() {
     StructType expectedSchema = TestUtils.TestTable1Config.schema;
-    Optional<StructType> schema =
-        LanceDatasetAdapter.getSchema(TestUtils.TestTable1Config.lanceConfig);
+    Optional<StructType> schema = getSchema(TestUtils.TestTable1Config.readOptions);
     assertTrue(schema.isPresent());
     assertEquals(expectedSchema, schema.get());
   }
 
   @Test
   public void testFragmentIds() {
-    List<Integer> fragments =
-        LanceDatasetAdapter.getFragmentIds(TestUtils.TestTable1Config.lanceConfig);
+    List<Integer> fragments = getFragmentIds(TestUtils.TestTable1Config.readOptions);
     assertEquals(2, fragments.size());
     assertEquals(0, fragments.get(0));
     assertEquals(1, fragments.get(1));
@@ -82,16 +85,40 @@ public class LanceDatasetReadTest {
             }));
   }
 
+  private Optional<StructType> getSchema(LanceSparkReadOptions readOptions) {
+    try (Dataset dataset =
+        Dataset.open()
+            .allocator(LanceRuntime.allocator())
+            .uri(readOptions.getDatasetUri())
+            .readOptions(readOptions.toReadOptions())
+            .build()) {
+      return Optional.of(LanceArrowUtils.fromArrowSchema(dataset.getSchema()));
+    } catch (IllegalArgumentException e) {
+      return Optional.empty();
+    }
+  }
+
+  private List<Integer> getFragmentIds(LanceSparkReadOptions readOptions) {
+    try (Dataset dataset =
+        Dataset.open()
+            .allocator(LanceRuntime.allocator())
+            .uri(readOptions.getDatasetUri())
+            .readOptions(readOptions.toReadOptions())
+            .build()) {
+      return dataset.getFragments().stream().map(Fragment::getId).collect(Collectors.toList());
+    }
+  }
+
   public void validateFragment(List<List<Object>> expectedValues, int fragment, StructType schema)
       throws IOException {
     try (LanceFragmentScanner scanner =
-        LanceDatasetAdapter.getFragmentScanner(
+        LanceFragmentScanner.create(
             fragment,
             new LanceInputPartition(
                 schema,
                 0,
                 new LanceSplit(Arrays.asList(fragment)),
-                TestUtils.TestTable1Config.lanceConfig,
+                TestUtils.TestTable1Config.readOptions,
                 Optional.empty(),
                 "validateFragment"))) {
       try (ArrowReader reader = scanner.getArrowReader()) {

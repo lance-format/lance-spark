@@ -14,7 +14,8 @@
 package org.lance.spark.write;
 
 import org.lance.FragmentMetadata;
-import org.lance.spark.LanceConfig;
+import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.LanceSparkWriteOptions;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
@@ -46,11 +47,12 @@ public class LanceDataWriterTest {
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
       Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
       Schema schema = new Schema(Collections.singletonList(field));
-      LanceConfig config =
-          LanceConfig.from(tempDir.resolve(datasetName + LanceConfig.LANCE_FILE_SUFFIX).toString());
+      LanceSparkWriteOptions writeOptions =
+          LanceSparkWriteOptions.from(
+              tempDir.resolve(datasetName + LanceSparkReadOptions.LANCE_FILE_SUFFIX).toString());
       StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
       LanceDataWriter.WriterFactory writerFactory =
-          new LanceDataWriter.WriterFactory(sparkSchema, config);
+          new LanceDataWriter.WriterFactory(sparkSchema, writeOptions);
       LanceDataWriter dataWriter = (LanceDataWriter) writerFactory.createWriter(0, 0);
 
       int rows = 132;
