@@ -30,7 +30,7 @@ import java.util.Map;
  * Utilities for fragment-aware join optimization.
  *
  * <p>Lance stores data in fragments, and row addresses encode the fragment ID in the upper 32 bits:
- * row_address = (fragment_id << 32) | row_index
+ * {@code row_address = (fragment_id << 32) | row_index}
  *
  * <p>This class provides utilities to extract fragment IDs from row addresses and build mappings
  * for efficient fragment-based joins.
@@ -63,7 +63,7 @@ public class FragmentAwareJoinUtils implements Serializable {
   /**
    * Create a Spark SQL expression to extract fragment ID from a row address column.
    *
-   * <p>This generates an expression equivalent to: rowaddr >>> 32
+   * <p>This generates an expression equivalent to: {@code rowaddr >>> 32}
    *
    * @param rowAddrExpr the expression representing the row address column
    * @return an expression that extracts the fragment ID
