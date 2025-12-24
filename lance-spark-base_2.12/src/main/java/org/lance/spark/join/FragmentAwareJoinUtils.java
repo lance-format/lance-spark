@@ -13,7 +13,7 @@
  */
 package org.lance.spark.join;
 
-import org.lance.spark.LanceConfig;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.internal.LanceDatasetAdapter;
 
 import org.apache.spark.sql.catalyst.expressions.Expression;
@@ -79,12 +79,12 @@ public class FragmentAwareJoinUtils implements Serializable {
    * <p>This can be used to determine the distribution of data across fragments and optimize
    * partition planning.
    *
-   * @param config the Lance dataset configuration
+   * @param options the Lance read options
    * @return a map from fragment ID to the number of rows in that fragment
    */
-  public static Map<Integer, Long> buildFragmentSizeMap(LanceConfig config) {
+  public static Map<Integer, Long> buildFragmentSizeMap(LanceSparkReadOptions options) {
     Map<Integer, Long> fragmentSizes = new HashMap<>();
-    List<Integer> fragmentIds = LanceDatasetAdapter.getFragmentIds(config);
+    List<Integer> fragmentIds = LanceDatasetAdapter.getFragmentIds(options);
 
     // In a full implementation, we would query the fragment metadata
     // For now, we return an empty map as a placeholder
@@ -139,12 +139,12 @@ public class FragmentAwareJoinUtils implements Serializable {
    * <p>Note: This requires scanning the Lance manifest to build the row ID distribution. For large
    * tables, this mapping should be cached/broadcast.
    *
-   * @param config the Lance dataset configuration
+   * @param options the Lance read options
    * @return a map from row ID ranges to fragment IDs
    */
-  public static Map<LongRange, Integer> buildRowIdFragmentMap(LanceConfig config) {
+  public static Map<LongRange, Integer> buildRowIdFragmentMap(LanceSparkReadOptions options) {
     Map<LongRange, Integer> rowIdMap = new HashMap<>();
-    List<Integer> fragmentIds = LanceDatasetAdapter.getFragmentIds(config);
+    List<Integer> fragmentIds = LanceDatasetAdapter.getFragmentIds(options);
 
     // TODO: Query Lance manifest to get row ID ranges for each fragment
     // For now, return an empty map as a placeholder

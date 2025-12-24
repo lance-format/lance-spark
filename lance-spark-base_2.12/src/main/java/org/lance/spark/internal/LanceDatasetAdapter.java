@@ -16,8 +16,7 @@ package org.lance.spark.internal;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.ReadOptions;
-import org.lance.spark.LanceConfig;
-import org.lance.spark.SparkOptions;
+import org.lance.spark.LanceSparkReadOptions;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
@@ -43,25 +42,25 @@ public class LanceDatasetAdapter {
   /**
    * Opens a Lance dataset. Caller is responsible for closing the dataset.
    *
-   * @param config the Lance configuration
+   * @param options the Lance read options
    * @return the opened Dataset
    */
-  public static Dataset openDataset(LanceConfig config) {
-    String uri = config.getDatasetUri();
-    ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
-    return Dataset.open(allocator, uri, options);
+  public static Dataset openDataset(LanceSparkReadOptions options) {
+    String uri = options.getDatasetUri();
+    ReadOptions readOptions = options.toReadOptions();
+    return Dataset.open(allocator, uri, readOptions);
   }
 
   /**
    * Get fragment IDs from a Lance dataset.
    *
-   * @param config the Lance dataset configuration
+   * @param options the Lance read options
    * @return list of fragment IDs
    */
-  public static List<Integer> getFragmentIds(LanceConfig config) {
-    String uri = config.getDatasetUri();
-    ReadOptions options = SparkOptions.genReadOptionFromConfig(config);
-    try (Dataset dataset = Dataset.open(allocator, uri, options)) {
+  public static List<Integer> getFragmentIds(LanceSparkReadOptions options) {
+    String uri = options.getDatasetUri();
+    ReadOptions readOptions = options.toReadOptions();
+    try (Dataset dataset = Dataset.open(allocator, uri, readOptions)) {
       return getFragmentIds(dataset);
     }
   }
