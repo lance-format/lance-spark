@@ -20,6 +20,7 @@ import org.lance.namespace.model.DropNamespaceRequest;
 import org.lance.namespace.model.DropTableRequest;
 import org.lance.namespace.model.ListTablesRequest;
 import org.lance.namespace.model.ListTablesResponse;
+import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.SchemaConverter;
 
@@ -27,12 +28,15 @@ import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException;
+import org.apache.spark.sql.catalyst.analysis.NoSuchFunctionException;
+import org.apache.spark.sql.connector.catalog.FunctionCatalog;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.NamespaceChange;
 import org.apache.spark.sql.connector.catalog.SupportsNamespaces;
 import org.apache.spark.sql.connector.catalog.Table;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.catalog.TableChange;
+import org.apache.spark.sql.connector.catalog.functions.UnboundFunction;
 import org.apache.spark.sql.connector.expressions.Transform;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
@@ -50,7 +54,8 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, SupportsNamespaces {
+public abstract class BaseLanceNamespaceSparkCatalog
+    implements TableCatalog, SupportsNamespaces, FunctionCatalog {
 
   private static final Logger logger =
       LoggerFactory.getLogger(BaseLanceNamespaceSparkCatalog.class);
@@ -134,6 +139,24 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
   @Override
   public String name() {
     return name;
+  }
+
+  @Override
+  public Identifier[] listFunctions(String[] namespace) throws NoSuchNamespaceException {
+    if (namespace != null && namespace.length > 0 && !namespaceExists(namespace)) {
+      throw new NoSuchNamespaceException(namespace);
+    }
+    String[] targetNamespace = namespace == null ? new String[0] : namespace;
+    return new Identifier[] {Identifier.of(targetNamespace, LanceFragmentIdWithDefaultFunction.NAME)};
+  }
+
+  @Override
+  public UnboundFunction loadFunction(Identifier ident) throws NoSuchFunctionException {
+    if (ident.namespace().length != 0
+        || !LanceFragmentIdWithDefaultFunction.NAME.equalsIgnoreCase(ident.name())) {
+      throw new NoSuchFunctionException(ident);
+    }
+    return new LanceFragmentIdWithDefaultFunction();
   }
 
   @Override

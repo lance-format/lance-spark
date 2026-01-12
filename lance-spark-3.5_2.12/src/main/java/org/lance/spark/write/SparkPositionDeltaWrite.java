@@ -24,6 +24,7 @@ import org.lance.operation.Update;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
 
 import com.google.common.collect.ImmutableList;
 import org.apache.arrow.c.ArrowArrayStream;
@@ -31,6 +32,7 @@ import org.apache.arrow.c.Data;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.distributions.Distribution;
 import org.apache.spark.sql.connector.distributions.Distributions;
+import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.Expressions;
 import org.apache.spark.sql.connector.expressions.NamedReference;
 import org.apache.spark.sql.connector.expressions.NullOrdering;
@@ -69,7 +71,10 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
   @Override
   public Distribution requiredDistribution() {
     NamedReference segmentId = Expressions.column(LanceConstant.FRAGMENT_ID);
-    return Distributions.clustered(new NamedReference[] {segmentId});
+    // Avoid skew by spreading null segment_id rows across tasks.
+    Expression clusteredExpr =
+        Expressions.apply(LanceFragmentIdWithDefaultFunction.NAME, segmentId);
+    return Distributions.clustered(new Expression[] {clusteredExpr});
   }
 
   @Override
