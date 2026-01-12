@@ -25,10 +25,10 @@ import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.SchemaConverter;
 
 import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
+import org.apache.spark.sql.catalyst.analysis.NoSuchFunctionException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException;
-import org.apache.spark.sql.catalyst.analysis.NoSuchFunctionException;
 import org.apache.spark.sql.connector.catalog.FunctionCatalog;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.NamespaceChange;
@@ -147,8 +147,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
       throw new NoSuchNamespaceException(namespace);
     }
     String[] targetNamespace = namespace == null ? new String[0] : namespace;
-    return new Identifier[] {Identifier.of(targetNamespace,
-            LanceFragmentIdWithDefaultFunction.NAME)};
+    return new Identifier[] {
+      Identifier.of(targetNamespace, LanceFragmentIdWithDefaultFunction.NAME)
+    };
   }
 
   @Override

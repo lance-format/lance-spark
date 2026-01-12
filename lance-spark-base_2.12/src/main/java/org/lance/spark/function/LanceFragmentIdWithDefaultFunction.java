@@ -24,8 +24,8 @@ import org.apache.spark.sql.types.StructType;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * A V2 function used for write distribution: return the fragment id if present, otherwise return
- * a random int to spread insert rows across partitions.
+ * A V2 function used for write distribution: return the fragment id if present, otherwise return a
+ * random int to spread insert rows across partitions.
  */
 public final class LanceFragmentIdWithDefaultFunction implements UnboundFunction {
   public static final String NAME = "lance_fragment_or_rand";
@@ -36,9 +36,9 @@ public final class LanceFragmentIdWithDefaultFunction implements UnboundFunction
   }
 
   /**
-  * Bind the function to an input schema that contains a single INT field representing the
-  * fragment id.
-  */
+   * Bind the function to an input schema that contains a single INT field representing the fragment
+   * id.
+   */
   @Override
   public BoundFunction bind(StructType inputType) {
     if (inputType.fields().length != 1) {
@@ -93,9 +93,7 @@ public final class LanceFragmentIdWithDefaultFunction implements UnboundFunction
       return NAME;
     }
 
-    /**
-    * Return the fragment id when available, otherwise return a random int to avoid skew.
-    */
+    /** Return the fragment id when available, otherwise return a random int to avoid skew. */
     @Override
     public Integer produceResult(InternalRow input) {
       if (input.isNullAt(0)) {
