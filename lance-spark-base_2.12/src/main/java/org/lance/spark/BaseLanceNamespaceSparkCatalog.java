@@ -147,7 +147,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
       throw new NoSuchNamespaceException(namespace);
     }
     String[] targetNamespace = namespace == null ? new String[0] : namespace;
-    return new Identifier[] {Identifier.of(targetNamespace, LanceFragmentIdWithDefaultFunction.NAME)};
+    return new Identifier[] {Identifier.of(targetNamespace,
+            LanceFragmentIdWithDefaultFunction.NAME)};
   }
 
   @Override
