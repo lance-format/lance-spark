@@ -63,6 +63,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
   private static final Logger logger =
       LoggerFactory.getLogger(BaseLanceNamespaceSparkCatalog.class);
 
+  static {
+    LanceNamespace.registerNamespaceImpl("hive2", "org.lance.namespace.hive2.Hive2Namespace");
+    LanceNamespace.registerNamespaceImpl("hive3", "org.lance.namespace.hive2.Hive3Namespace");
+  }
+
   /** Used to specify the namespace implementation to use */
   private static final String CONFIG_IMPL = "impl";
 
@@ -442,6 +447,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
             .build()) {
       schema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
     } catch (IllegalArgumentException e) {
+      throw new NoSuchTableException(ident);
+    } catch (TableNotFoundException e) {
       throw new NoSuchTableException(ident);
     }
 
