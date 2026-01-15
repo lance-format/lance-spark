@@ -16,6 +16,9 @@ package org.lance.spark;
 import org.lance.Dataset;
 import org.lance.WriteParams;
 import org.lance.namespace.LanceNamespace;
+import org.lance.namespace.errors.TableNotFoundException;
+import org.lance.namespace.model.DescribeTableRequest;
+import org.lance.namespace.model.DescribeTableResponse;
 import org.lance.namespace.model.DropNamespaceRequest;
 import org.lance.namespace.model.DropTableRequest;
 import org.lance.namespace.model.ListTablesRequest;
@@ -89,6 +92,18 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
   private LanceSparkCatalogConfig catalogConfig;
   private Map<String, String> storageOptions;
 
+  /**
+   * The namespace implementation type (e.g., "rest", "dir"). Saved for creating storage options
+   * providers on workers.
+   */
+  private String namespaceImpl;
+
+  /**
+   * The namespace properties for connection. Saved for creating storage options providers on
+   * workers.
+   */
+  private Map<String, String> namespaceProperties;
+
   @Override
   public void initialize(String name, CaseInsensitiveStringMap options) {
     this.name = name;
@@ -116,6 +131,10 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
     // Initialize the namespace with proper configuration
     Map<String, String> namespaceOptions = new HashMap<>(options);
 
+    // Save namespace impl and properties for serialization to workers
+    this.namespaceImpl = impl;
+    this.namespaceProperties = new HashMap<>(namespaceOptions);
+
     // Use the global buffer allocator
     this.namespace = LanceNamespace.connect(impl, namespaceOptions, LanceRuntime.allocator());
 
@@ -134,6 +153,24 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
   @Override
   public String name() {
     return name;
+  }
+
+  /**
+   * Returns the namespace implementation type (e.g., "rest", "dir").
+   *
+   * @return the namespace implementation type
+   */
+  public String getNamespaceImpl() {
+    return namespaceImpl;
+  }
+
+  /**
+   * Returns the namespace properties for connection.
+   *
+   * @return the namespace properties map
+   */
+  public Map<String, String> getNamespaceProperties() {
+    return namespaceProperties;
   }
 
   @Override
@@ -355,9 +392,23 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
     // Build the table ID for credential vending
     List<String> tableId = buildTableId(actualIdent);
 
-    // Open dataset using namespace for credential vending
+    // Call describeTable to get location and initial storage options
+    DescribeTableRequest describeRequest = new DescribeTableRequest();
+    tableId.forEach(describeRequest::addIdItem);
+    DescribeTableResponse describeResponse;
+    try {
+      describeResponse = namespace.describeTable(describeRequest);
+    } catch (TableNotFoundException e) {
+      throw new NoSuchTableException(ident);
+    } catch (RuntimeException e) {
+      throw new RuntimeException("Failed to describe table: " + ident, e);
+    }
+
+    String location = describeResponse.getLocation();
+    Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
+
+    // Open dataset to get schema
     StructType schema;
-    String location;
     try (Dataset dataset =
         Dataset.open()
             .allocator(LanceRuntime.allocator())
@@ -365,14 +416,14 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
             .tableId(tableId)
             .build()) {
       schema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
-      location = dataset.uri();
     } catch (IllegalArgumentException e) {
       throw new NoSuchTableException(ident);
     }
 
     // Create read options with namespace support
     LanceSparkReadOptions readOptions = createReadOptions(location, tableId);
-    return createDataset(readOptions, schema);
+    return createDataset(
+        readOptions, schema, initialStorageOptions, namespaceImpl, namespaceProperties);
   }
 
   /**
@@ -402,30 +453,31 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
 
     StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
 
-    // Create dataset using namespace - WriteDatasetBuilder handles createEmptyTable internally
-    Dataset.write()
-        .allocator(LanceRuntime.allocator())
-        .namespace(namespace)
-        .tableId(tableIdList)
-        .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false))
-        .mode(WriteParams.WriteMode.CREATE)
-        .execute()
-        .close();
-
-    // Open the created dataset to get location for config
+    // Create dataset using namespace - WriteDatasetBuilder handles declareTable internally
+    // and properly leverages namespace client for credential vending
     String location;
     try (Dataset dataset =
-        Dataset.open()
+        Dataset.write()
             .allocator(LanceRuntime.allocator())
             .namespace(namespace)
             .tableId(tableIdList)
-            .build()) {
+            .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false))
+            .mode(WriteParams.WriteMode.CREATE)
+            .storageOptions(catalogConfig.getStorageOptions())
+            .execute()) {
       location = dataset.uri();
     }
 
+    // Call describeTable to get initial storage options for Spark dataset wrapper
+    DescribeTableRequest describeRequest = new DescribeTableRequest();
+    tableIdList.forEach(describeRequest::addIdItem);
+    DescribeTableResponse describeResponse = namespace.describeTable(describeRequest);
+    Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
+
     // Create read options with namespace settings
     LanceSparkReadOptions readOptions = createReadOptions(location, tableIdList);
-    return createDataset(readOptions, processedSchema);
+    return createDataset(
+        readOptions, processedSchema, initialStorageOptions, namespaceImpl, namespaceProperties);
   }
 
   @Override
@@ -575,5 +627,9 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
   }
 
   public abstract LanceDataset createDataset(
-      LanceSparkReadOptions readOptions, StructType sparkSchema);
+      LanceSparkReadOptions readOptions,
+      StructType sparkSchema,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties);
 }

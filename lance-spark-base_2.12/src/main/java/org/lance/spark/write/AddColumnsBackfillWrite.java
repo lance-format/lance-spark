@@ -32,6 +32,7 @@ import org.apache.spark.sql.connector.write.streaming.StreamingWrite;
 import org.apache.spark.sql.types.StructType;
 
 import java.util.List;
+import java.util.Map;
 
 /** Spark write builder. */
 public class AddColumnsBackfillWrite implements Write, RequiresDistributionAndOrdering {
@@ -39,16 +40,45 @@ public class AddColumnsBackfillWrite implements Write, RequiresDistributionAndOr
   private final StructType schema;
   private final List<String> newColumns;
 
+  /**
+   * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
+   * to workers so they can reuse the credentials without calling describeTable again.
+   */
+  private final Map<String, String> initialStorageOptions;
+
+  /** Namespace configuration for credential refresh on workers. */
+  private final String namespaceImpl;
+
+  private final Map<String, String> namespaceProperties;
+  private final List<String> tableId;
+
   AddColumnsBackfillWrite(
-      StructType schema, LanceSparkWriteOptions writeOptions, List<String> newColumns) {
+      StructType schema,
+      LanceSparkWriteOptions writeOptions,
+      List<String> newColumns,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      List<String> tableId) {
     this.schema = schema;
     this.writeOptions = writeOptions;
     this.newColumns = newColumns;
+    this.initialStorageOptions = initialStorageOptions;
+    this.namespaceImpl = namespaceImpl;
+    this.namespaceProperties = namespaceProperties;
+    this.tableId = tableId;
   }
 
   @Override
   public BatchWrite toBatch() {
-    return new AddColumnsBackfillBatchWrite(schema, writeOptions, newColumns);
+    return new AddColumnsBackfillBatchWrite(
+        schema,
+        writeOptions,
+        newColumns,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        tableId);
   }
 
   @Override
@@ -76,16 +106,45 @@ public class AddColumnsBackfillWrite implements Write, RequiresDistributionAndOr
     private final StructType schema;
     private final List<String> newColumns;
 
+    /**
+     * Initial storage options fetched from namespace.describeTable() on the driver. These are
+     * passed to workers so they can reuse the credentials without calling describeTable again.
+     */
+    private final Map<String, String> initialStorageOptions;
+
+    /** Namespace configuration for credential refresh on workers. */
+    private final String namespaceImpl;
+
+    private final Map<String, String> namespaceProperties;
+    private final List<String> tableId;
+
     public AddColumnsWriteBuilder(
-        StructType schema, LanceSparkWriteOptions writeOptions, List<String> newColumns) {
+        StructType schema,
+        LanceSparkWriteOptions writeOptions,
+        List<String> newColumns,
+        Map<String, String> initialStorageOptions,
+        String namespaceImpl,
+        Map<String, String> namespaceProperties,
+        List<String> tableId) {
       this.schema = schema;
       this.writeOptions = writeOptions;
       this.newColumns = newColumns;
+      this.initialStorageOptions = initialStorageOptions;
+      this.namespaceImpl = namespaceImpl;
+      this.namespaceProperties = namespaceProperties;
+      this.tableId = tableId;
     }
 
     @Override
     public Write build() {
-      return new AddColumnsBackfillWrite(schema, writeOptions, newColumns);
+      return new AddColumnsBackfillWrite(
+          schema,
+          writeOptions,
+          newColumns,
+          initialStorageOptions,
+          namespaceImpl,
+          namespaceProperties,
+          tableId);
     }
   }
 }

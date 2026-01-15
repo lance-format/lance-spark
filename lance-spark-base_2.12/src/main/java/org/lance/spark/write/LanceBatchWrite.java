@@ -15,8 +15,11 @@ package org.lance.spark.write;
 
 import org.lance.Dataset;
 import org.lance.FragmentMetadata;
-import org.lance.FragmentOperation;
 import org.lance.ReadOptions;
+import org.lance.namespace.LanceNamespaceStorageOptionsProvider;
+import org.lance.operation.Append;
+import org.lance.operation.Operation;
+import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 
@@ -38,16 +41,68 @@ public class LanceBatchWrite implements BatchWrite {
   private final LanceSparkWriteOptions writeOptions;
   private final boolean overwrite;
 
+  /**
+   * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
+   * to workers so they can reuse the credentials without calling describeTable again.
+   */
+  private final Map<String, String> initialStorageOptions;
+
+  /** Namespace configuration for credential refresh on workers. */
+  private final String namespaceImpl;
+
+  private final Map<String, String> namespaceProperties;
+  private final List<String> tableId;
+
+  /** Dataset opened at start, held for commit to ensure version consistency. */
+  private final Dataset dataset;
+
   public LanceBatchWrite(
-      StructType schema, LanceSparkWriteOptions writeOptions, boolean overwrite) {
+      StructType schema,
+      LanceSparkWriteOptions writeOptions,
+      boolean overwrite,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      List<String> tableId) {
     this.schema = schema;
     this.writeOptions = writeOptions;
     this.overwrite = overwrite;
+    this.initialStorageOptions = initialStorageOptions;
+    this.namespaceImpl = namespaceImpl;
+    this.namespaceProperties = namespaceProperties;
+    this.tableId = tableId;
+
+    // Open dataset at start to capture version for commit
+    this.dataset = openDataset();
+  }
+
+  private Dataset openDataset() {
+    String uri = writeOptions.getDatasetUri();
+    ReadOptions readOptions = buildReadOptions();
+    return Dataset.open()
+        .allocator(LanceRuntime.allocator())
+        .uri(uri)
+        .readOptions(readOptions)
+        .build();
+  }
+
+  private ReadOptions buildReadOptions() {
+    Map<String, String> merged =
+        LanceRuntime.mergeStorageOptions(writeOptions.getStorageOptions(), initialStorageOptions);
+    LanceNamespaceStorageOptionsProvider provider =
+        LanceRuntime.getOrCreateStorageOptionsProvider(namespaceImpl, namespaceProperties, tableId);
+
+    ReadOptions.Builder builder = new ReadOptions.Builder().setStorageOptions(merged);
+    if (provider != null) {
+      builder.setStorageOptionsProvider(provider);
+    }
+    return builder.build();
   }
 
   @Override
   public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
-    return new LanceDataWriter.WriterFactory(schema, writeOptions);
+    return new LanceDataWriter.WriterFactory(
+        schema, writeOptions, initialStorageOptions, namespaceImpl, namespaceProperties, tableId);
   }
 
   @Override
@@ -57,43 +112,32 @@ public class LanceBatchWrite implements BatchWrite {
 
   @Override
   public void commit(WriterCommitMessage[] messages) {
-    List<FragmentMetadata> fragments =
-        Arrays.stream(messages)
-            .map(m -> (TaskCommit) m)
-            .map(TaskCommit::getFragments)
-            .flatMap(List::stream)
-            .collect(Collectors.toList());
+    try {
+      List<FragmentMetadata> fragments =
+          Arrays.stream(messages)
+              .map(m -> (TaskCommit) m)
+              .map(TaskCommit::getFragments)
+              .flatMap(List::stream)
+              .collect(Collectors.toList());
 
-    String uri = writeOptions.getDatasetUri();
-    Map<String, String> storageOptions = writeOptions.getStorageOptions();
+      Operation operation;
+      if (overwrite || writeOptions.isOverwrite()) {
+        Schema arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", true, false);
+        operation = Overwrite.builder().fragments(fragments).schema(arrowSchema).build();
+      } else {
+        operation = Append.builder().fragments(fragments).build();
+      }
 
-    // Open dataset to get current version
-    long version;
-    ReadOptions readOptions = new ReadOptions.Builder().setStorageOptions(storageOptions).build();
-    try (Dataset dataset =
-        Dataset.open()
-            .allocator(LanceRuntime.allocator())
-            .uri(uri)
-            .readOptions(readOptions)
-            .build()) {
-      version = dataset.version();
+      // Commit using the dataset opened at start (ensures version consistency)
+      dataset.newTransactionBuilder().operation(operation).build().commit();
+    } finally {
+      dataset.close();
     }
-
-    FragmentOperation operation;
-    if (overwrite || writeOptions.isOverwrite()) {
-      Schema arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", true, false);
-      operation = new FragmentOperation.Overwrite(fragments, arrowSchema);
-    } else {
-      operation = new FragmentOperation.Append(fragments);
-    }
-
-    Dataset.commit(
-        LanceRuntime.allocator(), uri, operation, java.util.Optional.of(version), storageOptions);
   }
 
   @Override
   public void abort(WriterCommitMessage[] messages) {
-    throw new UnsupportedOperationException();
+    dataset.close();
   }
 
   @Override

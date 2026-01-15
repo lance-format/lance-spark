@@ -18,6 +18,6 @@ import org.apache.spark.sql.types.StructType;
 public class LanceSparkDataSource extends LanceDataSource {
   @Override
   public LanceDataset createDataset(LanceSparkReadOptions readOptions, StructType sparkSchema) {
-    return new LanceDataset(readOptions, sparkSchema);
+    return new LanceDataset(readOptions, sparkSchema, null, null, null);
   }
 }

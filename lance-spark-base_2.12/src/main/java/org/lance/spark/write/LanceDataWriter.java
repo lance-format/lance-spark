@@ -30,6 +30,7 @@ import org.apache.spark.sql.types.StructType;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
@@ -94,17 +95,41 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
     private final LanceSparkWriteOptions writeOptions;
     private final StructType schema;
 
-    protected WriterFactory(StructType schema, LanceSparkWriteOptions writeOptions) {
+    /**
+     * Initial storage options fetched from namespace.describeTable() on the driver. These are
+     * passed to workers so they can reuse the credentials without calling describeTable again.
+     */
+    private final Map<String, String> initialStorageOptions;
+
+    /** Namespace configuration for credential refresh on workers. */
+    private final String namespaceImpl;
+
+    private final Map<String, String> namespaceProperties;
+    private final List<String> tableId;
+
+    protected WriterFactory(
+        StructType schema,
+        LanceSparkWriteOptions writeOptions,
+        Map<String, String> initialStorageOptions,
+        String namespaceImpl,
+        Map<String, String> namespaceProperties,
+        List<String> tableId) {
       // Everything passed to writer factory should be serializable
       this.schema = schema;
       this.writeOptions = writeOptions;
+      this.initialStorageOptions = initialStorageOptions;
+      this.namespaceImpl = namespaceImpl;
+      this.namespaceProperties = namespaceProperties;
+      this.tableId = tableId;
     }
 
     @Override
     public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
       int batchSize = writeOptions.getBatchSize();
       boolean useQueuedBuffer = writeOptions.isUseQueuedWriteBuffer();
-      WriteParams params = writeOptions.toWriteParams();
+
+      // Merge initial storage options with write options
+      WriteParams params = buildWriteParams();
 
       // Select buffer type based on configuration
       ArrowBatchWriteBuffer writeBuffer;
@@ -115,8 +140,8 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
         writeBuffer = new SemaphoreArrowBatchWriteBuffer(schema, batchSize);
       }
 
-      // Get storage options provider for credential refresh if namespace is configured
-      StorageOptionsProvider storageOptionsProvider = writeOptions.getStorageOptionsProvider();
+      // Get storage options provider for credential refresh
+      StorageOptionsProvider storageOptionsProvider = getStorageOptionsProvider();
 
       // Create fragment in background thread
       Callable<List<FragmentMetadata>> fragmentCreator =
@@ -133,6 +158,33 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       fragmentCreationThread.start();
 
       return new LanceDataWriter(writeBuffer, fragmentCreationTask, fragmentCreationThread);
+    }
+
+    private WriteParams buildWriteParams() {
+      Map<String, String> merged =
+          LanceRuntime.mergeStorageOptions(writeOptions.getStorageOptions(), initialStorageOptions);
+
+      WriteParams.Builder builder = new WriteParams.Builder();
+      builder.withMode(writeOptions.getWriteMode());
+      if (writeOptions.getMaxRowsPerFile() != null) {
+        builder.withMaxRowsPerFile(writeOptions.getMaxRowsPerFile());
+      }
+      if (writeOptions.getMaxRowsPerGroup() != null) {
+        builder.withMaxRowsPerGroup(writeOptions.getMaxRowsPerGroup());
+      }
+      if (writeOptions.getMaxBytesPerFile() != null) {
+        builder.withMaxBytesPerFile(writeOptions.getMaxBytesPerFile());
+      }
+      if (writeOptions.getDataStorageVersion() != null) {
+        builder.withDataStorageVersion(writeOptions.getDataStorageVersion());
+      }
+      builder.withStorageOptions(merged);
+      return builder.build();
+    }
+
+    private StorageOptionsProvider getStorageOptionsProvider() {
+      return LanceRuntime.getOrCreateStorageOptionsProvider(
+          namespaceImpl, namespaceProperties, tableId);
     }
   }
 }

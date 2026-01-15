@@ -59,7 +59,15 @@ public class LanceBatchWriteTest {
       // Append data to lance dataset
       LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
       StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
-      LanceBatchWrite lanceBatchWrite = new LanceBatchWrite(sparkSchema, writeOptions, false);
+      LanceBatchWrite lanceBatchWrite =
+          new LanceBatchWrite(
+              sparkSchema,
+              writeOptions,
+              false,
+              null, // initialStorageOptions
+              null, // namespaceImpl
+              null, // namespaceProperties
+              null); // tableId
       DataWriterFactory factor = lanceBatchWrite.createBatchWriterFactory(() -> 1);
 
       int rows = 132;

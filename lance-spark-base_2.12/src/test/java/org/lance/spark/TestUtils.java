@@ -73,11 +73,18 @@ public class TestUtils {
       inputPartition =
           new LanceInputPartition(
               schema,
-              0,
+              0 /* partitionId */,
               new LanceSplit(Arrays.asList(0, 1)),
               readOptions,
-              Optional.empty(),
-              "test");
+              Optional.empty() /* whereCondition */,
+              Optional.empty() /* limit */,
+              Optional.empty() /* offset */,
+              Optional.empty() /* topNSortOrders */,
+              Optional.empty() /* pushedAggregation */,
+              "test" /* scanId */,
+              null /* initialStorageOptions */,
+              null /* namespaceImpl */,
+              null /* namespaceProperties */);
     }
   }
 

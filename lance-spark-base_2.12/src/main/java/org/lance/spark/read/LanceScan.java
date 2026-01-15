@@ -53,6 +53,17 @@ public class LanceScan
   private final LanceStatistics statistics;
   private final String scanId = UUID.randomUUID().toString();
 
+  /**
+   * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
+   * to workers so they can reuse the credentials without calling describeTable again.
+   */
+  private final java.util.Map<String, String> initialStorageOptions;
+
+  /** Namespace configuration for credential refresh on workers. */
+  private final String namespaceImpl;
+
+  private final java.util.Map<String, String> namespaceProperties;
+
   public LanceScan(
       StructType schema,
       LanceSparkReadOptions readOptions,
@@ -61,7 +72,10 @@ public class LanceScan
       Optional<Integer> offset,
       Optional<List<ColumnOrdering>> topNSortOrders,
       Optional<Aggregation> pushedAggregation,
-      LanceStatistics statistics) {
+      LanceStatistics statistics,
+      java.util.Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      java.util.Map<String, String> namespaceProperties) {
     this.schema = schema;
     this.readOptions = readOptions;
     this.whereConditions = whereConditions;
@@ -70,6 +84,9 @@ public class LanceScan
     this.topNSortOrders = topNSortOrders;
     this.pushedAggregation = pushedAggregation;
     this.statistics = statistics;
+    this.initialStorageOptions = initialStorageOptions;
+    this.namespaceImpl = namespaceImpl;
+    this.namespaceProperties = namespaceProperties;
   }
 
   @Override
@@ -93,7 +110,10 @@ public class LanceScan
                     offset,
                     topNSortOrders,
                     pushedAggregation,
-                    scanId))
+                    scanId,
+                    initialStorageOptions,
+                    namespaceImpl,
+                    namespaceProperties))
         .toArray(InputPartition[]::new);
   }
 

@@ -22,6 +22,7 @@ import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.types.StructType;
 
 import java.util.List;
+import java.util.Map;
 
 public class LanceInputPartition implements InputPartition {
   private static final long serialVersionUID = 4723894723984723984L;
@@ -37,25 +38,16 @@ public class LanceInputPartition implements InputPartition {
   private final Optional<Aggregation> pushedAggregation;
   private final String scanId;
 
-  public LanceInputPartition(
-      StructType schema,
-      int partitionId,
-      LanceSplit lanceSplit,
-      LanceSparkReadOptions readOptions,
-      Optional<String> whereCondition,
-      String scanId) {
-    this(
-        schema,
-        partitionId,
-        lanceSplit,
-        readOptions,
-        whereCondition,
-        Optional.empty(),
-        Optional.empty(),
-        Optional.empty(),
-        Optional.empty(),
-        scanId);
-  }
+  /**
+   * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
+   * to workers so they can reuse the credentials without calling describeTable again.
+   */
+  private final Map<String, String> initialStorageOptions;
+
+  /** Namespace configuration for credential refresh on workers. */
+  private final String namespaceImpl;
+
+  private final Map<String, String> namespaceProperties;
 
   public LanceInputPartition(
       StructType schema,
@@ -67,7 +59,10 @@ public class LanceInputPartition implements InputPartition {
       Optional<Integer> offset,
       Optional<List<ColumnOrdering>> topNSortOrders,
       Optional<Aggregation> pushedAggregation,
-      String scanId) {
+      String scanId,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties) {
     this.schema = schema;
     this.partitionId = partitionId;
     this.lanceSplit = lanceSplit;
@@ -78,6 +73,9 @@ public class LanceInputPartition implements InputPartition {
     this.topNSortOrders = topNSortOrders;
     this.pushedAggregation = pushedAggregation;
     this.scanId = scanId;
+    this.initialStorageOptions = initialStorageOptions;
+    this.namespaceImpl = namespaceImpl;
+    this.namespaceProperties = namespaceProperties;
   }
 
   public StructType getSchema() {
@@ -118,5 +116,17 @@ public class LanceInputPartition implements InputPartition {
 
   public String getScanId() {
     return scanId;
+  }
+
+  public Map<String, String> getInitialStorageOptions() {
+    return initialStorageOptions;
+  }
+
+  public String getNamespaceImpl() {
+    return namespaceImpl;
+  }
+
+  public Map<String, String> getNamespaceProperties() {
+    return namespaceProperties;
   }
 }

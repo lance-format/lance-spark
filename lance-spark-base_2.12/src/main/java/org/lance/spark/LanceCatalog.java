@@ -65,7 +65,7 @@ public class LanceCatalog implements TableCatalog {
     } catch (IllegalArgumentException e) {
       throw new NoSuchTableException(ident);
     }
-    return new LanceDataset(readOptions, schema);
+    return new LanceDataset(readOptions, schema, null, null, null);
   }
 
   @Override
@@ -86,7 +86,7 @@ public class LanceCatalog implements TableCatalog {
     } catch (IllegalArgumentException e) {
       throw new TableAlreadyExistsException(ident);
     }
-    return new LanceDataset(readOptions, schema);
+    return new LanceDataset(readOptions, schema, null, null, null);
   }
 
   @Override

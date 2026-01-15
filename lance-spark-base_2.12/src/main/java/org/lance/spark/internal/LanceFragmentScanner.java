@@ -15,8 +15,10 @@ package org.lance.spark.internal;
 
 import org.lance.Dataset;
 import org.lance.Fragment;
+import org.lance.ReadOptions;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
+import org.lance.namespace.LanceNamespaceStorageOptionsProvider;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
@@ -47,22 +49,28 @@ public class LanceFragmentScanner implements AutoCloseable {
                 @Override
                 public Map<Integer, Fragment> load(CacheKey key) throws Exception {
                   LanceSparkReadOptions readOptions = key.getReadOptions();
-                  Dataset dataset;
-                  if (readOptions.hasNamespace()) {
-                    dataset =
-                        Dataset.open()
-                            .allocator(LanceRuntime.allocator())
-                            .namespace(readOptions.getNamespace())
-                            .tableId(readOptions.getTableId())
-                            .build();
-                  } else {
-                    dataset =
-                        Dataset.open()
-                            .allocator(LanceRuntime.allocator())
-                            .uri(readOptions.getDatasetUri())
-                            .readOptions(readOptions.toReadOptions())
-                            .build();
+
+                  // Build ReadOptions with merged storage options and credential refresh provider
+                  Map<String, String> merged =
+                      LanceRuntime.mergeStorageOptions(
+                          readOptions.getStorageOptions(), key.getInitialStorageOptions());
+                  LanceNamespaceStorageOptionsProvider provider =
+                      LanceRuntime.getOrCreateStorageOptionsProvider(
+                          key.getNamespaceImpl(),
+                          key.getNamespaceProperties(),
+                          readOptions.getTableId());
+
+                  ReadOptions.Builder builder = new ReadOptions.Builder().setStorageOptions(merged);
+                  if (provider != null) {
+                    builder.setStorageOptionsProvider(provider);
                   }
+
+                  Dataset dataset =
+                      Dataset.open()
+                          .allocator(LanceRuntime.allocator())
+                          .uri(readOptions.getDatasetUri())
+                          .readOptions(builder.build())
+                          .build();
                   return dataset.getFragments().stream()
                       .collect(Collectors.toMap(Fragment::getId, f -> f));
                 }
@@ -86,7 +94,13 @@ public class LanceFragmentScanner implements AutoCloseable {
   public static LanceFragmentScanner create(int fragmentId, LanceInputPartition inputPartition) {
     try {
       LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
-      CacheKey key = new CacheKey(readOptions, inputPartition.getScanId());
+      CacheKey key =
+          new CacheKey(
+              readOptions,
+              inputPartition.getScanId(),
+              inputPartition.getInitialStorageOptions(),
+              inputPartition.getNamespaceImpl(),
+              inputPartition.getNamespaceProperties());
       Map<Integer, Fragment> cachedFragments = LOADING_CACHE.get(key);
       Fragment fragment = cachedFragments.get(fragmentId);
       ScanOptions.Builder scanOptions = new ScanOptions.Builder();
@@ -171,14 +185,37 @@ public class LanceFragmentScanner implements AutoCloseable {
   private static class CacheKey {
     private final LanceSparkReadOptions readOptions;
     private final String scanId;
+    private final Map<String, String> initialStorageOptions;
+    private final String namespaceImpl;
+    private final Map<String, String> namespaceProperties;
 
-    CacheKey(LanceSparkReadOptions readOptions, String scanId) {
+    CacheKey(
+        LanceSparkReadOptions readOptions,
+        String scanId,
+        Map<String, String> initialStorageOptions,
+        String namespaceImpl,
+        Map<String, String> namespaceProperties) {
       this.readOptions = readOptions;
       this.scanId = scanId;
+      this.initialStorageOptions = initialStorageOptions;
+      this.namespaceImpl = namespaceImpl;
+      this.namespaceProperties = namespaceProperties;
     }
 
     public LanceSparkReadOptions getReadOptions() {
       return readOptions;
+    }
+
+    public Map<String, String> getInitialStorageOptions() {
+      return initialStorageOptions;
+    }
+
+    public String getNamespaceImpl() {
+      return namespaceImpl;
+    }
+
+    public Map<String, String> getNamespaceProperties() {
+      return namespaceProperties;
     }
 
     @Override

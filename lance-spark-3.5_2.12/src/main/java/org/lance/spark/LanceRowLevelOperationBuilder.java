@@ -17,22 +17,47 @@ import org.apache.spark.sql.connector.write.RowLevelOperation;
 import org.apache.spark.sql.connector.write.RowLevelOperationBuilder;
 import org.apache.spark.sql.types.StructType;
 
+import java.util.Map;
+
 public class LanceRowLevelOperationBuilder implements RowLevelOperationBuilder {
   private final RowLevelOperation.Command command;
   private final StructType sparkSchema;
   private final LanceSparkReadOptions readOptions;
 
+  /**
+   * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
+   * to workers so they can reuse the credentials without calling describeTable again.
+   */
+  private final Map<String, String> initialStorageOptions;
+
+  /** Namespace configuration for credential refresh on workers. */
+  private final String namespaceImpl;
+
+  private final Map<String, String> namespaceProperties;
+
   public LanceRowLevelOperationBuilder(
       RowLevelOperation.Command command,
       StructType sparkSchema,
-      LanceSparkReadOptions readOptions) {
+      LanceSparkReadOptions readOptions,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties) {
     this.command = command;
     this.sparkSchema = sparkSchema;
     this.readOptions = readOptions;
+    this.initialStorageOptions = initialStorageOptions;
+    this.namespaceImpl = namespaceImpl;
+    this.namespaceProperties = namespaceProperties;
   }
 
   @Override
   public RowLevelOperation build() {
-    return new LancePositionDeltaOperation(command, sparkSchema, readOptions);
+    return new LancePositionDeltaOperation(
+        command,
+        sparkSchema,
+        readOptions,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties);
   }
 }

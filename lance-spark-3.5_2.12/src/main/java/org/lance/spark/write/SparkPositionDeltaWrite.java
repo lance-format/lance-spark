@@ -61,9 +61,31 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
   private final StructType sparkSchema;
   private final LanceSparkWriteOptions writeOptions;
 
-  public SparkPositionDeltaWrite(StructType sparkSchema, LanceSparkWriteOptions writeOptions) {
+  /**
+   * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
+   * to workers so they can reuse the credentials without calling describeTable again.
+   */
+  private final Map<String, String> initialStorageOptions;
+
+  /** Namespace configuration for credential refresh on workers. */
+  private final String namespaceImpl;
+
+  private final Map<String, String> namespaceProperties;
+  private final List<String> tableId;
+
+  public SparkPositionDeltaWrite(
+      StructType sparkSchema,
+      LanceSparkWriteOptions writeOptions,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      List<String> tableId) {
     this.sparkSchema = sparkSchema;
     this.writeOptions = writeOptions;
+    this.initialStorageOptions = initialStorageOptions;
+    this.namespaceImpl = namespaceImpl;
+    this.namespaceProperties = namespaceProperties;
+    this.tableId = tableId;
   }
 
   @Override
@@ -89,7 +111,13 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
     @Override
     public DeltaWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
-      return new PositionDeltaWriteFactory(sparkSchema, writeOptions);
+      return new PositionDeltaWriteFactory(
+          sparkSchema,
+          writeOptions,
+          initialStorageOptions,
+          namespaceImpl,
+          namespaceProperties,
+          tableId);
     }
 
     @Override
@@ -146,16 +174,40 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     private final StructType sparkSchema;
     private final LanceSparkWriteOptions writeOptions;
 
-    PositionDeltaWriteFactory(StructType sparkSchema, LanceSparkWriteOptions writeOptions) {
+    /**
+     * Initial storage options fetched from namespace.describeTable() on the driver. These are
+     * passed to workers so they can reuse the credentials without calling describeTable again.
+     */
+    private final Map<String, String> initialStorageOptions;
+
+    /** Namespace configuration for credential refresh on workers. */
+    private final String namespaceImpl;
+
+    private final Map<String, String> namespaceProperties;
+    private final List<String> tableId;
+
+    PositionDeltaWriteFactory(
+        StructType sparkSchema,
+        LanceSparkWriteOptions writeOptions,
+        Map<String, String> initialStorageOptions,
+        String namespaceImpl,
+        Map<String, String> namespaceProperties,
+        List<String> tableId) {
       this.sparkSchema = sparkSchema;
       this.writeOptions = writeOptions;
+      this.initialStorageOptions = initialStorageOptions;
+      this.namespaceImpl = namespaceImpl;
+      this.namespaceProperties = namespaceProperties;
+      this.tableId = tableId;
     }
 
     @Override
     public DeltaWriter<InternalRow> createWriter(int partitionId, long taskId) {
       int batchSize = writeOptions.getBatchSize();
       boolean useQueuedBuffer = writeOptions.isUseQueuedWriteBuffer();
-      WriteParams params = writeOptions.toWriteParams();
+
+      // Merge initial storage options with write options
+      WriteParams params = buildWriteParams();
 
       // Select buffer type based on configuration
       ArrowBatchWriteBuffer writeBuffer;
@@ -166,8 +218,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
         writeBuffer = new SemaphoreArrowBatchWriteBuffer(sparkSchema, batchSize);
       }
 
-      // Get storage options provider for credential refresh if namespace is configured
-      StorageOptionsProvider storageOptionsProvider = writeOptions.getStorageOptionsProvider();
+      // Get storage options provider for credential refresh
+      StorageOptionsProvider storageOptionsProvider = getStorageOptionsProvider();
 
       // Create fragment in background thread
       Callable<List<FragmentMetadata>> fragmentCreator =
@@ -185,7 +237,35 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
       return new LanceDeltaWriter(
           writeOptions,
-          new LanceDataWriter(writeBuffer, fragmentCreationTask, fragmentCreationThread));
+          new LanceDataWriter(writeBuffer, fragmentCreationTask, fragmentCreationThread),
+          initialStorageOptions);
+    }
+
+    private WriteParams buildWriteParams() {
+      Map<String, String> merged =
+          LanceRuntime.mergeStorageOptions(writeOptions.getStorageOptions(), initialStorageOptions);
+
+      WriteParams.Builder builder = new WriteParams.Builder();
+      builder.withMode(writeOptions.getWriteMode());
+      if (writeOptions.getMaxRowsPerFile() != null) {
+        builder.withMaxRowsPerFile(writeOptions.getMaxRowsPerFile());
+      }
+      if (writeOptions.getMaxRowsPerGroup() != null) {
+        builder.withMaxRowsPerGroup(writeOptions.getMaxRowsPerGroup());
+      }
+      if (writeOptions.getMaxBytesPerFile() != null) {
+        builder.withMaxBytesPerFile(writeOptions.getMaxBytesPerFile());
+      }
+      if (writeOptions.getDataStorageVersion() != null) {
+        builder.withDataStorageVersion(writeOptions.getDataStorageVersion());
+      }
+      builder.withStorageOptions(merged);
+      return builder.build();
+    }
+
+    private StorageOptionsProvider getStorageOptionsProvider() {
+      return LanceRuntime.getOrCreateStorageOptionsProvider(
+          namespaceImpl, namespaceProperties, tableId);
     }
   }
 
@@ -193,12 +273,22 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     private final LanceSparkWriteOptions writeOptions;
     private final LanceDataWriter writer;
 
+    /**
+     * Initial storage options fetched from namespace.describeTable() on the driver. These are
+     * passed to workers so they can reuse the credentials without calling describeTable again.
+     */
+    private final Map<String, String> initialStorageOptions;
+
     // Key is fragmentId, Value is fragment's deleted row indexes
     private final Map<Integer, RoaringBitmap> deletedRows;
 
-    private LanceDeltaWriter(LanceSparkWriteOptions writeOptions, LanceDataWriter writer) {
+    private LanceDeltaWriter(
+        LanceSparkWriteOptions writeOptions,
+        LanceDataWriter writer,
+        Map<String, String> initialStorageOptions) {
       this.writeOptions = writeOptions;
       this.writer = writer;
+      this.initialStorageOptions = initialStorageOptions;
       this.deletedRows = new HashMap<>();
     }
 
@@ -256,21 +346,15 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     }
 
     private Dataset openDataset(LanceSparkWriteOptions options) {
-      if (options.hasNamespace()) {
-        return Dataset.open()
-            .allocator(LanceRuntime.allocator())
-            .namespace(options.getNamespace())
-            .tableId(options.getTableId())
-            .build();
-      } else {
-        ReadOptions readOptions =
-            new ReadOptions.Builder().setStorageOptions(options.getStorageOptions()).build();
-        return Dataset.open()
-            .allocator(LanceRuntime.allocator())
-            .uri(options.getDatasetUri())
-            .readOptions(readOptions)
-            .build();
-      }
+      // Note: options.hasNamespace() is false on workers (namespace is transient)
+      Map<String, String> merged =
+          LanceRuntime.mergeStorageOptions(options.getStorageOptions(), initialStorageOptions);
+      ReadOptions readOptions = new ReadOptions.Builder().setStorageOptions(merged).build();
+      return Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .uri(options.getDatasetUri())
+          .readOptions(readOptions)
+          .build();
     }
 
     @Override

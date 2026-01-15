@@ -56,7 +56,7 @@ case class AddColumnsBackfillExec(
     }
 
     val relation = DataSourceV2Relation.create(
-      new LanceDataset(originalTable.readOptions(), actualQuery.schema),
+      new LanceDataset(originalTable.readOptions(), actualQuery.schema, null, null, null),
       Some(catalog),
       Some(ident))
 

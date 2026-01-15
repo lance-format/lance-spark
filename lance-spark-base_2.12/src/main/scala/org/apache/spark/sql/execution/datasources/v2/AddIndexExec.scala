@@ -22,10 +22,11 @@ import org.apache.spark.unsafe.types.UTF8String
 import org.json4s.JsonAST.{JBool, JDouble, JField, JInt, JNull, JObject, JString}
 import org.json4s.jackson.JsonMethods.{compact, render}
 import org.lance.Dataset
+import org.lance.ReadOptions
 import org.lance.index.{Index, IndexOptions, IndexParams, IndexType}
 import org.lance.index.scalar.ScalarIndexParams
 import org.lance.operation.{CreateIndex => AddIndexOperation}
-import org.lance.spark.{LanceDataset, LanceRuntime, LanceSparkReadOptions}
+import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceRuntime, LanceSparkReadOptions}
 
 import java.util.{Collections, Optional, UUID}
 
@@ -99,6 +100,21 @@ case class AddIndexExec(
     val uuid = UUID.randomUUID()
     val indexType = IndexTypeUtils.buildIndexType(method)
 
+    // Get namespace info from catalog if available (for credential vending on workers)
+    val (nsImpl, nsProps, tableId, initialStorageOpts): (
+        Option[String],
+        Option[Map[String, String]],
+        Option[List[String]],
+        Option[Map[String, String]]) = catalog match {
+      case nsCatalog: BaseLanceNamespaceSparkCatalog =>
+        (
+          Option(nsCatalog.getNamespaceImpl),
+          Option(nsCatalog.getNamespaceProperties).map(_.asScala.toMap),
+          Option(readOptions.getTableId).map(_.asScala.toList),
+          Option(lanceDataset.getInitialStorageOptions).map(_.asScala.toMap))
+      case _ => (None, None, None, None)
+    }
+
     // Build per-fragment tasks
     val tasks = fragmentIds.map { fid =>
       IndexTaskExecutor.create(
@@ -108,7 +124,11 @@ case class AddIndexExec(
         toJson(args),
         indexName,
         uuid.toString,
-        fid)
+        fid,
+        nsImpl,
+        nsProps,
+        tableId,
+        initialStorageOpts)
     }.toSeq
 
     val rdd = session.sparkContext.parallelize(tasks, tasks.size)
@@ -174,7 +194,12 @@ case class IndexTaskExecutor(
     json: String,
     indexName: String,
     uuid: String,
-    fragmentId: Int) extends Serializable {
+    fragmentId: Int,
+    namespaceImpl: Option[String],
+    namespaceProperties: Option[Map[String, String]],
+    tableId: Option[List[String]],
+    initialStorageOptions: Option[Map[String, String]]) extends Serializable {
+
   def execute(): String = {
     val readOptions = decode[LanceSparkReadOptions](lanceConf)
     val columns = decode[Array[String]](columnsEnc).toSeq
@@ -191,19 +216,26 @@ case class IndexTaskExecutor(
       .withFragmentIds(Collections.singletonList(fragmentId))
       .build()
 
-    val dataset = if (readOptions.hasNamespace) {
-      Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .namespace(readOptions.getNamespace)
-        .tableId(readOptions.getTableId)
-        .build()
-    } else {
-      Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .uri(readOptions.getDatasetUri)
-        .readOptions(readOptions.toReadOptions)
-        .build()
+    // Build ReadOptions with merged storage options and credential refresh provider
+    val merged = LanceRuntime.mergeStorageOptions(
+      readOptions.getStorageOptions,
+      initialStorageOptions.map(_.asJava).orNull)
+    val provider = LanceRuntime.getOrCreateStorageOptionsProvider(
+      namespaceImpl.orNull,
+      namespaceProperties.map(_.asJava).orNull,
+      tableId.map(_.asJava).orNull)
+
+    val builder = new ReadOptions.Builder().setStorageOptions(merged)
+    if (provider != null) {
+      builder.setStorageOptionsProvider(provider)
     }
+
+    val dataset = Dataset.open()
+      .allocator(LanceRuntime.allocator())
+      .uri(readOptions.getDatasetUri)
+      .readOptions(builder.build())
+      .build()
+
     try {
       dataset.createIndex(indexOptions)
     } finally {
@@ -222,7 +254,11 @@ object IndexTaskExecutor {
       json: String,
       indexName: String,
       uuid: String,
-      fragmentId: Int): IndexTaskExecutor = {
+      fragmentId: Int,
+      namespaceImpl: Option[String],
+      namespaceProperties: Option[Map[String, String]],
+      tableId: Option[List[String]],
+      initialStorageOptions: Option[Map[String, String]]): IndexTaskExecutor = {
     IndexTaskExecutor(
       encode(readOptions),
       encode(cols.toArray),
@@ -230,7 +266,11 @@ object IndexTaskExecutor {
       json,
       indexName,
       uuid,
-      fragmentId)
+      fragmentId,
+      namespaceImpl,
+      namespaceProperties,
+      tableId,
+      initialStorageOptions)
   }
 }
 

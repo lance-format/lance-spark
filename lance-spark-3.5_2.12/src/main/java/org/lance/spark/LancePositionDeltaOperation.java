@@ -26,16 +26,37 @@ import org.apache.spark.sql.connector.write.SupportsDelta;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
+import java.util.Map;
+
 public class LancePositionDeltaOperation implements RowLevelOperation, SupportsDelta {
   private final Command command;
   private final StructType sparkSchema;
   private final LanceSparkReadOptions readOptions;
 
+  /**
+   * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
+   * to workers so they can reuse the credentials without calling describeTable again.
+   */
+  private final Map<String, String> initialStorageOptions;
+
+  /** Namespace configuration for credential refresh on workers. */
+  private final String namespaceImpl;
+
+  private final Map<String, String> namespaceProperties;
+
   public LancePositionDeltaOperation(
-      Command command, StructType sparkSchema, LanceSparkReadOptions readOptions) {
+      Command command,
+      StructType sparkSchema,
+      LanceSparkReadOptions readOptions,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties) {
     this.command = command;
     this.sparkSchema = sparkSchema;
     this.readOptions = readOptions;
+    this.initialStorageOptions = initialStorageOptions;
+    this.namespaceImpl = namespaceImpl;
+    this.namespaceProperties = namespaceProperties;
   }
 
   @Override
@@ -45,7 +66,8 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
 
   @Override
   public ScanBuilder newScanBuilder(CaseInsensitiveStringMap caseInsensitiveStringMap) {
-    return new LanceScanBuilder(sparkSchema, readOptions);
+    return new LanceScanBuilder(
+        sparkSchema, readOptions, initialStorageOptions, namespaceImpl, namespaceProperties);
   }
 
   @Override
@@ -58,7 +80,13 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
             .namespace(readOptions.getNamespace())
             .tableId(readOptions.getTableId())
             .build();
-    return new SparkPositionDeltaWriteBuilder(sparkSchema, writeOptions);
+    return new SparkPositionDeltaWriteBuilder(
+        sparkSchema,
+        writeOptions,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        readOptions.getTableId());
   }
 
   @Override

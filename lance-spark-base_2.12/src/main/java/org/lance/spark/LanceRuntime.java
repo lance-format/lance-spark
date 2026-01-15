@@ -13,19 +13,27 @@
  */
 package org.lance.spark;
 
+import org.lance.namespace.LanceNamespace;
+import org.lance.namespace.LanceNamespaceStorageOptionsProvider;
+
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Runtime utilities for Lance Spark connector.
  *
- * <p>This class manages a global Arrow buffer allocator with size configurable via environment
- * variable.
+ * <p>This class manages a global Arrow buffer allocator and provides helper methods for namespace
+ * operations.
  *
  * <p>Usage:
  *
  * <pre>{@code
  * BufferAllocator allocator = LanceRuntime.allocator();
+ * LanceNamespace ns = LanceRuntime.createNamespace(impl, properties);
  * }</pre>
  */
 public final class LanceRuntime {
@@ -90,5 +98,49 @@ public final class LanceRuntime {
         GLOBAL_ALLOCATOR = null;
       }
     }
+  }
+
+  /**
+   * Checks if namespace configuration is available for credential refresh.
+   *
+   * @param namespaceImpl the namespace implementation type
+   * @param tableId the table identifier
+   * @return true if namespace config is available (namespaceImpl and tableId are non-null)
+   */
+  public static boolean hasNamespaceConfig(String namespaceImpl, List<String> tableId) {
+    return namespaceImpl != null && tableId != null;
+  }
+
+  /**
+   * Creates a storage options provider for credential refresh if namespace config is available.
+   *
+   * @param namespaceImpl the namespace implementation type
+   * @param namespaceProperties the namespace connection properties (can be null)
+   * @param tableId the table identifier
+   * @return a LanceNamespaceStorageOptionsProvider, or null if namespace config not available
+   */
+  public static LanceNamespaceStorageOptionsProvider getOrCreateStorageOptionsProvider(
+      String namespaceImpl, Map<String, String> namespaceProperties, List<String> tableId) {
+    if (!hasNamespaceConfig(namespaceImpl, tableId)) {
+      return null;
+    }
+    LanceNamespace ns = LanceNamespace.connect(namespaceImpl, namespaceProperties, allocator());
+    return new LanceNamespaceStorageOptionsProvider(ns, tableId);
+  }
+
+  /**
+   * Merges base storage options with initial storage options from namespace.describeTable().
+   *
+   * @param baseOptions the base storage options
+   * @param initialStorageOptions initial options from describeTable (can be null)
+   * @return merged storage options map
+   */
+  public static Map<String, String> mergeStorageOptions(
+      Map<String, String> baseOptions, Map<String, String> initialStorageOptions) {
+    Map<String, String> merged = new HashMap<>(baseOptions);
+    if (initialStorageOptions != null && !initialStorageOptions.isEmpty()) {
+      merged.putAll(initialStorageOptions);
+    }
+    return merged;
   }
 }

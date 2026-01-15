@@ -18,6 +18,7 @@ import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.ReadOptions;
 import org.lance.fragment.FragmentMergeResult;
+import org.lance.io.StorageOptionsProvider;
 import org.lance.operation.Merge;
 import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceRuntime;
@@ -47,6 +48,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -58,16 +60,45 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
   private final LanceSparkWriteOptions writeOptions;
   private final List<String> newColumns;
 
+  /**
+   * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
+   * to workers so they can reuse the credentials without calling describeTable again.
+   */
+  private final Map<String, String> initialStorageOptions;
+
+  /** Namespace configuration for credential refresh on workers. */
+  private final String namespaceImpl;
+
+  private final Map<String, String> namespaceProperties;
+  private final List<String> tableId;
+
   public AddColumnsBackfillBatchWrite(
-      StructType schema, LanceSparkWriteOptions writeOptions, List<String> newColumns) {
+      StructType schema,
+      LanceSparkWriteOptions writeOptions,
+      List<String> newColumns,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      List<String> tableId) {
     this.schema = schema;
     this.writeOptions = writeOptions;
     this.newColumns = newColumns;
+    this.initialStorageOptions = initialStorageOptions;
+    this.namespaceImpl = namespaceImpl;
+    this.namespaceProperties = namespaceProperties;
+    this.tableId = tableId;
   }
 
   @Override
   public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
-    return new AddColumnsWriterFactory(schema, writeOptions, newColumns);
+    return new AddColumnsWriterFactory(
+        schema,
+        writeOptions,
+        newColumns,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        tableId);
   }
 
   @Override
@@ -141,11 +172,46 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
     }
   }
 
+  private static Dataset openDatasetWithCredentialRefresh(
+      LanceSparkWriteOptions writeOptions,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      List<String> tableId) {
+    Map<String, String> merged =
+        LanceRuntime.mergeStorageOptions(writeOptions.getStorageOptions(), initialStorageOptions);
+    StorageOptionsProvider provider =
+        LanceRuntime.getOrCreateStorageOptionsProvider(namespaceImpl, namespaceProperties, tableId);
+
+    ReadOptions.Builder builder = new ReadOptions.Builder().setStorageOptions(merged);
+    if (provider != null) {
+      builder.setStorageOptionsProvider(provider);
+    }
+
+    return Dataset.open()
+        .allocator(LanceRuntime.allocator())
+        .uri(writeOptions.getDatasetUri())
+        .readOptions(builder.build())
+        .build();
+  }
+
   public static class AddColumnsWriter implements DataWriter<InternalRow> {
     private final LanceSparkWriteOptions writeOptions;
     private final StructType schema;
     private final int fragmentIdField;
     private final List<FragmentMetadata> fragments;
+
+    /**
+     * Initial storage options fetched from namespace.describeTable() on the driver. These are
+     * passed to workers so they can reuse the credentials without calling describeTable again.
+     */
+    private final Map<String, String> initialStorageOptions;
+
+    /** Namespace configuration for credential refresh on workers. */
+    private final String namespaceImpl;
+
+    private final Map<String, String> namespaceProperties;
+    private final List<String> tableId;
 
     private Schema mergedSchema;
     private StructType writerSchema;
@@ -154,11 +220,21 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
     private org.lance.spark.arrow.LanceArrowWriter writer = null;
 
     public AddColumnsWriter(
-        LanceSparkWriteOptions writeOptions, StructType schema, List<String> newColumns) {
+        LanceSparkWriteOptions writeOptions,
+        StructType schema,
+        List<String> newColumns,
+        Map<String, String> initialStorageOptions,
+        String namespaceImpl,
+        Map<String, String> namespaceProperties,
+        List<String> tableId) {
       this.writeOptions = writeOptions;
       this.schema = schema;
       this.fragmentIdField = schema.fieldIndex(LanceDataset.FRAGMENT_ID_COLUMN.name());
       this.fragments = new ArrayList<>();
+      this.initialStorageOptions = initialStorageOptions;
+      this.namespaceImpl = namespaceImpl;
+      this.namespaceProperties = namespaceProperties;
+      this.tableId = tableId;
 
       this.writerSchema = new StructType();
       Arrays.stream(schema.fields())
@@ -222,7 +298,9 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
         Data.exportArrayStream(allocator, reader, stream);
 
         // Use Dataset to get the fragment and merge columns
-        try (Dataset dataset = openDataset(writeOptions)) {
+        try (Dataset dataset =
+            openDatasetWithCredentialRefresh(
+                writeOptions, initialStorageOptions, namespaceImpl, namespaceProperties, tableId)) {
           Fragment fragment = new Fragment(dataset, fragmentId);
           FragmentMergeResult result =
               fragment.mergeColumns(
@@ -262,17 +340,46 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
     private final StructType schema;
     private final List<String> newColumns;
 
+    /**
+     * Initial storage options fetched from namespace.describeTable() on the driver. These are
+     * passed to workers so they can reuse the credentials without calling describeTable again.
+     */
+    private final Map<String, String> initialStorageOptions;
+
+    /** Namespace configuration for credential refresh on workers. */
+    private final String namespaceImpl;
+
+    private final Map<String, String> namespaceProperties;
+    private final List<String> tableId;
+
     protected AddColumnsWriterFactory(
-        StructType schema, LanceSparkWriteOptions writeOptions, List<String> newColumns) {
+        StructType schema,
+        LanceSparkWriteOptions writeOptions,
+        List<String> newColumns,
+        Map<String, String> initialStorageOptions,
+        String namespaceImpl,
+        Map<String, String> namespaceProperties,
+        List<String> tableId) {
       // Everything passed to writer factory should be serializable
       this.schema = schema;
       this.writeOptions = writeOptions;
       this.newColumns = newColumns;
+      this.initialStorageOptions = initialStorageOptions;
+      this.namespaceImpl = namespaceImpl;
+      this.namespaceProperties = namespaceProperties;
+      this.tableId = tableId;
     }
 
     @Override
     public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
-      return new AddColumnsWriter(writeOptions, schema, newColumns);
+      return new AddColumnsWriter(
+          writeOptions,
+          schema,
+          newColumns,
+          initialStorageOptions,
+          namespaceImpl,
+          namespaceProperties,
+          tableId);
     }
   }
 

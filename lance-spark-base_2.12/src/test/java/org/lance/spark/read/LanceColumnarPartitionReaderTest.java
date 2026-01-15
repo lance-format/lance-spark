@@ -34,11 +34,18 @@ public class LanceColumnarPartitionReaderTest {
     LanceInputPartition partition =
         new LanceInputPartition(
             TestUtils.TestTable1Config.schema,
-            0,
+            0 /* partitionId */,
             split,
             TestUtils.TestTable1Config.readOptions,
-            Optional.empty(),
-            "test");
+            Optional.empty() /* whereCondition */,
+            Optional.empty() /* limit */,
+            Optional.empty() /* offset */,
+            Optional.empty() /* topNSortOrders */,
+            Optional.empty() /* pushedAggregation */,
+            "test" /* scanId */,
+            null /* initialStorageOptions */,
+            null /* namespaceImpl */,
+            null /* namespaceProperties */);
     try (LanceColumnarPartitionReader reader = new LanceColumnarPartitionReader(partition)) {
       List<List<Long>> expectedValues = TestUtils.TestTable1Config.expectedValues;
       int rowIndex = 0;
@@ -69,15 +76,18 @@ public class LanceColumnarPartitionReaderTest {
     LanceInputPartition partition =
         new LanceInputPartition(
             TestUtils.TestTable1Config.schema,
-            0,
+            0 /* partitionId */,
             split,
             TestUtils.TestTable1Config.readOptions,
-            Optional.empty(),
-            Optional.of(1),
-            Optional.of(1),
-            Optional.empty(),
-            Optional.empty(), // pushedAggregation
-            "testOffsetAndLimit");
+            Optional.empty() /* whereCondition */,
+            Optional.of(1) /* limit */,
+            Optional.of(1) /* offset */,
+            Optional.empty() /* topNSortOrders */,
+            Optional.empty() /* pushedAggregation */,
+            "testOffsetAndLimit" /* scanId */,
+            null /* initialStorageOptions */,
+            null /* namespaceImpl */,
+            null /* namespaceProperties */);
     try (LanceColumnarPartitionReader reader = new LanceColumnarPartitionReader(partition)) {
       List<List<Long>> expectedValues = TestUtils.TestTable1Config.expectedValues;
       int rowIndex = 1;
@@ -110,15 +120,18 @@ public class LanceColumnarPartitionReaderTest {
     LanceInputPartition partition =
         new LanceInputPartition(
             TestUtils.TestTable1Config.schema,
-            0,
+            0 /* partitionId */,
             split,
             TestUtils.TestTable1Config.readOptions,
-            Optional.empty(),
-            Optional.of(1),
-            Optional.empty(),
-            Optional.of(Collections.singletonList(builder.build())),
-            Optional.empty(), // pushedAggregation
-            "testTopN");
+            Optional.empty() /* whereCondition */,
+            Optional.of(1) /* limit */,
+            Optional.empty() /* offset */,
+            Optional.of(Collections.singletonList(builder.build())) /* topNSortOrders */,
+            Optional.empty() /* pushedAggregation */,
+            "testTopN" /* scanId */,
+            null /* initialStorageOptions */,
+            null /* namespaceImpl */,
+            null /* namespaceProperties */);
     try (LanceColumnarPartitionReader reader = new LanceColumnarPartitionReader(partition)) {
       List<List<Long>> expectedValues = TestUtils.TestTable1Config.expectedValues;
 

@@ -15,9 +15,18 @@ package org.lance.spark;
 
 import org.apache.spark.sql.types.StructType;
 
+import java.util.Map;
+
 public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
 
-  public LanceDataset createDataset(LanceSparkReadOptions readOptions, StructType sparkSchema) {
-    return new LancePositionDeltaDataset(readOptions, sparkSchema);
+  @Override
+  public LanceDataset createDataset(
+      LanceSparkReadOptions readOptions,
+      StructType sparkSchema,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties) {
+    return new LancePositionDeltaDataset(
+        readOptions, sparkSchema, initialStorageOptions, namespaceImpl, namespaceProperties);
   }
 }

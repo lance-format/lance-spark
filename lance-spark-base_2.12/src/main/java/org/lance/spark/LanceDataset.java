@@ -103,18 +103,52 @@ public class LanceDataset implements SupportsRead, SupportsWrite, SupportsMetada
   protected final StructType sparkSchema;
 
   /**
+   * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
+   * to workers so they can reuse the credentials without calling describeTable again.
+   */
+  private final Map<String, String> initialStorageOptions;
+
+  /** Namespace configuration for credential refresh on workers. */
+  private final String namespaceImpl;
+
+  private final Map<String, String> namespaceProperties;
+
+  /**
    * Creates a Lance dataset.
    *
    * @param readOptions read options including dataset URI and settings
    * @param sparkSchema spark struct type
+   * @param initialStorageOptions initial storage options fetched from namespace.describeTable()
+   * @param namespaceImpl namespace implementation type for credential refresh on workers
+   * @param namespaceProperties namespace connection properties for credential refresh on workers
    */
-  public LanceDataset(LanceSparkReadOptions readOptions, StructType sparkSchema) {
+  public LanceDataset(
+      LanceSparkReadOptions readOptions,
+      StructType sparkSchema,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties) {
     this.readOptions = readOptions;
     this.sparkSchema = sparkSchema;
+    this.initialStorageOptions = initialStorageOptions;
+    this.namespaceImpl = namespaceImpl;
+    this.namespaceProperties = namespaceProperties;
   }
 
   public LanceSparkReadOptions readOptions() {
     return readOptions;
+  }
+
+  public Map<String, String> getInitialStorageOptions() {
+    return initialStorageOptions;
+  }
+
+  public String getNamespaceImpl() {
+    return namespaceImpl;
+  }
+
+  public Map<String, String> getNamespaceProperties() {
+    return namespaceProperties;
   }
 
   @Override
@@ -132,7 +166,8 @@ public class LanceDataset implements SupportsRead, SupportsWrite, SupportsMetada
               .fromOptions(mergedOptions)
               .build();
     }
-    return new LanceScanBuilder(sparkSchema, scanOptions);
+    return new LanceScanBuilder(
+        sparkSchema, scanOptions, initialStorageOptions, namespaceImpl, namespaceProperties);
   }
 
   @Override
@@ -173,10 +208,22 @@ public class LanceDataset implements SupportsRead, SupportsWrite, SupportsMetada
             .collect(Collectors.toList());
     if (!backfillColumns.isEmpty()) {
       return new AddColumnsBackfillWrite.AddColumnsWriteBuilder(
-          sparkSchema, writeOptions, backfillColumns);
+          sparkSchema,
+          writeOptions,
+          backfillColumns,
+          initialStorageOptions,
+          namespaceImpl,
+          namespaceProperties,
+          readOptions.getTableId());
     }
 
-    return new SparkWrite.SparkWriteBuilder(sparkSchema, writeOptions);
+    return new SparkWrite.SparkWriteBuilder(
+        sparkSchema,
+        writeOptions,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        readOptions.getTableId());
   }
 
   @Override

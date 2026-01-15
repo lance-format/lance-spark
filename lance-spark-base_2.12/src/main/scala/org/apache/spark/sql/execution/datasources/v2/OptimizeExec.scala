@@ -22,8 +22,9 @@ import org.apache.spark.sql.catalyst.plans.logical.{NamedArgument, OptimizeOutpu
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.execution.datasources.v2.SerializeUtil.{decode, encode}
 import org.lance.Dataset
+import org.lance.ReadOptions
 import org.lance.compaction.{Compaction, CompactionOptions, CompactionTask, RewriteResult}
-import org.lance.spark.{LanceDataset, LanceRuntime, LanceSparkReadOptions}
+import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceRuntime, LanceSparkReadOptions}
 import org.objenesis.strategy.StdInstantiatorStrategy
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
@@ -71,9 +72,24 @@ case class OptimizeExec(
     val options = buildOptions()
     val readOptions = lanceDataset.readOptions()
 
+    // Get namespace info and initial storage options from catalog/dataset
+    val (nsImpl, nsProps, tableId, initialStorageOpts): (
+        Option[String],
+        Option[Map[String, String]],
+        Option[List[String]],
+        Option[Map[String, String]]) = catalog match {
+      case nsCatalog: BaseLanceNamespaceSparkCatalog =>
+        (
+          Option(nsCatalog.getNamespaceImpl),
+          Option(nsCatalog.getNamespaceProperties).map(_.asScala.toMap),
+          Option(readOptions.getTableId).map(_.asScala.toList),
+          Option(lanceDataset.getInitialStorageOptions).map(_.asScala.toMap))
+      case _ => (None, None, None, None)
+    }
+
     // Plan compaction tasks
     val tasks = {
-      val dataset = openDataset(readOptions)
+      val dataset = openDataset(readOptions, nsImpl, nsProps, tableId, initialStorageOpts)
       try {
         Compaction.planCompaction(dataset, options).getCompactionTasks
       } finally {
@@ -88,7 +104,8 @@ case class OptimizeExec(
 
     // Run compaction tasks in parallel
     val rdd: org.apache.spark.rdd.RDD[OptimizeTaskExecutor] = session.sparkContext.parallelize(
-      tasks.asScala.toSeq.map(t => OptimizeTaskExecutor.create(readOptions, t)),
+      tasks.asScala.toSeq.map(t =>
+        OptimizeTaskExecutor.create(readOptions, t, nsImpl, nsProps, tableId, initialStorageOpts)),
       tasks.size)
     val result = rdd.map(f => f.execute())
       .collect()
@@ -98,7 +115,7 @@ case class OptimizeExec(
 
     // Commit compaction results
     val metrics = {
-      val dataset = openDataset(readOptions)
+      val dataset = openDataset(readOptions, nsImpl, nsProps, tableId, initialStorageOpts)
       try {
         Compaction.commitCompaction(dataset, result, options)
       } finally {
@@ -114,40 +131,66 @@ case class OptimizeExec(
         metrics.getFilesAdded)))
   }
 
-  private def openDataset(readOptions: LanceSparkReadOptions): Dataset = {
-    if (readOptions.hasNamespace) {
-      Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .namespace(readOptions.getNamespace)
-        .tableId(readOptions.getTableId)
-        .build()
-    } else {
-      Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .uri(readOptions.getDatasetUri)
-        .readOptions(readOptions.toReadOptions())
-        .build()
+  private def openDataset(
+      readOptions: LanceSparkReadOptions,
+      nsImpl: Option[String],
+      nsProps: Option[Map[String, String]],
+      tableId: Option[List[String]],
+      initialStorageOpts: Option[Map[String, String]]): Dataset = {
+    // Build ReadOptions with merged storage options and credential refresh provider
+    val merged = LanceRuntime.mergeStorageOptions(
+      readOptions.getStorageOptions,
+      initialStorageOpts.map(_.asJava).orNull)
+    val provider = LanceRuntime.getOrCreateStorageOptionsProvider(
+      nsImpl.orNull,
+      nsProps.map(_.asJava).orNull,
+      tableId.map(_.asJava).orNull)
+
+    val builder = new ReadOptions.Builder().setStorageOptions(merged)
+    if (provider != null) {
+      builder.setStorageOptionsProvider(provider)
     }
+
+    Dataset.open()
+      .allocator(LanceRuntime.allocator())
+      .uri(readOptions.getDatasetUri)
+      .readOptions(builder.build())
+      .build()
   }
 }
 
-case class OptimizeTaskExecutor(lanceConf: String, task: String) extends Serializable {
+case class OptimizeTaskExecutor(
+    lanceConf: String,
+    task: String,
+    namespaceImpl: Option[String],
+    namespaceProperties: Option[Map[String, String]],
+    tableId: Option[List[String]],
+    initialStorageOptions: Option[Map[String, String]]) extends Serializable {
+
   def execute(): String = {
     val readOptions = decode[LanceSparkReadOptions](lanceConf)
     val compactionTask = decode[CompactionTask](task)
-    val dataset = if (readOptions.hasNamespace) {
-      Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .namespace(readOptions.getNamespace)
-        .tableId(readOptions.getTableId)
-        .build()
-    } else {
-      Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .uri(readOptions.getDatasetUri)
-        .readOptions(readOptions.toReadOptions())
-        .build()
+
+    // Build ReadOptions with merged storage options and credential refresh provider
+    val merged = LanceRuntime.mergeStorageOptions(
+      readOptions.getStorageOptions,
+      initialStorageOptions.map(_.asJava).orNull)
+    val provider = LanceRuntime.getOrCreateStorageOptionsProvider(
+      namespaceImpl.orNull,
+      namespaceProperties.map(_.asJava).orNull,
+      tableId.map(_.asJava).orNull)
+
+    val builder = new ReadOptions.Builder().setStorageOptions(merged)
+    if (provider != null) {
+      builder.setStorageOptionsProvider(provider)
     }
+
+    val dataset = Dataset.open()
+      .allocator(LanceRuntime.allocator())
+      .uri(readOptions.getDatasetUri)
+      .readOptions(builder.build())
+      .build()
+
     try {
       val res = compactionTask.execute(dataset)
       encode(res)
@@ -158,8 +201,20 @@ case class OptimizeTaskExecutor(lanceConf: String, task: String) extends Seriali
 }
 
 object OptimizeTaskExecutor {
-  def create(readOptions: LanceSparkReadOptions, task: CompactionTask): OptimizeTaskExecutor = {
-    OptimizeTaskExecutor(encode(readOptions), encode(task))
+  def create(
+      readOptions: LanceSparkReadOptions,
+      task: CompactionTask,
+      namespaceImpl: Option[String],
+      namespaceProperties: Option[Map[String, String]],
+      tableId: Option[List[String]],
+      initialStorageOptions: Option[Map[String, String]]): OptimizeTaskExecutor = {
+    OptimizeTaskExecutor(
+      encode(readOptions),
+      encode(task),
+      namespaceImpl,
+      namespaceProperties,
+      tableId,
+      initialStorageOptions)
   }
 }
 

@@ -116,11 +116,18 @@ public class LanceDatasetReadTest {
             fragment,
             new LanceInputPartition(
                 schema,
-                0,
+                0 /* partitionId */,
                 new LanceSplit(Arrays.asList(fragment)),
                 TestUtils.TestTable1Config.readOptions,
-                Optional.empty(),
-                "validateFragment"))) {
+                Optional.empty() /* whereCondition */,
+                Optional.empty() /* limit */,
+                Optional.empty() /* offset */,
+                Optional.empty() /* topNSortOrders */,
+                Optional.empty() /* pushedAggregation */,
+                "validateFragment" /* scanId */,
+                null /* initialStorageOptions */,
+                null /* namespaceImpl */,
+                null /* namespaceProperties */))) {
       try (ArrowReader reader = scanner.getArrowReader()) {
         VectorSchemaRoot root = reader.getVectorSchemaRoot();
         assertNotNull(root);
