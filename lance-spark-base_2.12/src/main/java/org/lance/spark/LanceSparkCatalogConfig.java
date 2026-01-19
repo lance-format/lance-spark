@@ -48,11 +48,29 @@ public class LanceSparkCatalogConfig {
   /**
    * Creates a config from a map of options.
    *
-   * @param options the options map
+   * @param catalogOptions the options map
    * @return a new LanceSparkCatalogConfig
    */
-  public static LanceSparkCatalogConfig from(Map<String, String> options) {
-    return builder().storageOptions(options).build();
+  public static LanceSparkCatalogConfig from(Map<String, String> catalogOptions) {
+    final String storagePrefix = "storage.";
+    Map<String, String> nativeOptions = new HashMap<>();
+
+    for (Map.Entry<String, String> entry : catalogOptions.entrySet()) {
+      String fullKey = entry.getKey();
+      String value = entry.getValue();
+      if (fullKey == null || value == null) {
+        continue;
+      }
+      if (!fullKey.startsWith(storagePrefix)) {
+        nativeOptions.put(fullKey, value);
+        continue;
+      }
+
+      String nativeKey = fullKey.substring(storagePrefix.length());
+      nativeOptions.put(nativeKey, value);
+    }
+
+    return builder().storageOptions(nativeOptions).build();
   }
 
   /**
