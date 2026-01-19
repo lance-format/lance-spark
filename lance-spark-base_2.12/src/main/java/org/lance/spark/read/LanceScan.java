@@ -17,21 +17,15 @@ import org.lance.ipc.ColumnOrdering;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Optional;
 
-import org.apache.arrow.util.Preconditions;
-import org.apache.spark.sql.catalyst.InternalRow;
-import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
-import org.apache.spark.sql.connector.expressions.aggregate.CountStar;
 import org.apache.spark.sql.connector.read.Batch;
 import org.apache.spark.sql.connector.read.InputPartition;
-import org.apache.spark.sql.connector.read.PartitionReader;
 import org.apache.spark.sql.connector.read.PartitionReaderFactory;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.read.Statistics;
 import org.apache.spark.sql.connector.read.SupportsReportStatistics;
 import org.apache.spark.sql.internal.connector.SupportsMetadata;
 import org.apache.spark.sql.types.StructType;
-import org.apache.spark.sql.vectorized.ColumnarBatch;
 import scala.collection.immutable.Map;
 
 import java.io.Serializable;
@@ -126,38 +120,5 @@ public class LanceScan
   @Override
   public Statistics estimateStatistics() {
     return statistics;
-  }
-
-  private static class LanceReaderFactory implements PartitionReaderFactory {
-    @Override
-    public PartitionReader<InternalRow> createReader(InputPartition partition) {
-      Preconditions.checkArgument(
-          partition instanceof LanceInputPartition,
-          "Unknown InputPartition type. Expecting LanceInputPartition");
-      return LanceRowPartitionReader.create((LanceInputPartition) partition);
-    }
-
-    @Override
-    public PartitionReader<ColumnarBatch> createColumnarReader(InputPartition partition) {
-      Preconditions.checkArgument(
-          partition instanceof LanceInputPartition,
-          "Unknown InputPartition type. Expecting LanceInputPartition");
-
-      LanceInputPartition lancePartition = (LanceInputPartition) partition;
-      if (lancePartition.getPushedAggregation().isPresent()) {
-        AggregateFunc[] aggFunc =
-            lancePartition.getPushedAggregation().get().aggregateExpressions();
-        if (aggFunc.length == 1 && aggFunc[0] instanceof CountStar) {
-          return new LanceCountStarPartitionReader(lancePartition);
-        }
-      }
-
-      return new LanceColumnarPartitionReader(lancePartition);
-    }
-
-    @Override
-    public boolean supportColumnarReads(InputPartition partition) {
-      return true;
-    }
   }
 }

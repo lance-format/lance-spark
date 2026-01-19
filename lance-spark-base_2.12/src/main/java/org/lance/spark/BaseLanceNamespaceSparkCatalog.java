@@ -16,13 +16,21 @@ package org.lance.spark;
 import org.lance.Dataset;
 import org.lance.WriteParams;
 import org.lance.namespace.LanceNamespace;
+import org.lance.namespace.model.CreateEmptyTableRequest;
+import org.lance.namespace.model.CreateNamespaceRequest;
 import org.lance.namespace.model.DropNamespaceRequest;
 import org.lance.namespace.model.DropTableRequest;
+import org.lance.namespace.model.ListNamespacesRequest;
+import org.lance.namespace.model.ListNamespacesResponse;
 import org.lance.namespace.model.ListTablesRequest;
 import org.lance.namespace.model.ListTablesResponse;
+import org.lance.spark.partition.LancePartitionConfig;
+import org.lance.spark.partition.PartitionUtils;
+import org.lance.spark.partition.PartitionedLanceDataset;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.SchemaConverter;
 
+import com.clearspring.analytics.util.Preconditions;
 import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
@@ -49,6 +57,11 @@ import java.util.Map;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+
+import static org.lance.spark.partition.PartitionUtils.LANCE_PARTITION_TABLE_ROOT;
+import static org.lance.spark.partition.PartitionUtils.identToId;
+import static org.lance.spark.partition.PartitionUtils.namespaceProperties;
+import static org.lance.spark.partition.PartitionUtils.tableProperties;
 
 public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, SupportsNamespaces {
 
@@ -83,6 +96,7 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
   private static final String CONFIG_PARENT_DELIMITER_DEFAULT = ".";
 
   private LanceNamespace namespace;
+  private String impl;
   private String name;
   private Optional<String> extraLevel;
   private Optional<List<String>> parentPrefix;
@@ -116,8 +130,8 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
     // Initialize the namespace with proper configuration
     Map<String, String> namespaceOptions = new HashMap<>(options);
 
-    // Use the global buffer allocator
-    this.namespace = LanceNamespace.connect(impl, namespaceOptions, LanceRuntime.allocator());
+    this.namespace = PartitionUtils.createNamespace(namespaceOptions);
+    this.impl = impl;
 
     // Handle extra level name configuration
     if (options.containsKey(CONFIG_EXTRA_LEVEL)) {
@@ -307,6 +321,7 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
     String[] actualNamespace = removeExtraLevelsFromNamespace(namespace);
     actualNamespace = addParentPrefix(actualNamespace);
 
+    // List non-partitioned tables.
     ListTablesRequest request = new ListTablesRequest();
     request.setId(Arrays.stream(actualNamespace).collect(Collectors.toList()));
 
@@ -322,6 +337,24 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
         identifiers.add(Identifier.of(namespace, table));
       }
       pageToken = response.getPageToken();
+    } while (pageToken != null && !pageToken.isEmpty());
+
+    // List partitioned tables.
+    ListNamespacesRequest req = new ListNamespacesRequest();
+    req.setId(Arrays.stream(actualNamespace).collect(Collectors.toList()));
+    pageToken = null;
+
+    do {
+      if (pageToken != null) {
+        req.setPageToken(pageToken);
+      }
+      ListNamespacesResponse response = this.namespace.listNamespaces(req);
+      for (String ns : response.getNamespaces()) {
+        Identifier nsId = Identifier.of(namespace, ns);
+        if (PartitionUtils.isPartitionTable(this.namespace, impl, nsId)) {
+          identifiers.add(nsId);
+        }
+      }
     } while (pageToken != null && !pageToken.isEmpty());
 
     return identifiers.toArray(new Identifier[0]);
@@ -343,12 +376,27 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
       this.namespace.tableExists(request);
       return true;
     } catch (Exception e) {
+      logger.debug("Normal table {} not exists, fall back to partition table.", ident, e);
+    }
+
+    try {
+      loadPartitionedTable(ident);
+      return true;
+    } catch (Exception e) {
       return false;
     }
   }
 
   @Override
   public Table loadTable(Identifier ident) throws NoSuchTableException {
+    try {
+      return loadNonPartitionedTable(ident);
+    } catch (RuntimeException e) {
+      return loadPartitionedTable(ident);
+    }
+  }
+
+  private Table loadNonPartitionedTable(Identifier ident) throws NoSuchTableException {
     // Transform identifier for API call
     Identifier actualIdent = transformIdentifierForApi(ident);
 
@@ -375,6 +423,30 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
     return createDataset(readOptions, schema);
   }
 
+  private Table loadPartitionedTable(Identifier ident) throws NoSuchTableException {
+    // Transform identifier for API call
+    Identifier actualIdent = transformIdentifierForApi(ident);
+
+    Map<String, String> tableProps;
+    if (impl.equals("dir") || impl.equals(MemoryLanceNamespace.SCHEME)) {
+      tableProps = namespaceProperties(namespace, actualIdent);
+    } else if (impl.equals("hive3") || impl.equals("hive2")) {
+      tableProps = tableProperties(namespace, actualIdent);
+    } else {
+      throw new IllegalArgumentException(
+          "Unsupported namespace type for partition table: " + namespace.getClass());
+    }
+
+    String location = tableProps.get(LANCE_PARTITION_TABLE_ROOT);
+    if (location == null) {
+      throw new NoSuchTableException(actualIdent);
+    }
+
+    LancePartitionConfig config =
+        LancePartitionConfig.from(tableProps, actualIdent.name(), location);
+    return new PartitionedLanceDataset(config);
+  }
+
   /**
    * Creates LanceSparkReadOptions with namespace settings for this catalog.
    *
@@ -394,6 +466,17 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
   @Override
   public Table createTable(
       Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
+      throws TableAlreadyExistsException, NoSuchNamespaceException {
+    // Check if this is a partitioned table
+    if (partitions == null || partitions.length == 0) {
+      return createNonPartitionedTable(ident, schema, properties);
+    } else {
+      return createPartitionedTable(ident, schema, partitions, properties);
+    }
+  }
+
+  private Table createNonPartitionedTable(
+      Identifier ident, StructType schema, Map<String, String> properties)
       throws TableAlreadyExistsException, NoSuchNamespaceException {
     Identifier actualIdent = transformIdentifierForApi(ident);
 
@@ -428,6 +511,52 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
     return createDataset(readOptions, processedSchema);
   }
 
+  private Table createPartitionedTable(
+      Identifier ident,
+      StructType sparkSchema,
+      Transform[] partitions,
+      Map<String, String> properties) {
+    Identifier tableId = transformIdentifierForApi(ident);
+
+    // Set location.
+    // For partitioned table, user must specify the table location. This is a big different from
+    // unpartitioned table, which accepts both table location and none table location.
+    String location = properties.get(CREATE_TABLE_PROPERTY_LOCATION);
+    Preconditions.checkArgument(
+        location != null && !location.isEmpty(), "Table location must be specified");
+
+    // Create partitioned table.
+    Table table;
+    try {
+      table =
+          PartitionUtils.createEmptyPartitionTable(
+              "table", location, sparkSchema, partitions, properties);
+    } catch (NoSuchTableException e) {
+      throw new RuntimeException("Failed to create partitioned table", e);
+    }
+
+    // Register partitioned table to namespace.
+    Map<String, String> options = new HashMap<>(properties);
+    options.put(LANCE_PARTITION_TABLE_ROOT, location);
+
+    if (impl.equals("dir") || impl.equals(MemoryLanceNamespace.SCHEME)) {
+      CreateNamespaceRequest request = new CreateNamespaceRequest();
+      request.id(identToId(tableId));
+      request.setProperties(options);
+      namespace.createNamespace(request);
+    } else if (impl.equals("hive3") || impl.equals("hive2")) {
+      CreateEmptyTableRequest request = new CreateEmptyTableRequest();
+      request.id(identToId(tableId));
+      request.setProperties(options);
+      namespace.createEmptyTable(request);
+    } else {
+      throw new IllegalArgumentException(
+          "Unsupported namespace type for partition table: " + namespace.getClass());
+    }
+
+    return table;
+  }
+
   @Override
   public Table alterTable(Identifier ident, TableChange... changes) throws NoSuchTableException {
     throw new UnsupportedOperationException("Table alteration is not supported");
@@ -435,17 +564,38 @@ public abstract class BaseLanceNamespaceSparkCatalog implements TableCatalog, Su
 
   @Override
   public boolean dropTable(Identifier ident) {
-    try {
-      Identifier tableId = transformIdentifierForApi(ident);
-      DropTableRequest dropRequest = new DropTableRequest();
-      for (String part : tableId.namespace()) {
-        dropRequest.addIdItem(part);
-      }
-      dropRequest.addIdItem(tableId.name());
-      namespace.dropTable(dropRequest);
+    Identifier tableId = transformIdentifierForApi(ident);
+    if (dropNonPartitionedTable(tableId)) {
+      return true;
+    }
+    return dropPartitionedTable(tableId);
+  }
 
+  private boolean dropNonPartitionedTable(Identifier tableId) {
+    try {
+      DropTableRequest dropRequest = new DropTableRequest();
+      dropRequest.id(identToId(tableId));
+      namespace.dropTable(dropRequest);
       return true;
     } catch (Exception e) {
+      return false;
+    }
+  }
+
+  private boolean dropPartitionedTable(Identifier tableId) {
+    try {
+      if (PartitionUtils.isPartitionTable(namespace, impl, tableId)) {
+        if (impl.equals("dir") || impl.equals(MemoryLanceNamespace.SCHEME)) {
+          dropNamespace(identToId(tableId).toArray(new String[0]), true);
+        } else if (impl.equals("hive3") || impl.equals("hive2")) {
+          dropTable(tableId);
+        } else {
+          throw new IllegalArgumentException(
+              "Unsupported namespace type for partition table: " + namespace.getClass());
+        }
+      }
+      return true;
+    } catch (NoSuchNamespaceException e) {
       return false;
     }
   }
