@@ -94,7 +94,7 @@ jobs:
              - Update LANCE_SPARK_VERSION to match the current lance-spark version from pom.xml (lance-spark.version property).
              - Update LANCE_NS_VERSION to match the lance-namespace-core version that is transitively included via lance-core. You can find this by checking the lance-core pom.xml dependencies at https://repo1.maven.org/maven2/org/lance/lance-core/${VERSION}/lance-core-${VERSION}.pom or by running "mvn dependency:tree" after updating pom.xml.
           3. Run "make lint" to check for any linting issues. If there are issues, run "make format" to fix them and rerun "make lint" until it passes.
-          4. Run "make install-all" to verify the build works with the new dependency.
+          4. Run "make install" to verify the build works with the new dependency (this builds Spark 3.5/Scala 2.12 by default).
           5. Inspect "git status --short" and "git diff" to confirm the dependency update and any required fixes.
           6. Create and switch to a new branch named "${BRANCH_NAME}" (replace any duplicated hyphens if necessary).
           7. Stage all relevant files with "git add -A". Commit using the message "chore: update lance dependency to v${VERSION}".
