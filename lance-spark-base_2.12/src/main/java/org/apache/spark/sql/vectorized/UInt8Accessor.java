@@ -16,8 +16,8 @@ package org.apache.spark.sql.vectorized;
 import org.apache.arrow.vector.UInt8Vector;
 
 /**
- * Accessor for unsigned 64-bit integers (UInt8). Maps to Spark LongType (may overflow for values >
- * Long.MAX_VALUE, but no better option).
+ * Accessor for unsigned 64-bit integers (UInt8). Maps to Spark LongType (may overflow for values
+ * &gt; Long.MAX_VALUE, but no better option).
  */
 public class UInt8Accessor {
   private final UInt8Vector accessor;
