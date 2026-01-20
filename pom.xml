@@ -52,7 +52,6 @@
     <properties>
         <lance-spark.version>0.1.3-beta.7</lance-spark.version>
         <lance.version>2.0.0-beta.9</lance.version>
-        <lance-namespace.version>0.4.5</lance-namespace.version>
 
         <antlr4.version>4.9.3</antlr4.version>
 

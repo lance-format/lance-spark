@@ -1,0 +1,115 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Codex Update Lance Dependency
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag name from Lance (e.g., v2.0.0)"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag name from Lance (e.g., v2.0.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show inputs
+        run: |
+          echo "tag = ${{ inputs.tag }}"
+
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Codex CLI
+        run: npm install -g @openai/codex
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          pip install packaging lxml
+
+      - name: Configure git user
+        run: |
+          git config user.name "lance-community"
+          git config user.email "community@lance.org"
+
+      - name: Run Codex to update Lance dependency
+        env:
+          TAG: ${{ inputs.tag }}
+          GITHUB_TOKEN: ${{ secrets.LANCE_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.LANCE_RELEASE_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.CODEX_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#refs/tags/}"
+          VERSION="${VERSION#v}"
+          BRANCH_NAME="codex/update-lance-${VERSION//[^a-zA-Z0-9]/-}"
+
+          cat <<EOF >/tmp/codex-prompt.txt
+          You are running inside the lance-spark repository on a GitHub Actions runner. Update the Lance dependency to version ${VERSION} (semver format) and prepare a pull request for maintainers to review.
+
+          Follow these steps exactly:
+          1. Update the lance.version property in pom.xml. Find the line "<lance.version>X.Y.Z...</lance.version>" in the properties section and update it to "<lance.version>${VERSION}</lance.version>".
+          2. Update the hardcoded versions in docker/Dockerfile if they exist:
+             - Update LANCE_SPARK_VERSION to match the current lance-spark version from pom.xml (lance-spark.version property).
+             - Update LANCE_NS_VERSION to match the lance-namespace-core version that is transitively included via lance-core. You can find this by checking the lance-core pom.xml dependencies at https://repo1.maven.org/maven2/org/lance/lance-core/${VERSION}/lance-core-${VERSION}.pom or by running "mvn dependency:tree" after updating pom.xml.
+          3. Run "make lint" to check for any linting issues. If there are issues, run "make format" to fix them and rerun "make lint" until it passes.
+          4. Run "make install-all" to verify the build works with the new dependency.
+          5. Inspect "git status --short" and "git diff" to confirm the dependency update and any required fixes.
+          6. Create and switch to a new branch named "${BRANCH_NAME}" (replace any duplicated hyphens if necessary).
+          7. Stage all relevant files with "git add -A". Commit using the message "chore: update lance dependency to v${VERSION}".
+          8. Push the branch to origin. If the branch already exists, force-push your changes.
+          9. env "GH_TOKEN" is available, use "gh" tools for github related operations like creating pull request.
+          10. Create a pull request targeting "main" with title "chore: update lance dependency to v${VERSION}". First, write the PR body to /tmp/pr-body.md using a heredoc (cat <<'EOF' > /tmp/pr-body.md). The body should summarize the dependency bump, Docker version updates, build verification, and link the triggering tag (${TAG}). Then run "gh pr create --body-file /tmp/pr-body.md".
+          11. Display the PR URL, "git status --short", and a concise summary of the commands run and their results.
+
+          Constraints:
+          - Use bash commands; avoid modifying GitHub workflow files other than through the scripted task above.
+          - Do not merge the PR.
+          - If any command fails, diagnose and fix the issue instead of aborting.
+          - For lance-core compatibility errors, checkout lance-format/lance for source code reference.
+          - For lance-namespace compatibility errors, checkout lance-format/lance-namespace for source code reference.
+          EOF
+
+          printenv OPENAI_API_KEY | codex login --with-api-key
+          codex --config shell_environment_policy.ignore_default_excludes=true exec --dangerously-bypass-approvals-and-sandbox "$(cat /tmp/codex-prompt.txt)"
