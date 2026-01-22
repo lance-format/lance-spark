@@ -441,8 +441,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
             .tableId(tableId)
             .build()) {
       schema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
-    } catch (IllegalArgumentException e) {
-      throw new NoSuchTableException(ident);
     } catch (TableNotFoundException e) {
       throw new NoSuchTableException(ident);
     }
