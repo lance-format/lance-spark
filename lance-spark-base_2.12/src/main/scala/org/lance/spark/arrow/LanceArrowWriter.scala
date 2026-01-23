@@ -395,6 +395,7 @@ private[arrow] class StructWriter(
       children(i).write(struct, i)
       i += 1
     }
+    valueVector.setIndexDefined(count)
   }
   override def finish(): Unit = {
     super.finish()
