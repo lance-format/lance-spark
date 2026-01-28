@@ -16,6 +16,7 @@ package org.apache.spark.sql.util
 import com.esotericsoftware.kryo.Kryo
 import com.esotericsoftware.kryo.Kryo.DefaultInstantiatorStrategy
 import com.esotericsoftware.kryo.io.{Input, Output}
+import org.apache.spark.util.Utils
 import org.objenesis.strategy.StdInstantiatorStrategy
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
@@ -26,23 +27,27 @@ object LanceSerializeUtil {
     override def initialValue(): Kryo = {
       val kryo = new Kryo()
       kryo.setInstantiatorStrategy(new DefaultInstantiatorStrategy(new StdInstantiatorStrategy()))
-      kryo.setClassLoader(getClass.getClassLoader)
+      kryo.setClassLoader(Utils.getContextOrSparkClassLoader)
       kryo
     }
   }
 
   def encode[T](obj: T): String = {
+    val k = kryo.get
+    k.setClassLoader(Utils.getContextOrSparkClassLoader)
     val buffer = new ByteArrayOutputStream()
     val output = new Output(buffer)
-    kryo.get.writeClassAndObject(output, obj)
+    k.writeClassAndObject(output, obj)
     output.close()
     Base64.getEncoder.encodeToString(buffer.toByteArray)
   }
 
   def decode[T](obj: String): T = {
+    val k = kryo.get
+    k.setClassLoader(Utils.getContextOrSparkClassLoader)
     val array = Base64.getDecoder.decode(obj)
     val input = new Input(new ByteArrayInputStream(array))
-    val o = kryo.get.readClassAndObject(input)
+    val o = k.readClassAndObject(input)
     input.close()
     o.asInstanceOf[T]
   }

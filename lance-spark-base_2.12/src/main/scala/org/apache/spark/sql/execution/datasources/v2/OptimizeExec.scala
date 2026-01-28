@@ -13,22 +13,14 @@
  */
 package org.apache.spark.sql.execution.datasources.v2
 
-import com.esotericsoftware.kryo.Kryo
-import com.esotericsoftware.kryo.Kryo.DefaultInstantiatorStrategy
-import com.esotericsoftware.kryo.io.{Input, Output}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
 import org.apache.spark.sql.catalyst.plans.logical.{NamedArgument, OptimizeOutputType}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
-import org.apache.spark.sql.execution.datasources.v2.SerializeUtil.{decode, encode}
-import org.lance.Dataset
-import org.lance.ReadOptions
+import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
+import org.lance.{Dataset, ReadOptions}
 import org.lance.compaction.{Compaction, CompactionOptions, CompactionTask, RewriteResult}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceRuntime, LanceSparkReadOptions}
-import org.objenesis.strategy.StdInstantiatorStrategy
-
-import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
-import java.util.Base64
 
 import scala.jdk.CollectionConverters._
 
@@ -215,31 +207,5 @@ object OptimizeTaskExecutor {
       namespaceProperties,
       tableId,
       initialStorageOptions)
-  }
-}
-
-object SerializeUtil {
-  private val kryo: ThreadLocal[Kryo] = new ThreadLocal[Kryo] {
-    override def initialValue(): Kryo = {
-      val kryo = new Kryo()
-      kryo.setInstantiatorStrategy(new DefaultInstantiatorStrategy(new StdInstantiatorStrategy()))
-      kryo
-    }
-  }
-
-  def encode[T](obj: T): String = {
-    val buffer = new ByteArrayOutputStream()
-    val output = new Output(buffer)
-    kryo.get.writeClassAndObject(output, obj)
-    output.close()
-    Base64.getEncoder.encodeToString(buffer.toByteArray)
-  }
-
-  def decode[T](obj: String): T = {
-    val array = Base64.getDecoder.decode(obj)
-    val input = new Input(new ByteArrayInputStream(array))
-    val o = kryo.get.readClassAndObject(input)
-    input.close()
-    o.asInstanceOf[T]
   }
 }
