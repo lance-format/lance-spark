@@ -27,6 +27,9 @@ case class LanceDataSourceV2Strategy(session: SparkSession) extends SparkStrateg
     case AddColumnsBackfill(ResolvedIdentifier(catalog, ident), columnNames, source) =>
       AddColumnsBackfillExec(asTableCatalog(catalog), ident, columnNames, source) :: Nil
 
+    case UpdateColumnsBackfill(ResolvedIdentifier(catalog, ident), columnNames, source) =>
+      UpdateColumnsBackfillExec(asTableCatalog(catalog), ident, columnNames, source) :: Nil
+
     case Optimize(ResolvedIdentifier(catalog, ident), args) =>
       OptimizeExec(asTableCatalog(catalog), ident, args) :: Nil
 

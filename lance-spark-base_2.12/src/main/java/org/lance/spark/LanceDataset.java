@@ -17,6 +17,7 @@ import org.lance.spark.read.LanceScanBuilder;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.write.AddColumnsBackfillWrite;
 import org.lance.spark.write.SparkWrite;
+import org.lance.spark.write.UpdateColumnsBackfillWrite;
 
 import com.google.common.collect.ImmutableSet;
 import org.apache.spark.sql.connector.catalog.MetadataColumn;
@@ -211,6 +212,23 @@ public class LanceDataset implements SupportsRead, SupportsWrite, SupportsMetada
           sparkSchema,
           writeOptions,
           backfillColumns,
+          initialStorageOptions,
+          namespaceImpl,
+          namespaceProperties,
+          readOptions.getTableId());
+    }
+
+    List<String> updateColumns =
+        Arrays.stream(
+                sparkWriteOptions.getOrDefault(LanceConstant.UPDATE_COLUMNS_KEY, "").split(","))
+            .map(String::trim)
+            .filter(t -> !t.isEmpty())
+            .collect(Collectors.toList());
+    if (!updateColumns.isEmpty()) {
+      return new UpdateColumnsBackfillWrite.UpdateColumnsWriteBuilder(
+          sparkSchema,
+          writeOptions,
+          updateColumns,
           initialStorageOptions,
           namespaceImpl,
           namespaceProperties,
