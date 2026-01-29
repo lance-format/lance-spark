@@ -35,8 +35,8 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
     AddColumnsBackfill(table, columnNames, source)
   }
 
-  override def visitUpdateColumnsBackfill(ctx: LanceSqlExtensionsParser.UpdateColumnsBackfillContext)
-      : UpdateColumnsBackfill = {
+  override def visitUpdateColumnsBackfill(
+      ctx: LanceSqlExtensionsParser.UpdateColumnsBackfillContext): UpdateColumnsBackfill = {
     val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
     val columnNames = visitColumnList(ctx.columnList())
     val source = UnresolvedRelation(Seq(ctx.identifier().getText))
