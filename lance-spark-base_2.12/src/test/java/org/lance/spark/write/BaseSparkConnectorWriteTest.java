@@ -31,6 +31,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 
@@ -331,7 +332,8 @@ public abstract class BaseSparkConnectorWriteTest {
         .save();
     assertTrue(checkDataset(1, outputPath));
 
-    long ts1 = System.currentTimeMillis();
+    Instant instant = Instant.now();
+    long ts1 = instant.toEpochMilli();
 
     List<Row> data2 = List.of(RowFactory.create(2L, 200L));
     Dataset<Row> df2 = spark.createDataFrame(data2, schema);

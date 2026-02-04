@@ -24,6 +24,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -122,7 +123,8 @@ public abstract class SparkLanceNamespaceTestBase {
     assertTrue(checkDataset(0, fullName));
 
     spark.sql("INSERT INTO " + fullName + " VALUES (1, 'v1')");
-    long ts1 = System.currentTimeMillis();
+    Instant instant = Instant.now();
+    long ts1 = instant.toEpochMilli();
     assertTrue(checkDataset(1, fullName));
     spark.sql("INSERT INTO " + fullName + " VALUES (2, 'v2')");
     assertTrue(checkDataset(2, fullName));
