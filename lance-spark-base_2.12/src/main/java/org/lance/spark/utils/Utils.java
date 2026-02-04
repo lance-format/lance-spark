@@ -36,21 +36,21 @@ public class Utils {
     return Long.parseUnsignedLong(version);
   }
 
-  public static long findVersion(List<Version> versions, long timestampMicros) {
+  public static long findVersion(List<Version> versions, long timestamp) {
     long versionID = -1;
-    Instant timestamp = instantFromEpochNanos(timestampMicros);
+    Instant instant = instantFromTimestamp(timestamp);
     for (Version version : versions) {
       ZonedDateTime dataTime = version.getDataTime();
-      if (dataTime.toInstant().compareTo(timestamp) < 0) {
+      if (dataTime.toInstant().compareTo(instant) < 0) {
         versionID = version.getId();
-      } else if (dataTime.toInstant().equals(timestamp)) {
+      } else if (dataTime.toInstant().equals(instant)) {
         return version.getId();
       } else {
         break;
       }
     }
     if (versionID == -1) {
-      throw new IllegalArgumentException("No version found with timestamp: " + timestampMicros);
+      throw new IllegalArgumentException("No version found with timestamp: " + timestamp);
     }
     return versionID;
   }
@@ -120,13 +120,26 @@ public class Utils {
     }
 
     if (versionId != null) {
-      // TODO 修改version为long类型
       builder.version(versionId.intValue());
     }
     return builder.build();
   }
 
-  // Convert microseconds since epoch to ZonedDateTime in UTC
+  // Determine if the timestamp is in microseconds or nanoseconds and convert to Instant
+  private static Instant instantFromTimestamp(long timestamp) {
+    long abs = timestamp == Long.MIN_VALUE ? Long.MAX_VALUE : Math.abs(timestamp);
+    if (abs >= 1_000_000_000_000_000_000L) {
+      return instantFromEpochNanos(timestamp);
+    }
+    return instantFromEpochMicros(timestamp);
+  }
+
+  private static Instant instantFromEpochMicros(long epochMicros) {
+    long sec = Math.floorDiv(epochMicros, 1_000_000L);
+    long nanoAdj = Math.floorMod(epochMicros, 1_000_000L) * 1_000L;
+    return Instant.ofEpochSecond(sec, nanoAdj);
+  }
+
   private static Instant instantFromEpochNanos(long epochNanos) {
     long sec = Math.floorDiv(epochNanos, 1_000_000_000L);
     long nanoAdj = Math.floorMod(epochNanos, 1_000_000_000L);

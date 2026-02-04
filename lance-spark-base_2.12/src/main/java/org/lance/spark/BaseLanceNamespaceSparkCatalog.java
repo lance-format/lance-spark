@@ -462,7 +462,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
         Dataset.open()
             .allocator(LanceRuntime.allocator())
             .uri(location)
-            .readOptions(createReadOptions(location, catalogConfig).toReadOptions())
+            .readOptions(
+                createReadOptions(location, catalogConfig, tableId, namespace).toReadOptions())
             .build()) {
       versionId = Utils.findVersion(dataset.listVersions(), timestamp);
     } catch (IllegalArgumentException e) {
