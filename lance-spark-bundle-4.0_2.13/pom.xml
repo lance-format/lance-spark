@@ -15,7 +15,6 @@
     <packaging>jar</packaging>
 
     <properties>
-        <arrow.version>${arrow18.version}</arrow.version>
         <scala.version>${scala213.version}</scala.version>
         <scala.compat.version>${scala213.compat.version}</scala.compat.version>
     </properties>

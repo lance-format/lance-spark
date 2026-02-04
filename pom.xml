@@ -57,7 +57,7 @@
 
         <arrow15.version>15.0.0</arrow15.version>
         <arrow18.version>18.3.0</arrow18.version>
-        <arrow.version>${arrow15.version}</arrow.version>
+        <arrow.version>${arrow18.version}</arrow.version>
 
         <spark34.version>3.4.4</spark34.version>
         <spark35.version>3.5.5</spark35.version>
