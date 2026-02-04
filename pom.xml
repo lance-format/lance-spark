@@ -50,6 +50,7 @@
     </distributionManagement>
 
     <properties>
+        <arrow.version>15.0.0</arrow.version>
         <lance-spark.version>0.1.3-beta.8</lance-spark.version>
         <lance.version>2.0.0-beta.10</lance.version>
 
@@ -131,7 +132,21 @@
 
     <dependencyManagement>
         <dependencies>
-            
+            <dependency>
+                <groupId>org.apache.arrow</groupId>
+                <artifactId>arrow-vector</artifactId>
+                <version>${arrow.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.arrow</groupId>
+                <artifactId>arrow-memory-netty</artifactId>
+                <version>${arrow.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.arrow</groupId>
+                <artifactId>arrow-c-data</artifactId>
+                <version>${arrow.version}</version>
+            </dependency>
             <dependency>
                 <groupId>org.apache.spark</groupId>
                 <artifactId>spark-sql_${scala.compat.version}</artifactId>
