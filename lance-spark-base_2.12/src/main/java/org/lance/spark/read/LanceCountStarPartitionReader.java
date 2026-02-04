@@ -96,6 +96,7 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
           .allocator(allocator)
           .namespace(readOptions.getNamespace())
           .tableId(readOptions.getTableId())
+          .readOptions(readOptions.toReadOptions())
           .build();
     } else {
       return Dataset.open()

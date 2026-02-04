@@ -17,10 +17,7 @@ import org.lance.spark.LanceDataSource;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 
-import org.apache.spark.sql.Dataset;
-import org.apache.spark.sql.Row;
-import org.apache.spark.sql.RowFactory;
-import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.*;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException;
 import org.apache.spark.sql.types.DataTypes;
@@ -314,5 +311,58 @@ public abstract class BaseSparkConnectorWriteTest {
                   && e.getCause().getMessage().contains("batch_size must be positive")),
           "Expected batch_size validation error, got: " + e.getMessage());
     }
+  }
+
+  @Test
+  public void testTimeTravel(TestInfo testInfo) {
+    String tableName = testInfo.getTestMethod().get().getName();
+    String outputPath = TestUtils.getDatasetUri(dbPath.toString(), tableName);
+
+    StructType schema =
+        new StructType().add("id", DataTypes.LongType).add("value", DataTypes.LongType);
+
+    List<Row> data1 = List.of(RowFactory.create(1L, 100L));
+    Dataset<Row> df1 = spark.createDataFrame(data1, schema);
+    df1.write()
+        .format("lance")
+        .option(
+            LanceSparkReadOptions.CONFIG_DATASET_URI,
+            TestUtils.getDatasetUri(dbPath.toString(), tableName))
+        .save();
+    assertTrue(checkDataset(1, outputPath));
+
+    long ts1 = System.currentTimeMillis();
+
+    List<Row> data2 = List.of(RowFactory.create(2L, 200L));
+    Dataset<Row> df2 = spark.createDataFrame(data2, schema);
+    df2.write().format("lance").mode(SaveMode.Append).save(outputPath);
+    assertTrue(checkDataset(2, outputPath));
+
+    // check timestamp as of
+    List<Row> res =
+        spark
+            .sql("select * from lance.`" + outputPath + "`  TIMESTAMP AS OF " + ts1)
+            .collectAsList();
+    assertEquals(1, res.size());
+
+    // check version as of
+    List<Row> res2 =
+        spark.sql("select * from lance.`" + outputPath + "`  VERSION AS OF " + 2).collectAsList();
+    assertEquals(1, res2.size());
+  }
+
+  private boolean checkDataset(int expectedSize, String path) {
+    Dataset<Row> lanceTable =
+        spark
+            .read()
+            .format(LanceDataSource.name)
+            .option(LanceSparkReadOptions.CONFIG_DATASET_URI, path)
+            .load();
+
+    lanceTable.createOrReplaceTempView("table_a");
+    Dataset<Row> actual = spark.sql("SELECT * FROM table_a");
+    List<Row> res = actual.collectAsList();
+
+    return expectedSize == res.size();
   }
 }

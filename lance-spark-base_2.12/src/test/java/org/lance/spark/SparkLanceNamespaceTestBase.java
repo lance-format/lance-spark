@@ -95,6 +95,52 @@ public abstract class SparkLanceNamespaceTestBase {
   }
 
   @Test
+  public void testTimeTravelVersionAsOf() throws Exception {
+    String tableName = generateTableName("time_travel_version");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id INT NOT NULL, name STRING)");
+    assertTrue(checkDataset(0, fullName));
+
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, 'v1')");
+    assertTrue(checkDataset(1, fullName));
+    spark.sql("INSERT INTO " + fullName + " VALUES (2, 'v2')");
+    assertTrue(checkDataset(2, fullName));
+
+    // time travel to version 2 (the second insert)
+    Dataset<Row> actual = spark.sql("SELECT * FROM " + fullName + " VERSION AS OF " + "2");
+    List<Row> res = actual.collectAsList();
+    assertEquals(1, res.size());
+  }
+
+  @Test
+  public void testTimeTravelTimestampAsOf() throws Exception {
+    String tableName = generateTableName("time_travel_version");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id INT NOT NULL, name STRING)");
+    assertTrue(checkDataset(0, fullName));
+
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, 'v1')");
+    long ts1 = System.currentTimeMillis();
+    assertTrue(checkDataset(1, fullName));
+    spark.sql("INSERT INTO " + fullName + " VALUES (2, 'v2')");
+    assertTrue(checkDataset(2, fullName));
+
+    // time travel to timestamp before second insert
+    Dataset<Row> actual = spark.sql("SELECT * FROM " + fullName + " TIMESTAMP AS OF " + ts1);
+    List<Row> res = actual.collectAsList();
+    assertEquals(1, res.size());
+  }
+
+  private boolean checkDataset(int expectedSize, String tableName) {
+    Dataset<Row> actual = spark.sql("SELECT * FROM " + tableName);
+    List<Row> res = actual.collectAsList();
+
+    return expectedSize == res.size();
+  }
+
+  @Test
   public void testCreateAndDescribeTable() throws Exception {
     String tableName = generateTableName("test_table");
 
