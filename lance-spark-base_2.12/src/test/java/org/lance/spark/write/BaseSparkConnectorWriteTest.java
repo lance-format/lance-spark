@@ -13,7 +13,9 @@
  */
 package org.lance.spark.write;
 
+import org.lance.Version;
 import org.lance.spark.LanceDataSource;
+import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 
@@ -31,7 +33,6 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
 import java.nio.file.Path;
-import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 
@@ -324,16 +325,8 @@ public abstract class BaseSparkConnectorWriteTest {
 
     List<Row> data1 = List.of(RowFactory.create(1L, 100L));
     Dataset<Row> df1 = spark.createDataFrame(data1, schema);
-    df1.write()
-        .format("lance")
-        .option(
-            LanceSparkReadOptions.CONFIG_DATASET_URI,
-            TestUtils.getDatasetUri(dbPath.toString(), tableName))
-        .save();
+    df1.write().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, outputPath).save();
     assertTrue(checkDataset(1, outputPath));
-
-    Instant instant = Instant.now();
-    long ts1 = instant.toEpochMilli();
 
     List<Row> data2 = List.of(RowFactory.create(2L, 200L));
     Dataset<Row> df2 = spark.createDataFrame(data2, schema);
@@ -341,6 +334,9 @@ public abstract class BaseSparkConnectorWriteTest {
     assertTrue(checkDataset(2, outputPath));
 
     // check timestamp as of
+    Version version = getLatestVersion(outputPath);
+    long ts1 = version.getDataTime().toInstant().toEpochMilli() - 1;
+
     List<Row> res =
         spark
             .sql("select * from lance.`" + outputPath + "`  TIMESTAMP AS OF " + ts1)
@@ -366,5 +362,12 @@ public abstract class BaseSparkConnectorWriteTest {
     List<Row> res = actual.collectAsList();
 
     return expectedSize == res.size();
+  }
+
+  private Version getLatestVersion(String datasetUri) {
+    try (org.lance.Dataset dataset =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(datasetUri).build()) {
+      return dataset.getVersion();
+    }
   }
 }

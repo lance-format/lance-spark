@@ -13,4 +13,19 @@
  */
 package org.lance.spark;
 
-public class TestSparkDirectoryNamespace extends BaseTestSparkDirectoryNamespace {}
+import org.junit.jupiter.api.Test;
+
+public class TestSparkDirectoryNamespace extends BaseTestSparkDirectoryNamespace {
+
+  @Test
+  @Override
+  public void testTimeTravelVersionAsOf() throws Exception {
+    super.testTimeTravelVersionAsOf();
+  }
+
+  @Test
+  @Override
+  public void testTimeTravelTimestampAsOf() throws Exception {
+    super.testTimeTravelTimestampAsOf();
+  }
+}

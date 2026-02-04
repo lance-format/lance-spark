@@ -13,9 +13,12 @@
  */
 package org.lance.spark;
 
+import org.lance.Version;
+
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -24,7 +27,6 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Path;
-import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -123,23 +125,17 @@ public abstract class SparkLanceNamespaceTestBase {
     assertTrue(checkDataset(0, fullName));
 
     spark.sql("INSERT INTO " + fullName + " VALUES (1, 'v1')");
-    Instant instant = Instant.now();
-    long ts1 = instant.toEpochMilli();
     assertTrue(checkDataset(1, fullName));
     spark.sql("INSERT INTO " + fullName + " VALUES (2, 'v2')");
     assertTrue(checkDataset(2, fullName));
 
+    Version version = getLatestVersion(tableName);
+    long ts = version.getDataTime().toInstant().toEpochMilli() - 1;
+
     // time travel to timestamp before second insert
-    Dataset<Row> actual = spark.sql("SELECT * FROM " + fullName + " TIMESTAMP AS OF " + ts1);
+    Dataset<Row> actual = spark.sql("SELECT * FROM " + fullName + " TIMESTAMP AS OF " + ts);
     List<Row> res = actual.collectAsList();
     assertEquals(1, res.size());
-  }
-
-  private boolean checkDataset(int expectedSize, String tableName) {
-    Dataset<Row> actual = spark.sql("SELECT * FROM " + tableName);
-    List<Row> res = actual.collectAsList();
-
-    return expectedSize == res.size();
   }
 
   @Test
@@ -617,5 +613,37 @@ public abstract class SparkLanceNamespaceTestBase {
     Row row = result.collectAsList().get(0);
     assertEquals(42L, row.getLong(0));
     assertEquals(3.14, row.getDouble(1), 0.001);
+  }
+
+  private boolean checkDataset(int expectedSize, String tableName) {
+    Dataset<Row> actual = spark.sql("SELECT * FROM " + tableName);
+    List<Row> res = actual.collectAsList();
+
+    return expectedSize == res.size();
+  }
+
+  private Version getLatestVersion(String tableName) throws Exception {
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    LanceDataset lanceTable = (LanceDataset) catalog.loadTable(ident);
+    LanceSparkReadOptions readOptions = lanceTable.readOptions();
+    try (org.lance.Dataset dataset = openLatestDataset(readOptions)) {
+      return dataset.getVersion();
+    }
+  }
+
+  private org.lance.Dataset openLatestDataset(LanceSparkReadOptions readOptions) {
+    if (readOptions.hasNamespace()) {
+      return org.lance.Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .namespace(readOptions.getNamespace())
+          .tableId(readOptions.getTableId())
+          .readOptions(readOptions.toReadOptions())
+          .build();
+    }
+    return org.lance.Dataset.open()
+        .allocator(LanceRuntime.allocator())
+        .uri(readOptions.getDatasetUri())
+        .readOptions(readOptions.toReadOptions())
+        .build();
   }
 }
