@@ -13,6 +13,4 @@
  */
 package org.lance.spark;
 
-import org.junit.jupiter.api.Test;
-
 public class TestSparkDirectoryNamespace extends BaseTestSparkDirectoryNamespace {}
