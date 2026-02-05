@@ -19,6 +19,7 @@
         <scala.compat.version>${scala213.compat.version}</scala.compat.version>
         <antlr4.version>4.13.1</antlr4.version>
         <java.release>17</java.release>
+        <arrow.version>${arrow17.version}</arrow.version>
     </properties>
 
     <dependencies>
