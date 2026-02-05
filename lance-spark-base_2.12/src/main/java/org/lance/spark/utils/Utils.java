@@ -92,23 +92,22 @@ public class Utils {
   public static LanceSparkReadOptions createReadOptions(
       String location,
       LanceSparkCatalogConfig catalogConfig,
-      Long versionId,
-      LanceNamespace namespace,
-      List<String> tableId) {
+      Optional<Long> versionId,
+      Optional<LanceNamespace> namespace,
+      Optional<List<String>> tableId) {
     LanceSparkReadOptions.Builder builder =
         LanceSparkReadOptions.builder().datasetUri(location).withCatalogDefaults(catalogConfig);
 
-    if (tableId != null) {
-      builder.tableId(tableId);
+    if (versionId.isPresent()) {
+      builder.version(versionId.get().intValue());
+    }
+    if (tableId.isPresent()) {
+      builder.tableId(tableId.get());
+    }
+    if (namespace.isPresent()) {
+      builder.namespace(namespace.get());
     }
 
-    if (namespace != null) {
-      builder.namespace(namespace);
-    }
-
-    if (versionId != null) {
-      builder.version(versionId.intValue());
-    }
     return builder.build();
   }
 

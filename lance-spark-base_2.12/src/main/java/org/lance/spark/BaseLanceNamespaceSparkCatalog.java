@@ -28,7 +28,6 @@ import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.SchemaConverter;
 import org.lance.spark.utils.Utils;
 
-import org.apache.commons.lang3.tuple.Triple;
 import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchFunctionException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
@@ -416,68 +415,17 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   @Override
   public Table loadTable(Identifier ident) throws NoSuchTableException {
-    Triple<List<String>, String, Map<String, String>> res = getTableMessage(ident);
-    List<String> tableId = res.getLeft();
-    String location = res.getMiddle();
-    Map<String, String> initialStorageOptions = res.getRight();
-
-    // Create read options with namespace support
-    LanceSparkReadOptions readOptions =
-        createReadOptions(location, catalogConfig, null, namespace, tableId);
-
-    // Open dataset to get schema
-    StructType schema = getSchema(ident, location, readOptions, namespace);
-    return createDataset(
-        readOptions, schema, initialStorageOptions, namespaceImpl, namespaceProperties);
+    return loadTableInternal(ident, Optional.empty(), Optional.empty());
   }
 
   @Override
   public Table loadTable(Identifier ident, String version) throws NoSuchTableException {
-    Triple<List<String>, String, Map<String, String>> res = getTableMessage(ident);
-    List<String> tableId = res.getLeft();
-    String location = res.getMiddle();
-    Map<String, String> initialStorageOptions = res.getRight();
-
-    // Open dataset to get schema
-    long versionId = Utils.parseVersion(version);
-    LanceSparkReadOptions readOptions =
-        createReadOptions(location, catalogConfig, versionId, namespace, tableId);
-    StructType schema = getSchema(ident, location, readOptions, namespace);
-
-    // Create read options with namespace support
-    return createDataset(
-        readOptions, schema, initialStorageOptions, namespaceImpl, namespaceProperties);
+    return loadTableInternal(ident, Optional.empty(), Optional.of(version));
   }
 
   @Override
   public Table loadTable(Identifier ident, long timestamp) throws NoSuchTableException {
-    Triple<List<String>, String, Map<String, String>> res = getTableMessage(ident);
-    List<String> tableId = res.getLeft();
-    String location = res.getMiddle();
-    Map<String, String> initialStorageOptions = res.getRight();
-
-    // Open dataset to get schema
-    long versionId;
-    try (Dataset dataset =
-        Dataset.open()
-            .allocator(LanceRuntime.allocator())
-            .uri(location)
-            .readOptions(
-                createReadOptions(location, catalogConfig, null, namespace, tableId)
-                    .toReadOptions())
-            .build()) {
-      versionId = Utils.findVersion(dataset.listVersions(), timestamp);
-    } catch (TableNotFoundException e) {
-      throw new NoSuchTableException(ident);
-    }
-
-    LanceSparkReadOptions readOptions =
-        createReadOptions(location, catalogConfig, versionId, namespace, tableId);
-    StructType schema = getSchema(ident, location, readOptions, namespace);
-
-    // Create read options with namespace support
-    return createDataset(
-        readOptions, schema, initialStorageOptions, namespaceImpl, namespaceProperties);
+    return loadTableInternal(ident, Optional.of(timestamp), null);
   }
 
   @Override
@@ -514,7 +462,12 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     // Create read options with namespace settings
     LanceSparkReadOptions readOptions =
-        createReadOptions(location, catalogConfig, null, namespace, tableIdList);
+        createReadOptions(
+            location,
+            catalogConfig,
+            Optional.empty(),
+            Optional.of(namespace),
+            Optional.of(tableIdList));
     return createDataset(
         readOptions, processedSchema, initialStorageOptions, namespaceImpl, namespaceProperties);
   }
@@ -665,8 +618,10 @@ public abstract class BaseLanceNamespaceSparkCatalog
         .collect(Collectors.toList());
   }
 
-  private Triple<List<String>, String, Map<String, String>> getTableMessage(Identifier ident)
+  private Table loadTableInternal(
+      Identifier ident, Optional<Long> timestamp, Optional<String> version)
       throws NoSuchTableException {
+
     // Transform identifier for API call
     Identifier actualIdent = transformIdentifierForApi(ident);
 
@@ -687,7 +642,37 @@ public abstract class BaseLanceNamespaceSparkCatalog
     String location = describeResponse.getLocation();
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
 
-    return Triple.of(tableId, location, initialStorageOptions);
+    Optional<Long> versionId = Optional.empty();
+    if (timestamp.isPresent()) {
+      try (Dataset dataset =
+          Dataset.open()
+              .allocator(LanceRuntime.allocator())
+              .uri(location)
+              .readOptions(
+                  createReadOptions(
+                          location,
+                          catalogConfig,
+                          Optional.empty(),
+                          Optional.of(namespace),
+                          Optional.of(tableId))
+                      .toReadOptions())
+              .build()) {
+        versionId = Optional.of(Utils.findVersion(dataset.listVersions(), timestamp.get()));
+      } catch (TableNotFoundException e) {
+        throw new NoSuchTableException(ident);
+      }
+    } else if (version.isPresent()) {
+      versionId = Optional.of(Utils.parseVersion(version.get()));
+    }
+
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            location, catalogConfig, versionId, Optional.of(namespace), Optional.of(tableId));
+    StructType schema = getSchema(ident, location, readOptions, namespace);
+
+    // Create read options with namespace support
+    return createDataset(
+        readOptions, schema, initialStorageOptions, namespaceImpl, namespaceProperties);
   }
 
   public abstract LanceDataset createDataset(
