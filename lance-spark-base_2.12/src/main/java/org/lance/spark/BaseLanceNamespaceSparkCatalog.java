@@ -423,7 +423,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     // Create read options with namespace support
     LanceSparkReadOptions readOptions =
-        createReadOptions(location, catalogConfig, tableId, namespace);
+        createReadOptions(location, catalogConfig, null, namespace, tableId);
 
     // Open dataset to get schema
     StructType schema = getSchema(ident, location, readOptions, namespace);
@@ -441,7 +441,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     // Open dataset to get schema
     long versionId = Utils.parseVersion(version);
     LanceSparkReadOptions readOptions =
-        createReadOptions(location, versionId, catalogConfig, namespace, tableId);
+        createReadOptions(location, catalogConfig, versionId, namespace, tableId);
     StructType schema = getSchema(ident, location, readOptions, namespace);
 
     // Create read options with namespace support
@@ -463,7 +463,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
             .allocator(LanceRuntime.allocator())
             .uri(location)
             .readOptions(
-                createReadOptions(location, catalogConfig, tableId, namespace).toReadOptions())
+                createReadOptions(location, catalogConfig, null, namespace, tableId)
+                    .toReadOptions())
             .build()) {
       versionId = Utils.findVersion(dataset.listVersions(), timestamp);
     } catch (TableNotFoundException e) {
@@ -471,7 +472,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     }
 
     LanceSparkReadOptions readOptions =
-        createReadOptions(location, versionId, catalogConfig, namespace, tableId);
+        createReadOptions(location, catalogConfig, versionId, namespace, tableId);
     StructType schema = getSchema(ident, location, readOptions, namespace);
 
     // Create read options with namespace support
@@ -513,7 +514,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     // Create read options with namespace settings
     LanceSparkReadOptions readOptions =
-        createReadOptions(location, catalogConfig, tableIdList, namespace);
+        createReadOptions(location, catalogConfig, null, namespace, tableIdList);
     return createDataset(
         readOptions, processedSchema, initialStorageOptions, namespaceImpl, namespaceProperties);
   }

@@ -82,19 +82,6 @@ public class Utils {
     }
   }
 
-  public static LanceSparkReadOptions createReadOptions(
-      String datasetUri, LanceSparkCatalogConfig catalogConfig) {
-    return createReadOptions(datasetUri, null, catalogConfig, null, null);
-  }
-
-  public static LanceSparkReadOptions createReadOptions(
-      String datasetUri,
-      LanceSparkCatalogConfig catalogConfig,
-      List<String> tableId,
-      LanceNamespace namespace) {
-    return createReadOptions(datasetUri, null, catalogConfig, namespace, tableId);
-  }
-
   /**
    * Creates LanceSparkReadOptions for this catalog.
    *
@@ -104,8 +91,8 @@ public class Utils {
    */
   public static LanceSparkReadOptions createReadOptions(
       String location,
-      Long versionId,
       LanceSparkCatalogConfig catalogConfig,
+      Long versionId,
       LanceNamespace namespace,
       List<String> tableId) {
     LanceSparkReadOptions.Builder builder =
@@ -127,9 +114,8 @@ public class Utils {
 
   // Determine if the timestamp is in microseconds or nanoseconds and convert to Instant
   private static Instant instantFromTimestamp(long timestamp) {
-    long abs = timestamp == Long.MIN_VALUE ? Long.MAX_VALUE : Math.abs(timestamp);
-    if (abs >= 1_000_000_000_000_000_000L) {
-      return instantFromEpochNanos(timestamp);
+    if (timestamp <= 0) {
+      throw new IllegalArgumentException("Timestamp must be greater than zero");
     }
     return instantFromEpochMicros(timestamp);
   }
@@ -137,12 +123,6 @@ public class Utils {
   private static Instant instantFromEpochMicros(long epochMicros) {
     long sec = Math.floorDiv(epochMicros, 1_000_000L);
     long nanoAdj = Math.floorMod(epochMicros, 1_000_000L) * 1_000L;
-    return Instant.ofEpochSecond(sec, nanoAdj);
-  }
-
-  private static Instant instantFromEpochNanos(long epochNanos) {
-    long sec = Math.floorDiv(epochNanos, 1_000_000_000L);
-    long nanoAdj = Math.floorMod(epochNanos, 1_000_000_000L);
     return Instant.ofEpochSecond(sec, nanoAdj);
   }
 }

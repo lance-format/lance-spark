@@ -56,7 +56,8 @@ public class LanceCatalog implements TableCatalog {
   @Override
   public Table loadTable(Identifier ident) throws NoSuchTableException {
     String datasetUri = getDatasetUri(ident);
-    LanceSparkReadOptions readOptions = createReadOptions(datasetUri, catalogConfig);
+    LanceSparkReadOptions readOptions =
+        createReadOptions(datasetUri, catalogConfig, null, null, null);
     StructType schema = getSchema(ident, datasetUri, readOptions, null);
 
     return new LanceDataset(readOptions, schema, null, null, null);
@@ -79,7 +80,8 @@ public class LanceCatalog implements TableCatalog {
         Dataset.open()
             .allocator(LanceRuntime.allocator())
             .uri(datasetUri)
-            .readOptions(createReadOptions(datasetUri, catalogConfig).toReadOptions())
+            .readOptions(
+                createReadOptions(datasetUri, catalogConfig, null, null, null).toReadOptions())
             .build()) {
       versionId = Utils.findVersion(dataset.listVersions(), timestamp);
     } catch (IllegalArgumentException e) {
@@ -94,7 +96,8 @@ public class LanceCatalog implements TableCatalog {
       Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
       throws TableAlreadyExistsException, NoSuchNamespaceException {
     String datasetUri = getDatasetUri(ident);
-    LanceSparkReadOptions readOptions = createReadOptions(datasetUri, catalogConfig);
+    LanceSparkReadOptions readOptions =
+        createReadOptions(datasetUri, catalogConfig, null, null, null);
     try {
       Dataset.write()
           .allocator(LanceRuntime.allocator())
@@ -182,7 +185,7 @@ public class LanceCatalog implements TableCatalog {
       Identifier ident, String datasetUri, long versionId, LanceSparkCatalogConfig catalogConfig)
       throws NoSuchTableException {
     LanceSparkReadOptions readOptions =
-        createReadOptions(datasetUri, versionId, catalogConfig, null, null);
+        createReadOptions(datasetUri, catalogConfig, versionId, null, null);
     StructType schema = getSchema(ident, datasetUri, readOptions, null);
 
     return new LanceDataset(readOptions, schema, null, null, null);

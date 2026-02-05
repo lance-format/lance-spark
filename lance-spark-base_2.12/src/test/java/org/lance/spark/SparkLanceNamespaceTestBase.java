@@ -27,6 +27,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -54,6 +55,7 @@ public abstract class SparkLanceNamespaceTestBase {
             .config(
                 "spark.sql.catalog." + catalogName, "org.lance.spark.LanceNamespaceSparkCatalog")
             .config("spark.sql.catalog." + catalogName + ".impl", getNsImpl())
+            .config("spark.sql.session.timeZone", "UTC")
             .getOrCreate();
 
     Map<String, String> additionalConfigs = getAdditionalNsConfigs();
@@ -130,10 +132,12 @@ public abstract class SparkLanceNamespaceTestBase {
     assertTrue(checkDataset(2, fullName));
 
     Version version = getLatestVersion(tableName);
-    long ts = version.getDataTime().toInstant().toEpochMilli() - 1;
+    DateTimeFormatter format = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    String date = version.getDataTime().format(format);
 
     // time travel to timestamp before second insert
-    Dataset<Row> actual = spark.sql("SELECT * FROM " + fullName + " TIMESTAMP AS OF " + ts);
+    Dataset<Row> actual =
+        spark.sql("SELECT * FROM " + fullName + " TIMESTAMP AS OF '" + date + "'");
     List<Row> res = actual.collectAsList();
     assertEquals(1, res.size());
   }
