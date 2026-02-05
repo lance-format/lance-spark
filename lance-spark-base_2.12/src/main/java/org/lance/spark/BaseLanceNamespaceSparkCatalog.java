@@ -466,7 +466,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
                 createReadOptions(location, catalogConfig, tableId, namespace).toReadOptions())
             .build()) {
       versionId = Utils.findVersion(dataset.listVersions(), timestamp);
-    } catch (IllegalArgumentException e) {
+    } catch (TableNotFoundException e) {
       throw new NoSuchTableException(ident);
     }
 
