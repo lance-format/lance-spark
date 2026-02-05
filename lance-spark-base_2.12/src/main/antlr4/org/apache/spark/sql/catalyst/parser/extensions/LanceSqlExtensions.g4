@@ -21,8 +21,15 @@ singleStatement
 statement
     : ALTER TABLE multipartIdentifier ADD COLUMNS columnList FROM identifier                    #addColumnsBackfill
     | ALTER TABLE multipartIdentifier CREATE INDEX indexName=identifier USING method=identifier '(' columnList ')' (WITH '(' (namedArgument (',' namedArgument)*)? ')')? #createIndex
+    | ALTER TABLE multipartIdentifier CREATE TAG tagName=identifier (VERSION AS OF version=versionValue)? #createTag
+    | ALTER TABLE multipartIdentifier DROP TAG tagName=identifier                               #dropTag
     | OPTIMIZE multipartIdentifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')?        #optimize
     | VACUUM multipartIdentifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')?          #vacuum
+    ;
+
+versionValue
+    : number                          #numericVersion
+    | STRING                          #stringVersion
     ;
 
 multipartIdentifier
@@ -64,14 +71,19 @@ number
 
 ADD: 'ADD';
 ALTER: 'ALTER';
+AS: 'AS';
 COLUMNS: 'COLUMNS';
 CREATE: 'CREATE';
+DROP: 'DROP';
 FROM: 'FROM';
 INDEX: 'INDEX';
+OF: 'OF';
 OPTIMIZE: 'OPTIMIZE';
 TABLE: 'TABLE';
+TAG: 'TAG';
 USING: 'USING';
 VACUUM: 'VACUUM';
+VERSION: 'VERSION';
 WITH: 'WITH';
 
 TRUE: 'TRUE';

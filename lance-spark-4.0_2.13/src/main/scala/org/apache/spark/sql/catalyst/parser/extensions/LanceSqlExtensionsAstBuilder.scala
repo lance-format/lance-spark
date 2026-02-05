@@ -15,7 +15,7 @@ package org.apache.spark.sql.catalyst.parser.extensions
 
 import org.apache.spark.sql.catalyst.analysis.{UnresolvedIdentifier, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.parser.ParserInterface
-import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, LogicalPlan, NamedArgument, Optimize, Vacuum}
+import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, CreateTag, DropTag, LogicalPlan, NamedArgument, Optimize, Vacuum}
 
 import scala.jdk.CollectionConverters._
 
@@ -81,6 +81,30 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
       .toSeq
 
     AddIndex(table, indexName, method, columns, args)
+  }
+
+  override def visitCreateTag(ctx: LanceSqlExtensionsParser.CreateTagContext): CreateTag = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val tagName = ctx.tagName.getText
+    val version = Option(ctx.version).map(_.accept(this))
+    CreateTag(table, tagName, version)
+  }
+
+  override def visitDropTag(ctx: LanceSqlExtensionsParser.DropTagContext): DropTag = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val tagName = ctx.tagName.getText
+    DropTag(table, tagName)
+  }
+
+  override def visitNumericVersion(ctx: LanceSqlExtensionsParser.NumericVersionContext)
+      : java.lang.Long = {
+    ctx.number().accept(this).asInstanceOf[java.lang.Long]
+  }
+
+  override def visitStringVersion(ctx: LanceSqlExtensionsParser.StringVersionContext): String = {
+    val text = ctx.STRING().getText
+    // Remove surrounding quotes from the string literal
+    text.substring(1, text.length - 1)
   }
 
   override def visitStringLiteral(ctx: LanceSqlExtensionsParser.StringLiteralContext): String = {

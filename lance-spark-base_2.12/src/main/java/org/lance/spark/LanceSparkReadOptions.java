@@ -70,6 +70,7 @@ public class LanceSparkReadOptions implements Serializable {
   private final boolean pushDownFilters;
   private final Integer blockSize;
   private final Integer version;
+  private final String tag;
   private final Integer indexCacheSize;
   private final Integer metadataCacheSize;
   private final int batchSize;
@@ -91,6 +92,7 @@ public class LanceSparkReadOptions implements Serializable {
     this.pushDownFilters = builder.pushDownFilters;
     this.blockSize = builder.blockSize;
     this.version = builder.version;
+    this.tag = builder.tag;
     this.indexCacheSize = builder.indexCacheSize;
     this.metadataCacheSize = builder.metadataCacheSize;
     this.batchSize = builder.batchSize;
@@ -193,6 +195,10 @@ public class LanceSparkReadOptions implements Serializable {
     return version;
   }
 
+  public String getTag() {
+    return tag;
+  }
+
   public Integer getIndexCacheSize() {
     return indexCacheSize;
   }
@@ -267,6 +273,9 @@ public class LanceSparkReadOptions implements Serializable {
     if (version != null) {
       builder.setVersion(version);
     }
+    if (tag != null) {
+      builder.setTag(tag);
+    }
     if (indexCacheSize != null) {
       builder.setIndexCacheSize(indexCacheSize);
     }
@@ -293,6 +302,7 @@ public class LanceSparkReadOptions implements Serializable {
         && Objects.equals(datasetUri, that.datasetUri)
         && Objects.equals(blockSize, that.blockSize)
         && Objects.equals(version, that.version)
+        && Objects.equals(tag, that.tag)
         && Objects.equals(indexCacheSize, that.indexCacheSize)
         && Objects.equals(metadataCacheSize, that.metadataCacheSize)
         && Objects.equals(storageOptions, that.storageOptions)
@@ -306,6 +316,7 @@ public class LanceSparkReadOptions implements Serializable {
         pushDownFilters,
         blockSize,
         version,
+        tag,
         indexCacheSize,
         metadataCacheSize,
         batchSize,
@@ -321,6 +332,7 @@ public class LanceSparkReadOptions implements Serializable {
     private Integer blockSize;
     private Query nearest;
     private Integer version;
+    private String tag;
     private Integer indexCacheSize;
     private Integer metadataCacheSize;
     private int batchSize = DEFAULT_BATCH_SIZE;
@@ -362,6 +374,11 @@ public class LanceSparkReadOptions implements Serializable {
 
     public Builder version(Integer version) {
       this.version = version;
+      return this;
+    }
+
+    public Builder tag(String tag) {
+      this.tag = tag;
       return this;
     }
 
@@ -415,7 +432,12 @@ public class LanceSparkReadOptions implements Serializable {
         this.blockSize = Integer.parseInt(options.get(CONFIG_BLOCK_SIZE));
       }
       if (options.containsKey(CONFIG_VERSION)) {
-        this.version = Integer.parseInt(options.get(CONFIG_VERSION));
+        String versionValue = options.get(CONFIG_VERSION);
+        try {
+          this.version = Integer.parseInt(versionValue);
+        } catch (NumberFormatException e) {
+          this.tag = versionValue;
+        }
       }
       if (options.containsKey(CONFIG_INDEX_CACHE_SIZE)) {
         this.indexCacheSize = Integer.parseInt(options.get(CONFIG_INDEX_CACHE_SIZE));
