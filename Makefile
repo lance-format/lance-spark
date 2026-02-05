@@ -111,6 +111,10 @@ docker-shell:
 docker-down: check-docker-compose
 	cd docker && ${DOCKER_COMPOSE} down
 
+.PHONY: docker-test
+docker-test: check-docker-compose
+	cd docker && docker exec spark-lance pytest /home/lance/tests/ -v --timeout=120
+
 # =============================================================================
 # Documentation
 # =============================================================================
@@ -151,6 +155,7 @@ help:
 	@echo "  docker-up      - Start docker containers"
 	@echo "  docker-shell   - Open shell in spark-lance container"
 	@echo "  docker-down    - Stop docker containers"
+	@echo "  docker-test    - Run integration tests in spark-lance container"
 	@echo ""
 	@echo "Documentation:"
 	@echo "  serve-docs     - Serve documentation locally"

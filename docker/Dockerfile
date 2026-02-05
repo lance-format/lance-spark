@@ -35,7 +35,7 @@ WORKDIR ${SPARK_HOME}
 
 ENV SPARK_VERSION=3.5.8
 ENV SPARK_MAJOR_VERSION=3.5
-ENV LANCE_SPARK_VERSION=0.1.3-beta.7
+ENV LANCE_SPARK_VERSION=0.1.3-beta.8
 ENV LANCE_NS_VERSION=0.4.5
 
 # Download spark
@@ -81,6 +81,9 @@ RUN mkdir -p /home/lance/warehouse /home/lance/notebooks /home/lance/spark-event
 
 # Copy notebooks if available
 COPY notebooks/ /home/lance/notebooks/
+
+# Copy tests
+COPY tests/ /home/lance/tests/
 
 # Add a notebook command
 RUN echo '#! /bin/sh' >> /bin/notebook \
