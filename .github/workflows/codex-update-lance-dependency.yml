@@ -98,7 +98,7 @@ jobs:
           5. Inspect "git status --short" and "git diff" to confirm the dependency update and any required fixes.
           6. Create and switch to a new branch named "${BRANCH_NAME}" (replace any duplicated hyphens if necessary).
           7. Stage all relevant files with "git add -A". Commit using the message "chore: update lance dependency to v${VERSION}".
-          8. Push the branch to origin. If the branch already exists, force-push your changes.
+          8. Push the branch to origin. If the remote branch already exists, delete it first with "gh api -X DELETE repos/lancedb/lance-spark/git/refs/heads/${BRANCH_NAME}" then push with "git push origin ${BRANCH_NAME}". Do NOT use "git push --force" or "git push -f".
           9. env "GH_TOKEN" is available, use "gh" tools for github related operations like creating pull request.
           10. Create a pull request targeting "main" with title "chore: update lance dependency to v${VERSION}". First, write the PR body to /tmp/pr-body.md using a heredoc (cat <<'EOF' > /tmp/pr-body.md). The body should summarize the dependency bump, Docker version updates, build verification, and link the triggering tag (${TAG}). Then run "gh pr create --body-file /tmp/pr-body.md".
           11. Display the PR URL, "git status --short", and a concise summary of the commands run and their results.
