@@ -4,7 +4,7 @@
 
     <groupId>org.lance</groupId>
     <artifactId>lance-spark-root</artifactId>
-    <version>0.1.3-beta.7</version>
+    <version>0.1.3-beta.8</version>
     <packaging>pom</packaging>
 
     <name>${project.artifactId}</name>
@@ -50,8 +50,9 @@
     </distributionManagement>
 
     <properties>
-        <lance-spark.version>0.1.3-beta.7</lance-spark.version>
-        <lance.version>2.0.0-beta.10</lance.version>
+        <lance-spark.version>0.1.3-beta.8</lance-spark.version>
+        <lance.version>2.0.0-rc.3</lance.version>
+        <lance-namespace-impl.version>0.1.3</lance-namespace-impl.version>
 
         <antlr4.version>4.9.3</antlr4.version>
 
