@@ -425,7 +425,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   @Override
   public Table loadTable(Identifier ident, long timestamp) throws NoSuchTableException {
-    return loadTableInternal(ident, Optional.of(timestamp), null);
+    return loadTableInternal(ident, Optional.of(timestamp), Optional.empty());
   }
 
   @Override
