@@ -128,10 +128,15 @@ public abstract class SparkLanceNamespaceTestBase {
 
     spark.sql("INSERT INTO " + fullName + " VALUES (1, 'v1')");
     assertTrue(checkDataset(1, fullName));
+
+    Thread.sleep(1000);
     spark.sql("INSERT INTO " + fullName + " VALUES (2, 'v2')");
     assertTrue(checkDataset(2, fullName));
 
     Version version = getLatestVersion(tableName);
+    spark.sql("INSERT INTO " + fullName + " VALUES (3, 'v3')");
+    assertTrue(checkDataset(3, fullName));
+
     DateTimeFormatter format = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     String date = version.getDataTime().format(format);
 
