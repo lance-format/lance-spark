@@ -21,7 +21,7 @@ RUN apt-get update && \
 RUN python3 -m venv /opt/venv && \
     . /opt/venv/bin/activate && \
     pip install --upgrade pip && \
-    pip install pytest pytest-timeout
+    pip install pytest pytest-timeout packaging
 
 ENV PATH="/opt/venv/bin:$PATH"
 ENV SPARK_HOME="/opt/spark"
@@ -36,7 +36,7 @@ ARG PY4J_VERSION=0.10.9.9
 ENV PYTHONPATH="${SPARK_HOME}/python/lib/py4j-${PY4J_VERSION}-src.zip:${PYTHONPATH}"
 
 RUN mkdir -p ${SPARK_HOME} \
-    && curl https://dlcdn.apache.org/spark/spark-${SPARK_DOWNLOAD_VERSION}/spark-${SPARK_DOWNLOAD_VERSION}-bin-hadoop3.tgz \
+    && curl https://archive.apache.org/dist/spark/spark-${SPARK_DOWNLOAD_VERSION}/spark-${SPARK_DOWNLOAD_VERSION}-bin-hadoop3.tgz \
        -o spark.tgz \
     && tar xzf spark.tgz --directory ${SPARK_HOME} --strip-components 1 \
     && rm spark.tgz

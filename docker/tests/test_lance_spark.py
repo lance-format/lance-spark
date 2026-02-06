@@ -9,9 +9,13 @@ Test organization follows the Lance documentation structure:
 - DML (Data Manipulation Language): INSERT, UPDATE, DELETE, MERGE, ADD COLUMN operations
 """
 
+import os
 import time
 import pytest
+from packaging.version import Version
 from pyspark.sql import SparkSession
+
+SPARK_VERSION = Version(os.environ.get("SPARK_VERSION", "3.5"))
 
 
 @pytest.fixture(scope="module")
@@ -31,19 +35,25 @@ def spark():
     session.stop()
 
 
+def drop_table(spark, table_name):
+    """Drop a table, using PURGE only on Spark >= 3.5."""
+    purge = " PURGE" if SPARK_VERSION >= Version("3.5") else ""
+    spark.sql(f"DROP TABLE IF EXISTS {table_name}{purge}")
+
+
 @pytest.fixture(autouse=True)
 def cleanup_tables(spark):
     """Clean up test tables before and after each test."""
-    spark.sql("DROP TABLE IF EXISTS default.test_table")
-    spark.sql("DROP TABLE IF EXISTS default.employees")
+    drop_table(spark, "default.test_table")
+    drop_table(spark, "default.employees")
     # TODO - reenable once `tableExists` works on Spark 4.0
     #spark.catalog.dropTempView("source") if spark.catalog.tableExists("source") else None
     #spark.catalog.dropTempView("tmp_view") if spark.catalog.tableExists("tmp_view") else None
     spark.catalog.dropTempView("source")
     spark.catalog.dropTempView("tmp_view")
     yield
-    spark.sql("DROP TABLE IF EXISTS default.test_table")
-    spark.sql("DROP TABLE IF EXISTS default.employees")
+    drop_table(spark, "default.test_table")
+    drop_table(spark, "default.employees")
     # TODO - reenable once `tableExists` works on Spark 4.0
     #spark.catalog.dropTempView("source") if spark.catalog.tableExists("source") else None
     #spark.catalog.dropTempView("tmp_view") if spark.catalog.tableExists("tmp_view") else None
@@ -136,7 +146,7 @@ class TestDDLTable:
             )
         """)
 
-        spark.sql("DROP TABLE default.test_table")
+        drop_table(spark, "default.test_table")
 
         tables = spark.sql("SHOW TABLES IN default").collect()
         table_names = [row.tableName for row in tables]

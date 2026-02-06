@@ -12,8 +12,8 @@
 
 # Version parameters (can be overridden from command line)
 # Example: make install SPARK_VERSION=3.5 SCALA_VERSION=2.13
-SPARK_VERSION ?= 4.0
-SCALA_VERSION ?= 2.13
+SPARK_VERSION ?= 3.5
+SCALA_VERSION ?= 2.12
 
 # Derived module names
 MODULE := lance-spark-$(SPARK_VERSION)_$(SCALA_VERSION)
@@ -155,7 +155,9 @@ docker-build-minimal:
 docker-test:
 	@docker image inspect spark-lance-minimal:latest >/dev/null 2>&1 || \
 		(echo "Error: Docker image 'spark-lance-minimal:latest' not found. Run 'make docker-build-minimal' first." && exit 1)
-	docker run --rm --hostname spark-lance spark-lance-minimal:latest \
+	docker run --rm --hostname spark-lance \
+		-e SPARK_VERSION=$(SPARK_VERSION) \
+		spark-lance-minimal:latest \
 		"pytest /home/lance/tests/ -v --timeout=120"
 
 # =============================================================================
