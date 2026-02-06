@@ -175,6 +175,7 @@ case class AddIndexExec(
       Dataset.open()
         .allocator(LanceRuntime.allocator())
         .namespace(readOptions.getNamespace)
+        .readOptions(readOptions.toReadOptions)
         .tableId(readOptions.getTableId)
         .build()
     } else {

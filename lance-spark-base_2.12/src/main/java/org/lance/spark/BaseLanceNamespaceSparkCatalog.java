@@ -17,6 +17,7 @@ import org.lance.Dataset;
 import org.lance.WriteParams;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.errors.TableNotFoundException;
+import org.lance.namespace.model.DeregisterTableRequest;
 import org.lance.namespace.model.DescribeTableRequest;
 import org.lance.namespace.model.DescribeTableResponse;
 import org.lance.namespace.model.DropNamespaceRequest;
@@ -26,6 +27,7 @@ import org.lance.namespace.model.ListTablesResponse;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.SchemaConverter;
+import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchFunctionException;
@@ -56,6 +58,9 @@ import java.util.Map;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+
+import static org.lance.spark.utils.Utils.createReadOptions;
+import static org.lance.spark.utils.Utils.getSchema;
 
 public abstract class BaseLanceNamespaceSparkCatalog
     implements TableCatalog, SupportsNamespaces, FunctionCatalog {
@@ -411,60 +416,17 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   @Override
   public Table loadTable(Identifier ident) throws NoSuchTableException {
-    // Transform identifier for API call
-    Identifier actualIdent = transformIdentifierForApi(ident);
-
-    // Build the table ID for credential vending
-    List<String> tableId = buildTableId(actualIdent);
-
-    // Call describeTable to get location and initial storage options
-    DescribeTableRequest describeRequest = new DescribeTableRequest();
-    tableId.forEach(describeRequest::addIdItem);
-    DescribeTableResponse describeResponse;
-    try {
-      describeResponse = namespace.describeTable(describeRequest);
-    } catch (TableNotFoundException e) {
-      throw new NoSuchTableException(ident);
-    } catch (RuntimeException e) {
-      throw new RuntimeException("Failed to describe table: " + ident, e);
-    }
-
-    String location = describeResponse.getLocation();
-    Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
-
-    // Open dataset to get schema
-    StructType schema;
-    try (Dataset dataset =
-        Dataset.open()
-            .allocator(LanceRuntime.allocator())
-            .namespace(namespace)
-            .tableId(tableId)
-            .build()) {
-      schema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
-    } catch (IllegalArgumentException e) {
-      throw new NoSuchTableException(ident);
-    }
-
-    // Create read options with namespace support
-    LanceSparkReadOptions readOptions = createReadOptions(location, tableId);
-    return createDataset(
-        readOptions, schema, initialStorageOptions, namespaceImpl, namespaceProperties);
+    return loadTableInternal(ident, Optional.empty(), Optional.empty());
   }
 
-  /**
-   * Creates LanceSparkReadOptions with namespace settings for this catalog.
-   *
-   * @param location the dataset location URI
-   * @param tableId the table identifier within the namespace
-   * @return a new LanceSparkReadOptions with all catalog settings
-   */
-  private LanceSparkReadOptions createReadOptions(String location, List<String> tableId) {
-    return LanceSparkReadOptions.builder()
-        .datasetUri(location)
-        .withCatalogDefaults(catalogConfig)
-        .namespace(namespace)
-        .tableId(tableId)
-        .build();
+  @Override
+  public Table loadTable(Identifier ident, String version) throws NoSuchTableException {
+    return loadTableInternal(ident, Optional.empty(), Optional.of(version));
+  }
+
+  @Override
+  public Table loadTable(Identifier ident, long timestamp) throws NoSuchTableException {
+    return loadTableInternal(ident, Optional.of(timestamp), Optional.empty());
   }
 
   @Override
@@ -500,7 +462,13 @@ public abstract class BaseLanceNamespaceSparkCatalog
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
 
     // Create read options with namespace settings
-    LanceSparkReadOptions readOptions = createReadOptions(location, tableIdList);
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            location,
+            catalogConfig,
+            Optional.empty(),
+            Optional.of(namespace),
+            Optional.of(tableIdList));
     return createDataset(
         readOptions, processedSchema, initialStorageOptions, namespaceImpl, namespaceProperties);
   }
@@ -512,6 +480,23 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   @Override
   public boolean dropTable(Identifier ident) {
+    try {
+      Identifier tableId = transformIdentifierForApi(ident);
+      DeregisterTableRequest deregisterRequest = new DeregisterTableRequest();
+      for (String part : tableId.namespace()) {
+        deregisterRequest.addIdItem(part);
+      }
+      deregisterRequest.addIdItem(tableId.name());
+      namespace.deregisterTable(deregisterRequest);
+
+      return true;
+    } catch (Exception e) {
+      return false;
+    }
+  }
+
+  @Override
+  public boolean purgeTable(Identifier ident) {
     try {
       Identifier tableId = transformIdentifierForApi(ident);
       DropTableRequest dropRequest = new DropTableRequest();
@@ -649,6 +634,63 @@ public abstract class BaseLanceNamespaceSparkCatalog
   private List<String> buildTableId(Identifier ident) {
     return Stream.concat(Arrays.stream(ident.namespace()), Stream.of(ident.name()))
         .collect(Collectors.toList());
+  }
+
+  private Table loadTableInternal(
+      Identifier ident, Optional<Long> timestamp, Optional<String> version)
+      throws NoSuchTableException {
+
+    // Transform identifier for API call
+    Identifier actualIdent = transformIdentifierForApi(ident);
+
+    // Build the table ID for credential vending
+    List<String> tableId = buildTableId(actualIdent);
+
+    // Call describeTable to get location and initial storage options
+    DescribeTableRequest describeRequest = new DescribeTableRequest();
+    tableId.forEach(describeRequest::addIdItem);
+    DescribeTableResponse describeResponse;
+    try {
+      describeResponse = namespace.describeTable(describeRequest);
+    } catch (TableNotFoundException e) {
+      throw new NoSuchTableException(ident);
+    } catch (RuntimeException e) {
+      throw new RuntimeException("Failed to describe table: " + ident, e);
+    }
+    String location = describeResponse.getLocation();
+    Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
+
+    Optional<Long> versionId = Optional.empty();
+    if (timestamp.isPresent()) {
+      try (Dataset dataset =
+          Dataset.open()
+              .allocator(LanceRuntime.allocator())
+              .uri(location)
+              .readOptions(
+                  createReadOptions(
+                          location,
+                          catalogConfig,
+                          Optional.empty(),
+                          Optional.of(namespace),
+                          Optional.of(tableId))
+                      .toReadOptions())
+              .build()) {
+        versionId = Optional.of(Utils.findVersion(dataset.listVersions(), timestamp.get()));
+      } catch (TableNotFoundException e) {
+        throw new NoSuchTableException(ident);
+      }
+    } else if (version.isPresent()) {
+      versionId = Optional.of(Utils.parseVersion(version.get()));
+    }
+
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            location, catalogConfig, versionId, Optional.of(namespace), Optional.of(tableId));
+    StructType schema = getSchema(ident, location, readOptions, namespace);
+
+    // Create read options with namespace support
+    return createDataset(
+        readOptions, schema, initialStorageOptions, namespaceImpl, namespaceProperties);
   }
 
   public abstract LanceDataset createDataset(

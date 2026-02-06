@@ -15,6 +15,8 @@ package org.lance.spark;
 
 import org.lance.Dataset;
 import org.lance.WriteParams;
+import org.lance.spark.utils.Optional;
+import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
@@ -29,6 +31,9 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.apache.spark.sql.util.LanceArrowUtils;
 
 import java.util.Map;
+
+import static org.lance.spark.utils.Utils.createReadOptions;
+import static org.lance.spark.utils.Utils.getSchema;
 
 /**
  * A simple Lance catalog that supports both path-based and catalog-based table access.
@@ -52,20 +57,17 @@ public class LanceCatalog implements TableCatalog {
 
   @Override
   public Table loadTable(Identifier ident) throws NoSuchTableException {
-    String datasetUri = getDatasetUri(ident);
-    LanceSparkReadOptions readOptions = createReadOptions(datasetUri);
-    StructType schema;
-    try (Dataset dataset =
-        Dataset.open()
-            .allocator(LanceRuntime.allocator())
-            .uri(datasetUri)
-            .readOptions(readOptions.toReadOptions())
-            .build()) {
-      schema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
-    } catch (IllegalArgumentException e) {
-      throw new NoSuchTableException(ident);
-    }
-    return new LanceDataset(readOptions, schema, null, null, null);
+    return loadTableInternal(ident, Optional.empty(), Optional.empty());
+  }
+
+  @Override
+  public Table loadTable(Identifier ident, String version) throws NoSuchTableException {
+    return loadTableInternal(ident, Optional.empty(), Optional.of(version));
+  }
+
+  @Override
+  public Table loadTable(Identifier ident, long timestamp) throws NoSuchTableException {
+    return loadTableInternal(ident, Optional.of(timestamp), Optional.empty());
   }
 
   @Override
@@ -73,7 +75,9 @@ public class LanceCatalog implements TableCatalog {
       Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
       throws TableAlreadyExistsException, NoSuchNamespaceException {
     String datasetUri = getDatasetUri(ident);
-    LanceSparkReadOptions readOptions = createReadOptions(datasetUri);
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty());
     try {
       Dataset.write()
           .allocator(LanceRuntime.allocator())
@@ -113,19 +117,6 @@ public class LanceCatalog implements TableCatalog {
     this.options = options;
     // Parse catalog configuration
     this.catalogConfig = LanceSparkCatalogConfig.from(options.asCaseSensitiveMap());
-  }
-
-  /**
-   * Creates LanceSparkReadOptions for this catalog.
-   *
-   * @param datasetUri the dataset URI
-   * @return a new LanceSparkReadOptions with catalog settings
-   */
-  private LanceSparkReadOptions createReadOptions(String datasetUri) {
-    return LanceSparkReadOptions.builder()
-        .datasetUri(datasetUri)
-        .withCatalogDefaults(catalogConfig)
-        .build();
   }
 
   @Override
@@ -168,5 +159,41 @@ public class LanceCatalog implements TableCatalog {
     }
     sb.append(name);
     return sb.toString();
+  }
+
+  private Table loadTableInternal(
+      Identifier ident, Optional<Long> timestamp, Optional<String> version)
+      throws NoSuchTableException {
+    String datasetUri = getDatasetUri(ident);
+
+    Optional<Long> versionId = Optional.empty();
+
+    if (version.isPresent()) {
+      versionId = Optional.of(Utils.parseVersion(version.get()));
+    } else if (timestamp.isPresent()) {
+      try (Dataset dataset =
+          Dataset.open()
+              .allocator(LanceRuntime.allocator())
+              .uri(datasetUri)
+              .readOptions(
+                  createReadOptions(
+                          datasetUri,
+                          catalogConfig,
+                          Optional.empty(),
+                          Optional.empty(),
+                          Optional.empty())
+                      .toReadOptions())
+              .build()) {
+        versionId = Optional.of(Utils.findVersion(dataset.listVersions(), timestamp.get()));
+      } catch (IllegalArgumentException e) {
+        throw new NoSuchTableException(ident);
+      }
+    }
+
+    LanceSparkReadOptions readOptions =
+        createReadOptions(datasetUri, catalogConfig, versionId, Optional.empty(), Optional.empty());
+    StructType schema = getSchema(ident, datasetUri, readOptions, null);
+
+    return new LanceDataset(readOptions, schema, null, null, null);
   }
 }

@@ -13,11 +13,19 @@
  */
 package org.lance.spark.write;
 
-import org.lance.WriteParams;
+import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkWriteOptions;
 
+import org.apache.spark.sql.connector.distributions.Distribution;
+import org.apache.spark.sql.connector.distributions.Distributions;
+import org.apache.spark.sql.connector.expressions.Expressions;
+import org.apache.spark.sql.connector.expressions.NamedReference;
+import org.apache.spark.sql.connector.expressions.NullOrdering;
+import org.apache.spark.sql.connector.expressions.SortDirection;
+import org.apache.spark.sql.connector.expressions.SortOrder;
+import org.apache.spark.sql.connector.expressions.SortValue;
 import org.apache.spark.sql.connector.write.BatchWrite;
-import org.apache.spark.sql.connector.write.SupportsTruncate;
+import org.apache.spark.sql.connector.write.RequiresDistributionAndOrdering;
 import org.apache.spark.sql.connector.write.Write;
 import org.apache.spark.sql.connector.write.WriteBuilder;
 import org.apache.spark.sql.connector.write.streaming.StreamingWrite;
@@ -26,11 +34,17 @@ import org.apache.spark.sql.types.StructType;
 import java.util.List;
 import java.util.Map;
 
-/** Spark write builder. */
-public class SparkWrite implements Write {
+/**
+ * Spark write for UPDATE COLUMNS FROM command.
+ *
+ * <p>This updates existing columns in a Lance table by computing their values from a source
+ * TABLE/VIEW. Only rows that match (by _rowaddr) are updated; rows in source that don't exist in
+ * target are ignored.
+ */
+public class UpdateColumnsBackfillWrite implements Write, RequiresDistributionAndOrdering {
   private final LanceSparkWriteOptions writeOptions;
   private final StructType schema;
-  private final boolean overwrite;
+  private final List<String> updateColumns;
 
   /**
    * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
@@ -44,17 +58,17 @@ public class SparkWrite implements Write {
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
 
-  SparkWrite(
+  UpdateColumnsBackfillWrite(
       StructType schema,
       LanceSparkWriteOptions writeOptions,
-      boolean overwrite,
+      List<String> updateColumns,
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
       List<String> tableId) {
     this.schema = schema;
     this.writeOptions = writeOptions;
-    this.overwrite = overwrite;
+    this.updateColumns = updateColumns;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
@@ -63,10 +77,10 @@ public class SparkWrite implements Write {
 
   @Override
   public BatchWrite toBatch() {
-    return new LanceBatchWrite(
+    return new UpdateColumnsBackfillBatchWrite(
         schema,
         writeOptions,
-        overwrite,
+        updateColumns,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
@@ -78,11 +92,25 @@ public class SparkWrite implements Write {
     throw new UnsupportedOperationException();
   }
 
-  /** Task commit. */
-  public static class SparkWriteBuilder implements SupportsTruncate, WriteBuilder {
+  @Override
+  public Distribution requiredDistribution() {
+    NamedReference segmentId = Expressions.column(LanceConstant.FRAGMENT_ID);
+    return Distributions.clustered(new NamedReference[] {segmentId});
+  }
+
+  @Override
+  public SortOrder[] requiredOrdering() {
+    NamedReference segmentId = Expressions.column(LanceConstant.ROW_ADDRESS);
+    SortValue sortValue =
+        new SortValue(segmentId, SortDirection.ASCENDING, NullOrdering.NULLS_FIRST);
+    return new SortValue[] {sortValue};
+  }
+
+  /** Write builder for UPDATE COLUMNS FROM command. */
+  public static class UpdateColumnsWriteBuilder implements WriteBuilder {
     private final LanceSparkWriteOptions writeOptions;
     private final StructType schema;
-    private boolean overwrite = false;
+    private final List<String> updateColumns;
 
     /**
      * Initial storage options fetched from namespace.describeTable() on the driver. These are
@@ -96,15 +124,17 @@ public class SparkWrite implements Write {
     private final Map<String, String> namespaceProperties;
     private final List<String> tableId;
 
-    public SparkWriteBuilder(
+    public UpdateColumnsWriteBuilder(
         StructType schema,
         LanceSparkWriteOptions writeOptions,
+        List<String> updateColumns,
         Map<String, String> initialStorageOptions,
         String namespaceImpl,
         Map<String, String> namespaceProperties,
         List<String> tableId) {
       this.schema = schema;
       this.writeOptions = writeOptions;
+      this.updateColumns = updateColumns;
       this.initialStorageOptions = initialStorageOptions;
       this.namespaceImpl = namespaceImpl;
       this.namespaceProperties = namespaceProperties;
@@ -113,38 +143,14 @@ public class SparkWrite implements Write {
 
     @Override
     public Write build() {
-      LanceSparkWriteOptions options =
-          !overwrite
-              ? writeOptions
-              : LanceSparkWriteOptions.builder()
-                  .storageOptions(writeOptions.getStorageOptions())
-                  .namespace(writeOptions.getNamespace())
-                  .tableId(writeOptions.getTableId())
-                  .batchSize(writeOptions.getBatchSize())
-                  .datasetUri(writeOptions.getDatasetUri())
-                  .dataStorageVersion(writeOptions.getDataStorageVersion())
-                  .maxBytesPerFile(writeOptions.getMaxBytesPerFile())
-                  .maxRowsPerFile(writeOptions.getMaxRowsPerFile())
-                  .maxRowsPerGroup(writeOptions.getMaxRowsPerGroup())
-                  .queueDepth(writeOptions.getQueueDepth())
-                  .useQueuedWriteBuffer(writeOptions.isUseQueuedWriteBuffer())
-                  .writeMode(WriteParams.WriteMode.OVERWRITE)
-                  .build();
-
-      return new SparkWrite(
+      return new UpdateColumnsBackfillWrite(
           schema,
-          options,
-          overwrite,
+          writeOptions,
+          updateColumns,
           initialStorageOptions,
           namespaceImpl,
           namespaceProperties,
           tableId);
-    }
-
-    @Override
-    public WriteBuilder truncate() {
-      this.overwrite = true;
-      return this;
     }
   }
 }

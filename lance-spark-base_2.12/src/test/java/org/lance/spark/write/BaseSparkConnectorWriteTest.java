@@ -13,13 +13,16 @@
  */
 package org.lance.spark.write;
 
+import org.lance.Version;
 import org.lance.spark.LanceDataSource;
+import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
+import org.apache.spark.sql.SaveMode;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException;
@@ -34,6 +37,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
 import java.nio.file.Path;
+import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.List;
 
@@ -56,6 +60,7 @@ public abstract class BaseSparkConnectorWriteTest {
             .master("local")
             .config("spark.sql.catalog.lance", "org.lance.spark.LanceCatalog")
             .config("spark.sql.catalog.lance.max_row_per_file", "1")
+            .config("spark.sql.session.timeZone", "UTC")
             .getOrCreate();
     StructType schema =
         new StructType(
@@ -313,6 +318,68 @@ public abstract class BaseSparkConnectorWriteTest {
               || (e.getCause() != null
                   && e.getCause().getMessage().contains("batch_size must be positive")),
           "Expected batch_size validation error, got: " + e.getMessage());
+    }
+  }
+
+  @Test
+  public void testTimeTravel(TestInfo testInfo) throws InterruptedException {
+    String tableName = testInfo.getTestMethod().get().getName();
+    String outputPath = TestUtils.getDatasetUri(dbPath.toString(), tableName);
+
+    StructType schema =
+        new StructType().add("id", DataTypes.LongType).add("value", DataTypes.LongType);
+
+    List<Row> data1 = List.of(RowFactory.create(1L, 100L));
+    Dataset<Row> df1 = spark.createDataFrame(data1, schema);
+    df1.write().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, outputPath).save();
+    assertTrue(checkDataset(1, outputPath));
+    Thread.sleep(1000);
+
+    List<Row> data2 = List.of(RowFactory.create(2L, 200L));
+    Dataset<Row> df2 = spark.createDataFrame(data2, schema);
+    df2.write().format("lance").mode(SaveMode.Append).save(outputPath);
+    assertTrue(checkDataset(2, outputPath));
+
+    Version version_3 = getLatestVersion(outputPath);
+
+    List<Row> data3 = List.of(RowFactory.create(3L, 300L));
+    Dataset<Row> df3 = spark.createDataFrame(data3, schema);
+    df3.write().format("lance").mode(SaveMode.Append).save(outputPath);
+    assertTrue(checkDataset(3, outputPath));
+
+    // check timestamp as of
+    DateTimeFormatter format = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    String date = version_3.getDataTime().format(format);
+    String sql = String.format("select * from lance.`%s`  TIMESTAMP AS OF '%s'", outputPath, date);
+
+    List<Row> res = spark.sql(sql).collectAsList();
+    assertEquals(1, res.size());
+
+    // check version as of
+    List<Row> res2 =
+        spark.sql("select * from lance.`" + outputPath + "`  VERSION AS OF " + 2).collectAsList();
+    assertEquals(1, res2.size());
+  }
+
+  private boolean checkDataset(int expectedSize, String path) {
+    Dataset<Row> lanceTable =
+        spark
+            .read()
+            .format(LanceDataSource.name)
+            .option(LanceSparkReadOptions.CONFIG_DATASET_URI, path)
+            .load();
+
+    lanceTable.createOrReplaceTempView("table_a");
+    Dataset<Row> actual = spark.sql("SELECT * FROM table_a");
+    List<Row> res = actual.collectAsList();
+
+    return expectedSize == res.size();
+  }
+
+  private Version getLatestVersion(String datasetUri) {
+    try (org.lance.Dataset dataset =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(datasetUri).build()) {
+      return dataset.getVersion();
     }
   }
 }

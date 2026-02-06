@@ -15,7 +15,7 @@ package org.apache.spark.sql.catalyst.parser.extensions
 
 import org.apache.spark.sql.catalyst.analysis.{UnresolvedIdentifier, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.parser.ParserInterface
-import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, LogicalPlan, NamedArgument, Optimize, Vacuum}
+import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, LogicalPlan, NamedArgument, Optimize, UpdateColumnsBackfill, Vacuum}
 
 import scala.jdk.CollectionConverters._
 
@@ -33,6 +33,14 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
     val columnNames = visitColumnList(ctx.columnList())
     val source = UnresolvedRelation(Seq(ctx.identifier().getText))
     AddColumnsBackfill(table, columnNames, source)
+  }
+
+  override def visitUpdateColumnsBackfill(
+      ctx: LanceSqlExtensionsParser.UpdateColumnsBackfillContext): UpdateColumnsBackfill = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val columnNames = visitColumnList(ctx.columnList())
+    val source = UnresolvedRelation(Seq(ctx.identifier().getText))
+    UpdateColumnsBackfill(table, columnNames, source)
   }
 
   override def visitMultipartIdentifier(ctx: LanceSqlExtensionsParser.MultipartIdentifierContext)

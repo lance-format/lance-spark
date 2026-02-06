@@ -34,6 +34,8 @@ import java.util.Objects;
  */
 public class LanceSparkCatalogConfig {
 
+  private static final String STORAGE_PREFIX = "storage.";
+
   private final Map<String, String> storageOptions;
 
   private LanceSparkCatalogConfig(Builder builder) {
@@ -48,11 +50,28 @@ public class LanceSparkCatalogConfig {
   /**
    * Creates a config from a map of options.
    *
-   * @param options the options map
+   * @param catalogOptions the options map
    * @return a new LanceSparkCatalogConfig
    */
-  public static LanceSparkCatalogConfig from(Map<String, String> options) {
-    return builder().storageOptions(options).build();
+  public static LanceSparkCatalogConfig from(Map<String, String> catalogOptions) {
+    Map<String, String> nativeOptions = new HashMap<>();
+
+    for (Map.Entry<String, String> entry : catalogOptions.entrySet()) {
+      String fullKey = entry.getKey();
+      String value = entry.getValue();
+      if (fullKey == null || value == null) {
+        continue;
+      }
+      if (!fullKey.startsWith(STORAGE_PREFIX)) {
+        nativeOptions.put(fullKey, value);
+        continue;
+      }
+
+      String nativeKey = fullKey.substring(STORAGE_PREFIX.length());
+      nativeOptions.put(nativeKey, value);
+    }
+
+    return builder().storageOptions(nativeOptions).build();
   }
 
   /**

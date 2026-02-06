@@ -13,6 +13,9 @@
  */
 package org.lance.spark;
 
+import org.junit.jupiter.api.BeforeEach;
+
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -28,6 +31,18 @@ public abstract class BaseTestSparkDirectoryNamespace extends SparkLanceNamespac
   protected Map<String, String> getAdditionalNsConfigs() {
     Map<String, String> configs = new HashMap<>();
     configs.put("root", tempDir.toString());
+    // Disable extra_level so "default" is treated as an actual child namespace
+    // This ensures manifest mode is used instead of directory listing mode
+    configs.put("extra_level", "");
     return configs;
+  }
+
+  @BeforeEach
+  @Override
+  void setup() throws IOException {
+    super.setup();
+    // Create the "default" namespace explicitly so that DirectoryNamespace uses manifest mode
+    // instead of directory listing mode. This is required for deregisterTable to work correctly.
+    spark.sql("CREATE NAMESPACE " + catalogName + ".default");
   }
 }

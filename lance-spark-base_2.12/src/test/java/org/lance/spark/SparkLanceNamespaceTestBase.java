@@ -13,9 +13,12 @@
  */
 package org.lance.spark;
 
+import org.lance.Version;
+
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -24,6 +27,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -51,6 +55,7 @@ public abstract class SparkLanceNamespaceTestBase {
             .config(
                 "spark.sql.catalog." + catalogName, "org.lance.spark.LanceNamespaceSparkCatalog")
             .config("spark.sql.catalog." + catalogName + ".impl", getNsImpl())
+            .config("spark.sql.session.timeZone", "UTC")
             .getOrCreate();
 
     Map<String, String> additionalConfigs = getAdditionalNsConfigs();
@@ -92,6 +97,54 @@ public abstract class SparkLanceNamespaceTestBase {
    */
   protected String generateTableName(String baseName) {
     return baseName + "_" + UUID.randomUUID().toString().replace("-", "");
+  }
+
+  @Test
+  public void testTimeTravelVersionAsOf() throws Exception {
+    String tableName = generateTableName("time_travel_version");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id INT NOT NULL, name STRING)");
+    assertTrue(checkDataset(0, fullName));
+
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, 'v1')");
+    assertTrue(checkDataset(1, fullName));
+    spark.sql("INSERT INTO " + fullName + " VALUES (2, 'v2')");
+    assertTrue(checkDataset(2, fullName));
+
+    // time travel to version 2 (the second insert)
+    Dataset<Row> actual = spark.sql("SELECT * FROM " + fullName + " VERSION AS OF " + "2");
+    List<Row> res = actual.collectAsList();
+    assertEquals(1, res.size());
+  }
+
+  @Test
+  public void testTimeTravelTimestampAsOf() throws Exception {
+    String tableName = generateTableName("time_travel_version");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id INT NOT NULL, name STRING)");
+    assertTrue(checkDataset(0, fullName));
+
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, 'v1')");
+    assertTrue(checkDataset(1, fullName));
+
+    Thread.sleep(1000);
+    spark.sql("INSERT INTO " + fullName + " VALUES (2, 'v2')");
+    assertTrue(checkDataset(2, fullName));
+
+    Version version = getLatestVersion(tableName);
+    spark.sql("INSERT INTO " + fullName + " VALUES (3, 'v3')");
+    assertTrue(checkDataset(3, fullName));
+
+    DateTimeFormatter format = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    String date = version.getDataTime().format(format);
+
+    // time travel to timestamp before second insert
+    Dataset<Row> actual =
+        spark.sql("SELECT * FROM " + fullName + " TIMESTAMP AS OF '" + date + "'");
+    List<Row> res = actual.collectAsList();
+    assertEquals(1, res.size());
   }
 
   @Test
@@ -569,5 +622,37 @@ public abstract class SparkLanceNamespaceTestBase {
     Row row = result.collectAsList().get(0);
     assertEquals(42L, row.getLong(0));
     assertEquals(3.14, row.getDouble(1), 0.001);
+  }
+
+  private boolean checkDataset(int expectedSize, String tableName) {
+    Dataset<Row> actual = spark.sql("SELECT * FROM " + tableName);
+    List<Row> res = actual.collectAsList();
+
+    return expectedSize == res.size();
+  }
+
+  private Version getLatestVersion(String tableName) throws Exception {
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    LanceDataset lanceTable = (LanceDataset) catalog.loadTable(ident);
+    LanceSparkReadOptions readOptions = lanceTable.readOptions();
+    try (org.lance.Dataset dataset = openLatestDataset(readOptions)) {
+      return dataset.getVersion();
+    }
+  }
+
+  private org.lance.Dataset openLatestDataset(LanceSparkReadOptions readOptions) {
+    if (readOptions.hasNamespace()) {
+      return org.lance.Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .namespace(readOptions.getNamespace())
+          .tableId(readOptions.getTableId())
+          .readOptions(readOptions.toReadOptions())
+          .build();
+    }
+    return org.lance.Dataset.open()
+        .allocator(LanceRuntime.allocator())
+        .uri(readOptions.getDatasetUri())
+        .readOptions(readOptions.toReadOptions())
+        .build();
   }
 }

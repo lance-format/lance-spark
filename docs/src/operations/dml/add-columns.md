@@ -1,4 +1,4 @@
-# ADD COLUMN FROM
+# ADD COLUMNS FROM
 
 Similar to most table formats, Lance supports traditional schema evolution: 
 adding, removing, and altering columns in a dataset. 
@@ -8,7 +8,7 @@ making them very efficient operations.
 In addition, Lance supports data evolution, 
 which allows you to also backfill existing rows with the new column data without rewriting the data files in the dataset, 
 making it highly suitable for use cases like ML feature engineering.
-This feature is implemented in Spark as `ALTER TABLE ADD COLUMN FROM`
+This feature is implemented in Spark as `ALTER TABLE ADD COLUMNS FROM`
 
 !!! warning "Spark Extension Required"
     This feature requires the Lance Spark SQL extension to be enabled. 
