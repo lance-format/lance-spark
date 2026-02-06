@@ -14,6 +14,9 @@
     <description>Apache Spark 3.4 Connector for Lance</description>
     <packaging>jar</packaging>
 
+    <properties>
+        <arrow.version>${arrow14.version}</arrow.version>
+    </properties>
 
     <dependencies>
         <dependency>

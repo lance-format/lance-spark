@@ -461,60 +461,6 @@
             </build>
         </profile>
         <profile>
-            <id>scala-2.12</id>
-            <activation>
-                <activeByDefault>false</activeByDefault>
-            </activation>
-            <properties>
-                <scala.version>${scala212.version}</scala.version>
-                <scala.compat.version>${scala212.compat.version}</scala.compat.version>
-            </properties>
-        </profile>
-        <profile>
-            <id>scala-2.13</id>
-            <activation>
-                <activeByDefault>false</activeByDefault>
-            </activation>
-            <properties>
-                <scala.version>${scala213.version}</scala.version>
-                <scala.compat.version>${scala213.compat.version}</scala.compat.version>
-            </properties>
-        </profile>
-        <profile>
-            <id>spark-3.4</id>
-            <activation>
-                <activeByDefault>false</activeByDefault>
-            </activation>
-            <properties>
-                <arrow.version>${arrow14.version}</arrow.version>
-                <spark.version>${spark34.version}</spark.version>
-                <spark.compat.version>${spark34.compat.version}</spark.compat.version>
-            </properties>
-        </profile>
-        <profile>
-            <id>spark-3.5</id>
-            <activation>
-                <activeByDefault>false</activeByDefault>
-            </activation>
-            <properties>
-                <arrow.version>${arrow15.version}</arrow.version>
-                <spark.version>${spark35.version}</spark.version>
-                <spark.compat.version>${spark35.compat.version}</spark.compat.version>
-            </properties>
-        </profile>
-        <profile>
-            <id>spark-4.0</id>
-            <activation>
-                <activeByDefault>false</activeByDefault>
-            </activation>
-            <properties>
-                <arrow.version>${arrow18.version}</arrow.version>
-                <spark.version>${spark40.version}</spark.version>
-                <spark.compat.version>${spark40.compat.version}</spark.compat.version>
-                <java.release>${java17.release}</java.release>
-            </properties>
-        </profile>
-        <profile>
             <id>deploy-to-ossrh</id>
             <build>
                 <plugins>

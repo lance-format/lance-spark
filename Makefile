@@ -20,9 +20,6 @@ MODULE := lance-spark-$(SPARK_VERSION)_$(SCALA_VERSION)
 BUNDLE_MODULE := lance-spark-bundle-$(SPARK_VERSION)_$(SCALA_VERSION)
 BASE_MODULE := lance-spark-base_$(SCALA_VERSION)
 
-# Maven profiles for Spark/Scala version-specific settings
-MAVEN_PROFILES := -Pspark-$(SPARK_VERSION),scala-$(SCALA_VERSION)
-
 # Spark download versions for Docker
 include docker/versions.mk
 SPARK_DOWNLOAD_VERSION := $(SPARK_DOWNLOAD_VERSION_$(SPARK_VERSION))
@@ -43,11 +40,11 @@ DOCKER_COMPOSE := $(shell \
 
 .PHONY: install
 install:
-	./mvnw install -pl $(MODULE) -am -DskipTests $(MAVEN_PROFILES)
+	./mvnw install -pl $(MODULE) -am -DskipTests
 
 .PHONY: test
 test:
-	./mvnw test -pl $(MODULE) $(MAVEN_PROFILES)
+	./mvnw test -pl $(MODULE)
 
 .PHONY: build
 build: lint install
@@ -58,11 +55,11 @@ clean-module:
 
 .PHONY: bundle
 bundle:
-	./mvnw install -pl $(BUNDLE_MODULE) -am -DskipTests $(MAVEN_PROFILES)
+	./mvnw install -pl $(BUNDLE_MODULE) -am -DskipTests
 
 .PHONY: install-base
 install-base:
-	./mvnw install -pl $(BASE_MODULE) -am -DskipTests $(MAVEN_PROFILES)
+	./mvnw install -pl $(BASE_MODULE) -am -DskipTests
 
 # =============================================================================
 # Global commands (all modules)
@@ -76,24 +73,13 @@ lint:
 format:
 	./mvnw spotless:apply
 
-# All supported Spark/Scala combinations
-SPARK_SCALA_COMBOS := 3.4_2.12 3.4_2.13 3.5_2.12 3.5_2.13 4.0_2.13
-
 .PHONY: install-all
 install-all:
-	@for combo in $(SPARK_SCALA_COMBOS); do \
-		spark=$${combo%%_*}; scala=$${combo#*_}; \
-		echo "=== Installing Spark $$spark / Scala $$scala ==="; \
-		$(MAKE) install SPARK_VERSION=$$spark SCALA_VERSION=$$scala || exit 1; \
-	done
+	./mvnw install -DskipTests
 
 .PHONY: test-all
 test-all:
-	@for combo in $(SPARK_SCALA_COMBOS); do \
-		spark=$${combo%%_*}; scala=$${combo#*_}; \
-		echo "=== Testing Spark $$spark / Scala $$scala ==="; \
-		$(MAKE) test SPARK_VERSION=$$spark SCALA_VERSION=$$scala || exit 1; \
-	done
+	./mvnw test
 
 .PHONY: build-all
 build-all: lint install-all
@@ -148,16 +134,16 @@ docker-build-minimal:
 		--build-arg SCALA_VERSION=$(SCALA_VERSION) \
 		--build-arg PY4J_VERSION=$(PY4J_VERSION) \
 		-f Dockerfile.minimal \
-		-t spark-lance-minimal:latest \
+		-t spark-lance-minimal:$(SPARK_VERSION)_$(SCALA_VERSION) \
 		.
 
 .PHONY: docker-test
 docker-test:
-	@docker image inspect spark-lance-minimal:latest >/dev/null 2>&1 || \
-		(echo "Error: Docker image 'spark-lance-minimal:latest' not found. Run 'make docker-build-minimal' first." && exit 1)
+	@docker image inspect spark-lance-minimal:$(SPARK_VERSION)_$(SCALA_VERSION) >/dev/null 2>&1 || \
+		(echo "Error: Docker image 'spark-lance-minimal:$(SPARK_VERSION)_$(SCALA_VERSION)' not found. Run 'make docker-build-minimal' first." && exit 1)
 	docker run --rm --hostname spark-lance \
 		-e SPARK_VERSION=$(SPARK_VERSION) \
-		spark-lance-minimal:latest \
+		spark-lance-minimal:$(SPARK_VERSION)_$(SCALA_VERSION) \
 		"pytest /home/lance/tests/ -v --timeout=120"
 
 # =============================================================================
