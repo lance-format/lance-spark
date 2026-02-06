@@ -64,9 +64,9 @@ and namespace-specific options:
 | `spark.sql.catalog.{name}`                  | String | ✓        | Set to `org.lance.spark.LanceNamespaceSparkCatalog`                                                                        |
 | `spark.sql.catalog.{name}.impl`             | String | ✓        | Namespace implementation, short name like `dir`, `rest`, `hive3`, `glue` or full Java implementation class                 |
 | `spark.sql.catalog.{name}.storage.*`        | -      | ✗        | Lance IO storage options. See [Lance Object Store Guide](https://lance.org/guide/object_store) for all available options.  |
-| `spark.sql.catalog.{name}.single_level_ns`  | String | ✗        | Virtual level for 2-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                           |
-| `spark.sql.catalog.{name}.parent`           | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                       |
-| `spark.sql.catalog.{name}.parent_delimiter` | String | ✗        | Delimiter for parent prefix (default: `$`). See [Note on Namespace Levels](#note-on-namespace-levels).                     |
+| `spark.sql.catalog.{name}.extra_level`      | String | ✗        | Virtual level for 2-level namespaces. Set to empty string to disable. See [Note on Namespace Levels](#note-on-namespace-levels). |
+| `spark.sql.catalog.{name}.parent`           | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                             |
+| `spark.sql.catalog.{name}.parent_delimiter` | String | ✗        | Delimiter for parent prefix (default: `.`). See [Note on Namespace Levels](#note-on-namespace-levels).                           |
 
 ### Arrow Allocator
 
@@ -431,17 +431,39 @@ Most users treat Spark as a 3 level hierarchy with 1 level namespace.
 
 ### For Namespaces with Less Than 3 Levels
 
-Since Lance allows a 2 level hierarchy of **root namespace → table** for namespaces like `DirectoryNamespace`,
-the `LanceNamespaceSparkCatalog` provides a configuration `single_level_ns` which puts an additional dummy level
-to match the Spark hierarchy and make it **root namespace → dummy extra level → table**.
+Some namespace implementations have a flat 2-level hierarchy of **root namespace → table**. The `LanceNamespaceSparkCatalog` provides a configuration `extra_level` which adds a virtual namespace level to match Spark's 3-level hierarchy.
 
-Currently, this is automatically set with `single_level_ns=default` for `DirectoryNamespace`
-and when `RestNamespace` if it cannot respond to `ListNamespaces` operation.
-If you have a custom namespace implementation of the same behavior, you can also set the config to add the extra level.
+**DirectoryNamespace**: Now supports multi-level namespaces out of the box. The `extra_level` is set to `default` by default for backward compatibility, but can be disabled:
+
+=== "Multi-level namespace (recommended)"
+    ```python
+    # Disable extra_level to use actual multi-level namespaces
+    spark = SparkSession.builder \
+        .config("spark.sql.catalog.lance.impl", "dir") \
+        .config("spark.sql.catalog.lance.extra_level", "") \
+        .getOrCreate()
+
+    # Create namespaces explicitly
+    spark.sql("CREATE NAMESPACE lance.mydb")
+    spark.sql("CREATE TABLE lance.mydb.users (id INT, name STRING)")
+    ```
+
+=== "Single-level with virtual namespace (default)"
+    ```python
+    # extra_level=default is set automatically for backward compatibility
+    spark = SparkSession.builder \
+        .config("spark.sql.catalog.lance.impl", "dir") \
+        .getOrCreate()
+
+    # Use the virtual "default" namespace
+    spark.sql("CREATE TABLE lance.default.users (id INT, name STRING)")
+    ```
+
+**RestNamespace**: If `ListNamespaces` returns an error, `extra_level=default` is automatically configured.
 
 ### For Namespaces with More Than 3 Levels
 
-Some namespace implementations like Hive3 and DirectoryNamespace support more than 3 levels of hierarchy.
+Some namespace implementations like Hive3 support more than 3 levels of hierarchy.
 For example, Hive3 has a 4 level hierarchy: **root metastore → catalog → database → table**.
 
 To handle this, the `LanceNamespaceSparkCatalog` provides `parent` and `parent_delimiter` configurations which
@@ -449,9 +471,9 @@ allow you to specify a parent prefix that gets prepended to all namespace operat
 
 For example, with Hive3:
 
-- Setting `parent=hive` (using default `parent_delimiter=$`)
-- When Spark requests namespace `["database1"]`, it gets transformed to `["hive$database1"]` for the API call
-- This allows the 4-level Hive 3 structure to work within Spark's 3-level model
+- Setting `parent=hive` (using default `parent_delimiter=.`)
+- When Spark requests namespace `["database1"]`, it gets transformed to `["hive.database1"]` for the API call
+- This allows the 4-level Hive3 structure to work within Spark's 3-level model
 
 The parent configuration effectively "anchors" your Spark catalog at a specific level within the deeper namespace
 hierarchy, making the extra levels transparent to Spark users while maintaining compatibility with the underlying

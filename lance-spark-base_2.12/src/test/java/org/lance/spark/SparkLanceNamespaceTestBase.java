@@ -594,6 +594,58 @@ public abstract class SparkLanceNamespaceTestBase {
   }
 
   @Test
+  public void testInsertOverwrite() throws Exception {
+    String tableName = generateTableName("insert_overwrite_test");
+    String fullName = catalogName + ".default." + tableName;
+
+    // Create table and insert initial data
+    spark.sql("CREATE TABLE " + fullName + " (id INT NOT NULL, name STRING)");
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, 'Alice'), (2, 'Bob')");
+    assertEquals(2, spark.sql("SELECT * FROM " + fullName).count());
+
+    // Use INSERT OVERWRITE to replace all data
+    spark.sql("INSERT OVERWRITE " + fullName + " VALUES (3, 'Charlie'), (4, 'David'), (5, 'Eve')");
+    assertEquals(3, spark.sql("SELECT * FROM " + fullName).count());
+
+    // Verify old data is gone and new data exists
+    List<Row> rows = spark.sql("SELECT * FROM " + fullName + " ORDER BY id").collectAsList();
+    assertEquals(3, rows.get(0).getInt(0));
+    assertEquals("Charlie", rows.get(0).getString(1));
+    assertEquals(4, rows.get(1).getInt(0));
+    assertEquals("David", rows.get(1).getString(1));
+    assertEquals(5, rows.get(2).getInt(0));
+    assertEquals("Eve", rows.get(2).getString(1));
+  }
+
+  @Test
+  public void testInsertOverwriteWithSelect() throws Exception {
+    String sourceTable = generateTableName("source_table");
+    String targetTable = generateTableName("target_table");
+    String sourceFullName = catalogName + ".default." + sourceTable;
+    String targetFullName = catalogName + ".default." + targetTable;
+
+    // Create source table with data
+    spark.sql("CREATE TABLE " + sourceFullName + " (id INT NOT NULL, name STRING)");
+    spark.sql("INSERT INTO " + sourceFullName + " VALUES (10, 'New1'), (20, 'New2')");
+
+    // Create target table with initial data
+    spark.sql("CREATE TABLE " + targetFullName + " (id INT NOT NULL, name STRING)");
+    spark.sql("INSERT INTO " + targetFullName + " VALUES (1, 'Old1'), (2, 'Old2')");
+    assertEquals(2, spark.sql("SELECT * FROM " + targetFullName).count());
+
+    // Use INSERT OVERWRITE with SELECT to replace data
+    spark.sql("INSERT OVERWRITE " + targetFullName + " SELECT * FROM " + sourceFullName);
+    assertEquals(2, spark.sql("SELECT * FROM " + targetFullName).count());
+
+    // Verify data was replaced
+    List<Row> rows = spark.sql("SELECT * FROM " + targetFullName + " ORDER BY id").collectAsList();
+    assertEquals(10, rows.get(0).getInt(0));
+    assertEquals("New1", rows.get(0).getString(1));
+    assertEquals(20, rows.get(1).getInt(0));
+    assertEquals("New2", rows.get(1).getString(1));
+  }
+
+  @Test
   public void testOnePartIdentifier() throws Exception {
     String tableName = generateTableName("one_part_test");
 

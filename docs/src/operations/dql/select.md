@@ -152,6 +152,84 @@ These virtual columns can be used for:
     largeBlobs.select("id", "title", "content__blob_size").show();
     ```
 
+## Time Travel
+
+Lance supports time travel queries, allowing you to query historical versions of your data using either a specific version number or a timestamp.
+
+### Query by Version
+
+Use `VERSION AS OF` to query a specific version of the table:
+
+=== "SQL"
+    ```sql
+    -- Query version 5 of the table
+    SELECT * FROM users VERSION AS OF 5;
+
+    -- Query specific columns from a version
+    SELECT id, name FROM users VERSION AS OF 3;
+    ```
+
+=== "Python"
+    ```python
+    # Query a specific version using DataFrame API
+    df = spark.read \
+        .format("lance") \
+        .option("version", "5") \
+        .load("/path/to/dataset.lance")
+    df.show()
+    ```
+
+=== "Scala"
+    ```scala
+    // Query a specific version using DataFrame API
+    val df = spark.read
+        .format("lance")
+        .option("version", "5")
+        .load("/path/to/dataset.lance")
+    df.show()
+    ```
+
+=== "Java"
+    ```java
+    // Query a specific version using DataFrame API
+    Dataset<Row> df = spark.read()
+        .format("lance")
+        .option("version", "5")
+        .load("/path/to/dataset.lance");
+    df.show();
+    ```
+
+### Query by Timestamp
+
+Use `TIMESTAMP AS OF` to query the table as it existed at a specific point in time:
+
+=== "SQL"
+    ```sql
+    -- Query the table as it was at a specific timestamp
+    SELECT * FROM users TIMESTAMP AS OF '2024-01-15 10:30:00';
+
+    -- Query with timestamp in epoch microseconds
+    SELECT * FROM users TIMESTAMP AS OF 1705314600000000;
+    ```
+
+=== "Python"
+    ```python
+    # Query by timestamp using SQL
+    spark.sql("SELECT * FROM users TIMESTAMP AS OF '2024-01-15 10:30:00'").show()
+    ```
+
+=== "Scala"
+    ```scala
+    // Query by timestamp using SQL
+    spark.sql("SELECT * FROM users TIMESTAMP AS OF '2024-01-15 10:30:00'").show()
+    ```
+
+=== "Java"
+    ```java
+    // Query by timestamp using SQL
+    spark.sql("SELECT * FROM users TIMESTAMP AS OF '2024-01-15 10:30:00'").show();
+    ```
+
 ## Read Options
 
 These options control how data is read from Lance datasets. They can be set using the `.option()` method when reading data.
