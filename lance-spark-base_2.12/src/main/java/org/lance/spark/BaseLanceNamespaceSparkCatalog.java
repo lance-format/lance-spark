@@ -17,6 +17,7 @@ import org.lance.Dataset;
 import org.lance.WriteParams;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.errors.TableNotFoundException;
+import org.lance.namespace.model.DeregisterTableRequest;
 import org.lance.namespace.model.DescribeTableRequest;
 import org.lance.namespace.model.DescribeTableResponse;
 import org.lance.namespace.model.DropNamespaceRequest;
@@ -479,6 +480,23 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   @Override
   public boolean dropTable(Identifier ident) {
+    try {
+      Identifier tableId = transformIdentifierForApi(ident);
+      DeregisterTableRequest deregisterRequest = new DeregisterTableRequest();
+      for (String part : tableId.namespace()) {
+        deregisterRequest.addIdItem(part);
+      }
+      deregisterRequest.addIdItem(tableId.name());
+      namespace.deregisterTable(deregisterRequest);
+
+      return true;
+    } catch (Exception e) {
+      return false;
+    }
+  }
+
+  @Override
+  public boolean purgeTable(Identifier ident) {
     try {
       Identifier tableId = transformIdentifierForApi(ident);
       DropTableRequest dropRequest = new DropTableRequest();
