@@ -13,11 +13,11 @@
  */
 package org.lance.spark;
 
+import org.junit.jupiter.api.BeforeEach;
+
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
-
-import org.junit.jupiter.api.BeforeEach;
 
 /** Test for BaseLanceNamespaceSparkCatalog using DirectoryNamespace implementation. */
 public abstract class BaseTestSparkDirectoryNamespace extends SparkLanceNamespaceTestBase {
