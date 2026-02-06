@@ -132,7 +132,9 @@ public class LanceFragmentScanner implements AutoCloseable {
     }
   }
 
-  /** @return the arrow reader. The caller is responsible for closing the reader */
+  /**
+   * @return the arrow reader. The caller is responsible for closing the reader
+   */
   public ArrowReader getArrowReader() {
     return scanner.scanBatches();
   }

@@ -14,10 +14,6 @@
     <description>Bundled Jar of Apache Spark 3.4 Connector for Lance</description>
     <packaging>jar</packaging>
 
-    <properties>
-        <scala.version>${scala213.version}</scala.version>
-        <scala.compat.version>${scala213.compat.version}</scala.compat.version>
-    </properties>
 
     <dependencies>
         <dependency>

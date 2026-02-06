@@ -79,7 +79,9 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
     return false;
   }
 
-  /** @return the current batch, the caller responsible for closing the batch */
+  /**
+   * @return the current batch, the caller responsible for closing the batch
+   */
   public ColumnarBatch getCurrentBatch() {
     return currentColumnarBatch;
   }

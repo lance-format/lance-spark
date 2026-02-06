@@ -36,13 +36,19 @@ def cleanup_tables(spark):
     """Clean up test tables before and after each test."""
     spark.sql("DROP TABLE IF EXISTS default.test_table")
     spark.sql("DROP TABLE IF EXISTS default.employees")
-    spark.catalog.dropTempView("source") if spark.catalog.tableExists("source") else None
-    spark.catalog.dropTempView("tmp_view") if spark.catalog.tableExists("tmp_view") else None
+    # TODO - reenable once `tableExists` works on Spark 4.0
+    #spark.catalog.dropTempView("source") if spark.catalog.tableExists("source") else None
+    #spark.catalog.dropTempView("tmp_view") if spark.catalog.tableExists("tmp_view") else None
+    spark.catalog.dropTempView("source")
+    spark.catalog.dropTempView("tmp_view")
     yield
     spark.sql("DROP TABLE IF EXISTS default.test_table")
     spark.sql("DROP TABLE IF EXISTS default.employees")
-    spark.catalog.dropTempView("source") if spark.catalog.tableExists("source") else None
-    spark.catalog.dropTempView("tmp_view") if spark.catalog.tableExists("tmp_view") else None
+    # TODO - reenable once `tableExists` works on Spark 4.0
+    #spark.catalog.dropTempView("source") if spark.catalog.tableExists("source") else None
+    #spark.catalog.dropTempView("tmp_view") if spark.catalog.tableExists("tmp_view") else None
+    spark.catalog.dropTempView("source")
+    spark.catalog.dropTempView("tmp_view")
 
 
 # =============================================================================

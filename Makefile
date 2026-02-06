@@ -149,6 +149,7 @@ docker-build-minimal:
 		--build-arg PY4J_VERSION=$(PY4J_VERSION) \
 		-f Dockerfile.minimal \
 		-t spark-lance-minimal:latest \
+		.
 
 .PHONY: docker-test
 docker-test:

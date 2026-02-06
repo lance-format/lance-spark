@@ -23,7 +23,9 @@ public final class BundleInfo {
     // Utility class
   }
 
-  /** @return the bundle name */
+  /**
+   * @return the bundle name
+   */
   public static String getBundleName() {
     return "lance-spark-bundle-4.0_2.13";
   }
