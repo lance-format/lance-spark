@@ -112,8 +112,6 @@ public class LanceFragmentScanner implements AutoCloseable {
         scanOptions.filter(inputPartition.getWhereCondition().get());
       }
       scanOptions.batchSize(readOptions.getBatchSize());
-      scanOptions.withRowId(getWithRowId(inputPartition.getSchema()));
-      scanOptions.withRowAddress(getWithRowAddress(inputPartition.getSchema()));
       if (readOptions.getNearest() != null) {
         scanOptions.nearest(readOptions.getNearest());
       }
@@ -165,29 +163,49 @@ public class LanceFragmentScanner implements AutoCloseable {
     return inputPartition;
   }
 
+  /**
+   * Builds the projection column list for the scanner. Regular data columns come first, followed by
+   * special metadata columns in the order matching {@link
+   * org.lance.spark.LanceDataset#METADATA_COLUMNS}. All special columns (_rowid, _rowaddr, version
+   * columns) go through scanner.project() for consistent output ordering.
+   */
   private static List<String> getColumnNames(StructType schema) {
-    return Arrays.stream(schema.fields())
-        .map(StructField::name)
-        .filter(
-            name ->
-                !name.equals(LanceConstant.FRAGMENT_ID)
-                    && !name.equals(LanceConstant.ROW_ID)
-                    && !name.equals(LanceConstant.ROW_ADDRESS)
-                    && !name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)
-                    && !name.endsWith(LanceConstant.BLOB_SIZE_SUFFIX))
-        .collect(Collectors.toList());
-  }
+    // Collect all field names in the schema for quick lookup
+    java.util.Set<String> schemaFields = new java.util.HashSet<>();
+    for (StructField field : schema.fields()) {
+      schemaFields.add(field.name());
+    }
 
-  private static boolean getWithRowId(StructType schema) {
-    return Arrays.stream(schema.fields())
-        .map(StructField::name)
-        .anyMatch(name -> name.equals(LanceConstant.ROW_ID));
-  }
+    // Regular data columns (exclude all special/metadata columns)
+    List<String> columns =
+        Arrays.stream(schema.fields())
+            .map(StructField::name)
+            .filter(
+                name ->
+                    !name.equals(LanceConstant.FRAGMENT_ID)
+                        && !name.equals(LanceConstant.ROW_ID)
+                        && !name.equals(LanceConstant.ROW_ADDRESS)
+                        && !name.equals(LanceConstant.ROW_CREATED_AT_VERSION)
+                        && !name.equals(LanceConstant.ROW_LAST_UPDATED_AT_VERSION)
+                        && !name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)
+                        && !name.endsWith(LanceConstant.BLOB_SIZE_SUFFIX))
+            .collect(Collectors.toList());
 
-  private static boolean getWithRowAddress(StructType schema) {
-    return Arrays.stream(schema.fields())
-        .map(StructField::name)
-        .anyMatch(name -> name.equals(LanceConstant.ROW_ADDRESS));
+    // Append special columns in METADATA_COLUMNS order (must match Rust scanner output order)
+    if (schemaFields.contains(LanceConstant.ROW_ID)) {
+      columns.add(LanceConstant.ROW_ID);
+    }
+    if (schemaFields.contains(LanceConstant.ROW_ADDRESS)) {
+      columns.add(LanceConstant.ROW_ADDRESS);
+    }
+    if (schemaFields.contains(LanceConstant.ROW_LAST_UPDATED_AT_VERSION)) {
+      columns.add(LanceConstant.ROW_LAST_UPDATED_AT_VERSION);
+    }
+    if (schemaFields.contains(LanceConstant.ROW_CREATED_AT_VERSION)) {
+      columns.add(LanceConstant.ROW_CREATED_AT_VERSION);
+    }
+
+    return columns;
   }
 
   private static class CacheKey {

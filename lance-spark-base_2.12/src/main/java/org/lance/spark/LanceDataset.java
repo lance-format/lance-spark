@@ -97,8 +97,40 @@ public class LanceDataset implements SupportsRead, SupportsWrite, SupportsMetada
         }
       };
 
+  public static final MetadataColumn ROW_LAST_UPDATED_AT_VERSION_COLUMN =
+      new MetadataColumn() {
+        @Override
+        public String name() {
+          return LanceConstant.ROW_LAST_UPDATED_AT_VERSION;
+        }
+
+        @Override
+        public DataType dataType() {
+          return DataTypes.LongType;
+        }
+      };
+
+  public static final MetadataColumn ROW_CREATED_AT_VERSION_COLUMN =
+      new MetadataColumn() {
+        @Override
+        public String name() {
+          return LanceConstant.ROW_CREATED_AT_VERSION;
+        }
+
+        @Override
+        public DataType dataType() {
+          return DataTypes.LongType;
+        }
+      };
+
   public static final MetadataColumn[] METADATA_COLUMNS =
-      new MetadataColumn[] {ROW_ID_COLUMN, ROW_ADDRESS_COLUMN, FRAGMENT_ID_COLUMN};
+      new MetadataColumn[] {
+        ROW_ID_COLUMN,
+        ROW_ADDRESS_COLUMN,
+        ROW_LAST_UPDATED_AT_VERSION_COLUMN,
+        ROW_CREATED_AT_VERSION_COLUMN,
+        FRAGMENT_ID_COLUMN
+      };
 
   private final LanceSparkReadOptions readOptions;
   protected final StructType sparkSchema;

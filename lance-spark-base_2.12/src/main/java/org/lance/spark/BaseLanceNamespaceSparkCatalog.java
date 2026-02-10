@@ -451,6 +451,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
             .tableId(tableIdList)
             .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false))
             .mode(WriteParams.WriteMode.CREATE)
+            .enableStableRowIds(catalogConfig.isEnableStableRowIds(properties))
             .storageOptions(catalogConfig.getStorageOptions())
             .execute()) {
       location = dataset.uri();

@@ -85,6 +85,7 @@ public class LanceCatalog implements TableCatalog {
           .uri(datasetUri)
           .schema(LanceArrowUtils.toArrowSchema(schema, "UTC", true, false))
           .mode(WriteParams.WriteMode.CREATE)
+          .enableStableRowIds(catalogConfig.isEnableStableRowIds(properties))
           .storageOptions(readOptions.getStorageOptions())
           .execute()
           .close();
