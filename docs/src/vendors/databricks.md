@@ -2,23 +2,28 @@
 
 ## Supported Environments
 
-| Environment   | Support Status  | Notes                                                              |
-|---------------|-----------------|--------------------------------------------------------------------|
-| Classic Compute | ✅ Supported    | Supports custom Spark datasources                                  |
-| SQL Warehouse | ❌ Not Supported | Does not support custom Spark datasources or SQL Extensions        |
+| Environment     | Catalog          | Support Status      | Notes                                                       |
+|-----------------|------------------|---------------------|-------------------------------------------------------------|
+| Classic Compute | Unity Catalog    | ❌ Not Supported     | Databricks uses a proprietary implementation not compatible with Spark extensions |
+| Classic Compute | Hive Metastore   | ⚠️ Not Recommended  | Vended storage credentials through Databricks are not supported |
+| Classic Compute | Lance Namespace  | ✅ Supported         | Recommended approach; bypasses Databricks catalog integration |
+| SQL Warehouse   | —                | ❌ Not Supported     | Does not support custom Spark datasources or SQL Extensions |
 
-## Catalog Support
+!!! warning "Databricks Catalogs"
+    Using Databricks catalogs is not officially supported.
 
-| Catalog           | Support Status    | Notes                                                                                                    |
-|-------------------|-------------------|----------------------------------------------------------------------------------------------------------|
-| Hive Metastore    | ✅ Supported       | Available via Databricks legacy Hive Metastore support                                                   |
-| Unity Catalog     | ❌ Not Yet Supported | Databricks uses a custom Unity Catalog implementation that is not compatible with OSS Unity Catalog. We are working with Databricks to add support. |
+    - **Unity Catalog** &mdash; Databricks uses a proprietary Unity Catalog implementation that is not compatible with OSS Unity Catalog. We are working with Databricks to add support.
+    - **Hive Metastore** &mdash; Lance Spark can read and write to the Databricks legacy Hive Metastore, but vended storage credentials through Databricks are not currently supported, resulting in a cumbersome authentication process.
+
+    The recommended approach is to use the Lance namespace catalog (`LanceNamespaceSparkCatalog`) directly, which bypasses Databricks catalog integration entirely. See [Configure Spark](#3-configure-spark) below.
 
 ## Classic Compute Setup
 
 ### 1. Create a Cluster
 
 Create a new cluster using **Databricks Runtime 16.4 LTS**. Other runtimes may work but have not been tested.
+
+The cluster **Access Mode** must be set to **No isolation shared**. This is required for using custom Spark extensions on Databricks. You can set this by using `Policy: Unrestricted` and configuring the access mode under **Advanced** cluster configuration.
 
 ### 2. Install the Lance Spark Library
 
@@ -40,40 +45,58 @@ Navigate to **Classic Compute &rarr; \<cluster\> &rarr; Libraries &rarr; Install
 
 ### 3. Configure Spark
 
-Navigate to **Classic Compute &rarr; \<cluster\> &rarr; Configuration &rarr; Spark Config** and add the following to register the Lance catalog:
+Configure the catalog to use `LanceNamespaceSparkCatalog`, then set catalog-specific and namespace-specific properties as needed. Refer to the [Lance Spark Config docs](https://lance.org/integrations/spark/config/#example-namespace-implementations) for all available namespace implementations.
+
+!!! note
+    Some namespace implementations may require additional libraries from the [lance-namespace repository](https://github.com/lance-format/lance-namespace). These are also published on Maven Central and can be installed alongside the Lance Spark bundle using the same process described in [Install the Lance Spark Library](#2-install-the-lance-spark-library).
+
+Navigate to **Classic Compute &rarr; \<cluster\> &rarr; Advanced Configuration &rarr; Spark Config** to populate namespace configuration options. To use the `LanceNamespaceSparkCatalog` with S3 storage, you can set the following properties, replacing values as needed:
 
 ```
-spark.sql.catalog.<catalog_name> = org.lance.spark.LanceNamespaceSparkCatalog
-spark.sql.defaultCatalog = <catalog_name>
+spark.sql.catalog.<catalog_name> org.lance.spark.LanceNamespaceSparkCatalog
+spark.sql.catalog.<catalog_name>.impl dir
+spark.sql.catalog.<catalog_name>.root s3://my-bucket/my-tables
+spark.sql.catalog.<catalog_name>.storage.access_key_id <ACCESS_KEY>
+spark.sql.catalog.<catalog_name>.storage.secret_access_key <SECRET_KEY>
+spark.sql.catalog.<catalog_name>.storage.region us-east-1
+spark.sql.defaultCatalog <catalog_name>
 ```
-
-Replace `<catalog_name>` with your desired catalog name.
-
-#### Storage Credentials
-
-Because Unity Catalog is not supported, storage credentials cannot be inherited from the Databricks environment. You must provide them explicitly, either at the catalog level in Spark Config or per read/write operation.
-
-To configure credentials at the catalog level (S3 example):
-
-```
-spark.sql.catalog.<catalog_name>.storage.access_key_id=YOUR_ACCESS_KEY
-spark.sql.catalog.<catalog_name>.storage.secret_access_key=YOUR_SECRET_KEY
-spark.sql.catalog.<catalog_name>.storage.session_token=YOUR_SESSION_TOKEN   # optional, for temporary credentials
-spark.sql.catalog.<catalog_name>.storage.region=us-east-1
-spark.sql.catalog.<catalog_name>.storage.endpoint=https://s3.amazonaws.com  # or custom S3-compatible endpoint
-spark.sql.catalog.<catalog_name>.storage.aws_allow_http=false               # set true for local MinIO etc.
-```
-
-You can configure credentials for any [supported storage system](https://lance.org/guide/object_store) in a similar way using the appropriate options.
 
 ## Example Usage
+Interacting with Lance Spark on Databricks is the same as using any Spark datasource. You can use either SQL or the DataFrame API to create, read, and manipulate Lance tables.
+
+### SQL
+
+```python
+# Create a table
+spark.sql("""
+CREATE TABLE lancedb.default.my_table (
+    id INT,
+    name STRING
+) USING lance
+""")
+
+# List tables
+spark.sql("SHOW TABLES IN lancedb.default").show()
+
+# Describe a table
+spark.sql("DESCRIBE TABLE lancedb.default.my_table").show()
+
+# Insert data
+spark.sql("INSERT INTO lancedb.default.my_table VALUES (1, 'Alice'), (2, 'Bob'), (3, 'David')")
+
+# Query data
+spark.sql("SELECT * FROM lancedb.default.my_table").show()
+
+# Drop a table
+spark.sql("DROP TABLE lancedb.default.my_table")
+```
 
 ### DataFrame API
 
 ```python
 import pyarrow as pa
 
-# Create a table
 table = pa.Table.from_pylist([
     {"name": "Alice", "age": 20},
     {"name": "Bob", "age": 30},
@@ -85,52 +108,15 @@ df = spark.createDataFrame(table)
 # Write a table
 df.write \
     .format("lance") \
-    .option("access_key_id", "YOUR_ACCESS_KEY") \
-    .option("secret_access_key", "YOUR_SECRET_KEY") \
-    .option("region", "us-east-1") \
-    .option("endpoint", "https://s3.amazonaws.com") \
-    .saveAsTable("hive_metastore.default.my_table", path="s3://my-bucket/my-table")
+    .saveAsTable("lancedb.default.my_table")
 
 # Read a table
 new_df = spark.read \
-    .option("access_key_id", "YOUR_ACCESS_KEY") \
-    .option("secret_access_key", "YOUR_SECRET_KEY") \
-    .option("region", "us-east-1") \
-    .option("endpoint", "https://s3.amazonaws.com") \
-    .table("hive_metastore.default.my_table") \
+    .table("lancedb.default.my_table") \
     .collect()
 ```
 
-!!! tip
-    If you configured storage credentials at the catalog level in Spark Config, you can omit the `.option(...)` calls for credentials in each read/write operation.
-
-### SQL
-
-```python
-# Create a table
-spark.sql("""
-CREATE TABLE hive_metastore.default.my_table (
-    id INT,
-    name STRING
-) USING lance
-LOCATION 's3://my-bucket/my-table';
-""")
-
-# List tables
-spark.sql("SHOW TABLES IN hive_metastore.default").show()
-
-# Describe a table
-spark.sql("DESCRIBE TABLE hive_metastore.default.my_table").show()
-
-# Drop a table
-spark.sql("DROP TABLE hive_metastore.default.my_table")
-```
-
 ## Known Issues
-
-### Authentication
-
-The common Databricks pattern where storage credentials are inherited from Unity Catalog does not work with Lance Spark, because Unity Catalog is not currently supported. Users must provide storage credentials explicitly (e.g., AWS access key and secret key) as options when reading and writing tables, or configure them at the catalog level in Spark Config.
 
 ### SQL Extensions Not Available
 
@@ -143,5 +129,9 @@ Lance SQL Extensions cannot currently be loaded in Databricks Classic Compute. T
 When this is resolved, you will be able to enable extensions by adding the following to your Spark Config:
 
 ```
-spark.sql.extensions=org.lance.spark.extensions.LanceSparkSessionExtensions
+spark.sql.extensions org.lance.spark.extensions.LanceSparkSessionExtensions
 ```
+
+### Authentication
+
+Databricks-native authentication mechanisms that rely on Unity Catalog (e.g., External Volumes, vended credentials) are not compatible with Lance Spark. Storage credentials must be managed explicitly using the available [Lance Spark storage configuration options](https://lance.org/integrations/spark/config/#example-namespace-implementations) (e.g., AWS access key and secret key for S3).
