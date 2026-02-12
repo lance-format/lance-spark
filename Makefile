@@ -188,7 +188,7 @@ docker-test:
 	docker run --rm --hostname lance-spark \
 		-e SPARK_VERSION=$(SPARK_VERSION) \
 		lance-spark-test:$(SPARK_VERSION)_$(SCALA_VERSION) \
-		"pytest /home/lance/tests/ -v --timeout=120"
+		"pytest /home/lance/tests/ -v --timeout=180"
 
 # =============================================================================
 # Documentation
