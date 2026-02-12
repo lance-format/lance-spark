@@ -300,6 +300,84 @@ public abstract class BaseSparkConnectorWriteTest {
   }
 
   @Test
+  public void createTableAsSelect(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+    spark.sql("CREATE TABLE lance.`" + path + "` AS SELECT * FROM tmp_view");
+
+    Dataset<Row> result =
+        spark.read().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, path).load();
+    assertEquals(2, result.count());
+  }
+
+  @Test
+  public void replaceTableAsSelect(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    // Create initial table
+    spark.sql("CREATE TABLE lance.`" + path + "` AS SELECT * FROM tmp_view");
+
+    // Replace with different data
+    spark.sql(
+        "REPLACE TABLE lance.`" + path + "` AS SELECT id * 10 AS id, name, address FROM tmp_view");
+
+    Dataset<Row> result =
+        spark.read().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, path).load();
+    assertEquals(2, result.count());
+    // Verify data was replaced (ids should be 10, 20)
+    assertEquals(1, result.filter(col("id").equalTo(10)).count());
+    assertEquals(1, result.filter(col("id").equalTo(20)).count());
+    assertEquals(0, result.filter(col("id").equalTo(1)).count());
+  }
+
+  @Test
+  public void createOrReplaceTableAsSelect(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    // First call - creates the table
+    spark.sql("CREATE OR REPLACE TABLE lance.`" + path + "` AS SELECT * FROM tmp_view");
+
+    Dataset<Row> result1 =
+        spark.read().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, path).load();
+    assertEquals(2, result1.count());
+
+    // Second call - replaces with different data
+    spark.sql(
+        "CREATE OR REPLACE TABLE lance.`"
+            + path
+            + "` AS SELECT id * 10 AS id, name, address FROM tmp_view");
+
+    Dataset<Row> result2 =
+        spark.read().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, path).load();
+    assertEquals(2, result2.count());
+    assertEquals(1, result2.filter(col("id").equalTo(10)).count());
+    assertEquals(1, result2.filter(col("id").equalTo(20)).count());
+  }
+
+  @Test
+  public void replaceTableSchemaOnly(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    // Create initial table with data
+    spark.sql("CREATE TABLE lance.`" + path + "` AS SELECT * FROM tmp_view");
+
+    // Replace with schema only (no data)
+    spark.sql("REPLACE TABLE lance.`" + path + "` (new_id INT, value STRING)");
+
+    Dataset<Row> result =
+        spark.read().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, path).load();
+    assertEquals(0, result.count());
+    // Verify new schema
+    StructType resultSchema = result.schema();
+    assertEquals(2, resultSchema.fields().length);
+    assertEquals("new_id", resultSchema.fields()[0].name());
+    assertEquals("value", resultSchema.fields()[1].name());
+  }
+
+  @Test
   public void writeWithInvalidBatchSizeFails(TestInfo testInfo) {
     String datasetName = testInfo.getTestMethod().get().getName();
     try {

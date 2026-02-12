@@ -24,11 +24,13 @@ import org.lance.namespace.model.DropNamespaceRequest;
 import org.lance.namespace.model.DropTableRequest;
 import org.lance.namespace.model.ListTablesRequest;
 import org.lance.namespace.model.ListTablesResponse;
+import org.lance.operation.Overwrite;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.SchemaConverter;
 import org.lance.spark.utils.Utils;
 
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchFunctionException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
@@ -37,9 +39,10 @@ import org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException;
 import org.apache.spark.sql.connector.catalog.FunctionCatalog;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.NamespaceChange;
+import org.apache.spark.sql.connector.catalog.StagedTable;
+import org.apache.spark.sql.connector.catalog.StagingTableCatalog;
 import org.apache.spark.sql.connector.catalog.SupportsNamespaces;
 import org.apache.spark.sql.connector.catalog.Table;
-import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.catalog.TableChange;
 import org.apache.spark.sql.connector.catalog.functions.UnboundFunction;
 import org.apache.spark.sql.connector.expressions.Transform;
@@ -64,7 +67,7 @@ import static org.lance.spark.utils.Utils.getSchema;
 import static org.lance.spark.utils.Utils.openDataset;
 
 public abstract class BaseLanceNamespaceSparkCatalog
-    implements TableCatalog, SupportsNamespaces, FunctionCatalog {
+    implements StagingTableCatalog, SupportsNamespaces, FunctionCatalog {
 
   private static final Logger logger =
       LoggerFactory.getLogger(BaseLanceNamespaceSparkCatalog.class);
@@ -518,6 +521,191 @@ public abstract class BaseLanceNamespaceSparkCatalog
   public void renameTable(Identifier oldIdent, Identifier newIdent)
       throws NoSuchTableException, TableAlreadyExistsException {
     throw new UnsupportedOperationException("Table renaming is not supported");
+  }
+
+  @Override
+  public StagedTable stageCreate(
+      Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
+      throws TableAlreadyExistsException, NoSuchNamespaceException {
+    Identifier actualIdent = transformIdentifierForApi(ident);
+    List<String> tableIdList = buildTableId(actualIdent);
+    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+
+    String location;
+    try (Dataset dataset =
+        Dataset.write()
+            .allocator(LanceRuntime.allocator())
+            .namespace(namespace)
+            .tableId(tableIdList)
+            .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false))
+            .mode(WriteParams.WriteMode.CREATE)
+            .storageOptions(catalogConfig.getStorageOptions())
+            .execute()) {
+      location = dataset.uri();
+    }
+
+    DescribeTableRequest describeRequest = new DescribeTableRequest();
+    tableIdList.forEach(describeRequest::addIdItem);
+    DescribeTableResponse describeResponse = namespace.describeTable(describeRequest);
+    Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
+
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            location,
+            catalogConfig,
+            Optional.empty(),
+            Optional.of(namespace),
+            Optional.of(tableIdList));
+
+    Runnable abortAction =
+        () -> {
+          DropTableRequest dropRequest = new DropTableRequest();
+          tableIdList.forEach(dropRequest::addIdItem);
+          namespace.dropTable(dropRequest);
+        };
+    return new LanceStagedTable(
+        readOptions,
+        processedSchema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        LanceStagedTable.Operation.CREATE,
+        null,
+        abortAction);
+  }
+
+  @Override
+  public StagedTable stageReplace(
+      Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
+      throws NoSuchNamespaceException, NoSuchTableException {
+    Identifier actualIdent = transformIdentifierForApi(ident);
+    List<String> tableIdList = buildTableId(actualIdent);
+    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+
+    DescribeTableRequest describeRequest = new DescribeTableRequest();
+    tableIdList.forEach(describeRequest::addIdItem);
+    DescribeTableResponse describeResponse;
+    try {
+      describeResponse = namespace.describeTable(describeRequest);
+    } catch (TableNotFoundException e) {
+      throw new NoSuchTableException(ident);
+    }
+    String location = describeResponse.getLocation();
+    Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
+
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            location,
+            catalogConfig,
+            Optional.empty(),
+            Optional.of(namespace),
+            Optional.of(tableIdList));
+
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
+    Runnable commitAction =
+        () -> {
+          try (Dataset dataset = openDataset(readOptions)) {
+            dataset
+                .newTransactionBuilder()
+                .operation(
+                    Overwrite.builder()
+                        .fragments(Collections.emptyList())
+                        .schema(arrowSchema)
+                        .build())
+                .build()
+                .commit();
+          }
+        };
+    return new LanceStagedTable(
+        readOptions,
+        processedSchema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        LanceStagedTable.Operation.REPLACE,
+        commitAction,
+        null);
+  }
+
+  @Override
+  public StagedTable stageCreateOrReplace(
+      Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
+      throws NoSuchNamespaceException {
+    Identifier actualIdent = transformIdentifierForApi(ident);
+    List<String> tableIdList = buildTableId(actualIdent);
+    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+
+    boolean exists = tableExists(ident);
+    Runnable abortAction;
+    String location;
+    Map<String, String> initialStorageOptions;
+
+    if (!exists) {
+      try (Dataset dataset =
+          Dataset.write()
+              .allocator(LanceRuntime.allocator())
+              .namespace(namespace)
+              .tableId(tableIdList)
+              .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false))
+              .mode(WriteParams.WriteMode.CREATE)
+              .storageOptions(catalogConfig.getStorageOptions())
+              .execute()) {
+        location = dataset.uri();
+      }
+
+      DescribeTableRequest describeRequest = new DescribeTableRequest();
+      tableIdList.forEach(describeRequest::addIdItem);
+      DescribeTableResponse describeResponse = namespace.describeTable(describeRequest);
+      initialStorageOptions = describeResponse.getStorageOptions();
+
+      abortAction =
+          () -> {
+            DropTableRequest dropRequest = new DropTableRequest();
+            tableIdList.forEach(dropRequest::addIdItem);
+            namespace.dropTable(dropRequest);
+          };
+    } else {
+      DescribeTableRequest describeRequest = new DescribeTableRequest();
+      tableIdList.forEach(describeRequest::addIdItem);
+      DescribeTableResponse describeResponse = namespace.describeTable(describeRequest);
+      location = describeResponse.getLocation();
+      initialStorageOptions = describeResponse.getStorageOptions();
+
+      abortAction = null;
+    }
+
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            location,
+            catalogConfig,
+            Optional.empty(),
+            Optional.of(namespace),
+            Optional.of(tableIdList));
+
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
+    Runnable commitAction =
+        () -> {
+          try (Dataset dataset = openDataset(readOptions)) {
+            dataset
+                .newTransactionBuilder()
+                .operation(
+                    Overwrite.builder()
+                        .fragments(Collections.emptyList())
+                        .schema(arrowSchema)
+                        .build())
+                .build()
+                .commit();
+          }
+        };
+    return new LanceStagedTable(
+        readOptions,
+        processedSchema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        LanceStagedTable.Operation.CREATE_OR_REPLACE,
+        commitAction,
+        abortAction);
   }
 
   /**

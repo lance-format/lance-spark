@@ -15,21 +15,25 @@ package org.lance.spark;
 
 import org.lance.Dataset;
 import org.lance.WriteParams;
+import org.lance.operation.Overwrite;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.Utils;
 
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException;
 import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.StagedTable;
+import org.apache.spark.sql.connector.catalog.StagingTableCatalog;
 import org.apache.spark.sql.connector.catalog.Table;
-import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.catalog.TableChange;
 import org.apache.spark.sql.connector.expressions.Transform;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.apache.spark.sql.util.LanceArrowUtils;
 
+import java.util.Collections;
 import java.util.Map;
 
 import static org.lance.spark.utils.Utils.createReadOptions;
@@ -45,7 +49,7 @@ import static org.lance.spark.utils.Utils.openDataset;
  * <p>For catalog-based access (e.g., spark.sql.catalog.lance configuration), users should use
  * {@link BaseLanceNamespaceSparkCatalog} for full namespace support.
  */
-public class LanceCatalog implements TableCatalog {
+public class LanceCatalog implements StagingTableCatalog {
   private CaseInsensitiveStringMap options;
   private String catalogName = "lance";
   private LanceSparkCatalogConfig catalogConfig;
@@ -124,6 +128,128 @@ public class LanceCatalog implements TableCatalog {
   @Override
   public String name() {
     return catalogName;
+  }
+
+  @Override
+  public StagedTable stageCreate(
+      Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
+      throws TableAlreadyExistsException, NoSuchNamespaceException {
+    String datasetUri = getDatasetUri(ident);
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty());
+    try {
+      Dataset.write()
+          .allocator(LanceRuntime.allocator())
+          .uri(datasetUri)
+          .schema(LanceArrowUtils.toArrowSchema(schema, "UTC", true, false))
+          .mode(WriteParams.WriteMode.CREATE)
+          .storageOptions(readOptions.getStorageOptions())
+          .execute()
+          .close();
+    } catch (IllegalArgumentException e) {
+      throw new TableAlreadyExistsException(ident);
+    }
+    Runnable abortAction = () -> Dataset.drop(datasetUri, catalogConfig.getStorageOptions());
+    return new LanceStagedTable(
+        readOptions,
+        schema,
+        null,
+        null,
+        null,
+        LanceStagedTable.Operation.CREATE,
+        null,
+        abortAction);
+  }
+
+  @Override
+  public StagedTable stageReplace(
+      Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
+      throws NoSuchNamespaceException, NoSuchTableException {
+    String datasetUri = getDatasetUri(ident);
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty());
+    // Verify the table exists
+    getSchema(ident, readOptions);
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", true, false);
+    Runnable commitAction =
+        () -> {
+          try (Dataset dataset = openDataset(readOptions)) {
+            dataset
+                .newTransactionBuilder()
+                .operation(
+                    Overwrite.builder()
+                        .fragments(Collections.emptyList())
+                        .schema(arrowSchema)
+                        .build())
+                .build()
+                .commit();
+          }
+        };
+    return new LanceStagedTable(
+        readOptions,
+        schema,
+        null,
+        null,
+        null,
+        LanceStagedTable.Operation.REPLACE,
+        commitAction,
+        null);
+  }
+
+  @Override
+  public StagedTable stageCreateOrReplace(
+      Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
+      throws NoSuchNamespaceException {
+    String datasetUri = getDatasetUri(ident);
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty());
+
+    boolean exists = tableExists(ident);
+    Runnable abortAction;
+    if (!exists) {
+      try {
+        Dataset.write()
+            .allocator(LanceRuntime.allocator())
+            .uri(datasetUri)
+            .schema(LanceArrowUtils.toArrowSchema(schema, "UTC", true, false))
+            .mode(WriteParams.WriteMode.CREATE)
+            .storageOptions(readOptions.getStorageOptions())
+            .execute()
+            .close();
+      } catch (IllegalArgumentException e) {
+        throw new RuntimeException("Failed to create table for CREATE OR REPLACE", e);
+      }
+      abortAction = () -> Dataset.drop(datasetUri, catalogConfig.getStorageOptions());
+    } else {
+      abortAction = null;
+    }
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", true, false);
+    Runnable commitAction =
+        () -> {
+          try (Dataset dataset = openDataset(readOptions)) {
+            dataset
+                .newTransactionBuilder()
+                .operation(
+                    Overwrite.builder()
+                        .fragments(Collections.emptyList())
+                        .schema(arrowSchema)
+                        .build())
+                .build()
+                .commit();
+          }
+        };
+    return new LanceStagedTable(
+        readOptions,
+        schema,
+        null,
+        null,
+        null,
+        LanceStagedTable.Operation.CREATE_OR_REPLACE,
+        commitAction,
+        abortAction);
   }
 
   /**

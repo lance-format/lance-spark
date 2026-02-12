@@ -56,6 +56,8 @@ public class LanceBatchWrite implements BatchWrite {
   /** Dataset opened at start, held for commit to ensure version consistency. */
   private final Dataset dataset;
 
+  private final Runnable onCommit;
+
   public LanceBatchWrite(
       StructType schema,
       LanceSparkWriteOptions writeOptions,
@@ -63,7 +65,8 @@ public class LanceBatchWrite implements BatchWrite {
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
-      List<String> tableId) {
+      List<String> tableId,
+      Runnable onCommit) {
     this.schema = schema;
     this.writeOptions = writeOptions;
     this.overwrite = overwrite;
@@ -71,6 +74,7 @@ public class LanceBatchWrite implements BatchWrite {
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
+    this.onCommit = onCommit;
 
     // Open dataset at start to capture version for commit
     this.dataset = openDataset();
@@ -130,6 +134,9 @@ public class LanceBatchWrite implements BatchWrite {
 
       // Commit using the dataset opened at start (ensures version consistency)
       dataset.newTransactionBuilder().operation(operation).build().commit();
+      if (onCommit != null) {
+        onCommit.run();
+      }
     } finally {
       dataset.close();
     }
