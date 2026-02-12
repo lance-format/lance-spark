@@ -14,11 +14,20 @@
 package org.lance.spark.read;
 
 import org.lance.Dataset;
-import org.lance.Fragment;
+import org.lance.ipc.ColumnOrdering;
+import org.lance.ipc.FilteredReadPlan;
+import org.lance.ipc.LanceScanner;
+import org.lance.ipc.ScanOptions;
+import org.lance.ipc.Splits;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.internal.LanceFragmentScanner;
+import org.lance.spark.utils.Optional;
+
+import org.apache.spark.sql.types.StructType;
 
 import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -27,21 +36,71 @@ public class LanceSplit implements Serializable {
   private static final long serialVersionUID = 2983749283749283749L;
 
   private final List<Integer> fragments;
+  private final FilteredReadPlan filteredReadPlan;
 
   public LanceSplit(List<Integer> fragments) {
     this.fragments = fragments;
+    this.filteredReadPlan = null;
+  }
+
+  public LanceSplit(FilteredReadPlan filteredReadPlan) {
+    this.fragments = new ArrayList<>(filteredReadPlan.getFragmentRanges().keySet());
+    this.filteredReadPlan = filteredReadPlan;
   }
 
   public List<Integer> getFragments() {
     return fragments;
   }
 
-  public static List<LanceSplit> generateLanceSplits(LanceSparkReadOptions readOptions) {
+  public Optional<FilteredReadPlan> getFilteredReadPlan() {
+    return Optional.ofNullable(filteredReadPlan);
+  }
+
+  public static List<LanceSplit> generateLanceSplits(
+      LanceSparkReadOptions readOptions,
+      StructType schema,
+      Optional<String> whereCondition,
+      Optional<Integer> limit,
+      Optional<Integer> offset,
+      Optional<List<ColumnOrdering>> topNSortOrders) {
     try (Dataset dataset = openDataset(readOptions)) {
-      return dataset.getFragments().stream()
-          .map(Fragment::getId)
-          .map(id -> new LanceSplit(Collections.singletonList(id)))
-          .collect(Collectors.toList());
+      ScanOptions.Builder scanOptionsBuilder = new ScanOptions.Builder();
+      scanOptionsBuilder.columns(LanceFragmentScanner.getColumnNames(schema));
+      if (whereCondition.isPresent()) {
+        scanOptionsBuilder.filter(whereCondition.get());
+      }
+      scanOptionsBuilder.batchSize(readOptions.getBatchSize());
+      scanOptionsBuilder.withRowId(LanceFragmentScanner.getWithRowId(schema));
+      scanOptionsBuilder.withRowAddress(LanceFragmentScanner.getWithRowAddress(schema));
+      if (readOptions.getNearest() != null) {
+        scanOptionsBuilder.nearest(readOptions.getNearest());
+      }
+      if (limit.isPresent()) {
+        scanOptionsBuilder.limit(limit.get());
+      }
+      if (offset.isPresent()) {
+        scanOptionsBuilder.offset(offset.get());
+      }
+      if (topNSortOrders.isPresent()) {
+        scanOptionsBuilder.setColumnOrderings(topNSortOrders.get());
+      }
+
+      try (LanceScanner scanner = dataset.newScan(scanOptionsBuilder.build())) {
+        Splits splits = scanner.planSplits(null);
+        if (splits.getFilteredReadPlans().isPresent()) {
+          return splits.getFilteredReadPlans().get().stream()
+              .map(LanceSplit::new)
+              .collect(Collectors.toList());
+        } else if (splits.getFragments().isPresent()) {
+          return splits.getFragments().get().stream()
+              .map(id -> new LanceSplit(Collections.singletonList(id)))
+              .collect(Collectors.toList());
+        } else {
+          return Collections.emptyList();
+        }
+      } catch (Exception e) {
+        throw new RuntimeException("Failed to plan splits", e);
+      }
     }
   }
 

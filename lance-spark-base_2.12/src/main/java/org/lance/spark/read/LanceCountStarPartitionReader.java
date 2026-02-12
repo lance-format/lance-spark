@@ -14,8 +14,11 @@
 package org.lance.spark.read;
 
 import org.lance.Dataset;
+import org.lance.ReadOptions;
+import org.lance.ipc.FilteredReadPlan;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
+import org.lance.namespace.LanceNamespaceStorageOptionsProvider;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.vectorized.LanceArrowColumnVector;
@@ -32,6 +35,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Partition reader for pushed down aggregates. This reader computes the aggregate result directly
@@ -59,6 +63,59 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
   }
 
   private long computeCount() {
+    if (inputPartition.getLanceSplit().getFilteredReadPlan().isPresent()) {
+      return computeCountFilteredReadPlan();
+    }
+    return computeCountFragmentBased();
+  }
+
+  private long computeCountFilteredReadPlan() {
+    LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
+    long totalCount = 0;
+
+    Map<String, String> merged =
+        LanceRuntime.mergeStorageOptions(
+            readOptions.getStorageOptions(), inputPartition.getInitialStorageOptions());
+    LanceNamespaceStorageOptionsProvider provider =
+        LanceRuntime.getOrCreateStorageOptionsProvider(
+            inputPartition.getNamespaceImpl(),
+            inputPartition.getNamespaceProperties(),
+            readOptions.getTableId());
+
+    ReadOptions.Builder readOptionsBuilder = new ReadOptions.Builder().setStorageOptions(merged);
+    if (provider != null) {
+      readOptionsBuilder.setStorageOptionsProvider(provider);
+    }
+
+    try (Dataset dataset =
+        Dataset.open()
+            .allocator(allocator)
+            .uri(readOptions.getDatasetUri())
+            .readOptions(readOptionsBuilder.build())
+            .build()) {
+      ScanOptions.Builder scanOptionsBuilder = new ScanOptions.Builder();
+      if (inputPartition.getWhereCondition().isPresent()) {
+        scanOptionsBuilder.filter(inputPartition.getWhereCondition().get());
+      }
+      scanOptionsBuilder.withRowId(true);
+      scanOptionsBuilder.columns(Lists.newArrayList());
+
+      try (LanceScanner scanner = dataset.newScan(scanOptionsBuilder.build())) {
+        FilteredReadPlan plan = inputPartition.getLanceSplit().getFilteredReadPlan().get();
+        try (ArrowReader reader = scanner.executeFilteredReadPlan(plan)) {
+          while (reader.loadNextBatch()) {
+            totalCount += reader.getVectorSchemaRoot().getRowCount();
+          }
+        }
+      } catch (Exception e) {
+        throw new RuntimeException("Failed to execute filtered read plan", e);
+      }
+    }
+
+    return totalCount;
+  }
+
+  private long computeCountFragmentBased() {
     // This reader is only used when there are filters (metadata-based count uses LocalScan)
     LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
     long totalCount = 0;

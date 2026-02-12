@@ -95,7 +95,7 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
     fragmentScanner.close();
   }
 
-  private void addBlobVirtualColumns(
+  public static void addBlobVirtualColumns(
       List<ColumnVector> fieldVectors, VectorSchemaRoot root, LanceInputPartition inputPartition) {
     StructType schema = inputPartition.getSchema();
 

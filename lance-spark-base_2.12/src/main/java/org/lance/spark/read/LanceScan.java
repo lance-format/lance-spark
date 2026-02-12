@@ -96,7 +96,9 @@ public class LanceScan
 
   @Override
   public InputPartition[] planInputPartitions() {
-    List<LanceSplit> splits = LanceSplit.generateLanceSplits(readOptions);
+    List<LanceSplit> splits =
+        LanceSplit.generateLanceSplits(
+            readOptions, schema, whereConditions, limit, offset, topNSortOrders);
     return IntStream.range(0, splits.size())
         .mapToObj(
             i ->
