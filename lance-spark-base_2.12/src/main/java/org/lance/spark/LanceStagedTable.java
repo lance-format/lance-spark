@@ -99,6 +99,9 @@ public class LanceStagedTable extends LanceDataset implements StagedTable {
     if (builder instanceof SparkWrite.SparkWriteBuilder) {
       SparkWrite.SparkWriteBuilder sparkBuilder = (SparkWrite.SparkWriteBuilder) builder;
       sparkBuilder.setOnCommit(() -> dataCommitted.set(true));
+      if (!tableExisted) {
+        sparkBuilder.setNewTable(true);
+      }
       if (operation == Operation.REPLACE || operation == Operation.CREATE_OR_REPLACE) {
         sparkBuilder.truncate();
       }

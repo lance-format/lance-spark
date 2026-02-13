@@ -16,6 +16,7 @@ package org.lance.spark.write;
 import org.lance.Dataset;
 import org.lance.FragmentMetadata;
 import org.lance.ReadOptions;
+import org.lance.WriteParams;
 import org.lance.namespace.LanceNamespaceStorageOptionsProvider;
 import org.lance.operation.Append;
 import org.lance.operation.Operation;
@@ -62,6 +63,7 @@ public class LanceBatchWrite implements BatchWrite {
       StructType schema,
       LanceSparkWriteOptions writeOptions,
       boolean overwrite,
+      boolean newTable,
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
@@ -76,8 +78,22 @@ public class LanceBatchWrite implements BatchWrite {
     this.tableId = tableId;
     this.onCommit = onCommit;
 
-    // Open dataset at start to capture version for commit
-    this.dataset = openDataset();
+    // For new tables (staged creates), create an empty dataset first.
+    // For existing tables, open to capture version for commit.
+    this.dataset = newTable ? createEmptyDataset() : openDataset();
+  }
+
+  private Dataset createEmptyDataset() {
+    String uri = writeOptions.getDatasetUri();
+    Map<String, String> merged =
+        LanceRuntime.mergeStorageOptions(writeOptions.getStorageOptions(), initialStorageOptions);
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", true, false);
+    WriteParams writeParams =
+        new WriteParams.Builder()
+            .withMode(WriteParams.WriteMode.CREATE)
+            .withStorageOptions(merged)
+            .build();
+    return Dataset.create(LanceRuntime.allocator(), uri, arrowSchema, writeParams);
   }
 
   private Dataset openDataset() {

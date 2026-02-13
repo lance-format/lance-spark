@@ -31,6 +31,7 @@ public class SparkWrite implements Write {
   private final LanceSparkWriteOptions writeOptions;
   private final StructType schema;
   private final boolean overwrite;
+  private final boolean newTable;
 
   /**
    * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
@@ -49,6 +50,7 @@ public class SparkWrite implements Write {
       StructType schema,
       LanceSparkWriteOptions writeOptions,
       boolean overwrite,
+      boolean newTable,
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
@@ -57,6 +59,7 @@ public class SparkWrite implements Write {
     this.schema = schema;
     this.writeOptions = writeOptions;
     this.overwrite = overwrite;
+    this.newTable = newTable;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
@@ -70,6 +73,7 @@ public class SparkWrite implements Write {
         schema,
         writeOptions,
         overwrite,
+        newTable,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
@@ -87,6 +91,7 @@ public class SparkWrite implements Write {
     private final LanceSparkWriteOptions writeOptions;
     private final StructType schema;
     private boolean overwrite = false;
+    private boolean newTable = false;
     private Runnable onCommit;
 
     /**
@@ -120,6 +125,10 @@ public class SparkWrite implements Write {
       this.onCommit = onCommit;
     }
 
+    public void setNewTable(boolean newTable) {
+      this.newTable = newTable;
+    }
+
     @Override
     public Write build() {
       LanceSparkWriteOptions options =
@@ -144,6 +153,7 @@ public class SparkWrite implements Write {
           schema,
           options,
           overwrite,
+          newTable,
           initialStorageOptions,
           namespaceImpl,
           namespaceProperties,

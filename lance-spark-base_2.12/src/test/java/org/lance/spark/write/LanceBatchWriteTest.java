@@ -64,6 +64,7 @@ public class LanceBatchWriteTest {
               sparkSchema,
               writeOptions,
               false,
+              false, // newTable
               null, // initialStorageOptions
               null, // namespaceImpl
               null, // namespaceProperties
