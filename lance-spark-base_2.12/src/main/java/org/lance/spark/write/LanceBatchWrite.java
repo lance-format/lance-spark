@@ -35,6 +35,7 @@ import org.apache.spark.sql.util.LanceArrowUtils;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 public class LanceBatchWrite implements BatchWrite {
@@ -57,7 +58,7 @@ public class LanceBatchWrite implements BatchWrite {
   /** Dataset opened at start, held for commit to ensure version consistency. */
   private final Dataset dataset;
 
-  private final Runnable onCommit;
+  private final AtomicBoolean dataCommitted;
 
   public LanceBatchWrite(
       StructType schema,
@@ -68,7 +69,7 @@ public class LanceBatchWrite implements BatchWrite {
       String namespaceImpl,
       Map<String, String> namespaceProperties,
       List<String> tableId,
-      Runnable onCommit) {
+      AtomicBoolean dataCommitted) {
     this.schema = schema;
     this.writeOptions = writeOptions;
     this.overwrite = overwrite;
@@ -76,7 +77,7 @@ public class LanceBatchWrite implements BatchWrite {
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
-    this.onCommit = onCommit;
+    this.dataCommitted = dataCommitted;
 
     // For new tables (staged creates), create an empty dataset first.
     // For existing tables, open to capture version for commit.
@@ -150,8 +151,8 @@ public class LanceBatchWrite implements BatchWrite {
 
       // Commit using the dataset opened at start (ensures version consistency)
       dataset.newTransactionBuilder().operation(operation).build().commit();
-      if (onCommit != null) {
-        onCommit.run();
+      if (dataCommitted != null) {
+        dataCommitted.set(true);
       }
     } finally {
       dataset.close();

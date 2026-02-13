@@ -25,6 +25,7 @@ import org.apache.spark.sql.types.StructType;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Spark write builder. */
 public class SparkWrite implements Write {
@@ -44,7 +45,7 @@ public class SparkWrite implements Write {
 
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
-  private final Runnable onCommit;
+  private final AtomicBoolean dataCommitted;
 
   SparkWrite(
       StructType schema,
@@ -55,7 +56,7 @@ public class SparkWrite implements Write {
       String namespaceImpl,
       Map<String, String> namespaceProperties,
       List<String> tableId,
-      Runnable onCommit) {
+      AtomicBoolean dataCommitted) {
     this.schema = schema;
     this.writeOptions = writeOptions;
     this.overwrite = overwrite;
@@ -64,7 +65,7 @@ public class SparkWrite implements Write {
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
-    this.onCommit = onCommit;
+    this.dataCommitted = dataCommitted;
   }
 
   @Override
@@ -78,7 +79,7 @@ public class SparkWrite implements Write {
         namespaceImpl,
         namespaceProperties,
         tableId,
-        onCommit);
+        dataCommitted);
   }
 
   @Override
@@ -92,7 +93,7 @@ public class SparkWrite implements Write {
     private final StructType schema;
     private boolean overwrite = false;
     private boolean newTable = false;
-    private Runnable onCommit;
+    private AtomicBoolean dataCommitted;
 
     /**
      * Initial storage options fetched from namespace.describeTable() on the driver. These are
@@ -121,8 +122,8 @@ public class SparkWrite implements Write {
       this.tableId = tableId;
     }
 
-    public void setOnCommit(Runnable onCommit) {
-      this.onCommit = onCommit;
+    public void setDataCommitted(AtomicBoolean dataCommitted) {
+      this.dataCommitted = dataCommitted;
     }
 
     public void setNewTable(boolean newTable) {
@@ -158,7 +159,7 @@ public class SparkWrite implements Write {
           namespaceImpl,
           namespaceProperties,
           tableId,
-          onCommit);
+          dataCommitted);
     }
 
     @Override
