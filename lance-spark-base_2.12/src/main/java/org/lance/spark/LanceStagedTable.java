@@ -13,8 +13,6 @@
  */
 package org.lance.spark;
 
-import static org.lance.spark.utils.Utils.openDataset;
-
 import org.lance.Dataset;
 import org.lance.WriteParams;
 import org.lance.namespace.LanceNamespace;
@@ -32,6 +30,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+
+import static org.lance.spark.utils.Utils.openDataset;
 
 /**
  * A staged table that supports atomic create, replace, and create-or-replace operations.
@@ -132,10 +132,7 @@ public class LanceStagedTable extends LanceDataset implements StagedTable {
         dataset
             .newTransactionBuilder()
             .operation(
-                Overwrite.builder()
-                    .fragments(Collections.emptyList())
-                    .schema(arrowSchema)
-                    .build())
+                Overwrite.builder().fragments(Collections.emptyList()).schema(arrowSchema).build())
             .build()
             .commit();
       }
