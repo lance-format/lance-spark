@@ -55,7 +55,7 @@ public class LanceStagedTable extends LanceDataset implements StagedTable {
   private final Schema arrowSchema;
   private final Map<String, String> storageOptions;
   private final boolean tableExisted;
-  private final AtomicBoolean dataCommitted = new AtomicBoolean(false);
+  private final AtomicBoolean commitFlag = new AtomicBoolean(false);
 
   /**
    * Creates a new staged table.
@@ -98,7 +98,7 @@ public class LanceStagedTable extends LanceDataset implements StagedTable {
     WriteBuilder builder = super.newWriteBuilder(info);
     if (builder instanceof SparkWrite.SparkWriteBuilder) {
       SparkWrite.SparkWriteBuilder sparkBuilder = (SparkWrite.SparkWriteBuilder) builder;
-      sparkBuilder.setDataCommitted(dataCommitted);
+      sparkBuilder.setCommitFlag(commitFlag);
       if (!tableExisted) {
         sparkBuilder.setNewTable(true);
       }
@@ -111,7 +111,7 @@ public class LanceStagedTable extends LanceDataset implements StagedTable {
 
   @Override
   public void commitStagedChanges() {
-    if (dataCommitted.get()) {
+    if (commitFlag.get()) {
       return;
     }
 

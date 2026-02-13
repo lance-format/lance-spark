@@ -45,7 +45,7 @@ public class SparkWrite implements Write {
 
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
-  private final AtomicBoolean dataCommitted;
+  private final AtomicBoolean commitFlag;
 
   SparkWrite(
       StructType schema,
@@ -56,7 +56,7 @@ public class SparkWrite implements Write {
       String namespaceImpl,
       Map<String, String> namespaceProperties,
       List<String> tableId,
-      AtomicBoolean dataCommitted) {
+      AtomicBoolean commitFlag) {
     this.schema = schema;
     this.writeOptions = writeOptions;
     this.overwrite = overwrite;
@@ -65,7 +65,7 @@ public class SparkWrite implements Write {
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
-    this.dataCommitted = dataCommitted;
+    this.commitFlag = commitFlag;
   }
 
   @Override
@@ -79,7 +79,7 @@ public class SparkWrite implements Write {
         namespaceImpl,
         namespaceProperties,
         tableId,
-        dataCommitted);
+        commitFlag);
   }
 
   @Override
@@ -93,7 +93,7 @@ public class SparkWrite implements Write {
     private final StructType schema;
     private boolean overwrite = false;
     private boolean newTable = false;
-    private AtomicBoolean dataCommitted;
+    private AtomicBoolean commitFlag;
 
     /**
      * Initial storage options fetched from namespace.describeTable() on the driver. These are
@@ -122,8 +122,8 @@ public class SparkWrite implements Write {
       this.tableId = tableId;
     }
 
-    public void setDataCommitted(AtomicBoolean dataCommitted) {
-      this.dataCommitted = dataCommitted;
+    public void setCommitFlag(AtomicBoolean commitFlag) {
+      this.commitFlag = commitFlag;
     }
 
     public void setNewTable(boolean newTable) {
@@ -159,7 +159,7 @@ public class SparkWrite implements Write {
           namespaceImpl,
           namespaceProperties,
           tableId,
-          dataCommitted);
+          commitFlag);
     }
 
     @Override
