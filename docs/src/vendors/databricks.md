@@ -1,22 +1,5 @@
 # Databricks
 
-## Supported Environments
-
-| Environment     | Catalog          | Support Status      | Notes                                                       |
-|-----------------|------------------|---------------------|-------------------------------------------------------------|
-| Classic Compute | Unity Catalog    | ❌ Not Supported     | Databricks uses a proprietary implementation not compatible with Spark extensions |
-| Classic Compute | Hive Metastore   | ❌ Not Supported     | Vended storage credentials through Databricks are not supported |
-| Classic Compute | Lance Namespace  | ✅ Supported         | Recommended approach; bypasses Databricks catalog integration |
-| SQL Warehouse   | —                | ❌ Not Supported     | Does not support custom Spark datasources or SQL Extensions |
-
-!!! warning "Databricks Catalogs"
-    Using Databricks catalogs is not officially supported.
-
-    - **Unity Catalog** &mdash; Databricks uses a proprietary Unity Catalog implementation that is not compatible with OSS Unity Catalog. Please contact Databricks for support.
-    - **Hive Metastore** &mdash; Lance Spark can read and write to the Databricks legacy Hive Metastore, but vended storage credentials through Databricks are not currently supported, resulting in a cumbersome authentication process.
-
-    The recommended approach is to use the Lance namespace catalog (`LanceNamespaceSparkCatalog`) directly, which bypasses Databricks catalog integration entirely. See [Configure Spark](#3-configure-spark) below.
-
 ## Classic Compute Setup
 
 ### 1. Create a Cluster
@@ -43,6 +26,23 @@ Navigate to **Classic Compute &rarr; \<cluster\> &rarr; Libraries &rarr; Install
 Navigate to **Classic Compute &rarr; \<cluster\> &rarr; Advanced Configuration &rarr; Spark Config** to populate namespace configuration options. The catalog must use `LanceNamespaceSparkCatalog`, other catalog-specific and namespace-specific properties should be set as needed. Refer to the [Lance Spark Config docs](https://lance.org/integrations/spark/config/#example-namespace-implementations) for all available namespace implementations.
 
 ## Known Limitations
+
+### Supported Environments
+
+| Environment     | Catalog          | Support Status      | Notes                                                       |
+|-----------------|------------------|---------------------|-------------------------------------------------------------|
+| Classic Compute | Unity Catalog    | ❌ Not Supported     | Databricks uses a proprietary implementation not compatible with Spark extensions |
+| Classic Compute | Hive Metastore   | ❌ Not Supported     | Vended storage credentials through Databricks are not supported |
+| Classic Compute | Lance Namespace  | ✅ Supported         | Recommended approach; bypasses Databricks catalog integration |
+| SQL Warehouse   | —                | ❌ Not Supported     | Does not support custom Spark datasources or SQL Extensions |
+
+!!! warning "Databricks Catalogs"
+    Using Databricks catalogs is not officially supported.
+
+    - **Unity Catalog** &mdash; Databricks uses a proprietary Unity Catalog implementation that is not compatible with OSS Unity Catalog. Please contact Databricks for support.
+    - **Hive Metastore** &mdash; Lance Spark can read and write to the Databricks legacy Hive Metastore, but vended storage credentials through Databricks are not currently supported, resulting in a cumbersome authentication process.
+
+    The recommended approach is to use the Lance namespace catalog (`LanceNamespaceSparkCatalog`) directly, which bypasses Databricks catalog integration entirely. See [Configure Spark](#3-configure-spark) above.
 
 ### SQL Extensions Not Available
 
