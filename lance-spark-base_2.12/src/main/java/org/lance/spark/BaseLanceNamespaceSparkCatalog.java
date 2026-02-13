@@ -26,7 +26,6 @@ import org.lance.namespace.model.DropNamespaceRequest;
 import org.lance.namespace.model.DropTableRequest;
 import org.lance.namespace.model.ListTablesRequest;
 import org.lance.namespace.model.ListTablesResponse;
-import org.lance.operation.Overwrite;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.SchemaConverter;
@@ -548,26 +547,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
             Optional.of(tableIdList));
 
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
-    Runnable commitAction =
-        () -> {
-          try (Dataset dataset =
-              Dataset.write()
-                  .allocator(LanceRuntime.allocator())
-                  .namespace(namespace)
-                  .tableId(tableIdList)
-                  .schema(arrowSchema)
-                  .mode(WriteParams.WriteMode.CREATE)
-                  .storageOptions(catalogConfig.getStorageOptions())
-                  .execute()) {
-            // Table created on commit
-          }
-        };
-    Runnable abortAction =
-        () -> {
-          DeregisterTableRequest deregisterRequest = new DeregisterTableRequest();
-          tableIdList.forEach(deregisterRequest::addIdItem);
-          namespace.deregisterTable(deregisterRequest);
-        };
     return new LanceStagedTable(
         readOptions,
         processedSchema,
@@ -575,8 +554,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
         namespaceImpl,
         namespaceProperties,
         LanceStagedTable.Operation.CREATE,
-        commitAction,
-        abortAction);
+        namespace,
+        tableIdList,
+        arrowSchema,
+        catalogConfig.getStorageOptions(),
+        false);
   }
 
   @Override
@@ -607,20 +589,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
             Optional.of(tableIdList));
 
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
-    Runnable commitAction =
-        () -> {
-          try (Dataset dataset = openDataset(readOptions)) {
-            dataset
-                .newTransactionBuilder()
-                .operation(
-                    Overwrite.builder()
-                        .fragments(Collections.emptyList())
-                        .schema(arrowSchema)
-                        .build())
-                .build()
-                .commit();
-          }
-        };
     return new LanceStagedTable(
         readOptions,
         processedSchema,
@@ -628,8 +596,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
         namespaceImpl,
         namespaceProperties,
         LanceStagedTable.Operation.REPLACE,
-        commitAction,
-        null);
+        namespace,
+        tableIdList,
+        arrowSchema,
+        catalogConfig.getStorageOptions(),
+        true);
   }
 
   @Override
@@ -641,7 +612,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
     StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
 
     boolean exists = tableExists(ident);
-    Runnable abortAction;
     String location;
     Map<String, String> initialStorageOptions;
 
@@ -651,21 +621,12 @@ public abstract class BaseLanceNamespaceSparkCatalog
       DeclareTableResponse declareResponse = namespace.declareTable(declareRequest);
       location = declareResponse.getLocation();
       initialStorageOptions = declareResponse.getStorageOptions();
-
-      abortAction =
-          () -> {
-            DeregisterTableRequest deregisterRequest = new DeregisterTableRequest();
-            tableIdList.forEach(deregisterRequest::addIdItem);
-            namespace.deregisterTable(deregisterRequest);
-          };
     } else {
       DescribeTableRequest describeRequest = new DescribeTableRequest();
       tableIdList.forEach(describeRequest::addIdItem);
       DescribeTableResponse describeResponse = namespace.describeTable(describeRequest);
       location = describeResponse.getLocation();
       initialStorageOptions = describeResponse.getStorageOptions();
-
-      abortAction = null;
     }
 
     LanceSparkReadOptions readOptions =
@@ -677,38 +638,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
             Optional.of(tableIdList));
 
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
-    Runnable commitAction;
-    if (!exists) {
-      commitAction =
-          () -> {
-            try (Dataset dataset =
-                Dataset.write()
-                    .allocator(LanceRuntime.allocator())
-                    .namespace(namespace)
-                    .tableId(tableIdList)
-                    .schema(arrowSchema)
-                    .mode(WriteParams.WriteMode.CREATE)
-                    .storageOptions(catalogConfig.getStorageOptions())
-                    .execute()) {
-              // Table created on commit
-            }
-          };
-    } else {
-      commitAction =
-          () -> {
-            try (Dataset dataset = openDataset(readOptions)) {
-              dataset
-                  .newTransactionBuilder()
-                  .operation(
-                      Overwrite.builder()
-                          .fragments(Collections.emptyList())
-                          .schema(arrowSchema)
-                          .build())
-                  .build()
-                  .commit();
-            }
-          };
-    }
     return new LanceStagedTable(
         readOptions,
         processedSchema,
@@ -716,8 +645,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
         namespaceImpl,
         namespaceProperties,
         LanceStagedTable.Operation.CREATE_OR_REPLACE,
-        commitAction,
-        abortAction);
+        namespace,
+        tableIdList,
+        arrowSchema,
+        catalogConfig.getStorageOptions(),
+        exists);
   }
 
   /**

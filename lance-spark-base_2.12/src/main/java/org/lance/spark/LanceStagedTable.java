@@ -13,13 +13,23 @@
  */
 package org.lance.spark;
 
+import static org.lance.spark.utils.Utils.openDataset;
+
+import org.lance.Dataset;
+import org.lance.WriteParams;
+import org.lance.namespace.LanceNamespace;
+import org.lance.namespace.model.DeregisterTableRequest;
+import org.lance.operation.Overwrite;
 import org.lance.spark.write.SparkWrite;
 
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.connector.catalog.StagedTable;
 import org.apache.spark.sql.connector.write.LogicalWriteInfo;
 import org.apache.spark.sql.connector.write.WriteBuilder;
 import org.apache.spark.sql.types.StructType;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -40,8 +50,11 @@ public class LanceStagedTable extends LanceDataset implements StagedTable {
   }
 
   private final Operation operation;
-  private final Runnable commitAction;
-  private final Runnable abortAction;
+  private final LanceNamespace namespace;
+  private final List<String> tableIdList;
+  private final Schema arrowSchema;
+  private final Map<String, String> storageOptions;
+  private final boolean tableExisted;
   private final AtomicBoolean dataCommitted = new AtomicBoolean(false);
 
   /**
@@ -53,8 +66,11 @@ public class LanceStagedTable extends LanceDataset implements StagedTable {
    * @param namespaceImpl namespace implementation type
    * @param namespaceProperties namespace connection properties
    * @param operation the staging operation type
-   * @param commitAction action to run on commitStagedChanges when no data was written (schema-only)
-   * @param abortAction action to run on abortStagedChanges for cleanup
+   * @param namespace the Lance namespace for table operations
+   * @param tableIdList the table identifier path
+   * @param arrowSchema the Arrow schema for the table
+   * @param storageOptions storage options for table creation
+   * @param tableExisted whether the table existed at staging time
    */
   public LanceStagedTable(
       LanceSparkReadOptions readOptions,
@@ -63,12 +79,18 @@ public class LanceStagedTable extends LanceDataset implements StagedTable {
       String namespaceImpl,
       Map<String, String> namespaceProperties,
       Operation operation,
-      Runnable commitAction,
-      Runnable abortAction) {
+      LanceNamespace namespace,
+      List<String> tableIdList,
+      Schema arrowSchema,
+      Map<String, String> storageOptions,
+      boolean tableExisted) {
     super(readOptions, sparkSchema, initialStorageOptions, namespaceImpl, namespaceProperties);
     this.operation = operation;
-    this.commitAction = commitAction;
-    this.abortAction = abortAction;
+    this.namespace = namespace;
+    this.tableIdList = tableIdList;
+    this.arrowSchema = arrowSchema;
+    this.storageOptions = storageOptions;
+    this.tableExisted = tableExisted;
   }
 
   @Override
@@ -86,15 +108,43 @@ public class LanceStagedTable extends LanceDataset implements StagedTable {
 
   @Override
   public void commitStagedChanges() {
-    if (!dataCommitted.get() && commitAction != null) {
-      commitAction.run();
+    if (dataCommitted.get()) {
+      return;
+    }
+
+    if (!tableExisted) {
+      try (Dataset dataset =
+          Dataset.write()
+              .allocator(LanceRuntime.allocator())
+              .namespace(namespace)
+              .tableId(tableIdList)
+              .schema(arrowSchema)
+              .mode(WriteParams.WriteMode.CREATE)
+              .storageOptions(storageOptions)
+              .execute()) {
+        // Table created on commit
+      }
+    } else {
+      try (Dataset dataset = openDataset(readOptions)) {
+        dataset
+            .newTransactionBuilder()
+            .operation(
+                Overwrite.builder()
+                    .fragments(Collections.emptyList())
+                    .schema(arrowSchema)
+                    .build())
+            .build()
+            .commit();
+      }
     }
   }
 
   @Override
   public void abortStagedChanges() {
-    if (abortAction != null) {
-      abortAction.run();
+    if (!tableExisted) {
+      DeregisterTableRequest deregisterRequest = new DeregisterTableRequest();
+      tableIdList.forEach(deregisterRequest::addIdItem);
+      namespace.deregisterTable(deregisterRequest);
     }
   }
 }

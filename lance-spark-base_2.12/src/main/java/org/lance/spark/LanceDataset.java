@@ -132,7 +132,7 @@ public class LanceDataset implements SupportsRead, SupportsWrite, SupportsMetada
         FRAGMENT_ID_COLUMN
       };
 
-  private final LanceSparkReadOptions readOptions;
+  protected final LanceSparkReadOptions readOptions;
   protected final StructType sparkSchema;
 
   /**
