@@ -1570,5 +1570,142 @@ class TestDMLMergeDelete:
         assert result[2].value == 50
 
 
+# =============================================================================
+# Stable Row IDs and CDF (Change Data Feed) Tests
+# =============================================================================
+
+class TestStableRowIds:
+    """Test stable row IDs and CDF version tracking columns.
+
+    These tests provide integration coverage for the enable_stable_row_ids
+    feature across storage backends. Detailed version tracking behavior
+    (updates, deletes, multi-operation workflows) is covered by the unit tests
+    (BaseCdfVersionTrackingTest, BaseCdfQueryPatternsTest, BaseCdfConfigTest).
+    """
+
+    def test_tblproperties_enable_stable_row_ids(self, spark):
+        """Test that TBLPROPERTIES enables CDF version columns."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING,
+                value INT
+            ) TBLPROPERTIES ('enable_stable_row_ids' = 'true')
+        """)
+
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (1, 'Alice', 100),
+            (2, 'Bob', 200),
+            (3, 'Charlie', 300)
+        """)
+
+        result = spark.sql("""
+            SELECT id, _row_created_at_version, _row_last_updated_at_version
+            FROM default.test_table
+            ORDER BY id
+        """).collect()
+
+        assert len(result) == 3
+        for row in result:
+            assert row._row_created_at_version is not None
+            assert row._row_last_updated_at_version is not None
+
+    def test_default_behavior_no_stable_row_ids(self, spark):
+        """Test backwards compatibility: version columns are null without enable_stable_row_ids."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING,
+                value INT
+            )
+        """)
+
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (1, 'Alice', 100),
+            (2, 'Bob', 200)
+        """)
+
+        # Version columns return null when stable row IDs are not enabled
+        result = spark.sql("""
+            SELECT id, _row_created_at_version, _row_last_updated_at_version
+            FROM default.test_table
+            ORDER BY id
+        """).collect()
+
+        assert len(result) == 2
+        for row in result:
+            assert row._row_created_at_version is None
+            assert row._row_last_updated_at_version is None
+
+    def _register_cdf_catalog(self, spark):
+        """Register a lance_cdf catalog with enable_stable_row_ids=true.
+
+        Derives a separate root from the main lance catalog and forwards
+        storage credentials so this works across all backends.
+        """
+        catalog_name = "lance_cdf"
+        prefix = f"spark.sql.catalog.{catalog_name}"
+
+        root = spark.conf.get("spark.sql.catalog.lance.root")
+        cdf_root = root.rstrip("/") + "/cdf_test" if "://" in root else root + "_cdf"
+
+        spark.conf.set(prefix, "org.lance.spark.LanceNamespaceSparkCatalog")
+        spark.conf.set(f"{prefix}.impl", "dir")
+        spark.conf.set(f"{prefix}.root", cdf_root)
+        spark.conf.set(f"{prefix}.enable_stable_row_ids", "true")
+
+        for key in [
+            "storage.account_name", "storage.account_key",
+            "storage.azure_storage_endpoint", "storage.allow_http",
+            "storage.endpoint", "storage.aws_allow_http",
+            "storage.access_key_id", "storage.secret_access_key",
+        ]:
+            try:
+                val = spark.conf.get(f"spark.sql.catalog.lance.{key}")
+                spark.conf.set(f"{prefix}.{key}", val)
+            except Exception:
+                print(f"Storage key {key} not set for this backend, skipping")
+
+        return catalog_name
+
+    def test_catalog_level_stable_row_ids(self, spark):
+        """Test that catalog-level enable_stable_row_ids enables version columns without TBLPROPERTIES."""
+        catalog_name = self._register_cdf_catalog(spark)
+
+        try:
+            # CREATE TABLE without TBLPROPERTIES — relies on catalog-level default
+            spark.sql(f"""
+                CREATE TABLE {catalog_name}.default.test_table (
+                    id INT,
+                    name STRING,
+                    value INT
+                )
+            """)
+
+            spark.sql(f"""
+                INSERT INTO {catalog_name}.default.test_table VALUES
+                (1, 'Alice', 100),
+                (2, 'Bob', 200)
+            """)
+
+            result = spark.sql(f"""
+                SELECT id, _row_created_at_version, _row_last_updated_at_version
+                FROM {catalog_name}.default.test_table
+                ORDER BY id
+            """).collect()
+
+            assert len(result) == 2
+            for row in result:
+                assert row._row_created_at_version is not None
+                assert row._row_last_updated_at_version is not None
+        finally:
+            try:
+                spark.sql(f"DROP TABLE IF EXISTS {catalog_name}.default.test_table PURGE")
+            except Exception as e:
+                print(f"Failed to clean up {catalog_name}.default.test_table: {e}")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
