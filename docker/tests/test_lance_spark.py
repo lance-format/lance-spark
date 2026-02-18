@@ -1639,6 +1639,112 @@ class TestStableRowIds:
             assert row._row_created_at_version is None
             assert row._row_last_updated_at_version is None
 
+    @requires_update_or_merge
+    def test_cdc_incremental_ingestion_pattern(self, spark):
+        """Test CDC incremental ingestion pipeline pattern.
+
+        Simulates a CDC pipeline that tracks the last processed version and
+        incrementally processes changes using version tracking columns.
+        """
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING,
+                value INT
+            ) TBLPROPERTIES ('enable_stable_row_ids' = 'true')
+        """)
+
+        # v2: Initial data load
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (1, 'Alice', 100),
+            (2, 'Bob', 200),
+            (3, 'Charlie', 300)
+        """)
+
+        # CDC Pipeline: Process batch 1 (everything since v1=CREATE TABLE)
+        last_processed_version = 1
+        batch1 = spark.sql(f"""
+            SELECT id, name, value, _row_created_at_version, _row_last_updated_at_version
+            FROM default.test_table
+            WHERE (_row_created_at_version > {last_processed_version})
+               OR (_row_last_updated_at_version > {last_processed_version})
+            ORDER BY id
+        """).collect()
+
+        assert len(batch1) == 3
+        assert all(row._row_created_at_version == 2 for row in batch1)
+        last_processed_version = 2
+
+        # v3: Update one row, v4: Insert new row
+        spark.sql("UPDATE default.test_table SET value = value + 50 WHERE id = 1")
+        spark.sql("INSERT INTO default.test_table VALUES (4, 'David', 400)")
+
+        # CDC Pipeline: Process batch 2 (changes since v2)
+        batch2 = spark.sql(f"""
+            SELECT id, name, value, _row_created_at_version, _row_last_updated_at_version
+            FROM default.test_table
+            WHERE (_row_created_at_version > {last_processed_version})
+               OR (_row_last_updated_at_version > {last_processed_version})
+            ORDER BY id
+        """).collect()
+
+        assert len(batch2) == 2
+        # Alice was updated in v3
+        alice = [r for r in batch2 if r.id == 1][0]
+        assert alice.value == 150
+        assert alice._row_created_at_version == 2
+        assert alice._row_last_updated_at_version == 3
+        # David was inserted in v4
+        david = [r for r in batch2 if r.id == 4][0]
+        assert david.value == 400
+        assert david._row_created_at_version == 4
+        assert david._row_last_updated_at_version == 4
+        last_processed_version = 4
+
+        # v5: More updates
+        spark.sql("UPDATE default.test_table SET value = value + 100 WHERE id IN (2, 3)")
+
+        # CDC Pipeline: Process batch 3 (changes since v4)
+        batch3 = spark.sql(f"""
+            SELECT id, name, value, _row_created_at_version, _row_last_updated_at_version
+            FROM default.test_table
+            WHERE (_row_created_at_version > {last_processed_version})
+               OR (_row_last_updated_at_version > {last_processed_version})
+            ORDER BY id
+        """).collect()
+
+        assert len(batch3) == 2
+        assert all(row._row_last_updated_at_version == 5 for row in batch3)
+        # Bob and Charlie were updated
+        ids = [r.id for r in batch3]
+        assert ids == [2, 3]
+        # Verify updated values
+        assert batch3[0].value == 300  # Bob: 200 + 100
+        assert batch3[1].value == 400  # Charlie: 300 + 100
+        last_processed_version = 5
+
+        # v6: Update entire table
+        spark.sql("UPDATE default.test_table SET value = value * 2")
+
+        # CDC Pipeline: Process batch 4 (changes since v5)
+        batch4 = spark.sql(f"""
+            SELECT id, name, value, _row_created_at_version, _row_last_updated_at_version
+            FROM default.test_table
+            WHERE (_row_created_at_version > {last_processed_version})
+               OR (_row_last_updated_at_version > {last_processed_version})
+            ORDER BY id
+        """).collect()
+
+        # All 4 rows should be updated
+        assert len(batch4) == 4
+        assert all(row._row_last_updated_at_version == 6 for row in batch4)
+        # Verify all values were doubled
+        assert batch4[0].value == 300  # Alice: 150 * 2
+        assert batch4[1].value == 600  # Bob: 300 * 2
+        assert batch4[2].value == 800  # Charlie: 400 * 2
+        assert batch4[3].value == 800  # David: 400 * 2
+
     def _register_cdf_catalog(self, spark):
         """Register a lance_cdf catalog with enable_stable_row_ids=true.
 
