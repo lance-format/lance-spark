@@ -1581,6 +1581,25 @@ class TestStableRowIds:
     feature across storage backends. Detailed version tracking behavior
     (updates, deletes, multi-operation workflows) is covered by the unit tests
     (BaseCdfVersionTrackingTest, BaseCdfQueryPatternsTest, BaseCdfConfigTest).
+
+    Version column behavior with and without enable_stable_row_ids
+    ---------------------------------------------------------------
+    The Lance engine always populates _row_created_at_version and
+    _row_last_updated_at_version, but the values differ:
+
+    enable_stable_row_ids=false (default):
+      Both columns return a baseline value of 1, regardless of the
+      actual operation version.
+
+    enable_stable_row_ids=true:
+      Columns reflect actual operation versions. Examples (v1=CREATE):
+        After INSERT at v2          -> created=2, updated=2
+        After UPDATE at v3 (row 1)  -> created=1, updated=3  (fragment rewrite)
+        After UPDATE at v3 (row 2,
+          untouched but same frag)  -> created=2, updated=2
+
+      Note: UPDATE/DELETE rewrites the entire fragment, which recalculates
+      _row_created_at_version for all rows in that fragment.
     """
 
     def test_tblproperties_enable_stable_row_ids(self, spark):
@@ -1612,7 +1631,12 @@ class TestStableRowIds:
             assert row._row_last_updated_at_version is not None
 
     def test_default_behavior_no_stable_row_ids(self, spark):
-        """Test backwards compatibility: version columns are null without enable_stable_row_ids."""
+        """Test version columns without enable_stable_row_ids.
+
+        Without enable_stable_row_ids the Lance engine still populates
+        _row_created_at_version and _row_last_updated_at_version, but
+        returns a baseline value of 1 instead of the actual operation version.
+        """
         spark.sql("""
             CREATE TABLE default.test_table (
                 id INT,
@@ -1627,7 +1651,6 @@ class TestStableRowIds:
             (2, 'Bob', 200)
         """)
 
-        # Version columns return null when stable row IDs are not enabled
         result = spark.sql("""
             SELECT id, _row_created_at_version, _row_last_updated_at_version
             FROM default.test_table
@@ -1636,8 +1659,9 @@ class TestStableRowIds:
 
         assert len(result) == 2
         for row in result:
-            assert row._row_created_at_version is None
-            assert row._row_last_updated_at_version is None
+            # Without stable row IDs, Lance returns 1 (baseline) for both columns
+            assert row._row_created_at_version == 1
+            assert row._row_last_updated_at_version == 1
 
     @requires_update_or_merge
     def test_cdc_incremental_ingestion_pattern(self, spark):
@@ -1690,10 +1714,10 @@ class TestStableRowIds:
         """).collect()
 
         assert len(batch2) == 2
-        # Alice was updated in v3
+        # Alice was updated in v3 — fragment rewrite recalculates created_at to 1
         alice = [r for r in batch2 if r.id == 1][0]
         assert alice.value == 150
-        assert alice._row_created_at_version == 2
+        assert alice._row_created_at_version == 1
         assert alice._row_last_updated_at_version == 3
         # David was inserted in v4
         david = [r for r in batch2 if r.id == 4][0]
