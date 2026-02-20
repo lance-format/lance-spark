@@ -13,8 +13,12 @@
  */
 package org.lance.spark;
 
+import org.lance.namespace.LanceNamespace;
+
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.types.StructType;
 
+import java.util.List;
 import java.util.Map;
 
 public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
@@ -28,5 +32,32 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
       Map<String, String> namespaceProperties) {
     return new LancePositionDeltaDataset(
         readOptions, sparkSchema, initialStorageOptions, namespaceImpl, namespaceProperties);
+  }
+
+  @Override
+  public LanceDataset createStagedDataset(
+      LanceSparkReadOptions readOptions,
+      StructType sparkSchema,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      LanceDataset.StagingOperation stagingOperation,
+      LanceNamespace stagingNamespace,
+      List<String> tableIdList,
+      Schema arrowSchema,
+      Map<String, String> storageOptions,
+      boolean tableExisted) {
+    return new LancePositionDeltaDataset(
+        readOptions,
+        sparkSchema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        stagingOperation,
+        stagingNamespace,
+        tableIdList,
+        arrowSchema,
+        storageOptions,
+        tableExisted);
   }
 }
