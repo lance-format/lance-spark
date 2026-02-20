@@ -221,6 +221,8 @@ def spark(request):
 
     session = builder.getOrCreate()
     session.sql(f"SET spark.sql.defaultCatalog={CATALOG}")
+    # Create default namespace for multi-level namespace mode
+    session.sql("CREATE NAMESPACE IF NOT EXISTS default")
     yield session
     session.stop()
 
