@@ -35,7 +35,7 @@ import org.apache.spark.sql.util.LanceArrowUtils;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 public class LanceBatchWrite implements BatchWrite {
@@ -58,7 +58,7 @@ public class LanceBatchWrite implements BatchWrite {
   /** Dataset opened at start, held for commit to ensure version consistency. */
   private final Dataset dataset;
 
-  private final AtomicBoolean commitFlag;
+  private final AtomicReference<StagedCommit> stagedCommit;
 
   public LanceBatchWrite(
       StructType schema,
@@ -69,7 +69,7 @@ public class LanceBatchWrite implements BatchWrite {
       String namespaceImpl,
       Map<String, String> namespaceProperties,
       List<String> tableId,
-      AtomicBoolean commitFlag) {
+      AtomicReference<StagedCommit> stagedCommit) {
     this.schema = schema;
     this.writeOptions = writeOptions;
     this.overwrite = overwrite;
@@ -77,7 +77,7 @@ public class LanceBatchWrite implements BatchWrite {
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
-    this.commitFlag = commitFlag;
+    this.stagedCommit = stagedCommit;
 
     // For new tables (staged creates), create an empty dataset first.
     // For existing tables, open to capture version for commit.
@@ -133,35 +133,42 @@ public class LanceBatchWrite implements BatchWrite {
 
   @Override
   public void commit(WriterCommitMessage[] messages) {
-    try {
-      List<FragmentMetadata> fragments =
-          Arrays.stream(messages)
-              .map(m -> (TaskCommit) m)
-              .map(TaskCommit::getFragments)
-              .flatMap(List::stream)
-              .collect(Collectors.toList());
+    List<FragmentMetadata> fragments =
+        Arrays.stream(messages)
+            .map(m -> (TaskCommit) m)
+            .map(TaskCommit::getFragments)
+            .flatMap(List::stream)
+            .collect(Collectors.toList());
 
-      Operation operation;
-      if (overwrite || writeOptions.isOverwrite()) {
-        Schema arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", true, false);
-        operation = Overwrite.builder().fragments(fragments).schema(arrowSchema).build();
-      } else {
-        operation = Append.builder().fragments(fragments).build();
-      }
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", true, false);
+    boolean isOverwrite = overwrite || writeOptions.isOverwrite();
 
-      // Commit using the dataset opened at start (ensures version consistency)
-      dataset.newTransactionBuilder().operation(operation).build().commit();
-      if (commitFlag != null) {
-        commitFlag.set(true);
+    if (stagedCommit != null) {
+      // For staged tables, store the commit info for commitStagedChanges() to use
+      stagedCommit.set(new StagedCommit(dataset, fragments, arrowSchema, isOverwrite));
+    } else {
+      // For non-staged tables, commit immediately
+      try {
+        Operation operation;
+        if (isOverwrite) {
+          operation = Overwrite.builder().fragments(fragments).schema(arrowSchema).build();
+        } else {
+          operation = Append.builder().fragments(fragments).build();
+        }
+        dataset.newTransactionBuilder().operation(operation).build().commit();
+      } finally {
+        dataset.close();
       }
-    } finally {
-      dataset.close();
     }
   }
 
   @Override
   public void abort(WriterCommitMessage[] messages) {
-    dataset.close();
+    // For staged tables, the dataset will be closed by abortStagedChanges()
+    // For non-staged tables, close it here
+    if (stagedCommit == null) {
+      dataset.close();
+    }
   }
 
   @Override

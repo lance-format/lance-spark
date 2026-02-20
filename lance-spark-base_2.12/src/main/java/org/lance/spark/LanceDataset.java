@@ -13,15 +13,13 @@
  */
 package org.lance.spark;
 
-import org.lance.Dataset;
-import org.lance.WriteParams;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.DeregisterTableRequest;
-import org.lance.operation.Overwrite;
 import org.lance.spark.read.LanceScanBuilder;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.write.AddColumnsBackfillWrite;
 import org.lance.spark.write.SparkWrite;
+import org.lance.spark.write.StagedCommit;
 import org.lance.spark.write.UpdateColumnsBackfillWrite;
 
 import com.google.common.collect.ImmutableSet;
@@ -40,22 +38,23 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
-
-import static org.lance.spark.utils.Utils.openDataset;
 
 /** Lance Spark Dataset. */
 public class LanceDataset
     implements SupportsRead, SupportsWrite, SupportsMetadataColumns, StagedTable {
+
+  private static final Logger LOG = LoggerFactory.getLogger(LanceDataset.class);
 
   /** The type of staging operation for staged table creation. */
   public enum StagingOperation {
@@ -175,7 +174,7 @@ public class LanceDataset
   private final Schema arrowSchema;
   private final Map<String, String> storageOptions;
   private final boolean tableExisted;
-  private final AtomicBoolean commitFlag = new AtomicBoolean(false);
+  private final AtomicReference<StagedCommit> stagedCommit = new AtomicReference<>();
 
   /**
    * Creates a Lance dataset.
@@ -355,7 +354,7 @@ public class LanceDataset
             readOptions.getTableId());
 
     if (stagingOperation != StagingOperation.NONE) {
-      builder.setCommitFlag(commitFlag);
+      builder.setStagedCommit(stagedCommit);
       if (!tableExisted) {
         builder.setNewTable(true);
       }
@@ -429,31 +428,16 @@ public class LanceDataset
       return;
     }
 
-    if (commitFlag.get()) {
-      return;
+    StagedCommit commit = stagedCommit.get();
+    if (commit == null) {
+      throw new IllegalStateException(
+          "No staged commit found. Was newWriteBuilder() called and write completed?");
     }
 
-    if (!tableExisted) {
-      try (Dataset dataset =
-          Dataset.write()
-              .allocator(LanceRuntime.allocator())
-              .namespace(stagingNamespace)
-              .tableId(tableIdList)
-              .schema(arrowSchema)
-              .mode(WriteParams.WriteMode.CREATE)
-              .storageOptions(storageOptions)
-              .execute()) {
-        // Table created on commit
-      }
-    } else {
-      try (Dataset dataset = openDataset(readOptions)) {
-        dataset
-            .newTransactionBuilder()
-            .operation(
-                Overwrite.builder().fragments(Collections.emptyList()).schema(arrowSchema).build())
-            .build()
-            .commit();
-      }
+    try {
+      commit.commit();
+    } finally {
+      commit.close();
     }
   }
 
@@ -463,10 +447,24 @@ public class LanceDataset
       return;
     }
 
+    // Close the staged commit if it exists (without committing)
+    StagedCommit commit = stagedCommit.get();
+    if (commit != null) {
+      commit.close();
+    }
+
+    // Deregister the table if it was newly created
     if (!tableExisted) {
       DeregisterTableRequest deregisterRequest = new DeregisterTableRequest();
       tableIdList.forEach(deregisterRequest::addIdItem);
-      stagingNamespace.deregisterTable(deregisterRequest);
+      try {
+        stagingNamespace.deregisterTable(deregisterRequest);
+      } catch (Exception e) {
+        LOG.warn(
+            "Failed to deregister table {} during abort. Manual cleanup may be required.",
+            tableIdList,
+            e);
+      }
     }
   }
 }

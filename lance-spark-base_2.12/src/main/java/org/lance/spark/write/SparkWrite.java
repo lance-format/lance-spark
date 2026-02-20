@@ -25,7 +25,7 @@ import org.apache.spark.sql.types.StructType;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** Spark write builder. */
 public class SparkWrite implements Write {
@@ -45,7 +45,7 @@ public class SparkWrite implements Write {
 
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
-  private final AtomicBoolean commitFlag;
+  private final AtomicReference<StagedCommit> stagedCommit;
 
   SparkWrite(
       StructType schema,
@@ -56,7 +56,7 @@ public class SparkWrite implements Write {
       String namespaceImpl,
       Map<String, String> namespaceProperties,
       List<String> tableId,
-      AtomicBoolean commitFlag) {
+      AtomicReference<StagedCommit> stagedCommit) {
     this.schema = schema;
     this.writeOptions = writeOptions;
     this.overwrite = overwrite;
@@ -65,7 +65,7 @@ public class SparkWrite implements Write {
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
-    this.commitFlag = commitFlag;
+    this.stagedCommit = stagedCommit;
   }
 
   @Override
@@ -79,7 +79,7 @@ public class SparkWrite implements Write {
         namespaceImpl,
         namespaceProperties,
         tableId,
-        commitFlag);
+        stagedCommit);
   }
 
   @Override
@@ -87,13 +87,13 @@ public class SparkWrite implements Write {
     throw new UnsupportedOperationException();
   }
 
-  /** Task commit. */
+  /** Spark write builder. */
   public static class SparkWriteBuilder implements SupportsTruncate, WriteBuilder {
     private final LanceSparkWriteOptions writeOptions;
     private final StructType schema;
     private boolean overwrite = false;
     private boolean newTable = false;
-    private AtomicBoolean commitFlag;
+    private AtomicReference<StagedCommit> stagedCommit;
 
     /**
      * Initial storage options fetched from namespace.describeTable() on the driver. These are
@@ -122,8 +122,8 @@ public class SparkWrite implements Write {
       this.tableId = tableId;
     }
 
-    public void setCommitFlag(AtomicBoolean commitFlag) {
-      this.commitFlag = commitFlag;
+    public void setStagedCommit(AtomicReference<StagedCommit> stagedCommit) {
+      this.stagedCommit = stagedCommit;
     }
 
     public void setNewTable(boolean newTable) {
@@ -159,7 +159,7 @@ public class SparkWrite implements Write {
           namespaceImpl,
           namespaceProperties,
           tableId,
-          commitFlag);
+          stagedCommit);
     }
 
     @Override
