@@ -32,7 +32,6 @@ public class SparkWrite implements Write {
   private final LanceSparkWriteOptions writeOptions;
   private final StructType schema;
   private final boolean overwrite;
-  private final boolean newTable;
 
   /**
    * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
@@ -46,6 +45,9 @@ public class SparkWrite implements Write {
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
   private final AtomicReference<StagedCommit> stagedCommit;
+
+  /** Whether this is a new table (staged create). Passed to LanceBatchWrite for dataset opening. */
+  private final boolean newTable;
 
   SparkWrite(
       StructType schema,
