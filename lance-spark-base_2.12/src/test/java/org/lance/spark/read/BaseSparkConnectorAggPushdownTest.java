@@ -45,6 +45,8 @@ public abstract class BaseSparkConnectorAggPushdownTest {
             .config("spark.sql.catalog.lance.impl", "dir")
             .config("spark.sql.catalog.lance.root", tempDir.toString())
             .getOrCreate();
+    // Create default namespace for multi-level namespace mode
+    spark.sql("CREATE NAMESPACE IF NOT EXISTS lance.default");
   }
 
   @AfterAll

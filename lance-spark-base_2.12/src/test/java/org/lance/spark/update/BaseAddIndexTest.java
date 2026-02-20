@@ -60,6 +60,7 @@ public abstract class BaseAddIndexTest {
                 "spark.sql.extensions", "org.lance.spark.extensions.LanceSparkSessionExtensions")
             .config("spark.sql.catalog." + catalogName + ".impl", "dir")
             .config("spark.sql.catalog." + catalogName + ".root", testRoot)
+            .config("spark.sql.catalog." + catalogName + ".single_level_ns", "true")
             .getOrCreate();
     this.tableName = "create_index_test_" + UUID.randomUUID().toString().replace("-", "");
     this.fullTable = this.catalogName + ".default." + this.tableName;

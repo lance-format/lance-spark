@@ -49,6 +49,8 @@ public abstract class BaseVacuumTest {
             .config("spark.sql.catalog." + catalogName + ".impl", "dir")
             .config("spark.sql.catalog." + catalogName + ".root", tempDir.toString())
             .getOrCreate();
+    // Create default namespace for multi-level namespace mode
+    spark.sql("CREATE NAMESPACE IF NOT EXISTS " + catalogName + ".default");
   }
 
   @AfterEach

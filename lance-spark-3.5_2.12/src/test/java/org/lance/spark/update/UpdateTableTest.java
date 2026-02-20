@@ -55,6 +55,8 @@ public class UpdateTableTest {
     }
 
     catalog = (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    // Create default namespace for multi-level namespace mode
+    spark.sql("CREATE NAMESPACE IF NOT EXISTS " + catalogName + ".default");
   }
 
   @AfterEach
