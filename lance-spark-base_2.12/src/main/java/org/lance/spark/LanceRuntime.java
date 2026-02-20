@@ -129,6 +129,21 @@ public final class LanceRuntime {
   }
 
   /**
+   * Creates a namespace connection.
+   *
+   * @param namespaceImpl the namespace implementation type
+   * @param namespaceProperties the namespace connection properties (can be null)
+   * @return a LanceNamespace connection, or null if namespaceImpl is null
+   */
+  public static LanceNamespace getOrCreateNamespace(
+      String namespaceImpl, Map<String, String> namespaceProperties) {
+    if (namespaceImpl == null) {
+      return null;
+    }
+    return LanceNamespace.connect(namespaceImpl, namespaceProperties, allocator());
+  }
+
+  /**
    * Merges base storage options with initial storage options from namespace.describeTable().
    *
    * @param baseOptions the base storage options
