@@ -104,20 +104,3 @@ For large scans, increasing this to match your CPU core count enables more concu
 ```bash
 export LANCE_IO_THREADS=128
 ```
-
-### Batch Size
-
-Set via Spark read option `batch_size` (default: 512).
-
-Controls the number of rows per batch during vectorized reads.
-Lance uses a relatively small batch size for random access use cases.
-If you would like comparable performance to analytic formats like Iceberg or Parquet,
-they use a default of 5000 batch size.
-
-```python
-df = spark.read \
-    .option("batch_size", "5000") \
-    .table("my_table") \
-    .select("embedding") \
-    .collect()
-```

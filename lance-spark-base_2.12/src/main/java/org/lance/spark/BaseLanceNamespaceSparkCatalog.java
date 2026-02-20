@@ -73,19 +73,19 @@ public abstract class BaseLanceNamespaceSparkCatalog
   private static final String CONFIG_IMPL = "impl";
 
   /**
-   * Spark requires at least 3 levels of catalog -> namespaces -> table (most uses exactly 3 levels)
-   * For namespaces that are only 2 levels (e.g. dir), this puts an extra dummy level namespace with
-   * the given name, so that a namespace mounted as ns1 in Spark will have ns1 -> dummy_name ->
-   * table structure.
+   * Enable single-level namespace mode with a virtual "default" namespace.
    *
-   * <p>For native implementations, we perform the following handling automatically:
+   * <p>When true: Tables are accessed as catalog.default.table, where "default" is a virtual
+   * namespace that maps to the root level. CREATE NAMESPACE is not allowed.
    *
-   * <ul>
-   *   <li>dir: directly configure extra_level=default
-   *   <li>rest: if ListNamespaces returns error, configure extra_level=default
-   * </ul>
+   * <p>When false (default): Multi-level namespace mode. Namespaces must be created explicitly with
+   * CREATE NAMESPACE before creating tables. Tables use manifest-based storage with hash-prefixed
+   * paths for better scalability.
+   *
+   * <p>For REST implementations: if ListNamespaces fails, single_level_ns is automatically enabled
+   * for backward compatibility with flat namespace backends.
    */
-  private static final String CONFIG_EXTRA_LEVEL = "extra_level";
+  private static final String CONFIG_SINGLE_LEVEL_NS = "single_level_ns";
 
   /** Supply in CREATE TABLE options to supply a different location to use for the table */
   private static final String CREATE_TABLE_PROPERTY_LOCATION = "location";
@@ -98,7 +98,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   private LanceNamespace namespace;
   private String name;
-  private Optional<String> extraLevel;
+  private boolean singleLevelNs;
   private Optional<List<String>> parentPrefix;
   private LanceSparkCatalogConfig catalogConfig;
   private Map<String, String> storageOptions;
@@ -149,15 +149,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
     // Use the global buffer allocator
     this.namespace = LanceNamespace.connect(impl, namespaceOptions, LanceRuntime.allocator());
 
-    // Handle extra level name configuration
-    if (options.containsKey(CONFIG_EXTRA_LEVEL)) {
-      this.extraLevel = Optional.of(options.get(CONFIG_EXTRA_LEVEL));
-    } else if ("dir".equals(impl)) {
-      this.extraLevel = Optional.of("default");
+    // Handle single-level namespace configuration
+    if (options.containsKey(CONFIG_SINGLE_LEVEL_NS)) {
+      this.singleLevelNs = Boolean.parseBoolean(options.get(CONFIG_SINGLE_LEVEL_NS));
     } else if ("rest".equals(impl)) {
-      this.extraLevel = determineExtraLevelForRest();
+      // For REST: auto-detect based on whether ListNamespaces works
+      this.singleLevelNs = determineSingleLevelNsForRest();
     } else {
-      this.extraLevel = Optional.empty();
+      // Default: multi-level namespace mode (manifest mode)
+      this.singleLevelNs = false;
     }
   }
 
@@ -233,12 +233,12 @@ public abstract class BaseLanceNamespaceSparkCatalog
         // Note: parent prefix removal is not needed here as the response
         // only contains the namespace name, not the full path
 
-        // Add extra level if configured
-        if (extraLevel.isPresent()) {
-          String[] withExtra = new String[2];
-          withExtra[0] = extraLevel.get();
-          withExtra[1] = ns;
-          nsArray = withExtra;
+        // In single-level mode, prepend virtual "default" namespace
+        if (singleLevelNs) {
+          String[] withDefault = new String[2];
+          withDefault[0] = "default";
+          withDefault[1] = ns;
+          nsArray = withDefault;
         }
 
         result.add(nsArray);
@@ -252,8 +252,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   @Override
   public String[][] listNamespaces(String[] parent) throws NoSuchNamespaceException {
-    // Remove extra level and add parent prefix
-    String[] actualParent = removeExtraLevelsFromNamespace(parent);
+    // Remove single-level prefix and add parent prefix
+    String[] actualParent = removeSingleLevelPrefixFromNamespace(parent);
     actualParent = addParentPrefix(actualParent);
 
     org.lance.namespace.model.ListNamespacesRequest request =
@@ -281,13 +281,13 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   @Override
   public boolean namespaceExists(String[] namespace) {
-    // If the namespace is exactly the extra level, it exists as a virtual namespace
-    if (extraLevel.isPresent() && namespace.length == 1 && extraLevel.get().equals(namespace[0])) {
+    // In single-level mode, the virtual "default" namespace always exists
+    if (singleLevelNs && namespace.length == 1 && "default".equals(namespace[0])) {
       return true;
     }
 
-    // Remove extra levels and add parent prefix
-    String[] actualNamespace = removeExtraLevelsFromNamespace(namespace);
+    // Remove single-level prefix and add parent prefix
+    String[] actualNamespace = removeSingleLevelPrefixFromNamespace(namespace);
     actualNamespace = addParentPrefix(actualNamespace);
 
     org.lance.namespace.model.NamespaceExistsRequest request =
@@ -305,8 +305,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
   @Override
   public Map<String, String> loadNamespaceMetadata(String[] namespace)
       throws NoSuchNamespaceException {
-    // Remove extra levels and add parent prefix
-    String[] actualNamespace = removeExtraLevelsFromNamespace(namespace);
+    // Remove single-level prefix and add parent prefix
+    String[] actualNamespace = removeSingleLevelPrefixFromNamespace(namespace);
     actualNamespace = addParentPrefix(actualNamespace);
 
     org.lance.namespace.model.DescribeNamespaceRequest request =
@@ -327,8 +327,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
   @Override
   public void createNamespace(String[] namespace, Map<String, String> properties)
       throws NamespaceAlreadyExistsException {
-    // Remove extra levels and add parent prefix
-    String[] actualNamespace = removeExtraLevelsFromNamespace(namespace);
+    // Remove single-level prefix and add parent prefix
+    String[] actualNamespace = removeSingleLevelPrefixFromNamespace(namespace);
     actualNamespace = addParentPrefix(actualNamespace);
 
     org.lance.namespace.model.CreateNamespaceRequest request =
@@ -352,8 +352,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
   @Override
   public boolean dropNamespace(String[] namespace, boolean cascade)
       throws NoSuchNamespaceException {
-    // Remove extra levels and add parent prefix
-    String[] actualNamespace = removeExtraLevelsFromNamespace(namespace);
+    // Remove single-level prefix and add parent prefix
+    String[] actualNamespace = removeSingleLevelPrefixFromNamespace(namespace);
     actualNamespace = addParentPrefix(actualNamespace);
 
     DropNamespaceRequest request = new DropNamespaceRequest();
@@ -372,7 +372,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   @Override
   public Identifier[] listTables(String[] namespace) throws NoSuchNamespaceException {
-    String[] actualNamespace = removeExtraLevelsFromNamespace(namespace);
+    String[] actualNamespace = removeSingleLevelPrefixFromNamespace(namespace);
     actualNamespace = addParentPrefix(actualNamespace);
 
     ListTablesRequest request = new ListTablesRequest();
@@ -520,41 +520,42 @@ public abstract class BaseLanceNamespaceSparkCatalog
   }
 
   /**
-   * Removes the extra level from a Spark identifier if it matches the configured extra level name.
-   * For example, with extraLevelName="default": - ["default", "table"] -> ["table"] - ["default"]
-   * -> [] (root namespace) - ["other", "table"] -> ["other", "table"] (unchanged)
+   * Removes the virtual "default" prefix from a Spark identifier in single-level mode. For example:
+   * - ["default", "table"] -> ["table"] - ["default"] -> [] (root namespace) - ["other", "table"]
+   * -> ["other", "table"] (unchanged)
    */
-  private Identifier removeExtraLevelsFromId(Identifier identifier) {
-    if (extraLevel.isEmpty()) {
+  private Identifier removeSingleLevelPrefixFromId(Identifier identifier) {
+    if (!singleLevelNs) {
       return identifier;
     }
 
-    String[] newNamespace = removeExtraLevelsFromNamespace(identifier.namespace());
+    String[] newNamespace = removeSingleLevelPrefixFromNamespace(identifier.namespace());
     return Identifier.of(newNamespace, identifier.name());
   }
 
-  /** Transforms an identifier for API calls by removing extra levels and adding parent prefix. */
+  /**
+   * Transforms an identifier for API calls by removing single-level prefix and adding parent
+   * prefix.
+   */
   private Identifier transformIdentifierForApi(Identifier identifier) {
-    Identifier transformed = removeExtraLevelsFromId(identifier);
+    Identifier transformed = removeSingleLevelPrefixFromId(identifier);
     String[] namespace = addParentPrefix(transformed.namespace());
     return Identifier.of(namespace, transformed.name());
   }
 
   /**
-   * Removes the extra level from a namespace array if it matches the configured extra level name.
-   * For example, with extraLevel="default": - ["default"] -> [] - ["default", "subnamespace"] ->
-   * ["subnamespace"] - ["other"] -> ["other"] (unchanged)
+   * Removes the virtual "default" prefix from a namespace array in single-level mode. For example:
+   * - ["default"] -> [] - ["default", "subnamespace"] -> ["subnamespace"] - ["other"] -> ["other"]
+   * (unchanged)
    */
-  private String[] removeExtraLevelsFromNamespace(String[] namespace) {
-    if (extraLevel.isEmpty()) {
+  private String[] removeSingleLevelPrefixFromNamespace(String[] namespace) {
+    if (!singleLevelNs) {
       return namespace;
     }
 
-    String extraLevelName = this.extraLevel.get();
-
-    // Check if the first namespace part matches the extra level
-    if (namespace.length > 0 && extraLevelName.equals(namespace[0])) {
-      // Remove the extra level from namespace
+    // Check if the first namespace part matches "default"
+    if (namespace.length > 0 && "default".equals(namespace[0])) {
+      // Remove the "default" prefix from namespace
       String[] newNamespace = new String[namespace.length - 1];
       System.arraycopy(namespace, 1, newNamespace, 0, namespace.length - 1);
       return newNamespace;
@@ -564,22 +565,22 @@ public abstract class BaseLanceNamespaceSparkCatalog
   }
 
   /**
-   * Determines whether to use extra level for REST implementations by testing ListNamespaces. If
-   * ListNamespaces fails, assumes flat namespace structure and returns "default".
+   * Determines whether to use single-level mode for REST implementations by testing ListNamespaces.
+   * If ListNamespaces fails, assumes flat namespace structure and enables single-level mode.
    *
-   * @return Optional containing "default" if ListNamespaces fails, empty otherwise
+   * @return true if ListNamespaces fails (single-level mode), false otherwise
    */
-  private Optional<String> determineExtraLevelForRest() {
+  private boolean determineSingleLevelNsForRest() {
     try {
       org.lance.namespace.model.ListNamespacesRequest request =
           new org.lance.namespace.model.ListNamespacesRequest();
       namespace.listNamespaces(request);
-      return Optional.empty();
+      return false;
     } catch (Exception e) {
       logger.info(
           "REST namespace ListNamespaces failed, "
-              + "falling back to flat table structure with extra_level=default");
-      return Optional.of("default");
+              + "falling back to flat table structure with single_level_ns=true");
+      return true;
     }
   }
 
