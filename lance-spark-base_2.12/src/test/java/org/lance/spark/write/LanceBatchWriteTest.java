@@ -64,12 +64,11 @@ public class LanceBatchWriteTest {
               sparkSchema,
               writeOptions,
               false,
-              false, // newTable
               null, // initialStorageOptions
               null, // namespaceImpl
               null, // namespaceProperties
               null, // tableId
-              null); // onCommit
+              null); // stagedCommit
       DataWriterFactory factor = lanceBatchWrite.createBatchWriterFactory(() -> 1);
 
       int rows = 132;

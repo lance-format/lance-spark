@@ -13,9 +13,8 @@
  */
 package org.lance.spark;
 
-import org.lance.namespace.LanceNamespace;
+import org.lance.spark.write.StagedCommit;
 
-import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
 import org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException;
 import org.apache.spark.sql.connector.catalog.Identifier;
@@ -26,7 +25,6 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.List;
 import java.util.Map;
 
 public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
@@ -78,23 +76,13 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
-      LanceDataset.StagingOperation stagingOperation,
-      LanceNamespace stagingNamespace,
-      List<String> tableIdList,
-      Schema arrowSchema,
-      Map<String, String> storageOptions,
-      boolean tableExisted) {
+      StagedCommit stagedCommit) {
     return new LancePositionDeltaDataset(
         readOptions,
         sparkSchema,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
-        stagingOperation,
-        stagingNamespace,
-        tableIdList,
-        arrowSchema,
-        storageOptions,
-        tableExisted);
+        stagedCommit);
   }
 }

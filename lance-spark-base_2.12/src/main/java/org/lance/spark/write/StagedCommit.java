@@ -16,24 +16,33 @@ package org.lance.spark.write;
 import org.lance.Dataset;
 import org.lance.FragmentMetadata;
 import org.lance.WriteParams;
+import org.lance.namespace.LanceNamespace;
+import org.lance.namespace.model.DeregisterTableRequest;
 import org.lance.operation.Operation;
 import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
 
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 /**
  * Holds the state needed to commit a staged table operation (CREATE, REPLACE, CREATE_OR_REPLACE).
- * This is used to defer the actual commit from LanceBatchWrite.commit() to
- * LanceDataset.commitStagedChanges(). Staged commits always use Overwrite operation.
+ * This is created eagerly in the catalog's stage methods so that schema-only operations (no data
+ * written) can still commit successfully. Writers update fragments/schema via setters. Staged
+ * commits always use Overwrite operation.
  */
 public class StagedCommit {
-  private final List<FragmentMetadata> fragments;
-  private final Schema schema;
+  private static final Logger LOG = LoggerFactory.getLogger(StagedCommit.class);
+
+  private List<FragmentMetadata> fragments;
+  private Schema schema;
 
   /** Dataset for existing tables. Empty for new tables (staged create). */
   private final Optional<Dataset> dataset;
@@ -42,19 +51,40 @@ public class StagedCommit {
   private final String datasetUri;
   private final Map<String, String> storageOptions;
 
+  private final boolean isNewTable;
+  private final LanceNamespace namespace;
+  private final List<String> tableId;
+
   /** Creates a StagedCommit for an existing table (REPLACE or CREATE_OR_REPLACE on existing). */
   public static StagedCommit forExistingTable(
-      Dataset dataset, List<FragmentMetadata> fragments, Schema schema) {
-    return new StagedCommit(Optional.of(dataset), fragments, schema, null, null);
+      Dataset dataset, Schema schema, LanceNamespace namespace, List<String> tableId) {
+    return new StagedCommit(
+        Optional.of(dataset),
+        Collections.emptyList(),
+        schema,
+        null,
+        null,
+        false,
+        namespace,
+        tableId);
   }
 
   /** Creates a StagedCommit for a new table (CREATE or CREATE_OR_REPLACE on non-existing). */
   public static StagedCommit forNewTable(
-      List<FragmentMetadata> fragments,
       Schema schema,
       String datasetUri,
-      Map<String, String> storageOptions) {
-    return new StagedCommit(Optional.empty(), fragments, schema, datasetUri, storageOptions);
+      Map<String, String> storageOptions,
+      LanceNamespace namespace,
+      List<String> tableId) {
+    return new StagedCommit(
+        Optional.empty(),
+        Collections.emptyList(),
+        schema,
+        datasetUri,
+        storageOptions,
+        true,
+        namespace,
+        tableId);
   }
 
   private StagedCommit(
@@ -62,12 +92,26 @@ public class StagedCommit {
       List<FragmentMetadata> fragments,
       Schema schema,
       String datasetUri,
-      Map<String, String> storageOptions) {
+      Map<String, String> storageOptions,
+      boolean isNewTable,
+      LanceNamespace namespace,
+      List<String> tableId) {
     this.dataset = dataset;
-    this.fragments = fragments;
+    this.fragments = new ArrayList<>(fragments);
     this.schema = schema;
     this.datasetUri = datasetUri;
     this.storageOptions = storageOptions;
+    this.isNewTable = isNewTable;
+    this.namespace = namespace;
+    this.tableId = tableId;
+  }
+
+  public void setFragments(List<FragmentMetadata> fragments) {
+    this.fragments = fragments;
+  }
+
+  public void setSchema(Schema schema) {
+    this.schema = schema;
   }
 
   /** Performs the actual commit using the stored dataset and fragments. */
@@ -109,5 +153,25 @@ public class StagedCommit {
   /** Closes the dataset without committing. Used for abort scenarios. */
   public void close() {
     dataset.ifPresent(Dataset::close);
+  }
+
+  /**
+   * Aborts the staged operation by closing the dataset and deregistering the table if it was newly
+   * created.
+   */
+  public void abort() {
+    close();
+    if (isNewTable && namespace != null) {
+      DeregisterTableRequest req = new DeregisterTableRequest();
+      tableId.forEach(req::addIdItem);
+      try {
+        namespace.deregisterTable(req);
+      } catch (Exception e) {
+        LOG.warn(
+            "Failed to deregister table {} during abort. Manual cleanup may be required.",
+            tableId,
+            e);
+      }
+    }
   }
 }

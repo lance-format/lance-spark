@@ -25,7 +25,6 @@ import org.apache.spark.sql.types.StructType;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicReference;
 
 /** Spark write builder. */
 public class SparkWrite implements Write {
@@ -44,25 +43,20 @@ public class SparkWrite implements Write {
 
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
-  private final AtomicReference<StagedCommit> stagedCommit;
-
-  /** Whether this is a new table (staged create). Passed to LanceBatchWrite for dataset opening. */
-  private final boolean newTable;
+  private final StagedCommit stagedCommit;
 
   SparkWrite(
       StructType schema,
       LanceSparkWriteOptions writeOptions,
       boolean overwrite,
-      boolean newTable,
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
       List<String> tableId,
-      AtomicReference<StagedCommit> stagedCommit) {
+      StagedCommit stagedCommit) {
     this.schema = schema;
     this.writeOptions = writeOptions;
     this.overwrite = overwrite;
-    this.newTable = newTable;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
@@ -76,7 +70,6 @@ public class SparkWrite implements Write {
         schema,
         writeOptions,
         overwrite,
-        newTable,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
@@ -94,8 +87,7 @@ public class SparkWrite implements Write {
     private final LanceSparkWriteOptions writeOptions;
     private final StructType schema;
     private boolean overwrite = false;
-    private boolean newTable = false;
-    private AtomicReference<StagedCommit> stagedCommit;
+    private StagedCommit stagedCommit;
 
     /**
      * Initial storage options fetched from namespace.describeTable() on the driver. These are
@@ -124,12 +116,8 @@ public class SparkWrite implements Write {
       this.tableId = tableId;
     }
 
-    public void setStagedCommit(AtomicReference<StagedCommit> stagedCommit) {
+    public void setStagedCommit(StagedCommit stagedCommit) {
       this.stagedCommit = stagedCommit;
-    }
-
-    public void setNewTable(boolean newTable) {
-      this.newTable = newTable;
     }
 
     @Override
@@ -156,7 +144,6 @@ public class SparkWrite implements Write {
           schema,
           options,
           overwrite,
-          newTable,
           initialStorageOptions,
           namespaceImpl,
           namespaceProperties,

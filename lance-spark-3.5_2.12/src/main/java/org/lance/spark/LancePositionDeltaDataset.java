@@ -13,15 +13,13 @@
  */
 package org.lance.spark;
 
-import org.lance.namespace.LanceNamespace;
+import org.lance.spark.write.StagedCommit;
 
-import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.connector.catalog.SupportsRowLevelOperations;
 import org.apache.spark.sql.connector.write.RowLevelOperationBuilder;
 import org.apache.spark.sql.connector.write.RowLevelOperationInfo;
 import org.apache.spark.sql.types.StructType;
 
-import java.util.List;
 import java.util.Map;
 
 public class LancePositionDeltaDataset extends LanceDataset implements SupportsRowLevelOperations {
@@ -40,24 +38,14 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
-      StagingOperation stagingOperation,
-      LanceNamespace stagingNamespace,
-      List<String> tableIdList,
-      Schema arrowSchema,
-      Map<String, String> storageOptions,
-      boolean tableExisted) {
+      StagedCommit stagedCommit) {
     super(
         readOptions,
         sparkSchema,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
-        stagingOperation,
-        stagingNamespace,
-        tableIdList,
-        arrowSchema,
-        storageOptions,
-        tableExisted);
+        stagedCommit);
   }
 
   @Override

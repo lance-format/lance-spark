@@ -13,8 +13,6 @@
  */
 package org.lance.spark;
 
-import org.lance.namespace.LanceNamespace;
-import org.lance.namespace.model.DeregisterTableRequest;
 import org.lance.spark.read.LanceScanBuilder;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.write.AddColumnsBackfillWrite;
@@ -23,7 +21,6 @@ import org.lance.spark.write.StagedCommit;
 import org.lance.spark.write.UpdateColumnsBackfillWrite;
 
 import com.google.common.collect.ImmutableSet;
-import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.connector.catalog.MetadataColumn;
 import org.apache.spark.sql.connector.catalog.StagedTable;
 import org.apache.spark.sql.connector.catalog.SupportsMetadataColumns;
@@ -47,7 +44,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 /** Lance Spark Dataset. */
@@ -55,14 +51,6 @@ public class LanceDataset
     implements SupportsRead, SupportsWrite, SupportsMetadataColumns, StagedTable {
 
   private static final Logger LOG = LoggerFactory.getLogger(LanceDataset.class);
-
-  /** The type of staging operation for staged table creation. */
-  public enum StagingOperation {
-    NONE,
-    CREATE,
-    REPLACE,
-    CREATE_OR_REPLACE
-  }
 
   private static final Set<TableCapability> CAPABILITIES =
       ImmutableSet.of(
@@ -166,15 +154,8 @@ public class LanceDataset
 
   private final Map<String, String> namespaceProperties;
 
-  /** Staging-related fields for StagedTable support. */
-  private final StagingOperation stagingOperation;
-
-  private final LanceNamespace stagingNamespace;
-  private final List<String> tableIdList;
-  private final Schema arrowSchema;
-  private final Map<String, String> storageOptions;
-  private final boolean tableExisted;
-  private final AtomicReference<StagedCommit> stagedCommit = new AtomicReference<>();
+  /** Eagerly created staged commit for StagedTable support. Null for non-staged tables. */
+  private final StagedCommit stagedCommit;
 
   /**
    * Creates a Lance dataset.
@@ -191,18 +172,7 @@ public class LanceDataset
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties) {
-    this(
-        readOptions,
-        sparkSchema,
-        initialStorageOptions,
-        namespaceImpl,
-        namespaceProperties,
-        StagingOperation.NONE,
-        null,
-        null,
-        null,
-        null,
-        false);
+    this(readOptions, sparkSchema, initialStorageOptions, namespaceImpl, namespaceProperties, null);
   }
 
   /**
@@ -213,12 +183,7 @@ public class LanceDataset
    * @param initialStorageOptions initial storage options fetched from namespace.describeTable()
    * @param namespaceImpl namespace implementation type for credential refresh on workers
    * @param namespaceProperties namespace connection properties for credential refresh on workers
-   * @param stagingOperation the staging operation type
-   * @param stagingNamespace the Lance namespace for table operations
-   * @param tableIdList the table identifier path
-   * @param arrowSchema the Arrow schema for the table
-   * @param storageOptions storage options for table creation
-   * @param tableExisted whether the table existed at staging time
+   * @param stagedCommit the eagerly created staged commit, or null for non-staged tables
    */
   public LanceDataset(
       LanceSparkReadOptions readOptions,
@@ -226,23 +191,13 @@ public class LanceDataset
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
-      StagingOperation stagingOperation,
-      LanceNamespace stagingNamespace,
-      List<String> tableIdList,
-      Schema arrowSchema,
-      Map<String, String> storageOptions,
-      boolean tableExisted) {
+      StagedCommit stagedCommit) {
     this.readOptions = readOptions;
     this.sparkSchema = sparkSchema;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
-    this.stagingOperation = stagingOperation;
-    this.stagingNamespace = stagingNamespace;
-    this.tableIdList = tableIdList;
-    this.arrowSchema = arrowSchema;
-    this.storageOptions = storageOptions;
-    this.tableExisted = tableExisted;
+    this.stagedCommit = stagedCommit;
   }
 
   public LanceSparkReadOptions readOptions() {
@@ -353,15 +308,8 @@ public class LanceDataset
             namespaceProperties,
             readOptions.getTableId());
 
-    if (stagingOperation != StagingOperation.NONE) {
+    if (stagedCommit != null) {
       builder.setStagedCommit(stagedCommit);
-      if (!tableExisted) {
-        builder.setNewTable(true);
-      }
-      if (stagingOperation == StagingOperation.REPLACE
-          || stagingOperation == StagingOperation.CREATE_OR_REPLACE) {
-        builder.truncate();
-      }
     }
     return builder;
   }
@@ -424,47 +372,23 @@ public class LanceDataset
 
   @Override
   public void commitStagedChanges() {
-    if (stagingOperation == StagingOperation.NONE) {
+    if (stagedCommit == null) {
       return;
     }
 
-    StagedCommit commit = stagedCommit.get();
-    if (commit == null) {
-      throw new IllegalStateException(
-          "No staged commit found. Was newWriteBuilder() called and write completed?");
-    }
-
     try {
-      commit.commit();
+      stagedCommit.commit();
     } finally {
-      commit.close();
+      stagedCommit.close();
     }
   }
 
   @Override
   public void abortStagedChanges() {
-    if (stagingOperation == StagingOperation.NONE) {
+    if (stagedCommit == null) {
       return;
     }
 
-    // Close the staged commit if it exists (without committing)
-    StagedCommit commit = stagedCommit.get();
-    if (commit != null) {
-      commit.close();
-    }
-
-    // Deregister the table if it was newly created
-    if (!tableExisted) {
-      DeregisterTableRequest deregisterRequest = new DeregisterTableRequest();
-      tableIdList.forEach(deregisterRequest::addIdItem);
-      try {
-        stagingNamespace.deregisterTable(deregisterRequest);
-      } catch (Exception e) {
-        LOG.warn(
-            "Failed to deregister table {} during abort. Manual cleanup may be required.",
-            tableIdList,
-            e);
-      }
-    }
+    stagedCommit.abort();
   }
 }

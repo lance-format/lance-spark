@@ -30,6 +30,7 @@ import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.SchemaConverter;
 import org.lance.spark.utils.Utils;
+import org.lance.spark.write.StagedCommit;
 
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
@@ -547,18 +548,17 @@ public abstract class BaseLanceNamespaceSparkCatalog
             Optional.of(tableIdList));
 
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
+    Map<String, String> merged =
+        LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
+    StagedCommit stagedCommit =
+        StagedCommit.forNewTable(arrowSchema, location, merged, namespace, tableIdList);
     return createStagedDataset(
         readOptions,
         processedSchema,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
-        LanceDataset.StagingOperation.CREATE,
-        namespace,
-        tableIdList,
-        arrowSchema,
-        catalogConfig.getStorageOptions(),
-        false);
+        stagedCommit);
   }
 
   @Override
@@ -589,18 +589,16 @@ public abstract class BaseLanceNamespaceSparkCatalog
             Optional.of(tableIdList));
 
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
+    Dataset ds = openDataset(readOptions);
+    StagedCommit stagedCommit =
+        StagedCommit.forExistingTable(ds, arrowSchema, namespace, tableIdList);
     return createStagedDataset(
         readOptions,
         processedSchema,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
-        LanceDataset.StagingOperation.REPLACE,
-        namespace,
-        tableIdList,
-        arrowSchema,
-        catalogConfig.getStorageOptions(),
-        true);
+        stagedCommit);
   }
 
   @Override
@@ -638,18 +636,24 @@ public abstract class BaseLanceNamespaceSparkCatalog
             Optional.of(tableIdList));
 
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
+    StagedCommit stagedCommit;
+    if (exists) {
+      Dataset ds = openDataset(readOptions);
+      stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, namespace, tableIdList);
+    } else {
+      Map<String, String> merged =
+          LanceRuntime.mergeStorageOptions(
+              catalogConfig.getStorageOptions(), initialStorageOptions);
+      stagedCommit =
+          StagedCommit.forNewTable(arrowSchema, location, merged, namespace, tableIdList);
+    }
     return createStagedDataset(
         readOptions,
         processedSchema,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
-        LanceDataset.StagingOperation.CREATE_OR_REPLACE,
-        namespace,
-        tableIdList,
-        arrowSchema,
-        catalogConfig.getStorageOptions(),
-        exists);
+        stagedCommit);
   }
 
   /**
@@ -836,10 +840,5 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
-      LanceDataset.StagingOperation stagingOperation,
-      LanceNamespace stagingNamespace,
-      List<String> tableIdList,
-      Schema arrowSchema,
-      Map<String, String> storageOptions,
-      boolean tableExisted);
+      StagedCommit stagedCommit);
 }

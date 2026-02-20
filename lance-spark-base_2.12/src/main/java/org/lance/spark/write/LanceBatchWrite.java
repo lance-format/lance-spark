@@ -35,7 +35,6 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 public class LanceBatchWrite implements BatchWrite {
@@ -56,23 +55,22 @@ public class LanceBatchWrite implements BatchWrite {
   private final List<String> tableId;
 
   /**
-   * Dataset opened at start for existing tables to ensure version consistency. Empty for new tables
-   * (staged creates) - the dataset will be created at commit time.
+   * Dataset opened at start for existing tables to ensure version consistency. Empty for staged
+   * operations (the dataset is managed by StagedCommit).
    */
   private final Optional<Dataset> dataset;
 
-  private final AtomicReference<StagedCommit> stagedCommit;
+  private final StagedCommit stagedCommit;
 
   public LanceBatchWrite(
       StructType schema,
       LanceSparkWriteOptions writeOptions,
       boolean overwrite,
-      boolean newTable,
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
       List<String> tableId,
-      AtomicReference<StagedCommit> stagedCommit) {
+      StagedCommit stagedCommit) {
     this.schema = schema;
     this.writeOptions = writeOptions;
     this.overwrite = overwrite;
@@ -82,9 +80,9 @@ public class LanceBatchWrite implements BatchWrite {
     this.tableId = tableId;
     this.stagedCommit = stagedCommit;
 
-    // For new tables (staged creates), defer dataset creation to commit time.
-    // For existing tables, open to capture version for commit.
-    this.dataset = newTable ? Optional.empty() : Optional.of(openDataset());
+    // For staged operations, the dataset is managed by StagedCommit.
+    // For non-staged operations, open to capture version for commit.
+    this.dataset = (stagedCommit != null) ? Optional.empty() : Optional.of(openDataset());
   }
 
   private Dataset openDataset() {
@@ -134,17 +132,10 @@ public class LanceBatchWrite implements BatchWrite {
     boolean isOverwrite = overwrite || writeOptions.isOverwrite();
 
     if (stagedCommit != null) {
-      // For staged tables, store the commit info for commitStagedChanges() to use
-      if (dataset.isEmpty()) {
-        Map<String, String> mergedStorageOptions =
-            LanceRuntime.mergeStorageOptions(
-                writeOptions.getStorageOptions(), initialStorageOptions);
-        stagedCommit.set(
-            StagedCommit.forNewTable(
-                fragments, arrowSchema, writeOptions.getDatasetUri(), mergedStorageOptions));
-      } else {
-        stagedCommit.set(StagedCommit.forExistingTable(dataset.get(), fragments, arrowSchema));
-      }
+      // For staged tables, update the eagerly-created StagedCommit with fragments and schema.
+      // commitStagedChanges() will perform the actual commit.
+      stagedCommit.setFragments(fragments);
+      stagedCommit.setSchema(arrowSchema);
     } else {
       // For non-staged tables, commit immediately
       Dataset ds = dataset.get();
@@ -164,7 +155,7 @@ public class LanceBatchWrite implements BatchWrite {
 
   @Override
   public void abort(WriterCommitMessage[] messages) {
-    // For staged tables, the dataset will be closed by abortStagedChanges()
+    // For staged tables, the dataset is managed by StagedCommit (via abortStagedChanges)
     // For non-staged tables, close it here
     if (stagedCommit == null) {
       dataset.ifPresent(Dataset::close);
