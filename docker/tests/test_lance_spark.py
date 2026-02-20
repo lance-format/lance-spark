@@ -141,6 +141,9 @@ class TestDDLStagingTable:
         assert result[0].name == "Alice"
         assert result[2].id == 3
 
+    # TODO(https://github.com/lance-format/lance/issues/5972): Enable this test once Lance SDK
+    # supports passing explicit schema to Fragment.create() for REPLACE TABLE operations
+    @pytest.mark.skip(reason="Pending Lance SDK fix for schema override in fragment creation")
     def test_replace_table_as_select(self, spark):
         """Test REPLACE TABLE AS SELECT (RTAS) replaces data and schema."""
         # Create initial table with data

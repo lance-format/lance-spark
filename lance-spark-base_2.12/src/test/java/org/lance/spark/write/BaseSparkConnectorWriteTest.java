@@ -31,6 +31,7 @@ import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.io.TempDir;
@@ -40,6 +41,7 @@ import java.nio.file.Path;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import static org.apache.spark.sql.functions.col;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -329,6 +331,64 @@ public abstract class BaseSparkConnectorWriteTest {
     assertEquals(1, result.filter(col("id").equalTo(10)).count());
     assertEquals(1, result.filter(col("id").equalTo(20)).count());
     assertEquals(0, result.filter(col("id").equalTo(1)).count());
+  }
+
+  // TODO(https://github.com/lance-format/lance/issues/5972): Enable this test once Lance SDK
+  // supports passing explicit schema to Fragment.create() for REPLACE TABLE operations
+  @Disabled("Pending Lance SDK fix for schema override in fragment creation")
+  @Test
+  public void replaceTableAsSelectWithDifferentSchema(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    // Create initial table with schema: (id INT, name STRING, value DOUBLE)
+    StructType schema1 =
+        new StructType()
+            .add("id", DataTypes.IntegerType)
+            .add("name", DataTypes.StringType)
+            .add("value", DataTypes.DoubleType);
+    List<Row> data1 =
+        Arrays.asList(RowFactory.create(1, "Alice", 10.5), RowFactory.create(2, "Bob", 20.3));
+    Dataset<Row> df1 = spark.createDataFrame(data1, schema1);
+    df1.createOrReplaceTempView("initial_data");
+    spark.sql("CREATE TABLE lance.`" + path + "` AS SELECT * FROM initial_data");
+
+    // Replace with different schema: (id BIGINT, name STRING, score BIGINT)
+    // Note: 'value' column is removed and 'score' column is added, 'id' type changes
+    StructType schema2 =
+        new StructType()
+            .add("id", DataTypes.LongType)
+            .add("name", DataTypes.StringType)
+            .add("score", DataTypes.LongType);
+    List<Row> data2 =
+        Arrays.asList(
+            RowFactory.create(10L, "NewAlice", 100L),
+            RowFactory.create(20L, "NewBob", 200L),
+            RowFactory.create(30L, "NewCharlie", 300L));
+    Dataset<Row> df2 = spark.createDataFrame(data2, schema2);
+    df2.createOrReplaceTempView("replacement_data");
+
+    // This should succeed but currently fails with schema mismatch error
+    spark.sql("REPLACE TABLE lance.`" + path + "` AS SELECT * FROM replacement_data");
+
+    Dataset<Row> result =
+        spark.read().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, path).load();
+    assertEquals(3, result.count());
+
+    // Verify old data is gone
+    List<Long> ids =
+        result.select("id").collectAsList().stream()
+            .map(r -> r.getLong(0))
+            .sorted()
+            .collect(Collectors.toList());
+    assertEquals(Arrays.asList(10L, 20L, 30L), ids);
+
+    // Verify new schema has 'score' column instead of 'value'
+    StructType resultSchema = result.schema();
+    List<String> colNames =
+        Arrays.stream(resultSchema.fields()).map(f -> f.name()).collect(Collectors.toList());
+    assertTrue(colNames.contains("score"));
+    assertTrue(!colNames.contains("value"));
   }
 
   @Test
