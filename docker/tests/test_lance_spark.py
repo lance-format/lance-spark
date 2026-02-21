@@ -196,6 +196,9 @@ class TestDDLStagingTable:
         ids = sorted([row.id for row in result])
         assert ids == [1, 2]
 
+    # TODO(https://github.com/lance-format/lance/issues/5972): Enable this test once Lance SDK
+    # supports passing explicit schema to Fragment.create() for REPLACE TABLE operations
+    @pytest.mark.skip(reason="Pending Lance SDK fix for schema override in fragment creation")
     def test_create_or_replace_table_as_select_existing(self, spark):
         """Test CREATE OR REPLACE TABLE AS SELECT when table already exists."""
         # Create initial table
@@ -238,6 +241,9 @@ class TestDDLStagingTable:
         result = spark.table("default.test_table").collect()
         assert len(result) == 2
 
+    # TODO(https://github.com/lance-format/lance/issues/5972): Enable this test once Lance SDK
+    # supports passing explicit schema to Fragment.create() for REPLACE TABLE operations
+    @pytest.mark.skip(reason="Pending Lance SDK fix for schema override in fragment creation")
     def test_replace_table_schema_only(self, spark):
         """Test REPLACE TABLE with schema only (no data)."""
         # Create table with data
