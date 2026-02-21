@@ -58,7 +58,8 @@ public class LanceDataWriterTest {
               null, // initialStorageOptions
               null, // namespaceImpl
               null, // namespaceProperties
-              null); // tableId
+              null, // tableId
+              null); // arrowSchema (for schema override)
       LanceDataWriter dataWriter = (LanceDataWriter) writerFactory.createWriter(0, 0);
 
       int rows = 132;

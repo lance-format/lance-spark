@@ -114,6 +114,10 @@ public class StagedCommit {
     this.schema = schema;
   }
 
+  public Schema getSchema() {
+    return this.schema;
+  }
+
   /** Performs the actual commit using the stored dataset and fragments. */
   public void commit() {
     if (dataset.isEmpty()) {

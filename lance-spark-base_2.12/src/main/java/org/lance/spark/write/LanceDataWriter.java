@@ -22,6 +22,7 @@ import org.lance.spark.LanceSparkWriteOptions;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.write.DataWriter;
 import org.apache.spark.sql.connector.write.DataWriterFactory;
@@ -107,13 +108,21 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
     private final Map<String, String> namespaceProperties;
     private final List<String> tableId;
 
+    /**
+     * Target Arrow schema for staged operations (REPLACE TABLE, CREATE OR REPLACE). When set,
+     * Fragment.create() uses this schema instead of reading from the existing dataset, allowing
+     * schema changes during replace operations.
+     */
+    private final Schema arrowSchema;
+
     protected WriterFactory(
         StructType schema,
         LanceSparkWriteOptions writeOptions,
         Map<String, String> initialStorageOptions,
         String namespaceImpl,
         Map<String, String> namespaceProperties,
-        List<String> tableId) {
+        List<String> tableId,
+        Schema arrowSchema) {
       // Everything passed to writer factory should be serializable
       this.schema = schema;
       this.writeOptions = writeOptions;
@@ -121,6 +130,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       this.namespaceImpl = namespaceImpl;
       this.namespaceProperties = namespaceProperties;
       this.tableId = tableId;
+      this.arrowSchema = arrowSchema;
     }
 
     @Override
@@ -143,14 +153,30 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       // Get storage options provider for credential refresh
       StorageOptionsProvider storageOptionsProvider = getStorageOptionsProvider();
 
+      // Capture arrowSchema for use in lambda
+      Schema schemaForFragment = this.arrowSchema;
+
       // Create fragment in background thread
       Callable<List<FragmentMetadata>> fragmentCreator =
           () -> {
             try (ArrowArrayStream arrowStream =
                 ArrowArrayStream.allocateNew(LanceRuntime.allocator())) {
               Data.exportArrayStream(LanceRuntime.allocator(), writeBuffer, arrowStream);
-              return Fragment.create(
-                  writeOptions.getDatasetUri(), arrowStream, params, storageOptionsProvider);
+              // Use Fragment.write() builder when schema override is provided
+              // (for REPLACE TABLE operations with different schema)
+              if (schemaForFragment != null) {
+                return Fragment.write()
+                    .datasetUri(writeOptions.getDatasetUri())
+                    .allocator(LanceRuntime.allocator())
+                    .data(arrowStream)
+                    .writeParams(params)
+                    .storageOptionsProvider(storageOptionsProvider)
+                    .schema(schemaForFragment)
+                    .execute();
+              } else {
+                return Fragment.create(
+                    writeOptions.getDatasetUri(), arrowStream, params, storageOptionsProvider);
+              }
             }
           };
       FutureTask<List<FragmentMetadata>> fragmentCreationTask = new FutureTask<>(fragmentCreator);
