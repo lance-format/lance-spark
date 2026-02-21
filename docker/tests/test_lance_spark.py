@@ -16,7 +16,7 @@ import os
 import time
 import pytest
 from packaging.version import Version
-from pyspark.sql.types import StructType, StructField, IntegerType, StringType, DoubleType
+from pyspark.sql.types import StructType, StructField, IntegerType, StringType, DoubleType, BinaryType
 
 SPARK_VERSION = Version(os.environ.get("SPARK_VERSION", "3.5"))
 
@@ -178,6 +178,50 @@ class TestDDLStagingTable:
         ids = [row.id for row in result]
         assert ids == [10, 20, 30]
         assert result[0].value == 100.0
+
+    def test_replace_table_as_select_different_schema(self, spark, test_table):
+        """Test REPLACE TABLE AS SELECT with completely different schema."""
+        # Create initial table with schema: (id INT, name STRING, value DOUBLE)
+        spark.sql(f"""
+            CREATE TABLE {test_table} (
+                id INT,
+                name STRING,
+                value DOUBLE
+            )
+        """)
+        spark.sql(f"""
+            INSERT INTO {test_table} VALUES
+            (1, 'Alice', 10.5),
+            (2, 'Bob', 20.3)
+        """)
+
+        # Replace with incompatible schema: (id STRING, data BINARY)
+        schema = StructType([
+            StructField("id", StringType(), True),
+            StructField("data", BinaryType(), True)
+        ])
+        data = [("row1", bytearray([1, 2, 3])), ("row2", bytearray([4, 5, 6])), ("row3", bytearray([7, 8, 9]))]
+        df = spark.createDataFrame(data, schema)
+        df.createOrReplaceTempView("source")
+
+        spark.sql(f"""
+            REPLACE TABLE {test_table} AS SELECT * FROM source
+        """)
+
+        result = spark.table(test_table).orderBy("id").collect()
+        assert len(result) == 3
+
+        # Verify new schema
+        result_schema = spark.table(test_table).schema
+        assert len(result_schema.fields) == 2
+        assert result_schema.fields[0].name == "id"
+        assert result_schema.fields[0].dataType == StringType()
+        assert result_schema.fields[1].name == "data"
+        assert result_schema.fields[1].dataType == BinaryType()
+
+        # Verify data
+        ids = [row.id for row in result]
+        assert ids == ["row1", "row2", "row3"]
 
     def test_create_or_replace_table_as_select_new(self, spark):
         """Test CREATE OR REPLACE TABLE AS SELECT when table does not exist."""

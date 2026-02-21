@@ -31,7 +31,6 @@ import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.io.TempDir;
@@ -353,9 +352,7 @@ public abstract class BaseSparkConnectorWriteTest {
     // Replace with incompatible schema: (id STRING, data BINARY)
     // Note: id changes from INT to STRING (not coercible), completely different columns
     StructType schema2 =
-        new StructType()
-            .add("id", DataTypes.StringType)
-            .add("data", DataTypes.BinaryType);
+        new StructType().add("id", DataTypes.StringType).add("data", DataTypes.BinaryType);
     List<Row> data2 =
         Arrays.asList(
             RowFactory.create("row1", new byte[] {1, 2, 3}),
