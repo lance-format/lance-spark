@@ -333,9 +333,6 @@ public abstract class BaseSparkConnectorWriteTest {
     assertEquals(0, result.filter(col("id").equalTo(1)).count());
   }
 
-  // TODO(https://github.com/lance-format/lance/issues/5972): Enable this test once Lance SDK
-  // supports passing explicit schema to Fragment.create() for REPLACE TABLE operations
-  @Disabled("Pending Lance SDK fix for schema override in fragment creation")
   @Test
   public void replaceTableAsSelectWithDifferentSchema(TestInfo testInfo) {
     String datasetName = testInfo.getTestMethod().get().getName();
@@ -353,18 +350,17 @@ public abstract class BaseSparkConnectorWriteTest {
     df1.createOrReplaceTempView("initial_data");
     spark.sql("CREATE TABLE lance.`" + path + "` AS SELECT * FROM initial_data");
 
-    // Replace with different schema: (id BIGINT, name STRING, score BIGINT)
-    // Note: 'value' column is removed and 'score' column is added, 'id' type changes
+    // Replace with incompatible schema: (id STRING, data BINARY)
+    // Note: id changes from INT to STRING (not coercible), completely different columns
     StructType schema2 =
         new StructType()
-            .add("id", DataTypes.LongType)
-            .add("name", DataTypes.StringType)
-            .add("score", DataTypes.LongType);
+            .add("id", DataTypes.StringType)
+            .add("data", DataTypes.BinaryType);
     List<Row> data2 =
         Arrays.asList(
-            RowFactory.create(10L, "NewAlice", 100L),
-            RowFactory.create(20L, "NewBob", 200L),
-            RowFactory.create(30L, "NewCharlie", 300L));
+            RowFactory.create("row1", new byte[] {1, 2, 3}),
+            RowFactory.create("row2", new byte[] {4, 5, 6}),
+            RowFactory.create("row3", new byte[] {7, 8, 9}));
     Dataset<Row> df2 = spark.createDataFrame(data2, schema2);
     df2.createOrReplaceTempView("replacement_data");
 
@@ -375,20 +371,21 @@ public abstract class BaseSparkConnectorWriteTest {
         spark.read().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, path).load();
     assertEquals(3, result.count());
 
-    // Verify old data is gone
-    List<Long> ids =
+    // Verify new schema
+    StructType resultSchema = result.schema();
+    assertEquals(2, resultSchema.fields().length);
+    assertEquals("id", resultSchema.fields()[0].name());
+    assertEquals(DataTypes.StringType, resultSchema.fields()[0].dataType());
+    assertEquals("data", resultSchema.fields()[1].name());
+    assertEquals(DataTypes.BinaryType, resultSchema.fields()[1].dataType());
+
+    // Verify data
+    List<String> ids =
         result.select("id").collectAsList().stream()
-            .map(r -> r.getLong(0))
+            .map(r -> r.getString(0))
             .sorted()
             .collect(Collectors.toList());
-    assertEquals(Arrays.asList(10L, 20L, 30L), ids);
-
-    // Verify new schema has 'score' column instead of 'value'
-    StructType resultSchema = result.schema();
-    List<String> colNames =
-        Arrays.stream(resultSchema.fields()).map(f -> f.name()).collect(Collectors.toList());
-    assertTrue(colNames.contains("score"));
-    assertTrue(!colNames.contains("value"));
+    assertEquals(Arrays.asList("row1", "row2", "row3"), ids);
   }
 
   @Test
