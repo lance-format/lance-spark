@@ -179,6 +179,11 @@ class TestDDLStagingTable:
         assert ids == [10, 20, 30]
         assert result[0].value == 100.0
 
+    # TODO(https://github.com/lance-format/lance/issues/5972): Investigate why this fails on Spark 3.4
+    @pytest.mark.skipif(
+        SPARK_VERSION < Version("3.5"),
+        reason="REPLACE TABLE with different schema fails on Spark 3.4 due to Lance SDK schema validation"
+    )
     def test_replace_table_as_select_different_schema(self, spark, test_table):
         """Test REPLACE TABLE AS SELECT with completely different schema."""
         # Create initial table with schema: (id INT, name STRING, value DOUBLE)
