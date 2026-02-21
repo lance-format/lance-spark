@@ -31,7 +31,6 @@ import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.io.TempDir;
@@ -333,9 +332,6 @@ public abstract class BaseSparkConnectorWriteTest {
     assertEquals(0, result.filter(col("id").equalTo(1)).count());
   }
 
-  // TODO(https://github.com/lance-format/lance/issues/5972): Enable this test once Lance SDK
-  // supports passing explicit schema to Fragment.create() for REPLACE TABLE operations
-  @Disabled("Pending Lance SDK fix for schema override in fragment creation")
   @Test
   public void replaceTableAsSelectWithDifferentSchema(TestInfo testInfo) {
     String datasetName = testInfo.getTestMethod().get().getName();
@@ -416,9 +412,6 @@ public abstract class BaseSparkConnectorWriteTest {
     assertEquals(1, result2.filter(col("id").equalTo(20)).count());
   }
 
-  // TODO(https://github.com/lance-format/lance/issues/5972): Enable this test once Lance SDK
-  // supports passing explicit schema to Fragment.create() for REPLACE TABLE operations
-  @Disabled("Pending Lance SDK fix for schema override in fragment creation")
   @Test
   public void replaceTableSchemaOnly(TestInfo testInfo) {
     String datasetName = testInfo.getTestMethod().get().getName();

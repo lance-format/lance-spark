@@ -141,21 +141,18 @@ class TestDDLStagingTable:
         assert result[0].name == "Alice"
         assert result[2].id == 3
 
-    # TODO(https://github.com/lance-format/lance/issues/5972): Enable this test once Lance SDK
-    # supports passing explicit schema to Fragment.create() for REPLACE TABLE operations
-    @pytest.mark.skip(reason="Pending Lance SDK fix for schema override in fragment creation")
-    def test_replace_table_as_select(self, spark):
+    def test_replace_table_as_select(self, spark, test_table):
         """Test REPLACE TABLE AS SELECT (RTAS) replaces data and schema."""
         # Create initial table with data
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {test_table} (
                 id INT,
                 name STRING,
                 value DOUBLE
             )
         """)
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {test_table} VALUES
             (1, 'Alice', 10.5),
             (2, 'Bob', 20.3)
         """)
@@ -165,17 +162,17 @@ class TestDDLStagingTable:
         df = spark.createDataFrame(data, ["id", "name", "score"])
         df.createOrReplaceTempView("source")
 
-        spark.sql("""
-            REPLACE TABLE default.test_table AS SELECT * FROM source
+        spark.sql(f"""
+            REPLACE TABLE {test_table} AS SELECT * FROM source
         """)
 
-        result = spark.table("default.test_table").orderBy("id").collect()
+        result = spark.table(test_table).orderBy("id").collect()
         assert len(result) == 3
         # Verify old data is gone
         ids = [row.id for row in result]
         assert ids == [10, 20, 30]
         # Verify new schema has 'score' column instead of 'value'
-        schema = spark.table("default.test_table").schema
+        schema = spark.table(test_table).schema
         col_names = [f.name for f in schema.fields]
         assert "score" in col_names
         assert "value" not in col_names
@@ -196,35 +193,32 @@ class TestDDLStagingTable:
         ids = sorted([row.id for row in result])
         assert ids == [1, 2]
 
-    # TODO(https://github.com/lance-format/lance/issues/5972): Enable this test once Lance SDK
-    # supports passing explicit schema to Fragment.create() for REPLACE TABLE operations
-    @pytest.mark.skip(reason="Pending Lance SDK fix for schema override in fragment creation")
-    def test_create_or_replace_table_as_select_existing(self, spark):
+    def test_create_or_replace_table_as_select_existing(self, spark, test_table):
         """Test CREATE OR REPLACE TABLE AS SELECT when table already exists."""
         # Create initial table
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {test_table} (
                 id INT,
                 name STRING
             )
         """)
-        spark.sql("INSERT INTO default.test_table VALUES (1, 'Original')")
+        spark.sql(f"INSERT INTO {test_table} VALUES (1, 'Original')")
 
         # CORTAS replaces existing table
         data = [(10, "Replaced", 100.0), (20, "AlsoReplaced", 200.0)]
         df = spark.createDataFrame(data, ["id", "name", "value"])
         df.createOrReplaceTempView("source")
 
-        spark.sql("""
-            CREATE OR REPLACE TABLE default.test_table AS SELECT * FROM source
+        spark.sql(f"""
+            CREATE OR REPLACE TABLE {test_table} AS SELECT * FROM source
         """)
 
-        result = spark.table("default.test_table").orderBy("id").collect()
+        result = spark.table(test_table).orderBy("id").collect()
         assert len(result) == 2
         assert result[0].id == 10
         assert result[0].name == "Replaced"
         # Verify schema was replaced (now has 'value' column)
-        schema = spark.table("default.test_table").schema
+        schema = spark.table(test_table).schema
         col_names = [f.name for f in schema.fields]
         assert "value" in col_names
 
@@ -241,38 +235,35 @@ class TestDDLStagingTable:
         result = spark.table("default.test_table").collect()
         assert len(result) == 2
 
-    # TODO(https://github.com/lance-format/lance/issues/5972): Enable this test once Lance SDK
-    # supports passing explicit schema to Fragment.create() for REPLACE TABLE operations
-    @pytest.mark.skip(reason="Pending Lance SDK fix for schema override in fragment creation")
-    def test_replace_table_schema_only(self, spark):
+    def test_replace_table_schema_only(self, spark, test_table):
         """Test REPLACE TABLE with schema only (no data)."""
         # Create table with data
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {test_table} (
                 id INT,
                 name STRING,
                 value DOUBLE
             )
         """)
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {test_table} VALUES
             (1, 'Alice', 10.5),
             (2, 'Bob', 20.3)
         """)
 
         # Replace with new schema only (no data)
-        spark.sql("""
-            REPLACE TABLE default.test_table (
+        spark.sql(f"""
+            REPLACE TABLE {test_table} (
                 new_id INT,
                 description STRING
             )
         """)
 
         # Table should be empty with new schema
-        result = spark.table("default.test_table").collect()
+        result = spark.table(test_table).collect()
         assert len(result) == 0
 
-        schema = spark.table("default.test_table").schema
+        schema = spark.table(test_table).schema
         col_names = [f.name for f in schema.fields]
         assert "new_id" in col_names
         assert "description" in col_names
