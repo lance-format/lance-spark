@@ -71,6 +71,9 @@ venv.bak/
 **/.ipynb_checkpoints
 docker/*.jar
 
+# Python
+__pycache__/
+
 
 # mkdocs documentation
 /docs/site
