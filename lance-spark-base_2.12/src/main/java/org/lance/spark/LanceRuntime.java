@@ -30,6 +30,13 @@ import java.util.Map;
  * <p>This class manages a global Arrow buffer allocator, a shared Session for cache efficiency, and
  * provides helper methods for namespace operations.
  *
+ * <p>Session cache sizes can be configured via environment variables:
+ *
+ * <ul>
+ *   <li>{@code LANCE_INDEX_CACHE_SIZE} - Index cache size in bytes (default: 256MB)
+ *   <li>{@code LANCE_METADATA_CACHE_SIZE} - Metadata cache size in bytes (default: 256MB)
+ * </ul>
+ *
  * <p>Usage:
  *
  * <pre>{@code
@@ -84,8 +91,12 @@ public final class LanceRuntime {
    * Returns the global shared Session for cache efficiency.
    *
    * <p>The session provides shared index and metadata caches across all datasets opened in this
-   * JVM. Cache sizes can be configured via {@link #ENV_INDEX_CACHE_SIZE} and {@link
-   * #ENV_METADATA_CACHE_SIZE} environment variables.
+   * JVM. Cache sizes can be configured via environment variables:
+   *
+   * <ul>
+   *   <li>{@link #ENV_INDEX_CACHE_SIZE} - Index cache size in bytes
+   *   <li>{@link #ENV_METADATA_CACHE_SIZE} - Metadata cache size in bytes
+   * </ul>
    *
    * @return the global session
    */
@@ -94,14 +105,17 @@ public final class LanceRuntime {
       synchronized (LanceRuntime.class) {
         if (GLOBAL_SESSION == null) {
           Session.Builder builder = Session.builder();
+
           Long indexCacheSize = getEnvLong(ENV_INDEX_CACHE_SIZE);
           if (indexCacheSize != null) {
             builder.indexCacheSizeBytes(indexCacheSize);
           }
+
           Long metadataCacheSize = getEnvLong(ENV_METADATA_CACHE_SIZE);
           if (metadataCacheSize != null) {
             builder.metadataCacheSizeBytes(metadataCacheSize);
           }
+
           GLOBAL_SESSION = builder.build();
         }
       }
