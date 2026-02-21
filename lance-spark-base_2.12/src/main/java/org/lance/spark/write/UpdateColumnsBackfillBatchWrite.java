@@ -168,10 +168,14 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
           .allocator(LanceRuntime.allocator())
           .namespace(writeOptions.getNamespace())
           .tableId(writeOptions.getTableId())
+          .session(LanceRuntime.session())
           .build();
     } else {
       ReadOptions readOptions =
-          new ReadOptions.Builder().setStorageOptions(writeOptions.getStorageOptions()).build();
+          new ReadOptions.Builder()
+              .setStorageOptions(writeOptions.getStorageOptions())
+              .setSession(LanceRuntime.session())
+              .build();
       return Dataset.open()
           .allocator(LanceRuntime.allocator())
           .uri(writeOptions.getDatasetUri())
@@ -191,7 +195,8 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
     StorageOptionsProvider provider =
         LanceRuntime.getOrCreateStorageOptionsProvider(namespaceImpl, namespaceProperties, tableId);
 
-    ReadOptions.Builder builder = new ReadOptions.Builder().setStorageOptions(merged);
+    ReadOptions.Builder builder =
+        new ReadOptions.Builder().setStorageOptions(merged).setSession(LanceRuntime.session());
     if (provider != null) {
       builder.setStorageOptionsProvider(provider);
     }

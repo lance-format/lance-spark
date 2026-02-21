@@ -36,13 +36,50 @@ public class LanceSplit implements Serializable {
     return fragments;
   }
 
-  public static List<LanceSplit> generateLanceSplits(LanceSparkReadOptions readOptions) {
-    try (Dataset dataset = openDataset(readOptions)) {
-      return dataset.getFragments().stream()
-          .map(Fragment::getId)
-          .map(id -> new LanceSplit(Collections.singletonList(id)))
-          .collect(Collectors.toList());
+  /** Result of scan planning containing splits and resolved version. */
+  public static class ScanPlanResult {
+    private final List<LanceSplit> splits;
+    private final long resolvedVersion;
+
+    public ScanPlanResult(List<LanceSplit> splits, long resolvedVersion) {
+      this.splits = splits;
+      this.resolvedVersion = resolvedVersion;
     }
+
+    public List<LanceSplit> getSplits() {
+      return splits;
+    }
+
+    public long getResolvedVersion() {
+      return resolvedVersion;
+    }
+  }
+
+  /**
+   * Generates splits and resolves the dataset version.
+   *
+   * <p>This method opens the dataset at the specified version (or latest if not specified), gets
+   * the fragment IDs, and returns both the splits and the resolved version. The resolved version
+   * should be passed to workers to ensure snapshot isolation.
+   */
+  public static ScanPlanResult planScan(LanceSparkReadOptions readOptions) {
+    try (Dataset dataset = openDataset(readOptions)) {
+      List<LanceSplit> splits =
+          dataset.getFragments().stream()
+              .map(Fragment::getId)
+              .map(id -> new LanceSplit(Collections.singletonList(id)))
+              .collect(Collectors.toList());
+      long resolvedVersion = dataset.getVersion().getId();
+      return new ScanPlanResult(splits, resolvedVersion);
+    }
+  }
+
+  /**
+   * @deprecated Use {@link #planScan(LanceSparkReadOptions)} instead to get resolved version.
+   */
+  @Deprecated
+  public static List<LanceSplit> generateLanceSplits(LanceSparkReadOptions readOptions) {
+    return planScan(readOptions).getSplits();
   }
 
   private static Dataset openDataset(LanceSparkReadOptions readOptions) {

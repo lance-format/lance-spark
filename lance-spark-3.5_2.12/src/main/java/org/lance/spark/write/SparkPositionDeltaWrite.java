@@ -159,10 +159,14 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
             .allocator(LanceRuntime.allocator())
             .namespace(options.getNamespace())
             .tableId(options.getTableId())
+            .session(LanceRuntime.session())
             .build();
       } else {
         ReadOptions readOptions =
-            new ReadOptions.Builder().setStorageOptions(options.getStorageOptions()).build();
+            new ReadOptions.Builder()
+                .setStorageOptions(options.getStorageOptions())
+                .setSession(LanceRuntime.session())
+                .build();
         return Dataset.open()
             .allocator(LanceRuntime.allocator())
             .uri(options.getDatasetUri())
@@ -354,7 +358,11 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       // Note: options.hasNamespace() is false on workers (namespace is transient)
       Map<String, String> merged =
           LanceRuntime.mergeStorageOptions(options.getStorageOptions(), initialStorageOptions);
-      ReadOptions readOptions = new ReadOptions.Builder().setStorageOptions(merged).build();
+      ReadOptions readOptions =
+          new ReadOptions.Builder()
+              .setStorageOptions(merged)
+              .setSession(LanceRuntime.session())
+              .build();
       return Dataset.open()
           .allocator(LanceRuntime.allocator())
           .uri(options.getDatasetUri())

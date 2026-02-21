@@ -13,6 +13,7 @@
  */
 package org.lance.spark;
 
+import org.lance.Session;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.LanceNamespaceStorageOptionsProvider;
 
@@ -26,13 +27,14 @@ import java.util.Map;
 /**
  * Runtime utilities for Lance Spark connector.
  *
- * <p>This class manages a global Arrow buffer allocator and provides helper methods for namespace
- * operations.
+ * <p>This class manages a global Arrow buffer allocator, a shared Session for cache efficiency, and
+ * provides helper methods for namespace operations.
  *
  * <p>Usage:
  *
  * <pre>{@code
  * BufferAllocator allocator = LanceRuntime.allocator();
+ * Session session = LanceRuntime.session();
  * LanceNamespace ns = LanceRuntime.createNamespace(impl, properties);
  * }</pre>
  */
@@ -41,11 +43,20 @@ public final class LanceRuntime {
   /** Environment variable for allocator size. */
   public static final String ENV_ALLOCATOR_SIZE = "LANCE_ALLOCATOR_SIZE";
 
+  /** Environment variable for index cache size in bytes. */
+  public static final String ENV_INDEX_CACHE_SIZE = "LANCE_INDEX_CACHE_SIZE";
+
+  /** Environment variable for metadata cache size in bytes. */
+  public static final String ENV_METADATA_CACHE_SIZE = "LANCE_METADATA_CACHE_SIZE";
+
   /** Default allocator size (unlimited). */
   public static final long DEFAULT_ALLOCATOR_SIZE = Long.MAX_VALUE;
 
   /** Global allocator (lazy initialized based on env var). */
   private static volatile BufferAllocator GLOBAL_ALLOCATOR;
+
+  /** Global session for cache sharing across datasets (lazy initialized). */
+  private static volatile Session GLOBAL_SESSION;
 
   private LanceRuntime() {}
 
@@ -70,6 +81,35 @@ public final class LanceRuntime {
   }
 
   /**
+   * Returns the global shared Session for cache efficiency.
+   *
+   * <p>The session provides shared index and metadata caches across all datasets opened in this
+   * JVM. Cache sizes can be configured via {@link #ENV_INDEX_CACHE_SIZE} and {@link
+   * #ENV_METADATA_CACHE_SIZE} environment variables.
+   *
+   * @return the global session
+   */
+  public static Session session() {
+    if (GLOBAL_SESSION == null) {
+      synchronized (LanceRuntime.class) {
+        if (GLOBAL_SESSION == null) {
+          Session.Builder builder = Session.builder();
+          Long indexCacheSize = getEnvLong(ENV_INDEX_CACHE_SIZE);
+          if (indexCacheSize != null) {
+            builder.indexCacheSizeBytes(indexCacheSize);
+          }
+          Long metadataCacheSize = getEnvLong(ENV_METADATA_CACHE_SIZE);
+          if (metadataCacheSize != null) {
+            builder.metadataCacheSizeBytes(metadataCacheSize);
+          }
+          GLOBAL_SESSION = builder.build();
+        }
+      }
+    }
+    return GLOBAL_SESSION;
+  }
+
+  /**
    * Gets the allocator size from environment variable.
    *
    * @return the allocator size, or DEFAULT_ALLOCATOR_SIZE if not configured
@@ -87,6 +127,24 @@ public final class LanceRuntime {
   }
 
   /**
+   * Gets a long value from environment variable.
+   *
+   * @param envVar the environment variable name
+   * @return the long value, or null if not configured or invalid
+   */
+  private static Long getEnvLong(String envVar) {
+    String envValue = System.getenv(envVar);
+    if (envValue != null && !envValue.isEmpty()) {
+      try {
+        return Long.parseLong(envValue);
+      } catch (NumberFormatException e) {
+        // Fall through to null
+      }
+    }
+    return null;
+  }
+
+  /**
    * Clears the global allocator. This is primarily for testing purposes.
    *
    * <p>WARNING: This closes the global allocator. Do not call while it may be in use.
@@ -96,6 +154,20 @@ public final class LanceRuntime {
       if (GLOBAL_ALLOCATOR != null) {
         GLOBAL_ALLOCATOR.close();
         GLOBAL_ALLOCATOR = null;
+      }
+    }
+  }
+
+  /**
+   * Clears the global session. This is primarily for testing purposes.
+   *
+   * <p>WARNING: This closes the global session. Do not call while it may be in use.
+   */
+  static void clearGlobalSession() {
+    synchronized (LanceRuntime.class) {
+      if (GLOBAL_SESSION != null) {
+        GLOBAL_SESSION.close();
+        GLOBAL_SESSION = null;
       }
     }
   }

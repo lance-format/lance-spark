@@ -244,6 +244,31 @@ public class LanceSparkReadOptions implements Serializable {
   }
 
   /**
+   * Creates a copy of this options with a different version.
+   *
+   * <p>This is used to pin the version during scan planning for snapshot isolation.
+   *
+   * @param newVersion the version to use
+   * @return a new LanceSparkReadOptions with the specified version
+   */
+  public LanceSparkReadOptions withVersion(int newVersion) {
+    return builder()
+        .datasetUri(this.datasetUri)
+        .pushDownFilters(this.pushDownFilters)
+        .blockSize(this.blockSize)
+        .version(newVersion)
+        .indexCacheSize(this.indexCacheSize)
+        .metadataCacheSize(this.metadataCacheSize)
+        .batchSize(this.batchSize)
+        .nearest(this.nearest)
+        .topNPushDown(this.topNPushDown)
+        .storageOptions(this.storageOptions)
+        .namespace(this.namespace)
+        .tableId(this.tableId)
+        .build();
+  }
+
+  /**
    * Creates a StorageOptionsProvider for dynamic credential refresh.
    *
    * @return a StorageOptionsProvider if namespace is configured, null otherwise
@@ -262,6 +287,7 @@ public class LanceSparkReadOptions implements Serializable {
    */
   public ReadOptions toReadOptions() {
     ReadOptions.Builder builder = new ReadOptions.Builder();
+    builder.setSession(LanceRuntime.session());
     if (blockSize != null) {
       builder.setBlockSize(blockSize);
     }

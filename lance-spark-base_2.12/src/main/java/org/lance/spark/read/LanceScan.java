@@ -96,7 +96,13 @@ public class LanceScan
 
   @Override
   public InputPartition[] planInputPartitions() {
-    List<LanceSplit> splits = LanceSplit.generateLanceSplits(readOptions);
+    LanceSplit.ScanPlanResult planResult = LanceSplit.planScan(readOptions);
+    List<LanceSplit> splits = planResult.getSplits();
+
+    // Use resolved version for snapshot isolation - ensures all workers read the same version
+    LanceSparkReadOptions resolvedReadOptions =
+        readOptions.withVersion((int) planResult.getResolvedVersion());
+
     return IntStream.range(0, splits.size())
         .mapToObj(
             i ->
@@ -104,7 +110,7 @@ public class LanceScan
                     schema,
                     i,
                     splits.get(i),
-                    readOptions,
+                    resolvedReadOptions,
                     whereConditions,
                     limit,
                     offset,
