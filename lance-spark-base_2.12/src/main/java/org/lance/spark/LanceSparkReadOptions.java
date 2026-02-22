@@ -84,6 +84,9 @@ public class LanceSparkReadOptions implements Serializable {
   /** The table identifier within the namespace, used for credential refresh. */
   private final List<String> tableId;
 
+  /** The catalog name for cache isolation when multiple catalogs are configured. */
+  private final String catalogName;
+
   private LanceSparkReadOptions(Builder builder) {
     this.datasetUri = builder.datasetUri;
     String[] paths = extractDbPathAndDatasetName(datasetUri);
@@ -100,6 +103,7 @@ public class LanceSparkReadOptions implements Serializable {
     this.storageOptions = new HashMap<>(builder.storageOptions);
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
+    this.catalogName = builder.catalogName;
   }
 
   /** Creates a new builder for LanceSparkReadOptions. */
@@ -230,6 +234,10 @@ public class LanceSparkReadOptions implements Serializable {
     return tableId;
   }
 
+  public String getCatalogName() {
+    return catalogName;
+  }
+
   public boolean hasNamespace() {
     return namespace != null && tableId != null;
   }
@@ -265,6 +273,7 @@ public class LanceSparkReadOptions implements Serializable {
         .storageOptions(this.storageOptions)
         .namespace(this.namespace)
         .tableId(this.tableId)
+        .catalogName(this.catalogName)
         .build();
   }
 
@@ -357,6 +366,7 @@ public class LanceSparkReadOptions implements Serializable {
     private Map<String, String> storageOptions = new HashMap<>();
     private LanceNamespace namespace;
     private List<String> tableId;
+    private String catalogName;
 
     private Builder() {}
 
@@ -426,6 +436,11 @@ public class LanceSparkReadOptions implements Serializable {
 
     public Builder tableId(List<String> tableId) {
       this.tableId = tableId;
+      return this;
+    }
+
+    public Builder catalogName(String catalogName) {
+      this.catalogName = catalogName;
       return this;
     }
 

@@ -78,7 +78,12 @@ public class LanceCatalog implements TableCatalog {
     String datasetUri = getDatasetUri(ident);
     LanceSparkReadOptions readOptions =
         createReadOptions(
-            datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty());
+            datasetUri,
+            catalogConfig,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            catalogName);
     try {
       Dataset.write()
           .allocator(LanceRuntime.allocator())
@@ -175,7 +180,12 @@ public class LanceCatalog implements TableCatalog {
     } else if (timestamp.isPresent()) {
       LanceSparkReadOptions readOptions =
           createReadOptions(
-              datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty());
+              datasetUri,
+              catalogConfig,
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              catalogName);
       try (Dataset dataset = openDataset(readOptions)) {
         versionId = Optional.of(Utils.findVersion(dataset.listVersions(), timestamp.get()));
       } catch (IllegalArgumentException e) {
@@ -184,7 +194,8 @@ public class LanceCatalog implements TableCatalog {
     }
 
     LanceSparkReadOptions readOptions =
-        createReadOptions(datasetUri, catalogConfig, versionId, Optional.empty(), Optional.empty());
+        createReadOptions(
+            datasetUri, catalogConfig, versionId, Optional.empty(), Optional.empty(), catalogName);
     StructType schema = getSchema(ident, readOptions);
 
     return new LanceDataset(readOptions, schema, null, null, null);

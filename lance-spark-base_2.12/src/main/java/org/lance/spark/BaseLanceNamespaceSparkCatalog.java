@@ -475,7 +475,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
             catalogConfig,
             Optional.empty(),
             Optional.of(namespace),
-            Optional.of(tableIdList));
+            Optional.of(tableIdList),
+            name);
     return createDataset(
         readOptions, processedSchema, initialStorageOptions, namespaceImpl, namespaceProperties);
   }
@@ -545,7 +546,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
             catalogConfig,
             Optional.empty(),
             Optional.of(namespace),
-            Optional.of(tableIdList));
+            Optional.of(tableIdList),
+            name);
 
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
     Map<String, String> merged =
@@ -586,7 +588,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
             catalogConfig,
             Optional.empty(),
             Optional.of(namespace),
-            Optional.of(tableIdList));
+            Optional.of(tableIdList),
+            name);
 
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
     Dataset ds = openDataset(readOptions);
@@ -633,7 +636,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
             catalogConfig,
             Optional.empty(),
             Optional.of(namespace),
-            Optional.of(tableIdList));
+            Optional.of(tableIdList),
+            name);
 
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
     StagedCommit stagedCommit;
@@ -807,7 +811,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
               catalogConfig,
               Optional.empty(),
               Optional.of(namespace),
-              Optional.of(tableId));
+              Optional.of(tableId),
+              name);
       try (Dataset dataset = openDataset(readOptions)) {
         versionId = Optional.of(Utils.findVersion(dataset.listVersions(), timestamp.get()));
       } catch (TableNotFoundException e) {
@@ -819,7 +824,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     LanceSparkReadOptions readOptions =
         createReadOptions(
-            location, catalogConfig, versionId, Optional.of(namespace), Optional.of(tableId));
+            location, catalogConfig, versionId, Optional.of(namespace), Optional.of(tableId), name);
     StructType schema = getSchema(ident, readOptions);
 
     // Create read options with namespace support

@@ -68,14 +68,6 @@ and namespace-specific options:
 | `spark.sql.catalog.{name}.parent`           | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                             |
 | `spark.sql.catalog.{name}.parent_delimiter` | String | ✗        | Delimiter for parent prefix (default: `.`). See [Note on Namespace Levels](#note-on-namespace-levels).                           |
 
-### Arrow Allocator
-
-The Arrow buffer allocator size can be configured via environment variable:
-
-| Environment Variable    | Default          | Description                             |
-|-------------------------|------------------|-----------------------------------------|
-| `LANCE_ALLOCATOR_SIZE`  | `Long.MAX_VALUE` | Arrow allocator size in bytes (global). |
-
 ## Example Namespace Implementations
 
 ### Directory Namespace
@@ -479,3 +471,32 @@ For example, with Hive3:
 The parent configuration effectively "anchors" your Spark catalog at a specific level within the deeper namespace
 hierarchy, making the extra levels transparent to Spark users while maintaining compatibility with the underlying
 namespace implementation.
+
+## Memory Configuration
+
+Lance Spark uses Arrow for data transfer between native code and Spark, and maintains caches for improved performance.
+
+### Arrow Allocator
+
+Set via environment variable `LANCE_ALLOCATOR_SIZE` (default: unlimited).
+
+Controls the maximum memory allocation for Arrow buffers used in data transfer between Lance native code and Spark.
+
+| Environment Variable   | Default          | Description                              |
+|------------------------|------------------|------------------------------------------|
+| `LANCE_ALLOCATOR_SIZE` | `Long.MAX_VALUE` | Arrow allocator size in bytes (global).  |
+
+```bash
+export LANCE_ALLOCATOR_SIZE=4294967296  # 4GB
+```
+
+### Caching
+
+Lance Spark maintains index and metadata caches to minimize redundant I/O. Cache sizes are configured via environment variables:
+
+| Environment Variable       | Default | Description                      |
+|----------------------------|---------|----------------------------------|
+| `LANCE_INDEX_CACHE_SIZE`   | 6GB     | Index cache size in bytes.       |
+| `LANCE_METADATA_CACHE_SIZE`| 1GB     | Metadata cache size in bytes.    |
+
+For details on how caching works and tuning recommendations, see [Performance Tuning - Caching](performance.md#caching).

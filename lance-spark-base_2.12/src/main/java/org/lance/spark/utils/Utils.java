@@ -84,7 +84,11 @@ public class Utils {
    * Creates LanceSparkReadOptions for this catalog.
    *
    * @param location the dataset URI
+   * @param catalogConfig catalog configuration
    * @param versionId optional dataset version id
+   * @param namespace optional namespace for credential vending
+   * @param tableId optional table identifier
+   * @param catalogName catalog name for cache isolation
    * @return a new LanceSparkReadOptions with catalog settings
    */
   public static LanceSparkReadOptions createReadOptions(
@@ -92,9 +96,13 @@ public class Utils {
       LanceSparkCatalogConfig catalogConfig,
       Optional<Long> versionId,
       Optional<LanceNamespace> namespace,
-      Optional<List<String>> tableId) {
+      Optional<List<String>> tableId,
+      String catalogName) {
     LanceSparkReadOptions.Builder builder =
-        LanceSparkReadOptions.builder().datasetUri(location).withCatalogDefaults(catalogConfig);
+        LanceSparkReadOptions.builder()
+            .datasetUri(location)
+            .withCatalogDefaults(catalogConfig)
+            .catalogName(catalogName);
 
     if (versionId.isPresent()) {
       builder.version(versionId.get().intValue());

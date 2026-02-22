@@ -23,6 +23,7 @@ import org.apache.arrow.memory.RootAllocator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Runtime utilities for Lance Spark connector.
@@ -59,11 +60,14 @@ public final class LanceRuntime {
   /** Default allocator size (unlimited). */
   public static final long DEFAULT_ALLOCATOR_SIZE = Long.MAX_VALUE;
 
+  /** Default catalog name used when no catalog is specified. */
+  public static final String DEFAULT_CATALOG = "default";
+
   /** Global allocator (lazy initialized based on env var). */
   private static volatile BufferAllocator GLOBAL_ALLOCATOR;
 
-  /** Global session for cache sharing across datasets (lazy initialized). */
-  private static volatile Session GLOBAL_SESSION;
+  /** Per-catalog sessions for cache isolation (lazy initialized). */
+  private static final Map<String, Session> CATALOG_SESSIONS = new ConcurrentHashMap<>();
 
   private LanceRuntime() {}
 
@@ -88,39 +92,51 @@ public final class LanceRuntime {
   }
 
   /**
-   * Returns the global shared Session for cache efficiency.
+   * Returns the session for the default catalog.
    *
-   * <p>The session provides shared index and metadata caches across all datasets opened in this
-   * JVM. Cache sizes can be configured via environment variables:
+   * <p>This is equivalent to calling {@link #session(String)} with {@link #DEFAULT_CATALOG}.
+   *
+   * @return the session for the default catalog
+   */
+  public static Session session() {
+    return session(DEFAULT_CATALOG);
+  }
+
+  /**
+   * Returns the session for a specific catalog.
+   *
+   * <p>Each catalog has its own session with isolated index and metadata caches. This allows
+   * multiple Lance catalogs in the same Spark application to have separate caches.
+   *
+   * <p>Cache sizes can be configured via environment variables:
    *
    * <ul>
    *   <li>{@link #ENV_INDEX_CACHE_SIZE} - Index cache size in bytes
    *   <li>{@link #ENV_METADATA_CACHE_SIZE} - Metadata cache size in bytes
    * </ul>
    *
-   * @return the global session
+   * @param catalogName the catalog name for cache isolation
+   * @return the session for the specified catalog
    */
-  public static Session session() {
-    if (GLOBAL_SESSION == null) {
-      synchronized (LanceRuntime.class) {
-        if (GLOBAL_SESSION == null) {
-          Session.Builder builder = Session.builder();
+  public static Session session(String catalogName) {
+    String key = catalogName != null ? catalogName : DEFAULT_CATALOG;
+    return CATALOG_SESSIONS.computeIfAbsent(key, k -> createSession());
+  }
 
-          Long indexCacheSize = getEnvLong(ENV_INDEX_CACHE_SIZE);
-          if (indexCacheSize != null) {
-            builder.indexCacheSizeBytes(indexCacheSize);
-          }
+  private static Session createSession() {
+    Session.Builder builder = Session.builder();
 
-          Long metadataCacheSize = getEnvLong(ENV_METADATA_CACHE_SIZE);
-          if (metadataCacheSize != null) {
-            builder.metadataCacheSizeBytes(metadataCacheSize);
-          }
-
-          GLOBAL_SESSION = builder.build();
-        }
-      }
+    Long indexCacheSize = getEnvLong(ENV_INDEX_CACHE_SIZE);
+    if (indexCacheSize != null) {
+      builder.indexCacheSizeBytes(indexCacheSize);
     }
-    return GLOBAL_SESSION;
+
+    Long metadataCacheSize = getEnvLong(ENV_METADATA_CACHE_SIZE);
+    if (metadataCacheSize != null) {
+      builder.metadataCacheSizeBytes(metadataCacheSize);
+    }
+
+    return builder.build();
   }
 
   /**
@@ -173,16 +189,16 @@ public final class LanceRuntime {
   }
 
   /**
-   * Clears the global session. This is primarily for testing purposes.
+   * Clears all catalog sessions. This is primarily for testing purposes.
    *
-   * <p>WARNING: This closes the global session. Do not call while it may be in use.
+   * <p>WARNING: This closes all sessions. Do not call while they may be in use.
    */
   static void clearGlobalSession() {
     synchronized (LanceRuntime.class) {
-      if (GLOBAL_SESSION != null) {
-        GLOBAL_SESSION.close();
-        GLOBAL_SESSION = null;
+      for (Session session : CATALOG_SESSIONS.values()) {
+        session.close();
       }
+      CATALOG_SESSIONS.clear();
     }
   }
 

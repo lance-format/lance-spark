@@ -104,3 +104,49 @@ For large scans, increasing this to match your CPU core count enables more concu
 ```bash
 export LANCE_IO_THREADS=128
 ```
+
+## Caching
+
+Lance Spark uses a multi-level caching strategy to minimize redundant I/O and improve query performance.
+
+!!!note
+    Caches are isolated per Spark catalog. For multi-tenant deployments, configure one Lance catalog per tenant to provide complete cache and credential isolation. If you configure multiple catalogs, total memory usage is multiplied by the number of catalogs. For example, with default settings (6GB index + 1GB metadata) and 3 catalogs, the maximum cache memory is 21GB (3 × 7GB).
+
+### How Caching Works
+
+Lance Spark implements two levels of caching:
+
+1. **Session Cache** - Contains index and metadata caches:
+
+    - **Index Cache**: Caches opened vector indices, fragment reuse indices, and index metadata
+    - **Metadata Cache**: Caches manifests, transactions, deletion files, row ID indices, and file metadata
+
+2. **Dataset Cache** - Caches opened datasets by `(catalog, URI, version)` key. Since a dataset at a specific version is immutable, this ensures:
+
+    - Each dataset is opened only once per worker
+    - All workers read the same version for snapshot isolation
+    - Fragments are pre-loaded and cached per dataset
+
+### Index Cache Size
+
+Set via environment variable `LANCE_INDEX_CACHE_SIZE` (default: 6GB from Lance native).
+
+Controls the size of the index cache in bytes.
+The index cache stores vector indices which can be large but provide significant speedup for vector search queries.
+Increase this if you frequently query tables with vector indices.
+
+```bash
+export LANCE_INDEX_CACHE_SIZE=8589934592  # 8GB
+```
+
+### Metadata Cache Size
+
+Set via environment variable `LANCE_METADATA_CACHE_SIZE` (default: 1GB from Lance native).
+
+Controls the size of the metadata cache in bytes.
+The metadata cache stores manifests, file metadata, and other dataset metadata.
+Each column's metadata can be around 40MB, so increase this if your tables have many columns.
+
+```bash
+export LANCE_METADATA_CACHE_SIZE=2147483648  # 2GB
+```

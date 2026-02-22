@@ -78,10 +78,13 @@ public class LanceDatasetCache {
   /**
    * Cache key for dataset lookup.
    *
-   * <p>The key uses (URI, version) to ensure immutable dataset caching. The version is always
-   * explicit because it's resolved during scan planning - this ensures snapshot isolation.
+   * <p>The key uses (catalogName, URI, version) to ensure immutable dataset caching with
+   * per-catalog isolation. The version is always explicit because it's resolved during scan
+   * planning - this ensures snapshot isolation. The catalogName ensures that multiple Lance
+   * catalogs in the same Spark application have isolated caches.
    */
   public static class DatasetCacheKey {
+    private final String catalogName;
     private final String uri;
     private final Long version;
     private final Map<String, String> storageOptions;
@@ -91,6 +94,7 @@ public class LanceDatasetCache {
     private final List<String> tableId;
 
     public DatasetCacheKey(
+        String catalogName,
         String uri,
         Long version,
         Map<String, String> storageOptions,
@@ -98,6 +102,7 @@ public class LanceDatasetCache {
         String namespaceImpl,
         Map<String, String> namespaceProperties,
         List<String> tableId) {
+      this.catalogName = catalogName != null ? catalogName : LanceRuntime.DEFAULT_CATALOG;
       this.uri = uri;
       this.version = version;
       this.storageOptions = storageOptions;
@@ -105,6 +110,10 @@ public class LanceDatasetCache {
       this.namespaceImpl = namespaceImpl;
       this.namespaceProperties = namespaceProperties;
       this.tableId = tableId;
+    }
+
+    public String getCatalogName() {
+      return catalogName;
     }
 
     public String getUri() {
@@ -141,17 +150,20 @@ public class LanceDatasetCache {
         return false;
       }
       DatasetCacheKey that = (DatasetCacheKey) o;
-      return Objects.equals(uri, that.uri) && Objects.equals(version, that.version);
+      return Objects.equals(catalogName, that.catalogName)
+          && Objects.equals(uri, that.uri)
+          && Objects.equals(version, that.version);
     }
 
     @Override
     public int hashCode() {
-      return Objects.hash(uri, version);
+      return Objects.hash(catalogName, uri, version);
     }
 
     @Override
     public String toString() {
-      return String.format("DatasetCacheKey(uri=%s, version=%s)", uri, version);
+      return String.format(
+          "DatasetCacheKey(catalog=%s, uri=%s, version=%s)", catalogName, uri, version);
     }
   }
 
@@ -203,6 +215,7 @@ public class LanceDatasetCache {
       Map<String, String> namespaceProperties) {
     DatasetCacheKey key =
         new DatasetCacheKey(
+            readOptions.getCatalogName(),
             readOptions.getDatasetUri(),
             readOptions.getVersion() != null ? (long) readOptions.getVersion() : null,
             readOptions.getStorageOptions(),
@@ -256,7 +269,9 @@ public class LanceDatasetCache {
             key.getNamespaceImpl(), key.getNamespaceProperties(), key.getTableId());
 
     ReadOptions.Builder builder =
-        new ReadOptions.Builder().setStorageOptions(merged).setSession(LanceRuntime.session());
+        new ReadOptions.Builder()
+            .setStorageOptions(merged)
+            .setSession(LanceRuntime.session(key.getCatalogName()));
 
     if (provider != null) {
       builder.setStorageOptionsProvider(provider);
