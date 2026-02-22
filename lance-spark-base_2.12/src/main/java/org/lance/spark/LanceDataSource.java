@@ -139,7 +139,8 @@ public abstract class LanceDataSource implements SupportsCatalogOptions, DataSou
    */
   private static void setupDefaultLanceCatalog(SparkSession spark) {
     if (!spark.conf().contains(DEFAULT_LANCE_CATALOG_CONFIG)) {
-      spark.conf().set(DEFAULT_LANCE_CATALOG_CONFIG, LanceCatalog.class.getName());
+      // Use LanceNamespaceSparkCatalog in path-based-only mode (no impl config)
+      spark.conf().set(DEFAULT_LANCE_CATALOG_CONFIG, "org.lance.spark.LanceNamespaceSparkCatalog");
     }
   }
 

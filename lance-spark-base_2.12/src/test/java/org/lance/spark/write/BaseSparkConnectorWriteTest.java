@@ -59,7 +59,7 @@ public abstract class BaseSparkConnectorWriteTest {
         SparkSession.builder()
             .appName("spark-lance-connector-test")
             .master("local")
-            .config("spark.sql.catalog.lance", "org.lance.spark.LanceCatalog")
+            .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
             .config("spark.sql.catalog.lance.max_row_per_file", "1")
             .config("spark.sql.session.timeZone", "UTC")
             .getOrCreate();

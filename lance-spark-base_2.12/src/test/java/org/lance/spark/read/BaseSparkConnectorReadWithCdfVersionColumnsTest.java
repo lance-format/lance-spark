@@ -41,7 +41,7 @@ public abstract class BaseSparkConnectorReadWithCdfVersionColumnsTest {
         SparkSession.builder()
             .appName("spark-lance-connector-test")
             .master("local")
-            .config("spark.sql.catalog.lance", "org.lance.spark.LanceCatalog")
+            .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
             .getOrCreate();
     dbPath = TestUtils.TestTable1Config.dbPath;
     data =
