@@ -265,6 +265,7 @@ These options control how data is written to Lance datasets. They can be set usi
 | `batch_size`             | Integer | `512`    | Number of rows per batch during writing.                                             |
 | `use_queued_write_buffer`| Boolean | `false`  | Use pipelined write buffer for improved throughput.                                  |
 | `queue_depth`            | Integer | `8`      | Queue depth for pipelined writes (only used when `use_queued_write_buffer=true`).    |
+| `server_side_write`      | Boolean | `false`  | Send data to namespace via `insertIntoTable` API instead of writing directly to storage. Requires a namespace that supports write operations. |
 
 ### Example: Controlling File Size
 
@@ -333,4 +334,72 @@ These options control how data is written to Lance datasets. They can be set usi
         .option("use_queued_write_buffer", "true")
         .option("queue_depth", "4")
         .save("/path/to/output.lance")
+    ```
+
+### Example: Server-Side Writes
+
+When using a namespace that supports write operations (e.g., LanceDB Enterprise, Apache Gravitino),
+you can enable server-side writes to send data to the namespace via the `insertIntoTable` API instead
+of writing directly to object storage. This is useful when:
+
+- Spark workers don't have direct access to the underlying storage
+- You want centralized write control through the server
+- You want to avoid distributing storage credentials to workers
+- Your server can handle higher throughput than direct object store writes
+- Your server offers additional features (e.g., real-time indexing)
+
+**Requirements:**
+
+- Must use a namespace implementation that supports `insertIntoTable` operation
+- Not compatible with staged operations like `CREATE OR REPLACE TABLE`
+
+=== "Python"
+    ```python
+    # Configure namespace (example with REST namespace)
+    spark = SparkSession.builder \
+        .appName("lance-server-write-example") \
+        .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog") \
+        .config("spark.sql.catalog.lance.impl", "rest") \
+        .config("spark.sql.catalog.lance.uri", "https://your-server.example.com") \
+        .config("spark.sql.catalog.lance.headers.x-api-key", "your-api-key") \
+        .getOrCreate()
+
+    # Enable server-side write
+    df.writeTo("lance.mydb.mytable") \
+        .option("server_side_write", "true") \
+        .append()
+    ```
+
+=== "Scala"
+    ```scala
+    // Configure namespace (example with REST namespace)
+    val spark = SparkSession.builder()
+        .appName("lance-server-write-example")
+        .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
+        .config("spark.sql.catalog.lance.impl", "rest")
+        .config("spark.sql.catalog.lance.uri", "https://your-server.example.com")
+        .config("spark.sql.catalog.lance.headers.x-api-key", "your-api-key")
+        .getOrCreate()
+
+    // Enable server-side write
+    df.writeTo("lance.mydb.mytable")
+        .option("server_side_write", "true")
+        .append()
+    ```
+
+=== "Java"
+    ```java
+    // Configure namespace (example with REST namespace)
+    SparkSession spark = SparkSession.builder()
+        .appName("lance-server-write-example")
+        .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
+        .config("spark.sql.catalog.lance.impl", "rest")
+        .config("spark.sql.catalog.lance.uri", "https://your-server.example.com")
+        .config("spark.sql.catalog.lance.headers.x-api-key", "your-api-key")
+        .getOrCreate();
+
+    // Enable server-side write
+    df.writeTo("lance.mydb.mytable")
+        .option("server_side_write", "true")
+        .append();
     ```
