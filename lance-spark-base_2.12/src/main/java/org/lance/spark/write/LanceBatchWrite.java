@@ -139,7 +139,7 @@ public class LanceBatchWrite implements BatchWrite {
             .flatMap(List::stream)
             .collect(Collectors.toList());
 
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", true, false);
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", true);
     boolean isOverwrite = overwrite || writeOptions.isOverwrite();
 
     if (stagedCommit != null) {

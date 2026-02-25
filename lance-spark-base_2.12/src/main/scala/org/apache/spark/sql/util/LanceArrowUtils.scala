@@ -128,15 +128,13 @@ object LanceArrowUtils {
   def toArrowSchema(
       schema: StructType,
       timeZoneId: String,
-      errorOnDuplicatedFieldNames: Boolean,
-      largeVarTypes: Boolean = false): Schema = {
+      errorOnDuplicatedFieldNames: Boolean): Schema = {
     new Schema(schema.map { field =>
       toArrowField(
         field.name,
         deduplicateFieldNames(field.dataType, errorOnDuplicatedFieldNames),
         field.nullable,
         timeZoneId,
-        largeVarTypes,
         field.metadata)
     }.asJava)
   }
@@ -146,9 +144,8 @@ object LanceArrowUtils {
       dt: DataType,
       nullable: Boolean,
       timeZoneId: String,
-      largeVarTypes: Boolean = false,
       metadata: org.apache.spark.sql.types.Metadata = null): Field = {
-    var large: Boolean = largeVarTypes
+    var large: Boolean = false
     var meta: Map[String, String] = Map.empty
 
     if (metadata != null) {
@@ -177,14 +174,14 @@ object LanceArrowUtils {
             name,
             fieldType,
             Seq(
-              toArrowField("element", elementType, containsNull, timeZoneId, large)).asJava)
+              toArrowField("element", elementType, containsNull, timeZoneId)).asJava)
         } else {
           val fieldType = new FieldType(nullable, ArrowType.List.INSTANCE, null, meta.asJava)
           new Field(
             name,
             fieldType,
             Seq(
-              toArrowField("element", elementType, containsNull, timeZoneId, large)).asJava)
+              toArrowField("element", elementType, containsNull, timeZoneId)).asJava)
         }
       case StructType(fields) =>
         val fieldType = new FieldType(nullable, ArrowType.Struct.INSTANCE, null, meta.asJava)
@@ -192,7 +189,7 @@ object LanceArrowUtils {
           name,
           fieldType,
           fields.map { field =>
-            toArrowField(field.name, field.dataType, field.nullable, timeZoneId, large)
+            toArrowField(field.name, field.dataType, field.nullable, timeZoneId)
           }.toSeq.asJava)
       case MapType(keyType, valueType, valueContainsNull) =>
         val mapType = new FieldType(nullable, new ArrowType.Map(false), null, meta.asJava)
@@ -206,10 +203,9 @@ object LanceArrowUtils {
               .add(MapVector.KEY_NAME, keyType, nullable = false)
               .add(MapVector.VALUE_NAME, valueType, nullable = valueContainsNull),
             nullable = false,
-            timeZoneId,
-            largeVarTypes)).asJava)
+            timeZoneId)).asJava)
       case udt: UserDefinedType[_] =>
-        toArrowField(name, udt.sqlType, nullable, timeZoneId, largeVarTypes)
+        toArrowField(name, udt.sqlType, nullable, timeZoneId)
       case dataType =>
         val fieldType =
           new FieldType(nullable, toArrowType(dataType, timeZoneId, large, name), null, meta.asJava)

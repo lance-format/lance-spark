@@ -574,7 +574,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
             .allocator(LanceRuntime.allocator())
             .namespace(namespace)
             .tableId(tableIdList)
-            .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false))
+            .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true))
             .mode(WriteParams.WriteMode.CREATE)
             .enableStableRowIds(catalogConfig.isEnableStableRowIds(properties))
             .storageOptions(catalogConfig.getStorageOptions())
@@ -619,7 +619,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Dataset.write()
           .allocator(LanceRuntime.allocator())
           .uri(datasetUri)
-          .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false))
+          .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true))
           .mode(WriteParams.WriteMode.CREATE)
           .enableStableRowIds(catalogConfig.isEnableStableRowIds(properties))
           .storageOptions(readOptions.getStorageOptions())
@@ -738,7 +738,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
             Optional.of(tableIdList),
             name);
 
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
     StagedCommit stagedCommit =
@@ -762,7 +762,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         createReadOptions(
             datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
 
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     StagedCommit stagedCommit =
         StagedCommit.forNewTable(
             arrowSchema, datasetUri, catalogConfig.getStorageOptions(), null, null);
@@ -809,7 +809,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
             Optional.of(tableIdList),
             name);
 
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     Dataset ds = openDataset(readOptions);
     StagedCommit stagedCommit =
         StagedCommit.forExistingTable(ds, arrowSchema, namespace, tableIdList);
@@ -840,7 +840,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       throw new NoSuchTableException(ident);
     }
 
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     StagedCommit stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, null, null);
     return createStagedDataset(readOptions, processedSchema, null, null, null, stagedCommit);
   }
@@ -892,7 +892,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
             Optional.of(tableIdList),
             name);
 
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     StagedCommit stagedCommit;
     if (exists) {
       Dataset ds = openDataset(readOptions);
@@ -924,7 +924,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
             datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
 
     boolean exists = tableExistsAtPath(ident);
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     StagedCommit stagedCommit;
 
     if (exists) {

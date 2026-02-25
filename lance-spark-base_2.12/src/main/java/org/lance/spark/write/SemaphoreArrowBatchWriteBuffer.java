@@ -66,7 +66,7 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
   public SemaphoreArrowBatchWriteBuffer(StructType sparkSchema, int batchSize) {
     this(
         LanceRuntime.allocator(),
-        LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false, false),
+        LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false),
         sparkSchema,
         batchSize);
   }

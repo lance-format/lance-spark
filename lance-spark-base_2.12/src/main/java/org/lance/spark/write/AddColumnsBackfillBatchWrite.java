@@ -147,7 +147,7 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
     }
 
     // Commit merge operation using transaction builder
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false, false);
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false);
     try (Dataset dataset = openDataset(writeOptions)) {
       Merge merge = Merge.builder().fragments(fragments).schema(arrowSchema).build();
       dataset.newTransactionBuilder().operation(merge).build().commit();
@@ -277,7 +277,7 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
       BufferAllocator allocator = LanceRuntime.allocator();
       data =
           VectorSchemaRoot.create(
-              LanceArrowUtils.toArrowSchema(writerSchema, "UTC", false, false), allocator);
+              LanceArrowUtils.toArrowSchema(writerSchema, "UTC", false), allocator);
 
       writer = org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(data, writerSchema);
     }

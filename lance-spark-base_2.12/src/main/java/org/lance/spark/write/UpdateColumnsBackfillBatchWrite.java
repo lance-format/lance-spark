@@ -286,7 +286,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
       BufferAllocator allocator = LanceRuntime.allocator();
       data =
           VectorSchemaRoot.create(
-              LanceArrowUtils.toArrowSchema(writerSchema, "UTC", false, false), allocator);
+              LanceArrowUtils.toArrowSchema(writerSchema, "UTC", false), allocator);
 
       writer = org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(data, writerSchema);
     }

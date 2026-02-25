@@ -153,7 +153,7 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
       .add("regular_string", StringType, nullable = true)
       .add("large_string", StringType, nullable = true, largeVarCharMetadata)
 
-    val arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", false, false)
+    val arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", false)
 
     // Regular string should use Utf8
     val regularField = arrowSchema.findField("regular_string")
@@ -163,21 +163,4 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
     val largeField = arrowSchema.findField("large_string")
     assert(largeField.getType === ArrowType.LargeUtf8.INSTANCE)
   }
-
-  test("largeVarTypes parameter produces LargeUtf8 for all strings") {
-    val schema = new StructType()
-      .add("string1", StringType, nullable = true)
-      .add("string2", StringType, nullable = true)
-
-    // Without largeVarTypes, should use Utf8
-    val arrowSchemaSmall = LanceArrowUtils.toArrowSchema(schema, "UTC", false, false)
-    assert(arrowSchemaSmall.findField("string1").getType === ArrowType.Utf8.INSTANCE)
-    assert(arrowSchemaSmall.findField("string2").getType === ArrowType.Utf8.INSTANCE)
-
-    // With largeVarTypes=true, should use LargeUtf8
-    val arrowSchemaLarge = LanceArrowUtils.toArrowSchema(schema, "UTC", false, true)
-    assert(arrowSchemaLarge.findField("string1").getType === ArrowType.LargeUtf8.INSTANCE)
-    assert(arrowSchemaLarge.findField("string2").getType === ArrowType.LargeUtf8.INSTANCE)
-  }
-
 }

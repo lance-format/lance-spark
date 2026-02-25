@@ -93,7 +93,7 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
   public QueuedArrowBatchWriteBuffer(StructType sparkSchema, int batchSize, int queueDepth) {
     this(
         LanceRuntime.allocator(),
-        LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false, false),
+        LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false),
         sparkSchema,
         batchSize,
         queueDepth);
