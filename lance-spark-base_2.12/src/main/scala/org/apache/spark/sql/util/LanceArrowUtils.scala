@@ -91,6 +91,12 @@ object LanceArrowUtils {
       case _: ArrowType.LargeBinary =>
         // LargeBinary maps back to BinaryType in Spark
         BinaryType
+      case _: ArrowType.FixedSizeBinary =>
+        // FixedSizeBinary maps to BinaryType in Spark
+        BinaryType
+      case date: ArrowType.Date if date.getUnit == DateUnit.MILLISECOND =>
+        // Date(MILLISECOND) maps to DateType in Spark (same as Date(DAY))
+        DateType
       case l: ArrowType.List =>
         val children = field.getChildren
         if (children.isEmpty) {
