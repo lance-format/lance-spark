@@ -480,7 +480,7 @@ public abstract class BaseSparkConnectorWriteTest {
     assertTrue(checkDataset(3, outputPath));
 
     // check timestamp as of
-    DateTimeFormatter format = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    DateTimeFormatter format = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS");
     String date = version_3.getDataTime().format(format);
     String sql = String.format("select * from lance.`%s`  TIMESTAMP AS OF '%s'", outputPath, date);
 

@@ -26,7 +26,6 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 
 import java.time.Instant;
-import java.time.ZonedDateTime;
 import java.util.List;
 
 public class Utils {
@@ -39,11 +38,11 @@ public class Utils {
     long versionID = -1;
     Instant instant = instantFromTimestamp(timestamp);
     for (Version version : versions) {
-      ZonedDateTime dataTime = version.getDataTime();
-      if (dataTime.toInstant().compareTo(instant) < 0) {
+      // Truncate version timestamp to microsecond precision to match Spark's
+      // microsecond timestamp resolution, avoiding sub-microsecond mismatches
+      Instant versionInstant = truncateToMicros(version.getDataTime().toInstant());
+      if (versionInstant.compareTo(instant) <= 0) {
         versionID = version.getId();
-      } else if (dataTime.toInstant().equals(instant)) {
-        return version.getId();
       } else {
         break;
       }
@@ -129,5 +128,11 @@ public class Utils {
     long sec = Math.floorDiv(epochMicros, 1_000_000L);
     long nanoAdj = Math.floorMod(epochMicros, 1_000_000L) * 1_000L;
     return Instant.ofEpochSecond(sec, nanoAdj);
+  }
+
+  private static Instant truncateToMicros(Instant instant) {
+    long nanos = instant.getNano();
+    long truncatedNanos = (nanos / 1_000L) * 1_000L;
+    return Instant.ofEpochSecond(instant.getEpochSecond(), truncatedNanos);
   }
 }
