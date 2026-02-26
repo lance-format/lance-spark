@@ -13,10 +13,12 @@
  */
 package org.lance.spark.write;
 
+import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.ReadOptions;
+import org.lance.Transaction;
 import org.lance.fragment.FragmentUpdateResult;
 import org.lance.io.StorageOptionsProvider;
 import org.lance.operation.Update;
@@ -150,7 +152,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
           .forEach(updatedFragments::add);
     }
 
-    // Commit update operation using transaction builder
+    // Commit update operation using CommitBuilder
     try (Dataset dataset = openDataset(writeOptions)) {
       Update update =
           Update.builder()
@@ -158,7 +160,11 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
               .fieldsModified(fieldsModified)
               .updateMode(Optional.of(Update.UpdateMode.RewriteColumns))
               .build();
-      dataset.newTransactionBuilder().operation(update).build().commit();
+      try (Transaction txn =
+              new Transaction.Builder().readVersion(dataset.version()).operation(update).build();
+          Dataset committed = new CommitBuilder(dataset).execute(txn)) {
+        // auto-close txn and committed dataset
+      }
     }
   }
 

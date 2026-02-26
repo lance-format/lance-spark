@@ -21,7 +21,7 @@ import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
 import org.apache.spark.unsafe.types.UTF8String
 import org.json4s.JsonAST.{JBool, JDouble, JField, JInt, JNull, JObject, JString}
 import org.json4s.jackson.JsonMethods.{compact, render}
-import org.lance.Dataset
+import org.lance.{CommitBuilder, Dataset, Transaction}
 import org.lance.ReadOptions
 import org.lance.index.{Index, IndexOptions, IndexParams, IndexType}
 import org.lance.index.scalar.ScalarIndexParams
@@ -157,10 +157,16 @@ case class AddIndexExec(
         .build()
 
       val op = AddIndexOperation.builder().withNewIndices(Collections.singletonList(index)).build()
-      val newDataset = dataset.newTransactionBuilder().operation(op).build().commit()
-
-      // close the committed new dataset to release resources
-      newDataset.close()
+      val txn = new Transaction.Builder()
+        .readVersion(dataset.version())
+        .operation(op)
+        .build()
+      try {
+        val newDataset = new CommitBuilder(dataset).execute(txn)
+        newDataset.close()
+      } finally {
+        txn.close()
+      }
     } finally {
       dataset.close()
     }

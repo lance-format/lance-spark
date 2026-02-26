@@ -13,12 +13,12 @@
  */
 package org.lance.spark.write;
 
+import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.FragmentMetadata;
-import org.lance.WriteParams;
+import org.lance.Transaction;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.DeregisterTableRequest;
-import org.lance.operation.Operation;
 import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
 
@@ -124,30 +124,24 @@ public class StagedCommit {
   }
 
   private void commitNewTable() {
-    // TODO: This should use namespace and tableId with the Transaction API to create the table.
-    // Currently using URI-based creation as a workaround because:
-    // 1. Transaction API doesn't support creating new datasets
-    //    (throws UnsupportedOperationException)
-    // 2. Namespace API doesn't have a method to finalize a declared table with fragments
-    // Once the SDK supports Transaction.commit() for new datasets with
-    // LanceNamespaceStorageOptionsProvider, switch to that approach for proper credential
-    // refresh support. The table was already declared via namespace.declareTable().
-    try (Dataset ds =
-        Dataset.write()
-            .allocator(LanceRuntime.allocator())
-            .uri(datasetUri)
-            .schema(schema)
-            .mode(WriteParams.WriteMode.CREATE)
-            .storageOptions(storageOptions)
-            .execute()) {
-      Operation operation = Overwrite.builder().fragments(fragments).schema(schema).build();
-      ds.newTransactionBuilder().operation(operation).build().commit();
+    Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
+    try (Transaction txn = new Transaction.Builder().operation(operation).build();
+        Dataset committed =
+            new CommitBuilder(datasetUri, LanceRuntime.allocator())
+                .writeParams(storageOptions)
+                .execute(txn)) {
+      // auto-close txn and committed dataset
     }
   }
 
   private void commitExistingTable() {
-    Operation operation = Overwrite.builder().fragments(fragments).schema(schema).build();
-    dataset.get().newTransactionBuilder().operation(operation).build().commit();
+    Dataset ds = dataset.get();
+    Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
+    try (Transaction txn =
+            new Transaction.Builder().readVersion(ds.version()).operation(operation).build();
+        Dataset committed = new CommitBuilder(ds).execute(txn)) {
+      // auto-close txn and committed dataset
+    }
   }
 
   /** Closes the dataset without committing. Used for abort scenarios. */

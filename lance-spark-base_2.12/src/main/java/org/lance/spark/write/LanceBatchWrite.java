@@ -13,9 +13,11 @@
  */
 package org.lance.spark.write;
 
+import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.FragmentMetadata;
 import org.lance.ReadOptions;
+import org.lance.Transaction;
 import org.lance.namespace.LanceNamespaceStorageOptionsProvider;
 import org.lance.operation.Append;
 import org.lance.operation.Operation;
@@ -157,7 +159,11 @@ public class LanceBatchWrite implements BatchWrite {
         } else {
           operation = Append.builder().fragments(fragments).build();
         }
-        ds.newTransactionBuilder().operation(operation).build().commit();
+        try (Transaction txn =
+                new Transaction.Builder().readVersion(ds.version()).operation(operation).build();
+            Dataset committed = new CommitBuilder(ds).execute(txn)) {
+          // auto-close txn and committed dataset
+        }
       } finally {
         ds.close();
       }
