@@ -485,12 +485,12 @@ public abstract class BaseSparkConnectorWriteTest {
     String sql = String.format("select * from lance.`%s`  TIMESTAMP AS OF '%s'", outputPath, date);
 
     List<Row> res = spark.sql(sql).collectAsList();
-    assertEquals(1, res.size());
+    assertEquals(2, res.size());
 
     // check version as of
     List<Row> res2 =
         spark.sql("select * from lance.`" + outputPath + "`  VERSION AS OF " + 2).collectAsList();
-    assertEquals(1, res2.size());
+    assertEquals(2, res2.size());
   }
 
   private boolean checkDataset(int expectedSize, String path) {
