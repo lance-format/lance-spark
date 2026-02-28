@@ -44,19 +44,23 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
 
   private final Map<String, String> namespaceProperties;
 
+  private final String fileFormatVersion;
+
   public LancePositionDeltaOperation(
       Command command,
       StructType sparkSchema,
       LanceSparkReadOptions readOptions,
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
-      Map<String, String> namespaceProperties) {
+      Map<String, String> namespaceProperties,
+      String fileFormatVersion) {
     this.command = command;
     this.sparkSchema = sparkSchema;
     this.readOptions = readOptions;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
+    this.fileFormatVersion = fileFormatVersion;
   }
 
   @Override
@@ -73,13 +77,16 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
   @Override
   public DeltaWriteBuilder newWriteBuilder(LogicalWriteInfo logicalWriteInfo) {
     // Create write options from read options for delta operations
-    LanceSparkWriteOptions writeOptions =
+    LanceSparkWriteOptions.Builder writeOptionsBuilder =
         LanceSparkWriteOptions.builder()
             .datasetUri(readOptions.getDatasetUri())
             .storageOptions(readOptions.getStorageOptions())
             .namespace(readOptions.getNamespace())
-            .tableId(readOptions.getTableId())
-            .build();
+            .tableId(readOptions.getTableId());
+    if (fileFormatVersion != null) {
+      writeOptionsBuilder.fileFormatVersion(fileFormatVersion);
+    }
+    LanceSparkWriteOptions writeOptions = writeOptionsBuilder.build();
     return new SparkPositionDeltaWriteBuilder(
         sparkSchema,
         writeOptions,

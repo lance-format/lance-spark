@@ -158,6 +158,12 @@ public class LanceDataset
   private final StagedCommit stagedCommit;
 
   /**
+   * The file format version for this table. Used to ensure writes use the same version as the
+   * table. Null means the default version will be used.
+   */
+  private final String fileFormatVersion;
+
+  /**
    * Creates a Lance dataset.
    *
    * @param readOptions read options including dataset URI and settings
@@ -172,7 +178,14 @@ public class LanceDataset
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties) {
-    this(readOptions, sparkSchema, initialStorageOptions, namespaceImpl, namespaceProperties, null);
+    this(
+        readOptions,
+        sparkSchema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        null,
+        null);
   }
 
   /**
@@ -192,12 +205,42 @@ public class LanceDataset
       String namespaceImpl,
       Map<String, String> namespaceProperties,
       StagedCommit stagedCommit) {
+    this(
+        readOptions,
+        sparkSchema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        stagedCommit,
+        null);
+  }
+
+  /**
+   * Creates a Lance dataset with staging support and file format version.
+   *
+   * @param readOptions read options including dataset URI and settings
+   * @param sparkSchema spark struct type
+   * @param initialStorageOptions initial storage options fetched from namespace.describeTable()
+   * @param namespaceImpl namespace implementation type for credential refresh on workers
+   * @param namespaceProperties namespace connection properties for credential refresh on workers
+   * @param stagedCommit the eagerly created staged commit, or null for non-staged tables
+   * @param fileFormatVersion the file format version for writes, or null to use default
+   */
+  public LanceDataset(
+      LanceSparkReadOptions readOptions,
+      StructType sparkSchema,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      StagedCommit stagedCommit,
+      String fileFormatVersion) {
     this.readOptions = readOptions;
     this.sparkSchema = sparkSchema;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.stagedCommit = stagedCommit;
+    this.fileFormatVersion = fileFormatVersion;
   }
 
   public LanceSparkReadOptions readOptions() {
@@ -214,6 +257,10 @@ public class LanceDataset
 
   public Map<String, String> getNamespaceProperties() {
     return namespaceProperties;
+  }
+
+  public String getFileFormatVersion() {
+    return fileFormatVersion;
   }
 
   @Override
@@ -257,13 +304,18 @@ public class LanceDataset
     Map<String, String> mergedOptions = new HashMap<>(readOptions.getStorageOptions());
     mergedOptions.putAll(sparkWriteOptions.asCaseSensitiveMap());
 
-    LanceSparkWriteOptions writeOptions =
+    LanceSparkWriteOptions.Builder writeOptionsBuilder =
         LanceSparkWriteOptions.builder()
             .datasetUri(readOptions.getDatasetUri())
             .namespace(readOptions.getNamespace())
             .tableId(readOptions.getTableId())
-            .fromOptions(mergedOptions)
-            .build();
+            .fromOptions(mergedOptions);
+    // Use table's file format version if not explicitly set in write options
+    if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)
+        && fileFormatVersion != null) {
+      writeOptionsBuilder.fileFormatVersion(fileFormatVersion);
+    }
+    LanceSparkWriteOptions writeOptions = writeOptionsBuilder.build();
 
     List<String> backfillColumns =
         Arrays.stream(

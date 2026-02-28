@@ -48,6 +48,41 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
         stagedCommit);
   }
 
+  public LancePositionDeltaDataset(
+      LanceSparkReadOptions readOptions,
+      StructType sparkSchema,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      String fileFormatVersion) {
+    super(
+        readOptions,
+        sparkSchema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        null,
+        fileFormatVersion);
+  }
+
+  public LancePositionDeltaDataset(
+      LanceSparkReadOptions readOptions,
+      StructType sparkSchema,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      StagedCommit stagedCommit,
+      String fileFormatVersion) {
+    super(
+        readOptions,
+        sparkSchema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        stagedCommit,
+        fileFormatVersion);
+  }
+
   @Override
   public RowLevelOperationBuilder newRowLevelOperationBuilder(
       RowLevelOperationInfo rowLevelOperationInfo) {
@@ -57,6 +92,7 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
         readOptions(),
         getInitialStorageOptions(),
         getNamespaceImpl(),
-        getNamespaceProperties());
+        getNamespaceProperties(),
+        getFileFormatVersion());
   }
 }
