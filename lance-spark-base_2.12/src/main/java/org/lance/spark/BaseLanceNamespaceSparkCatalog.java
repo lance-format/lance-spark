@@ -1161,7 +1161,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     String fileFormatVersion;
     StructType schema;
     try (Dataset dataset = openDataset(readOptions)) {
-      schema = getSchema(ident, readOptions);
+      schema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
       fileFormatVersion = dataset.getLanceFileFormatVersion();
     }
 
@@ -1211,8 +1211,10 @@ public abstract class BaseLanceNamespaceSparkCatalog
     String fileFormatVersion;
     StructType schema;
     try (Dataset dataset = openDataset(readOptions)) {
-      schema = getSchema(ident, readOptions);
+      schema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
       fileFormatVersion = dataset.getLanceFileFormatVersion();
+    } catch (IllegalArgumentException e) {
+      throw new NoSuchTableException(ident);
     }
 
     return createDataset(readOptions, schema, null, null, null, fileFormatVersion);
