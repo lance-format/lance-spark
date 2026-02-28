@@ -66,7 +66,6 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.lance.spark.utils.Utils.createReadOptions;
-import static org.lance.spark.utils.Utils.getSchema;
 import static org.lance.spark.utils.Utils.openDataset;
 
 public abstract class BaseLanceNamespaceSparkCatalog
