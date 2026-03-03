@@ -12,8 +12,10 @@ Test organization follows the Lance documentation structure:
 import os
 import time
 import pytest
+import random
 from packaging.version import Version
 from pyspark.sql import SparkSession
+from pyspark.sql.types import StructType, StructField, IntegerType, ArrayType, FloatType
 
 SPARK_VERSION = Version(os.environ.get("SPARK_VERSION", "3.5"))
 
@@ -46,6 +48,7 @@ def cleanup_tables(spark):
     """Clean up test tables before and after each test."""
     drop_table(spark, "default.test_table")
     drop_table(spark, "default.employees")
+    drop_table(spark, "default.vector_table")
     # TODO - reenable once `tableExists` works on Spark 4.0
     #spark.catalog.dropTempView("source") if spark.catalog.tableExists("source") else None
     #spark.catalog.dropTempView("tmp_view") if spark.catalog.tableExists("tmp_view") else None
@@ -54,6 +57,7 @@ def cleanup_tables(spark):
     yield
     drop_table(spark, "default.test_table")
     drop_table(spark, "default.employees")
+    drop_table(spark, "default.vector_table")
     # TODO - reenable once `tableExists` works on Spark 4.0
     #spark.catalog.dropTempView("source") if spark.catalog.tableExists("source") else None
     #spark.catalog.dropTempView("tmp_view") if spark.catalog.tableExists("tmp_view") else None
@@ -153,8 +157,43 @@ class TestDDLTable:
         assert "test_table" not in table_names
 
 
+def prepare_vector_dataset(spark):
+    # Create table with vector column
+    spark.sql("""
+        CREATE TABLE default.vector_table (
+            id INT,
+            vector_column ARRAY<FLOAT> NOT NULL
+        )
+        TBLPROPERTIES ('vector_column.arrow.fixed-size-list.size' = '128')
+    """)
+
+    random.seed(42)
+    batch_size = 64
+    total_rows = 512
+    num_batches = total_rows // batch_size
+
+    for batch in range(num_batches):
+        # Create data for this batch
+        data = []
+        for i in range(batch_size):
+            row_id = batch * batch_size + i + 1
+            # Generate 128-dimensional random vector
+            vector = [round(random.random(), 3) for _ in range(128)]
+            data.append((row_id, vector))
+
+        # Create DataFrame with proper schema
+        schema = StructType([
+            StructField("id", IntegerType(), False),
+            StructField("vector_column", ArrayType(FloatType()), False)
+        ])
+        df = spark.createDataFrame(data, schema)
+        df.writeTo("default.vector_table").append()
+
+    return "default.vector_table"
+
+
 class TestDDLIndex:
-    """Test DDL index operations: CREATE INDEX (BTree, FTS)."""
+    """Test DDL index operations: CREATE INDEX (BTree, FTS, IVF_FLAT, IVF_SQ, IVF_PQ)."""
 
     def test_create_btree_index_on_int(self, spark):
         """Test CREATE INDEX with BTree on integer column."""
@@ -271,6 +310,135 @@ class TestDDLIndex:
 
         # Should return with 0 fragments indexed
         assert result[0][0] == 0
+
+    def test_create_ivf_flat_index_distributed(self, spark):
+        """Test CREATE INDEX with IVF_FLAT on vector column for distributed indexing."""
+        table_name = prepare_vector_dataset(spark)
+
+        # Create IVF_FLAT index on vector column
+        result = spark.sql(f"""
+            ALTER TABLE {table_name}
+            CREATE INDEX my_ivf_flat_index USING ivf_flat (vector_column)
+            WITH (numPartitions = 128, distanceType = 'L2')
+        """).collect()
+
+        # Verify output schema
+        assert len(result) == 1
+        row = result[0]
+
+        # Check fragments_indexed and index_name
+        fragments_indexed = row[0]
+        index_name = row[1]
+
+        assert fragments_indexed >= 2, f"Expected at least 2 fragments to be indexed, got {fragments_indexed}"
+        assert index_name == "my_ivf_flat_index"
+
+        # Verify table is still queryable after indexing
+        count = spark.table(table_name).count()
+        assert count == 512
+
+    def test_create_ivf_sq_index_distributed(self, spark):
+        """Test CREATE INDEX with IVF_SQ (scalar quantization) on vector column."""
+        table_name = prepare_vector_dataset(spark)
+
+        # Create IVF_SQ index on vector column
+        result = spark.sql(f"""
+            ALTER TABLE {table_name}
+            CREATE INDEX my_ivf_sq_index USING ivf_sq (vector_column)
+            WITH (numPartitions = 128, numBits = 8, sampleRate = 256, distanceType = 'L2')
+        """).collect()
+
+        # Verify output schema
+        assert len(result) == 1
+        row = result[0]
+
+        # Check fragments_indexed and index_name
+        fragments_indexed = row[0]
+        index_name = row[1]
+
+        assert fragments_indexed >= 2, f"Expected at least 2 fragments to be indexed, got {fragments_indexed}"
+        assert index_name == "my_ivf_sq_index"
+
+        # Verify table is still queryable after indexing
+        count = spark.table(table_name).count()
+        assert count == 512
+
+    def test_create_ivf_pq_index_distributed(self, spark):
+        """Test CREATE INDEX with IVF_PQ (product quantization) on vector column."""
+        table_name = prepare_vector_dataset(spark)
+
+        # Create IVF_PQ index on vector column
+        result = spark.sql(f"""
+            ALTER TABLE {table_name}
+            CREATE INDEX my_ivf_pq_index USING ivf_pq (vector_column)
+            WITH (numPartitions = 128, numSubVectors = 16, numBits = 8, distanceType = 'L2')
+        """).collect()
+
+        # Verify output schema
+        assert len(result) == 1
+        row = result[0]
+
+        # Check fragments_indexed and index_name
+        fragments_indexed = row[0]
+        index_name = row[1]
+
+        assert fragments_indexed >= 2, f"Expected at least 2 fragments to be indexed, got {fragments_indexed}"
+        assert index_name == "my_ivf_pq_index"
+
+        # Verify table is still queryable after indexing
+        count = spark.table(table_name).count()
+        assert count == 512
+
+    def test_create_ivf_pq_index_without_options(self, spark):
+        """Test CREATE INDEX with IVF_PQ using default options."""
+        table_name = prepare_vector_dataset(spark)
+
+        # Create IVF_PQ index without WITH clause (uses defaults)
+        result = spark.sql(f"""
+            ALTER TABLE {table_name}
+            CREATE INDEX my_ivf_pq_default_index USING ivf_pq (vector_column)
+        """).collect()
+
+        # Verify output schema
+        assert len(result) == 1
+        row = result[0]
+
+        # Check fragments_indexed and index_name
+        fragments_indexed = row[0]
+        index_name = row[1]
+
+        assert fragments_indexed >= 2, f"Expected at least 2 fragments to be indexed, got {fragments_indexed}"
+        assert index_name == "my_ivf_pq_default_index"
+
+        # Verify table is still queryable after indexing
+        count = spark.table(table_name).count()
+        assert count == 512
+
+    def test_create_ivf_flat_index_with_cosine_distance(self, spark):
+        """Test CREATE INDEX with IVF_FLAT using cosine distance metric."""
+        table_name = prepare_vector_dataset(spark)
+
+        # Create IVF_FLAT index with cosine distance
+        result = spark.sql(f"""
+            ALTER TABLE {table_name}
+            CREATE INDEX my_ivf_cosine_index USING ivf_flat (vector_column)
+            WITH (numPartitions = 64, maxIters = 50, distanceType = 'cosine')
+        """).collect()
+
+        # Verify output schema
+        assert len(result) == 1
+        row = result[0]
+
+        # Check fragments_indexed and index_name
+        fragments_indexed = row[0]
+        index_name = row[1]
+
+        assert fragments_indexed >= 2, f"Expected at least 2 fragments to be indexed, got {fragments_indexed}"
+        assert index_name == "my_ivf_cosine_index"
+
+        # Verify table is still queryable after indexing
+        count = spark.table(table_name).count()
+        assert count == 512
 
 
 class TestDDLOptimize:

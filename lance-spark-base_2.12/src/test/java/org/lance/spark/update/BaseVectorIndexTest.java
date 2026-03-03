@@ -31,7 +31,7 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.stream.Collectors;
 
-public class BaseVectorIndexTest extends BaseAddIndexTest {
+public class BaseVectorIndexTest {
   protected String tableName = "create_index_test2";
   protected String catalogName = "lance_test";
   protected String fullTable = catalogName + ".default." + tableName;

@@ -1,6 +1,6 @@
 # CREATE INDEX
 
-Creates a scalar index on a Lance table to accelerate queries.
+Creates a scalar or vector index on a Lance table to accelerate queries.
 
 !!! warning "Spark Extension Required"
     This feature requires the Lance Spark SQL extension to be enabled. See [Spark SQL Extensions](../../config.md#spark-sql-extensions) for configuration details.
@@ -22,10 +22,13 @@ The command uses the `ALTER TABLE` syntax to add an index.
 
 The following index methods are supported:
 
-| Method  | Description                                                                 |
-|---------|-----------------------------------------------------------------------------|
-| `btree` | B-tree index for efficient range queries and point lookups on scalar columns. |
-| `fts`   | Full-text search (inverted) index for text search on string columns.        |
+| Method    | Description                                                                 |
+|-----------|-----------------------------------------------------------------------------|
+| `btree`   | B-tree index for efficient range queries and point lookups on scalar columns. |
+| `fts`     | Full-text search (inverted) index for text search on string columns.        |
+| `ivf_flat`| IVF (Inverted File) index without quantization for vector similarity search. |
+| `ivf_sq`  | IVF index with scalar quantization for memory-efficient vector search.       |
+| `ivf_pq`  | IVF index with product quantization for large-scale vector search.           |
 
 ## Options
 
@@ -55,6 +58,31 @@ For the `fts` method, the following options are required:
 | `with_position`    | Boolean | Enable phrase queries. Increases index size.                   |
 
 For advanced tokenizer configuration, refer to the [Lance FTS documentation](https://lance.org/format/table/index/scalar/fts/#tokenizers).
+
+### Vector Index Options
+
+All vector index methods support the following options:
+
+| Option          | Type    | Description                                                                 | Default |
+|-----------------|---------|-----------------------------------------------------------------------------|---------|
+| `numPartitions` | Integer | Number of partitions (clusters) for IVF. Higher values improve recall but increase search time. | 32      |
+| `maxIters`      | Integer | Maximum iterations for k-means clustering during centroid training.         | 50      |
+| `distanceType`  | String  | Distance metric: "L2", "cosine", or "dot".                                 | "L2"    |
+
+#### Additional Options for `ivf_sq`
+
+| Option      | Type    | Description                                      | Default |
+|-------------|---------|--------------------------------------------------|---------|
+| `numBits`   | Integer | Number of bits per scalar quantized value (4-8). | 8       |
+| `sampleRate`| Integer | Sampling rate for training quantization.         | 256     |
+
+#### Additional Options for `ivf_pq`
+
+| Option          | Type    | Description                                      | Default |
+|-----------------|---------|--------------------------------------------------|---------|
+| `numSubVectors` | Integer | Number of sub-vectors for product quantization.  | 16      |
+| `numBits`       | Integer | Number of bits per sub-vector (typically 8).     | 8       |
+| `sampleRate`    | Integer | Sampling rate for training codebook.             | 256     |
 
 ## Examples
 
@@ -102,6 +130,51 @@ Create an FTS index on a text column:
         with_position = true
     );
     ```
+
+### IVF-FLAT Index
+
+Create an IVF-FLAT index on a vector column:
+
+=== "SQL"
+    ```sql
+    ALTER TABLE lance.db.embeddings CREATE INDEX my_ivf_flat_index USING ivf_flat (embedding) WITH (
+        numPartitions = 128,
+        maxIters = 50,
+        distanceType = 'cosine'
+    );
+    ```
+
+### IVF-SQ Index
+
+Create an IVF-SQ index with scalar quantization:
+
+=== "SQL"
+    ```sql
+    ALTER TABLE lance.db.embeddings CREATE INDEX my_ivf_sq_index USING ivf_sq (embedding) WITH (
+        numPartitions = 256,
+        numBits = 8,
+        sampleRate = 256,
+        maxIters = 50,
+        distanceType = 'L2'
+    );
+    ```
+
+### IVF-PQ Index
+
+Create an IVF-PQ index with product quantization for maximum memory efficiency:
+
+=== "SQL"
+    ```sql
+    ALTER TABLE lance.db.embeddings CREATE INDEX my_ivf_pq_index USING ivf_pq (embedding) WITH (
+        numPartitions = 512,
+        numSubVectors = 16,
+        numBits = 8,
+        sampleRate = 256,
+        maxIters = 50,
+        distanceType = 'cosine'
+    );
+    ```
+
 ## Output
 
 The `CREATE INDEX` command returns the following information about the operation:
@@ -117,6 +190,7 @@ Consider creating an index when:
 
 - You frequently filter a large table on a specific column.
 - Your queries involve point lookups or small range scans.
+- You need to perform vector similarity search on high-dimensional data.
 
 ## How It Works
 
@@ -128,5 +202,5 @@ The `CREATE INDEX` command operates as follows:
 
 ## Notes and Limitations
 
-- **Index Methods**: The `btree` and `fts` methods are supported for scalar index creation.
+- **Index Methods**: The `btree` and `fts` methods are supported for scalar index creation. The `ivf_flat`, `ivf_sq`, and `ivf_pq` methods are supported for vector index creation.
 - **Index Replacement**: If you create an index with the same name as an existing one, the old index will be replaced by the new one. This is because the underlying implementation uses `replace(true)`.
