@@ -52,9 +52,8 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
  * Tests that lance datasets with FixedSizeBinary columns can be read via Spark SQL.
  *
  * <p>FixedSizeBinary is not representable in Spark's type system (Spark only has BinaryType).
- * Utils.normalizeArrowSchema converts FixedSizeBinary → Binary before passing the schema to
- * LanceArrowUtils.fromArrowSchema, which would otherwise throw UNSUPPORTED_ARROWTYPE. The
- * FixedSizeBinaryAccessor handles reading the actual data bytes.
+ * LanceArrowUtils.fromArrowField maps FixedSizeBinary to BinaryType so that
+ * LanceArrowUtils.fromArrowSchema can build a valid Spark StructType.
  *
  * <p>We create the lance dataset directly via the lance Java API (bypassing Spark DDL, which cannot
  * express FixedSizeBinary), then read back via {@code spark.read().format("lance")}.
