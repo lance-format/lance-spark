@@ -17,6 +17,8 @@ import org.lance.Dataset;
 import org.lance.WriteParams;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.errors.TableNotFoundException;
+import org.lance.namespace.model.DeclareTableRequest;
+import org.lance.namespace.model.DeclareTableResponse;
 import org.lance.namespace.model.DeregisterTableRequest;
 import org.lance.namespace.model.DescribeTableRequest;
 import org.lance.namespace.model.DescribeTableResponse;
@@ -28,7 +30,9 @@ import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.SchemaConverter;
 import org.lance.spark.utils.Utils;
+import org.lance.spark.write.StagedCommit;
 
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchFunctionException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
@@ -37,9 +41,10 @@ import org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException;
 import org.apache.spark.sql.connector.catalog.FunctionCatalog;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.NamespaceChange;
+import org.apache.spark.sql.connector.catalog.StagedTable;
+import org.apache.spark.sql.connector.catalog.StagingTableCatalog;
 import org.apache.spark.sql.connector.catalog.SupportsNamespaces;
 import org.apache.spark.sql.connector.catalog.Table;
-import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.catalog.TableChange;
 import org.apache.spark.sql.connector.catalog.functions.UnboundFunction;
 import org.apache.spark.sql.connector.expressions.Transform;
@@ -61,30 +66,103 @@ import java.util.stream.Stream;
 
 import static org.lance.spark.utils.Utils.createReadOptions;
 import static org.lance.spark.utils.Utils.getSchema;
+import static org.lance.spark.utils.Utils.openDataset;
 
 public abstract class BaseLanceNamespaceSparkCatalog
-    implements TableCatalog, SupportsNamespaces, FunctionCatalog {
+    implements StagingTableCatalog, SupportsNamespaces, FunctionCatalog {
 
   private static final Logger logger =
       LoggerFactory.getLogger(BaseLanceNamespaceSparkCatalog.class);
 
-  /** Used to specify the namespace implementation to use */
+  /**
+   * Used to specify the namespace implementation to use. Optional when using path-based access
+   * only.
+   */
   private static final String CONFIG_IMPL = "impl";
 
+  /** Indicates path-based only mode when impl is not configured. */
+  private boolean pathBasedOnly = false;
+
   /**
-   * Spark requires at least 3 levels of catalog -> namespaces -> table (most uses exactly 3 levels)
-   * For namespaces that are only 2 levels (e.g. dir), this puts an extra dummy level namespace with
-   * the given name, so that a namespace mounted as ns1 in Spark will have ns1 -> dummy_name ->
-   * table structure.
-   *
-   * <p>For native implementations, we perform the following handling automatically:
-   *
-   * <ul>
-   *   <li>dir: directly configure extra_level=default
-   *   <li>rest: if ListNamespaces returns error, configure extra_level=default
-   * </ul>
+   * Checks if an identifier represents a path-based table location (e.g., /path/to/table or
+   * s3://bucket/path). This handles both LanceIdentifier and regular Identifier where the namespace
+   * contains a path.
    */
-  private static final String CONFIG_EXTRA_LEVEL = "extra_level";
+  private static boolean isPathBasedIdentifier(Identifier ident) {
+    if (ident instanceof LanceIdentifier) {
+      return true;
+    }
+
+    // Check if the namespace looks like a path (contains "/" or is a URI scheme)
+    String[] namespace = ident.namespace();
+    if (namespace != null && namespace.length > 0) {
+      String firstPart = namespace[0];
+      if (firstPart.contains("/")
+          || firstPart.startsWith("s3://")
+          || firstPart.startsWith("gs://")
+          || firstPart.startsWith("az://")
+          || firstPart.startsWith("file://")
+          || firstPart.startsWith("hdfs://")) {
+        return true;
+      }
+    }
+
+    // Check if name looks like an absolute path
+    String name = ident.name();
+    return name.startsWith("/")
+        || name.startsWith("s3://")
+        || name.startsWith("gs://")
+        || name.startsWith("az://")
+        || name.startsWith("file://")
+        || name.startsWith("hdfs://");
+  }
+
+  /**
+   * Extracts the full dataset URI from an identifier. For LanceIdentifier, uses location(). For
+   * path-based regular identifiers, reconstructs the path from namespace and name.
+   */
+  private static String getDatasetUri(Identifier ident) {
+    if (ident instanceof LanceIdentifier) {
+      return ((LanceIdentifier) ident).location();
+    }
+
+    // Reconstruct path from namespace and name
+    String[] namespace = ident.namespace();
+    String name = ident.name();
+
+    if (namespace == null || namespace.length == 0) {
+      return name;
+    }
+
+    // Join namespace parts with "/" and append the name
+    StringBuilder sb = new StringBuilder();
+    for (String ns : namespace) {
+      if (sb.length() > 0 && !sb.toString().endsWith("/")) {
+        sb.append("/");
+      }
+      sb.append(ns);
+    }
+    if (!sb.toString().endsWith("/")) {
+      sb.append("/");
+    }
+    sb.append(name);
+    return sb.toString();
+  }
+
+  /**
+   * Enable single-level namespace mode with a virtual "default" namespace.
+   *
+   * <p>When true: Tables are accessed as catalog.default.table, where "default" is a virtual
+   * namespace that maps to the root level. CREATE NAMESPACE is not allowed.
+   *
+   * <p>When false (default): Multi-level namespace mode. Namespaces must be created explicitly with
+   * CREATE NAMESPACE before creating tables. Tables use manifest-based storage with hash-prefixed
+   * paths for better scalability.
+   *
+   * <p>For REST implementations: if ListNamespaces fails, single_level_ns is automatically enabled
+   * for backward compatibility with flat namespace backends.
+   */
+  private static final String CONFIG_SINGLE_LEVEL_NS = "single_level_ns";
 
   /** Supply in CREATE TABLE options to supply a different location to use for the table */
   private static final String CREATE_TABLE_PROPERTY_LOCATION = "location";
@@ -97,7 +175,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   private LanceNamespace namespace;
   private String name;
-  private Optional<String> extraLevel;
+  private boolean singleLevelNs;
   private Optional<List<String>> parentPrefix;
   private LanceSparkCatalogConfig catalogConfig;
   private Map<String, String> storageOptions;
@@ -122,8 +200,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
     // Parse catalog configuration
     this.catalogConfig = LanceSparkCatalogConfig.from(this.storageOptions);
 
+    // impl is optional - if not provided, catalog operates in path-based only mode
     if (!options.containsKey(CONFIG_IMPL)) {
-      throw new IllegalArgumentException("Missing required configuration: " + CONFIG_IMPL);
+      this.pathBasedOnly = true;
+      this.parentPrefix = Optional.empty();
+      this.namespaceImpl = null;
+      this.namespaceProperties = new HashMap<>();
+      this.namespace = null;
+      this.singleLevelNs = false;
+      return;
     }
     String impl = options.get(CONFIG_IMPL);
 
@@ -148,15 +233,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
     // Use the global buffer allocator
     this.namespace = LanceNamespace.connect(impl, namespaceOptions, LanceRuntime.allocator());
 
-    // Handle extra level name configuration
-    if (options.containsKey(CONFIG_EXTRA_LEVEL)) {
-      this.extraLevel = Optional.of(options.get(CONFIG_EXTRA_LEVEL));
-    } else if ("dir".equals(impl)) {
-      this.extraLevel = Optional.of("default");
+    // Handle single-level namespace configuration
+    if (options.containsKey(CONFIG_SINGLE_LEVEL_NS)) {
+      this.singleLevelNs = Boolean.parseBoolean(options.get(CONFIG_SINGLE_LEVEL_NS));
     } else if ("rest".equals(impl)) {
-      this.extraLevel = determineExtraLevelForRest();
+      // For REST: auto-detect based on whether ListNamespaces works
+      this.singleLevelNs = determineSingleLevelNsForRest();
     } else {
-      this.extraLevel = Optional.empty();
+      // Default: multi-level namespace mode (manifest mode)
+      this.singleLevelNs = false;
     }
   }
 
@@ -232,12 +317,12 @@ public abstract class BaseLanceNamespaceSparkCatalog
         // Note: parent prefix removal is not needed here as the response
         // only contains the namespace name, not the full path
 
-        // Add extra level if configured
-        if (extraLevel.isPresent()) {
-          String[] withExtra = new String[2];
-          withExtra[0] = extraLevel.get();
-          withExtra[1] = ns;
-          nsArray = withExtra;
+        // In single-level mode, prepend virtual "default" namespace
+        if (singleLevelNs) {
+          String[] withDefault = new String[2];
+          withDefault[0] = "default";
+          withDefault[1] = ns;
+          nsArray = withDefault;
         }
 
         result.add(nsArray);
@@ -251,8 +336,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   @Override
   public String[][] listNamespaces(String[] parent) throws NoSuchNamespaceException {
-    // Remove extra level and add parent prefix
-    String[] actualParent = removeExtraLevelsFromNamespace(parent);
+    // Remove single-level prefix and add parent prefix
+    String[] actualParent = removeSingleLevelPrefixFromNamespace(parent);
     actualParent = addParentPrefix(actualParent);
 
     org.lance.namespace.model.ListNamespacesRequest request =
@@ -280,13 +365,13 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   @Override
   public boolean namespaceExists(String[] namespace) {
-    // If the namespace is exactly the extra level, it exists as a virtual namespace
-    if (extraLevel.isPresent() && namespace.length == 1 && extraLevel.get().equals(namespace[0])) {
+    // In single-level mode, the virtual "default" namespace always exists
+    if (singleLevelNs && namespace.length == 1 && "default".equals(namespace[0])) {
       return true;
     }
 
-    // Remove extra levels and add parent prefix
-    String[] actualNamespace = removeExtraLevelsFromNamespace(namespace);
+    // Remove single-level prefix and add parent prefix
+    String[] actualNamespace = removeSingleLevelPrefixFromNamespace(namespace);
     actualNamespace = addParentPrefix(actualNamespace);
 
     org.lance.namespace.model.NamespaceExistsRequest request =
@@ -304,8 +389,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
   @Override
   public Map<String, String> loadNamespaceMetadata(String[] namespace)
       throws NoSuchNamespaceException {
-    // Remove extra levels and add parent prefix
-    String[] actualNamespace = removeExtraLevelsFromNamespace(namespace);
+    // Remove single-level prefix and add parent prefix
+    String[] actualNamespace = removeSingleLevelPrefixFromNamespace(namespace);
     actualNamespace = addParentPrefix(actualNamespace);
 
     org.lance.namespace.model.DescribeNamespaceRequest request =
@@ -326,8 +411,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
   @Override
   public void createNamespace(String[] namespace, Map<String, String> properties)
       throws NamespaceAlreadyExistsException {
-    // Remove extra levels and add parent prefix
-    String[] actualNamespace = removeExtraLevelsFromNamespace(namespace);
+    // Remove single-level prefix and add parent prefix
+    String[] actualNamespace = removeSingleLevelPrefixFromNamespace(namespace);
     actualNamespace = addParentPrefix(actualNamespace);
 
     org.lance.namespace.model.CreateNamespaceRequest request =
@@ -351,8 +436,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
   @Override
   public boolean dropNamespace(String[] namespace, boolean cascade)
       throws NoSuchNamespaceException {
-    // Remove extra levels and add parent prefix
-    String[] actualNamespace = removeExtraLevelsFromNamespace(namespace);
+    // Remove single-level prefix and add parent prefix
+    String[] actualNamespace = removeSingleLevelPrefixFromNamespace(namespace);
     actualNamespace = addParentPrefix(actualNamespace);
 
     DropNamespaceRequest request = new DropNamespaceRequest();
@@ -371,7 +456,13 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   @Override
   public Identifier[] listTables(String[] namespace) throws NoSuchNamespaceException {
-    String[] actualNamespace = removeExtraLevelsFromNamespace(namespace);
+    // Path-based mode doesn't support listing tables
+    if (pathBasedOnly || this.namespace == null) {
+      throw new UnsupportedOperationException(
+          "Table listing requires namespace configuration. Use 'impl' config.");
+    }
+
+    String[] actualNamespace = removeSingleLevelPrefixFromNamespace(namespace);
     actualNamespace = addParentPrefix(actualNamespace);
 
     ListTablesRequest request = new ListTablesRequest();
@@ -396,6 +487,16 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   @Override
   public boolean tableExists(Identifier ident) {
+    // Handle path-based access
+    if (isPathBasedIdentifier(ident)) {
+      return tableExistsAtPath(ident);
+    }
+
+    // Require namespace to be configured for namespace-based access
+    if (pathBasedOnly || namespace == null) {
+      return false;
+    }
+
     // Transform identifier for API call
     Identifier actualIdent = transformIdentifierForApi(ident);
 
@@ -408,6 +509,19 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     try {
       this.namespace.tableExists(request);
+      return true;
+    } catch (Exception e) {
+      return false;
+    }
+  }
+
+  /** Checks if a table exists at a direct path. */
+  private boolean tableExistsAtPath(Identifier ident) {
+    String datasetUri = getDatasetUri(ident);
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
+    try (Dataset dataset = openDataset(readOptions)) {
       return true;
     } catch (Exception e) {
       return false;
@@ -433,6 +547,18 @@ public abstract class BaseLanceNamespaceSparkCatalog
   public Table createTable(
       Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
       throws TableAlreadyExistsException, NoSuchNamespaceException {
+
+    // Handle path-based access
+    if (isPathBasedIdentifier(ident)) {
+      return createTableAtPath(ident, schema, properties);
+    }
+
+    // Require namespace to be configured for namespace-based access
+    if (pathBasedOnly || namespace == null) {
+      throw new IllegalStateException(
+          "Namespace not configured. Use 'impl' config for namespace-based access.");
+    }
+
     Identifier actualIdent = transformIdentifierForApi(ident);
 
     // Build the table ID for credential vending
@@ -448,8 +574,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
             .allocator(LanceRuntime.allocator())
             .namespace(namespace)
             .tableId(tableIdList)
-            .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false))
+            .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true))
             .mode(WriteParams.WriteMode.CREATE)
+            .enableStableRowIds(catalogConfig.isEnableStableRowIds(properties))
             .storageOptions(catalogConfig.getStorageOptions())
             .execute()) {
       location = dataset.uri();
@@ -468,9 +595,40 @@ public abstract class BaseLanceNamespaceSparkCatalog
             catalogConfig,
             Optional.empty(),
             Optional.of(namespace),
-            Optional.of(tableIdList));
+            Optional.of(tableIdList),
+            name);
     return createDataset(
         readOptions, processedSchema, initialStorageOptions, namespaceImpl, namespaceProperties);
+  }
+
+  /**
+   * Creates a table at a direct path. This supports path-based access patterns like
+   * df.write.format("lance").save(path).
+   */
+  private Table createTableAtPath(
+      Identifier ident, StructType schema, Map<String, String> properties)
+      throws TableAlreadyExistsException {
+    String datasetUri = getDatasetUri(ident);
+
+    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
+
+    try {
+      Dataset.write()
+          .allocator(LanceRuntime.allocator())
+          .uri(datasetUri)
+          .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true))
+          .mode(WriteParams.WriteMode.CREATE)
+          .enableStableRowIds(catalogConfig.isEnableStableRowIds(properties))
+          .storageOptions(readOptions.getStorageOptions())
+          .execute()
+          .close();
+    } catch (IllegalArgumentException e) {
+      throw new TableAlreadyExistsException(ident);
+    }
+    return createDataset(readOptions, processedSchema, null, null, null);
   }
 
   @Override
@@ -480,6 +638,16 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   @Override
   public boolean dropTable(Identifier ident) {
+    // Handle path-based access
+    if (isPathBasedIdentifier(ident)) {
+      return dropTableAtPath(ident);
+    }
+
+    // Require namespace to be configured for namespace-based access
+    if (pathBasedOnly || namespace == null) {
+      return false;
+    }
+
     try {
       Identifier tableId = transformIdentifierForApi(ident);
       DeregisterTableRequest deregisterRequest = new DeregisterTableRequest();
@@ -495,8 +663,25 @@ public abstract class BaseLanceNamespaceSparkCatalog
     }
   }
 
+  /** Drops a table at a direct path. */
+  private boolean dropTableAtPath(Identifier ident) {
+    String datasetUri = getDatasetUri(ident);
+    Dataset.drop(datasetUri, catalogConfig.getStorageOptions());
+    return true;
+  }
+
   @Override
   public boolean purgeTable(Identifier ident) {
+    // Handle path-based access (same as dropTable for path-based)
+    if (isPathBasedIdentifier(ident)) {
+      return dropTableAtPath(ident);
+    }
+
+    // Require namespace to be configured for namespace-based access
+    if (pathBasedOnly || namespace == null) {
+      return false;
+    }
+
     try {
       Identifier tableId = transformIdentifierForApi(ident);
       DropTableRequest dropRequest = new DropTableRequest();
@@ -518,42 +703,278 @@ public abstract class BaseLanceNamespaceSparkCatalog
     throw new UnsupportedOperationException("Table renaming is not supported");
   }
 
+  @Override
+  public StagedTable stageCreate(
+      Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
+      throws TableAlreadyExistsException, NoSuchNamespaceException {
+
+    // Handle path-based access
+    if (isPathBasedIdentifier(ident)) {
+      return stageCreateAtPath(ident, schema, properties);
+    }
+
+    // Require namespace to be configured for namespace-based access
+    if (pathBasedOnly || namespace == null) {
+      throw new IllegalStateException(
+          "Namespace not configured. Use 'impl' config for namespace-based access.");
+    }
+
+    Identifier actualIdent = transformIdentifierForApi(ident);
+    List<String> tableIdList = buildTableId(actualIdent);
+    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+
+    DeclareTableRequest declareRequest = new DeclareTableRequest();
+    tableIdList.forEach(declareRequest::addIdItem);
+    DeclareTableResponse declareResponse = namespace.declareTable(declareRequest);
+    String location = declareResponse.getLocation();
+    Map<String, String> initialStorageOptions = declareResponse.getStorageOptions();
+
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            location,
+            catalogConfig,
+            Optional.empty(),
+            Optional.of(namespace),
+            Optional.of(tableIdList),
+            name);
+
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
+    Map<String, String> merged =
+        LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
+    StagedCommit stagedCommit =
+        StagedCommit.forNewTable(arrowSchema, location, merged, namespace, tableIdList);
+    return createStagedDataset(
+        readOptions,
+        processedSchema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        stagedCommit);
+  }
+
+  /** Stage create a table at a direct path. */
+  private StagedTable stageCreateAtPath(
+      Identifier ident, StructType schema, Map<String, String> properties) {
+    String datasetUri = getDatasetUri(ident);
+    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
+
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
+    StagedCommit stagedCommit =
+        StagedCommit.forNewTable(
+            arrowSchema, datasetUri, catalogConfig.getStorageOptions(), null, null);
+    return createStagedDataset(readOptions, processedSchema, null, null, null, stagedCommit);
+  }
+
+  @Override
+  public StagedTable stageReplace(
+      Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
+      throws NoSuchNamespaceException, NoSuchTableException {
+
+    // Handle path-based access
+    if (isPathBasedIdentifier(ident)) {
+      return stageReplaceAtPath(ident, schema, properties);
+    }
+
+    // Require namespace to be configured for namespace-based access
+    if (pathBasedOnly || namespace == null) {
+      throw new IllegalStateException(
+          "Namespace not configured. Use 'impl' config for namespace-based access.");
+    }
+
+    Identifier actualIdent = transformIdentifierForApi(ident);
+    List<String> tableIdList = buildTableId(actualIdent);
+    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+
+    DescribeTableRequest describeRequest = new DescribeTableRequest();
+    tableIdList.forEach(describeRequest::addIdItem);
+    DescribeTableResponse describeResponse;
+    try {
+      describeResponse = namespace.describeTable(describeRequest);
+    } catch (TableNotFoundException e) {
+      throw new NoSuchTableException(ident);
+    }
+    String location = describeResponse.getLocation();
+    Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
+
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            location,
+            catalogConfig,
+            Optional.empty(),
+            Optional.of(namespace),
+            Optional.of(tableIdList),
+            name);
+
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
+    Dataset ds = openDataset(readOptions);
+    StagedCommit stagedCommit =
+        StagedCommit.forExistingTable(ds, arrowSchema, namespace, tableIdList);
+    return createStagedDataset(
+        readOptions,
+        processedSchema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        stagedCommit);
+  }
+
+  /** Stage replace a table at a direct path. */
+  private StagedTable stageReplaceAtPath(
+      Identifier ident, StructType schema, Map<String, String> properties)
+      throws NoSuchTableException {
+    String datasetUri = getDatasetUri(ident);
+    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
+
+    Dataset ds;
+    try {
+      ds = openDataset(readOptions);
+    } catch (Exception e) {
+      throw new NoSuchTableException(ident);
+    }
+
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
+    StagedCommit stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, null, null);
+    return createStagedDataset(readOptions, processedSchema, null, null, null, stagedCommit);
+  }
+
+  @Override
+  public StagedTable stageCreateOrReplace(
+      Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
+      throws NoSuchNamespaceException {
+
+    // Handle path-based access
+    if (isPathBasedIdentifier(ident)) {
+      return stageCreateOrReplaceAtPath(ident, schema, properties);
+    }
+
+    // Require namespace to be configured for namespace-based access
+    if (pathBasedOnly || namespace == null) {
+      throw new IllegalStateException(
+          "Namespace not configured. Use 'impl' config for namespace-based access.");
+    }
+
+    Identifier actualIdent = transformIdentifierForApi(ident);
+    List<String> tableIdList = buildTableId(actualIdent);
+    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+
+    boolean exists = tableExists(ident);
+    String location;
+    Map<String, String> initialStorageOptions;
+
+    if (!exists) {
+      DeclareTableRequest declareRequest = new DeclareTableRequest();
+      tableIdList.forEach(declareRequest::addIdItem);
+      DeclareTableResponse declareResponse = namespace.declareTable(declareRequest);
+      location = declareResponse.getLocation();
+      initialStorageOptions = declareResponse.getStorageOptions();
+    } else {
+      DescribeTableRequest describeRequest = new DescribeTableRequest();
+      tableIdList.forEach(describeRequest::addIdItem);
+      DescribeTableResponse describeResponse = namespace.describeTable(describeRequest);
+      location = describeResponse.getLocation();
+      initialStorageOptions = describeResponse.getStorageOptions();
+    }
+
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            location,
+            catalogConfig,
+            Optional.empty(),
+            Optional.of(namespace),
+            Optional.of(tableIdList),
+            name);
+
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
+    StagedCommit stagedCommit;
+    if (exists) {
+      Dataset ds = openDataset(readOptions);
+      stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, namespace, tableIdList);
+    } else {
+      Map<String, String> merged =
+          LanceRuntime.mergeStorageOptions(
+              catalogConfig.getStorageOptions(), initialStorageOptions);
+      stagedCommit =
+          StagedCommit.forNewTable(arrowSchema, location, merged, namespace, tableIdList);
+    }
+    return createStagedDataset(
+        readOptions,
+        processedSchema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        stagedCommit);
+  }
+
+  /** Stage create or replace a table at a direct path. */
+  private StagedTable stageCreateOrReplaceAtPath(
+      Identifier ident, StructType schema, Map<String, String> properties) {
+    String datasetUri = getDatasetUri(ident);
+    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
+
+    boolean exists = tableExistsAtPath(ident);
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
+    StagedCommit stagedCommit;
+
+    if (exists) {
+      Dataset ds = openDataset(readOptions);
+      stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, null, null);
+    } else {
+      stagedCommit =
+          StagedCommit.forNewTable(
+              arrowSchema, datasetUri, catalogConfig.getStorageOptions(), null, null);
+    }
+    return createStagedDataset(readOptions, processedSchema, null, null, null, stagedCommit);
+  }
+
   /**
-   * Removes the extra level from a Spark identifier if it matches the configured extra level name.
-   * For example, with extraLevelName="default": - ["default", "table"] -> ["table"] - ["default"]
-   * -> [] (root namespace) - ["other", "table"] -> ["other", "table"] (unchanged)
+   * Removes the virtual "default" prefix from a Spark identifier in single-level mode. For example:
+   * - ["default", "table"] -> ["table"] - ["default"] -> [] (root namespace) - ["other", "table"]
+   * -> ["other", "table"] (unchanged)
    */
-  private Identifier removeExtraLevelsFromId(Identifier identifier) {
-    if (extraLevel.isEmpty()) {
+  private Identifier removeSingleLevelPrefixFromId(Identifier identifier) {
+    if (!singleLevelNs) {
       return identifier;
     }
 
-    String[] newNamespace = removeExtraLevelsFromNamespace(identifier.namespace());
+    String[] newNamespace = removeSingleLevelPrefixFromNamespace(identifier.namespace());
     return Identifier.of(newNamespace, identifier.name());
   }
 
-  /** Transforms an identifier for API calls by removing extra levels and adding parent prefix. */
+  /**
+   * Transforms an identifier for API calls by removing single-level prefix and adding parent
+   * prefix.
+   */
   private Identifier transformIdentifierForApi(Identifier identifier) {
-    Identifier transformed = removeExtraLevelsFromId(identifier);
+    Identifier transformed = removeSingleLevelPrefixFromId(identifier);
     String[] namespace = addParentPrefix(transformed.namespace());
     return Identifier.of(namespace, transformed.name());
   }
 
   /**
-   * Removes the extra level from a namespace array if it matches the configured extra level name.
-   * For example, with extraLevel="default": - ["default"] -> [] - ["default", "subnamespace"] ->
-   * ["subnamespace"] - ["other"] -> ["other"] (unchanged)
+   * Removes the virtual "default" prefix from a namespace array in single-level mode. For example:
+   * - ["default"] -> [] - ["default", "subnamespace"] -> ["subnamespace"] - ["other"] -> ["other"]
+   * (unchanged)
    */
-  private String[] removeExtraLevelsFromNamespace(String[] namespace) {
-    if (extraLevel.isEmpty()) {
+  private String[] removeSingleLevelPrefixFromNamespace(String[] namespace) {
+    if (!singleLevelNs) {
       return namespace;
     }
 
-    String extraLevelName = this.extraLevel.get();
-
-    // Check if the first namespace part matches the extra level
-    if (namespace.length > 0 && extraLevelName.equals(namespace[0])) {
-      // Remove the extra level from namespace
+    // Check if the first namespace part matches "default"
+    if (namespace.length > 0 && "default".equals(namespace[0])) {
+      // Remove the "default" prefix from namespace
       String[] newNamespace = new String[namespace.length - 1];
       System.arraycopy(namespace, 1, newNamespace, 0, namespace.length - 1);
       return newNamespace;
@@ -563,22 +984,22 @@ public abstract class BaseLanceNamespaceSparkCatalog
   }
 
   /**
-   * Determines whether to use extra level for REST implementations by testing ListNamespaces. If
-   * ListNamespaces fails, assumes flat namespace structure and returns "default".
+   * Determines whether to use single-level mode for REST implementations by testing ListNamespaces.
+   * If ListNamespaces fails, assumes flat namespace structure and enables single-level mode.
    *
-   * @return Optional containing "default" if ListNamespaces fails, empty otherwise
+   * @return true if ListNamespaces fails (single-level mode), false otherwise
    */
-  private Optional<String> determineExtraLevelForRest() {
+  private boolean determineSingleLevelNsForRest() {
     try {
       org.lance.namespace.model.ListNamespacesRequest request =
           new org.lance.namespace.model.ListNamespacesRequest();
       namespace.listNamespaces(request);
-      return Optional.empty();
+      return false;
     } catch (Exception e) {
       logger.info(
           "REST namespace ListNamespaces failed, "
-              + "falling back to flat table structure with extra_level=default");
-      return Optional.of("default");
+              + "falling back to flat table structure with single_level_ns=true");
+      return true;
     }
   }
 
@@ -640,6 +1061,17 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Identifier ident, Optional<Long> timestamp, Optional<String> version)
       throws NoSuchTableException {
 
+    // Handle path-based access
+    if (isPathBasedIdentifier(ident)) {
+      return loadTableFromPath(ident, timestamp, version);
+    }
+
+    // Require namespace to be configured for namespace-based access
+    if (pathBasedOnly || namespace == null) {
+      throw new IllegalStateException(
+          "Namespace not configured. Use 'impl' config for namespace-based access.");
+    }
+
     // Transform identifier for API call
     Identifier actualIdent = transformIdentifierForApi(ident);
 
@@ -662,19 +1094,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     Optional<Long> versionId = Optional.empty();
     if (timestamp.isPresent()) {
-      try (Dataset dataset =
-          Dataset.open()
-              .allocator(LanceRuntime.allocator())
-              .uri(location)
-              .readOptions(
-                  createReadOptions(
-                          location,
-                          catalogConfig,
-                          Optional.empty(),
-                          Optional.of(namespace),
-                          Optional.of(tableId))
-                      .toReadOptions())
-              .build()) {
+      LanceSparkReadOptions readOptions =
+          createReadOptions(
+              location,
+              catalogConfig,
+              Optional.empty(),
+              Optional.of(namespace),
+              Optional.of(tableId),
+              name);
+      try (Dataset dataset = openDataset(readOptions)) {
         versionId = Optional.of(Utils.findVersion(dataset.listVersions(), timestamp.get()));
       } catch (TableNotFoundException e) {
         throw new NoSuchTableException(ident);
@@ -685,12 +1113,48 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     LanceSparkReadOptions readOptions =
         createReadOptions(
-            location, catalogConfig, versionId, Optional.of(namespace), Optional.of(tableId));
-    StructType schema = getSchema(ident, location, readOptions, namespace);
+            location, catalogConfig, versionId, Optional.of(namespace), Optional.of(tableId), name);
+    StructType schema = getSchema(ident, readOptions);
 
     // Create read options with namespace support
     return createDataset(
         readOptions, schema, initialStorageOptions, namespaceImpl, namespaceProperties);
+  }
+
+  /**
+   * Loads a table from a direct path. This supports path-based access patterns like
+   * spark.read.format("lance").load(path).
+   */
+  private Table loadTableFromPath(
+      Identifier ident, Optional<Long> timestamp, Optional<String> version)
+      throws NoSuchTableException {
+    String datasetUri = getDatasetUri(ident);
+
+    Optional<Long> versionId = Optional.empty();
+    if (version.isPresent()) {
+      versionId = Optional.of(Utils.parseVersion(version.get()));
+    } else if (timestamp.isPresent()) {
+      LanceSparkReadOptions readOptions =
+          createReadOptions(
+              datasetUri,
+              catalogConfig,
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              name);
+      try (Dataset dataset = openDataset(readOptions)) {
+        versionId = Optional.of(Utils.findVersion(dataset.listVersions(), timestamp.get()));
+      } catch (IllegalArgumentException e) {
+        throw new NoSuchTableException(ident);
+      }
+    }
+
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            datasetUri, catalogConfig, versionId, Optional.empty(), Optional.empty(), name);
+    StructType schema = getSchema(ident, readOptions);
+
+    return createDataset(readOptions, schema, null, null, null);
   }
 
   public abstract LanceDataset createDataset(
@@ -699,4 +1163,12 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties);
+
+  public abstract LanceDataset createStagedDataset(
+      LanceSparkReadOptions readOptions,
+      StructType sparkSchema,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      StagedCommit stagedCommit);
 }

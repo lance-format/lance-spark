@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1
+#
+# Test image for running lance-spark integration tests.
+# Builds on top of the test-base image (from make docker-build-test-base)
+# to produce the same result as the minimal image.
+
+ARG SPARK_MAJOR_VERSION=4.0
+ARG SCALA_VERSION=2.13
+FROM ghcr.io/hamersaw/lance-spark-test-base:${SPARK_MAJOR_VERSION}_${SCALA_VERSION}
+
+# Re-declare ARGs needed after FROM
+ARG SPARK_MAJOR_VERSION=4.0
+ARG SCALA_VERSION=2.13
+
+# --- Uncached layers: bundle JAR ---
+
+# Add a random query as a cache buster
+ADD "https://www.random.org/cgi-bin/randbyte?nbytes=10&format=h" skipcache
+
+COPY lance-spark-bundle-${SPARK_MAJOR_VERSION}_${SCALA_VERSION}-*.jar ${SPARK_HOME}/jars/
+
+# Spark configuration and entrypoint
+COPY spark-defaults.conf ${SPARK_HOME}/conf/
+RUN chmod u+x ${SPARK_HOME}/sbin/* && \
+    chmod u+x ${SPARK_HOME}/bin/*
+
+# Create directories for Spark events and test data
+RUN mkdir -p /home/lance/warehouse /home/lance/spark-events /home/lance/data
+
+# Copy tests
+RUN mkdir -p /home/lance/tests
+COPY tests/ /home/lance/tests/
+
+WORKDIR ${SPARK_HOME}
+COPY entrypoint.sh .
+
+ENTRYPOINT ["./entrypoint.sh"]
+CMD ["tail", "-f", "/dev/null"]

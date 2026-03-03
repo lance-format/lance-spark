@@ -53,7 +53,7 @@ public class SparkConnectorWriteQueuedBufferTest {
         SparkSession.builder()
             .appName("spark-lance-connector-queued-buffer-test")
             .master("local")
-            .config("spark.sql.catalog.lance", "org.lance.spark.LanceCatalog")
+            .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
             .config("spark.sql.catalog.lance.max_row_per_file", "1")
             .getOrCreate();
     StructType schema =

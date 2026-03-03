@@ -137,14 +137,14 @@ public abstract class SparkLanceNamespaceTestBase {
     spark.sql("INSERT INTO " + fullName + " VALUES (3, 'v3')");
     assertTrue(checkDataset(3, fullName));
 
-    DateTimeFormatter format = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    DateTimeFormatter format = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS");
     String date = version.getDataTime().format(format);
 
-    // time travel to timestamp before second insert
+    // time travel to the version's timestamp should include that version's data
     Dataset<Row> actual =
         spark.sql("SELECT * FROM " + fullName + " TIMESTAMP AS OF '" + date + "'");
     List<Row> res = actual.collectAsList();
-    assertEquals(1, res.size());
+    assertEquals(2, res.size());
   }
 
   @Test

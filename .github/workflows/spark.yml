@@ -103,5 +103,42 @@ jobs:
           distribution: temurin
           java-version: 17
           cache: "maven"
+      - name: Install base
+        run: make install-base SCALA_VERSION=${{ matrix.scala-version }}
       - name: Run tests
         run: make test SPARK_VERSION=${{ matrix.spark-version }} SCALA_VERSION=${{ matrix.scala-version }}
+
+  integration-test:
+    name: Integration Test Spark ${{ matrix.spark-version }} / Scala ${{ matrix.scala-version }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - spark-version: "3.4"
+            scala-version: "2.12"
+          - spark-version: "3.4"
+            scala-version: "2.13"
+          - spark-version: "3.5"
+            scala-version: "2.12"
+          - spark-version: "3.5"
+            scala-version: "2.13"
+          - spark-version: "4.0"
+            scala-version: "2.13"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: "maven"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build bundle
+        run: make bundle SPARK_VERSION=${{ matrix.spark-version }} SCALA_VERSION=${{ matrix.scala-version }}
+      - name: Build Docker image
+        run: make docker-build-test-full SPARK_VERSION=${{ matrix.spark-version }} SCALA_VERSION=${{ matrix.scala-version }} DOCKER_CACHE_FROM="type=gha" DOCKER_CACHE_TO="type=gha,mode=max"
+      - name: Run Docker integration tests
+        run: make docker-test SPARK_VERSION=${{ matrix.spark-version }} SCALA_VERSION=${{ matrix.scala-version }}

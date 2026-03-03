@@ -59,7 +59,8 @@ public class LanceSparkWriteOptions implements Serializable {
   private static final WriteMode DEFAULT_WRITE_MODE = WriteMode.APPEND;
   private static final boolean DEFAULT_USE_QUEUED_WRITE_BUFFER = false;
   private static final int DEFAULT_QUEUE_DEPTH = 8;
-  private static final int DEFAULT_BATCH_SIZE = 512;
+  // Changed from 512 to 8192 for better write performance consistency with read path
+  private static final int DEFAULT_BATCH_SIZE = 8192;
 
   private final String datasetUri;
   private final WriteMode writeMode;
@@ -223,7 +224,9 @@ public class LanceSparkWriteOptions implements Serializable {
     if (dataStorageVersion != null) {
       builder.withDataStorageVersion(dataStorageVersion);
     }
-    builder.withStorageOptions(storageOptions);
+    if (!storageOptions.isEmpty()) {
+      builder.withStorageOptions(storageOptions);
+    }
     return builder.build();
   }
 

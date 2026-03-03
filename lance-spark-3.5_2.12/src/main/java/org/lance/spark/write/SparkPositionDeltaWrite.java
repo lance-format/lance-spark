@@ -13,11 +13,13 @@
  */
 package org.lance.spark.write;
 
+import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.ReadOptions;
 import org.lance.RowAddress;
+import org.lance.Transaction;
 import org.lance.WriteParams;
 import org.lance.io.StorageOptionsProvider;
 import org.lance.operation.Update;
@@ -149,7 +151,11 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
                 .newFragments(newFragments)
                 .build();
 
-        dataset.newTransactionBuilder().operation(update).build().commit();
+        try (Transaction txn =
+                new Transaction.Builder().readVersion(dataset.version()).operation(update).build();
+            Dataset committed = new CommitBuilder(dataset).execute(txn)) {
+          // auto-close txn and committed dataset
+        }
       }
     }
 
@@ -159,10 +165,14 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
             .allocator(LanceRuntime.allocator())
             .namespace(options.getNamespace())
             .tableId(options.getTableId())
+            .session(LanceRuntime.session())
             .build();
       } else {
         ReadOptions readOptions =
-            new ReadOptions.Builder().setStorageOptions(options.getStorageOptions()).build();
+            new ReadOptions.Builder()
+                .setStorageOptions(options.getStorageOptions())
+                .setSession(LanceRuntime.session())
+                .build();
         return Dataset.open()
             .allocator(LanceRuntime.allocator())
             .uri(options.getDatasetUri())
@@ -354,7 +364,11 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       // Note: options.hasNamespace() is false on workers (namespace is transient)
       Map<String, String> merged =
           LanceRuntime.mergeStorageOptions(options.getStorageOptions(), initialStorageOptions);
-      ReadOptions readOptions = new ReadOptions.Builder().setStorageOptions(merged).build();
+      ReadOptions readOptions =
+          new ReadOptions.Builder()
+              .setStorageOptions(merged)
+              .setSession(LanceRuntime.session())
+              .build();
       return Dataset.open()
           .allocator(LanceRuntime.allocator())
           .uri(options.getDatasetUri())

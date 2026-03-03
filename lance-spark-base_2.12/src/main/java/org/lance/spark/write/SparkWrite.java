@@ -43,6 +43,7 @@ public class SparkWrite implements Write {
 
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
+  private final StagedCommit stagedCommit;
 
   SparkWrite(
       StructType schema,
@@ -51,7 +52,8 @@ public class SparkWrite implements Write {
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
-      List<String> tableId) {
+      List<String> tableId,
+      StagedCommit stagedCommit) {
     this.schema = schema;
     this.writeOptions = writeOptions;
     this.overwrite = overwrite;
@@ -59,6 +61,7 @@ public class SparkWrite implements Write {
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
+    this.stagedCommit = stagedCommit;
   }
 
   @Override
@@ -70,7 +73,8 @@ public class SparkWrite implements Write {
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
-        tableId);
+        tableId,
+        stagedCommit);
   }
 
   @Override
@@ -78,11 +82,12 @@ public class SparkWrite implements Write {
     throw new UnsupportedOperationException();
   }
 
-  /** Task commit. */
+  /** Spark write builder. */
   public static class SparkWriteBuilder implements SupportsTruncate, WriteBuilder {
     private final LanceSparkWriteOptions writeOptions;
     private final StructType schema;
     private boolean overwrite = false;
+    private StagedCommit stagedCommit;
 
     /**
      * Initial storage options fetched from namespace.describeTable() on the driver. These are
@@ -109,6 +114,10 @@ public class SparkWrite implements Write {
       this.namespaceImpl = namespaceImpl;
       this.namespaceProperties = namespaceProperties;
       this.tableId = tableId;
+    }
+
+    public void setStagedCommit(StagedCommit stagedCommit) {
+      this.stagedCommit = stagedCommit;
     }
 
     @Override
@@ -138,7 +147,8 @@ public class SparkWrite implements Write {
           initialStorageOptions,
           namespaceImpl,
           namespaceProperties,
-          tableId);
+          tableId,
+          stagedCommit);
     }
 
     @Override

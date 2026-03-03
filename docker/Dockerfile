@@ -31,6 +31,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 ARG SPARK_DOWNLOAD_VERSION=4.0.0
 ARG SPARK_MAJOR_VERSION=4.0
 ARG SCALA_VERSION=2.13
+ARG SPARK_SCALA_SUFFIX=
 
 # Optional env variables
 ENV SPARK_HOME=${SPARK_HOME:-"/opt/spark"}
@@ -46,9 +47,9 @@ ENV LANCE_NS_VERSION=0.4.5
 
 # Download spark
 RUN mkdir -p ${SPARK_HOME} \
- && curl https://dlcdn.apache.org/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop3.tgz -o spark-${SPARK_VERSION}-bin-hadoop3.tgz \
- && tar xvzf spark-${SPARK_VERSION}-bin-hadoop3.tgz --directory /opt/spark --strip-components 1 \
- && rm -rf spark-${SPARK_VERSION}-bin-hadoop3.tgz
+ && curl https://dlcdn.apache.org/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop3${SPARK_SCALA_SUFFIX}.tgz -o spark.tgz \
+ && tar xvzf spark.tgz --directory /opt/spark --strip-components 1 \
+ && rm -rf spark.tgz
 
 # Download lance-spark bundle JAR from Maven
 RUN curl -L https://repo1.maven.org/maven2/com/lancedb/lance-spark-bundle-3.5_2.12/${LANCE_SPARK_VERSION}/lance-spark-bundle-3.5_2.12-${LANCE_SPARK_VERSION}.jar \

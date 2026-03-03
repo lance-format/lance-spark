@@ -13,10 +13,12 @@
  */
 package org.lance.spark.write;
 
+import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.ReadOptions;
+import org.lance.Transaction;
 import org.lance.fragment.FragmentUpdateResult;
 import org.lance.io.StorageOptionsProvider;
 import org.lance.operation.Update;
@@ -150,7 +152,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
           .forEach(updatedFragments::add);
     }
 
-    // Commit update operation using transaction builder
+    // Commit update operation using CommitBuilder
     try (Dataset dataset = openDataset(writeOptions)) {
       Update update =
           Update.builder()
@@ -158,7 +160,11 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
               .fieldsModified(fieldsModified)
               .updateMode(Optional.of(Update.UpdateMode.RewriteColumns))
               .build();
-      dataset.newTransactionBuilder().operation(update).build().commit();
+      try (Transaction txn =
+              new Transaction.Builder().readVersion(dataset.version()).operation(update).build();
+          Dataset committed = new CommitBuilder(dataset).execute(txn)) {
+        // auto-close txn and committed dataset
+      }
     }
   }
 
@@ -168,10 +174,14 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
           .allocator(LanceRuntime.allocator())
           .namespace(writeOptions.getNamespace())
           .tableId(writeOptions.getTableId())
+          .session(LanceRuntime.session())
           .build();
     } else {
       ReadOptions readOptions =
-          new ReadOptions.Builder().setStorageOptions(writeOptions.getStorageOptions()).build();
+          new ReadOptions.Builder()
+              .setStorageOptions(writeOptions.getStorageOptions())
+              .setSession(LanceRuntime.session())
+              .build();
       return Dataset.open()
           .allocator(LanceRuntime.allocator())
           .uri(writeOptions.getDatasetUri())
@@ -191,7 +201,8 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
     StorageOptionsProvider provider =
         LanceRuntime.getOrCreateStorageOptionsProvider(namespaceImpl, namespaceProperties, tableId);
 
-    ReadOptions.Builder builder = new ReadOptions.Builder().setStorageOptions(merged);
+    ReadOptions.Builder builder =
+        new ReadOptions.Builder().setStorageOptions(merged).setSession(LanceRuntime.session());
     if (provider != null) {
       builder.setStorageOptionsProvider(provider);
     }
@@ -281,7 +292,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
       BufferAllocator allocator = LanceRuntime.allocator();
       data =
           VectorSchemaRoot.create(
-              LanceArrowUtils.toArrowSchema(writerSchema, "UTC", false, false), allocator);
+              LanceArrowUtils.toArrowSchema(writerSchema, "UTC", false), allocator);
 
       writer = org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(data, writerSchema);
     }

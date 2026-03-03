@@ -14,7 +14,6 @@
 package org.lance.spark.utils;
 
 import org.lance.Dataset;
-import org.lance.OpenDatasetBuilder;
 import org.lance.Version;
 import org.lance.namespace.LanceNamespace;
 import org.lance.spark.LanceRuntime;
@@ -27,7 +26,6 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 
 import java.time.Instant;
-import java.time.ZonedDateTime;
 import java.util.List;
 
 public class Utils {
@@ -40,11 +38,11 @@ public class Utils {
     long versionID = -1;
     Instant instant = instantFromTimestamp(timestamp);
     for (Version version : versions) {
-      ZonedDateTime dataTime = version.getDataTime();
-      if (dataTime.toInstant().compareTo(instant) < 0) {
+      // Truncate version timestamp to microsecond precision to match Spark's
+      // microsecond timestamp resolution, avoiding sub-microsecond mismatches
+      Instant versionInstant = truncateToMicros(version.getDataTime().toInstant());
+      if (versionInstant.compareTo(instant) <= 0) {
         versionID = version.getId();
-      } else if (dataTime.toInstant().equals(instant)) {
-        return version.getId();
       } else {
         break;
       }
@@ -55,30 +53,29 @@ public class Utils {
     return versionID;
   }
 
-  public static StructType getSchema(
-      Identifier ident,
-      String datasetUri,
-      LanceSparkReadOptions readOptions,
-      LanceNamespace namespace)
+  public static Dataset openDataset(LanceSparkReadOptions readOptions) {
+    if (readOptions.hasNamespace()) {
+      return Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .namespace(readOptions.getNamespace())
+          .tableId(readOptions.getTableId())
+          .readOptions(readOptions.toReadOptions())
+          .build();
+    } else {
+      return Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .uri(readOptions.getDatasetUri())
+          .readOptions(readOptions.toReadOptions())
+          .build();
+    }
+  }
+
+  public static StructType getSchema(Identifier ident, LanceSparkReadOptions readOptions)
       throws NoSuchTableException {
-    Dataset dataset = null;
-    try {
-      OpenDatasetBuilder builder =
-          Dataset.open()
-              .allocator(LanceRuntime.allocator())
-              .uri(datasetUri)
-              .readOptions(readOptions.toReadOptions());
-      if (namespace != null) {
-        builder.namespace(namespace);
-      }
-      dataset = builder.build();
+    try (Dataset dataset = openDataset(readOptions)) {
       return LanceArrowUtils.fromArrowSchema(dataset.getSchema());
     } catch (IllegalArgumentException e) {
       throw new NoSuchTableException(ident);
-    } finally {
-      if (dataset != null) {
-        dataset.close();
-      }
     }
   }
 
@@ -86,7 +83,11 @@ public class Utils {
    * Creates LanceSparkReadOptions for this catalog.
    *
    * @param location the dataset URI
+   * @param catalogConfig catalog configuration
    * @param versionId optional dataset version id
+   * @param namespace optional namespace for credential vending
+   * @param tableId optional table identifier
+   * @param catalogName catalog name for cache isolation
    * @return a new LanceSparkReadOptions with catalog settings
    */
   public static LanceSparkReadOptions createReadOptions(
@@ -94,9 +95,13 @@ public class Utils {
       LanceSparkCatalogConfig catalogConfig,
       Optional<Long> versionId,
       Optional<LanceNamespace> namespace,
-      Optional<List<String>> tableId) {
+      Optional<List<String>> tableId,
+      String catalogName) {
     LanceSparkReadOptions.Builder builder =
-        LanceSparkReadOptions.builder().datasetUri(location).withCatalogDefaults(catalogConfig);
+        LanceSparkReadOptions.builder()
+            .datasetUri(location)
+            .withCatalogDefaults(catalogConfig)
+            .catalogName(catalogName);
 
     if (versionId.isPresent()) {
       builder.version(versionId.get().intValue());
@@ -123,5 +128,11 @@ public class Utils {
     long sec = Math.floorDiv(epochMicros, 1_000_000L);
     long nanoAdj = Math.floorMod(epochMicros, 1_000_000L) * 1_000L;
     return Instant.ofEpochSecond(sec, nanoAdj);
+  }
+
+  private static Instant truncateToMicros(Instant instant) {
+    long nanos = instant.getNano();
+    long truncatedNanos = (nanos / 1_000L) * 1_000L;
+    return Instant.ofEpochSecond(instant.getEpochSecond(), truncatedNanos);
   }
 }

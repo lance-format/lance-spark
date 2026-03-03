@@ -17,10 +17,12 @@ import org.lance.spark.read.LanceScanBuilder;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.write.AddColumnsBackfillWrite;
 import org.lance.spark.write.SparkWrite;
+import org.lance.spark.write.StagedCommit;
 import org.lance.spark.write.UpdateColumnsBackfillWrite;
 
 import com.google.common.collect.ImmutableSet;
 import org.apache.spark.sql.connector.catalog.MetadataColumn;
+import org.apache.spark.sql.connector.catalog.StagedTable;
 import org.apache.spark.sql.connector.catalog.SupportsMetadataColumns;
 import org.apache.spark.sql.connector.catalog.SupportsRead;
 import org.apache.spark.sql.connector.catalog.SupportsWrite;
@@ -33,6 +35,8 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -43,7 +47,11 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /** Lance Spark Dataset. */
-public class LanceDataset implements SupportsRead, SupportsWrite, SupportsMetadataColumns {
+public class LanceDataset
+    implements SupportsRead, SupportsWrite, SupportsMetadataColumns, StagedTable {
+
+  private static final Logger LOG = LoggerFactory.getLogger(LanceDataset.class);
+
   private static final Set<TableCapability> CAPABILITIES =
       ImmutableSet.of(
           TableCapability.BATCH_READ, TableCapability.BATCH_WRITE, TableCapability.TRUNCATE);
@@ -97,10 +105,42 @@ public class LanceDataset implements SupportsRead, SupportsWrite, SupportsMetada
         }
       };
 
-  public static final MetadataColumn[] METADATA_COLUMNS =
-      new MetadataColumn[] {ROW_ID_COLUMN, ROW_ADDRESS_COLUMN, FRAGMENT_ID_COLUMN};
+  public static final MetadataColumn ROW_LAST_UPDATED_AT_VERSION_COLUMN =
+      new MetadataColumn() {
+        @Override
+        public String name() {
+          return LanceConstant.ROW_LAST_UPDATED_AT_VERSION;
+        }
 
-  private final LanceSparkReadOptions readOptions;
+        @Override
+        public DataType dataType() {
+          return DataTypes.LongType;
+        }
+      };
+
+  public static final MetadataColumn ROW_CREATED_AT_VERSION_COLUMN =
+      new MetadataColumn() {
+        @Override
+        public String name() {
+          return LanceConstant.ROW_CREATED_AT_VERSION;
+        }
+
+        @Override
+        public DataType dataType() {
+          return DataTypes.LongType;
+        }
+      };
+
+  public static final MetadataColumn[] METADATA_COLUMNS =
+      new MetadataColumn[] {
+        ROW_ID_COLUMN,
+        ROW_ADDRESS_COLUMN,
+        ROW_LAST_UPDATED_AT_VERSION_COLUMN,
+        ROW_CREATED_AT_VERSION_COLUMN,
+        FRAGMENT_ID_COLUMN
+      };
+
+  protected final LanceSparkReadOptions readOptions;
   protected final StructType sparkSchema;
 
   /**
@@ -113,6 +153,9 @@ public class LanceDataset implements SupportsRead, SupportsWrite, SupportsMetada
   private final String namespaceImpl;
 
   private final Map<String, String> namespaceProperties;
+
+  /** Eagerly created staged commit for StagedTable support. Null for non-staged tables. */
+  private final StagedCommit stagedCommit;
 
   /**
    * Creates a Lance dataset.
@@ -129,11 +172,32 @@ public class LanceDataset implements SupportsRead, SupportsWrite, SupportsMetada
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties) {
+    this(readOptions, sparkSchema, initialStorageOptions, namespaceImpl, namespaceProperties, null);
+  }
+
+  /**
+   * Creates a Lance dataset with staging support.
+   *
+   * @param readOptions read options including dataset URI and settings
+   * @param sparkSchema spark struct type
+   * @param initialStorageOptions initial storage options fetched from namespace.describeTable()
+   * @param namespaceImpl namespace implementation type for credential refresh on workers
+   * @param namespaceProperties namespace connection properties for credential refresh on workers
+   * @param stagedCommit the eagerly created staged commit, or null for non-staged tables
+   */
+  public LanceDataset(
+      LanceSparkReadOptions readOptions,
+      StructType sparkSchema,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      StagedCommit stagedCommit) {
     this.readOptions = readOptions;
     this.sparkSchema = sparkSchema;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
+    this.stagedCommit = stagedCommit;
   }
 
   public LanceSparkReadOptions readOptions() {
@@ -235,13 +299,23 @@ public class LanceDataset implements SupportsRead, SupportsWrite, SupportsMetada
           readOptions.getTableId());
     }
 
-    return new SparkWrite.SparkWriteBuilder(
-        sparkSchema,
-        writeOptions,
-        initialStorageOptions,
-        namespaceImpl,
-        namespaceProperties,
-        readOptions.getTableId());
+    SparkWrite.SparkWriteBuilder builder =
+        new SparkWrite.SparkWriteBuilder(
+            sparkSchema,
+            writeOptions,
+            initialStorageOptions,
+            namespaceImpl,
+            namespaceProperties,
+            readOptions.getTableId());
+
+    if (stagedCommit != null) {
+      builder.setStagedCommit(stagedCommit);
+      // Set write mode to OVERWRITE so that Fragment.create() infers schema from the
+      // arrow stream rather than validating against the existing dataset schema. This
+      // allows replacing a table with a different schema.
+      builder.truncate();
+    }
+    return builder;
   }
 
   @Override
@@ -298,5 +372,27 @@ public class LanceDataset implements SupportsRead, SupportsWrite, SupportsMetada
     }
 
     return columns.toArray(new MetadataColumn[0]);
+  }
+
+  @Override
+  public void commitStagedChanges() {
+    if (stagedCommit == null) {
+      return;
+    }
+
+    try {
+      stagedCommit.commit();
+    } finally {
+      stagedCommit.close();
+    }
+  }
+
+  @Override
+  public void abortStagedChanges() {
+    if (stagedCommit == null) {
+      return;
+    }
+
+    stagedCommit.abort();
   }
 }

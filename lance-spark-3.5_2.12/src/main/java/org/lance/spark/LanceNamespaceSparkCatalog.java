@@ -13,6 +13,8 @@
  */
 package org.lance.spark;
 
+import org.lance.spark.write.StagedCommit;
+
 import org.apache.spark.sql.types.StructType;
 
 import java.util.Map;
@@ -28,5 +30,22 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
       Map<String, String> namespaceProperties) {
     return new LancePositionDeltaDataset(
         readOptions, sparkSchema, initialStorageOptions, namespaceImpl, namespaceProperties);
+  }
+
+  @Override
+  public LanceDataset createStagedDataset(
+      LanceSparkReadOptions readOptions,
+      StructType sparkSchema,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      StagedCommit stagedCommit) {
+    return new LancePositionDeltaDataset(
+        readOptions,
+        sparkSchema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        stagedCommit);
   }
 }

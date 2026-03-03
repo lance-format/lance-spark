@@ -64,17 +64,9 @@ and namespace-specific options:
 | `spark.sql.catalog.{name}`                  | String | ✓        | Set to `org.lance.spark.LanceNamespaceSparkCatalog`                                                                        |
 | `spark.sql.catalog.{name}.impl`             | String | ✓        | Namespace implementation, short name like `dir`, `rest`, `hive3`, `glue` or full Java implementation class                 |
 | `spark.sql.catalog.{name}.storage.*`        | -      | ✗        | Lance IO storage options. See [Lance Object Store Guide](https://lance.org/guide/object_store) for all available options.  |
-| `spark.sql.catalog.{name}.extra_level`      | String | ✗        | Virtual level for 2-level namespaces. Set to empty string to disable. See [Note on Namespace Levels](#note-on-namespace-levels). |
+| `spark.sql.catalog.{name}.single_level_ns`  | Boolean | ✗       | Enable single-level mode with virtual "default" namespace. Default: `false`. See [Note on Namespace Levels](#note-on-namespace-levels). |
 | `spark.sql.catalog.{name}.parent`           | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                             |
 | `spark.sql.catalog.{name}.parent_delimiter` | String | ✗        | Delimiter for parent prefix (default: `.`). See [Note on Namespace Levels](#note-on-namespace-levels).                           |
-
-### Arrow Allocator
-
-The Arrow buffer allocator size can be configured via environment variable:
-
-| Environment Variable    | Default          | Description                             |
-|-------------------------|------------------|-----------------------------------------|
-| `LANCE_ALLOCATOR_SIZE`  | `Long.MAX_VALUE` | Arrow allocator size in bytes (global). |
 
 ## Example Namespace Implementations
 
@@ -431,35 +423,36 @@ Most users treat Spark as a 3 level hierarchy with 1 level namespace.
 
 ### For Namespaces with Less Than 3 Levels
 
-Some namespace implementations have a flat 2-level hierarchy of **root namespace → table**. The `LanceNamespaceSparkCatalog` provides a configuration `extra_level` which adds a virtual namespace level to match Spark's 3-level hierarchy.
+Some namespace implementations have a flat 2-level hierarchy of **root namespace → table**. The `LanceNamespaceSparkCatalog` provides a configuration `single_level_ns` to enable single-level mode with a virtual "default" namespace.
 
-**DirectoryNamespace**: Now supports multi-level namespaces out of the box. The `extra_level` is set to `default` by default for backward compatibility, but can be disabled:
+**DirectoryNamespace**: By default, uses multi-level namespace mode with manifest-based storage. Tables are stored with hash-prefixed paths for better scalability.
 
-=== "Multi-level namespace (recommended)"
+=== "Multi-level namespace (default, recommended)"
     ```python
-    # Disable extra_level to use actual multi-level namespaces
+    # Default: multi-level namespace mode with manifest-based storage
     spark = SparkSession.builder \
         .config("spark.sql.catalog.lance.impl", "dir") \
-        .config("spark.sql.catalog.lance.extra_level", "") \
+        .config("spark.sql.catalog.lance.root", "s3://bucket/lance") \
         .getOrCreate()
 
-    # Create namespaces explicitly
+    # Create namespaces explicitly, then create tables
     spark.sql("CREATE NAMESPACE lance.mydb")
     spark.sql("CREATE TABLE lance.mydb.users (id INT, name STRING)")
     ```
 
-=== "Single-level with virtual namespace (default)"
+=== "Single-level with virtual namespace"
     ```python
-    # extra_level=default is set automatically for backward compatibility
+    # Enable single-level mode for backward compatibility
     spark = SparkSession.builder \
         .config("spark.sql.catalog.lance.impl", "dir") \
+        .config("spark.sql.catalog.lance.single_level_ns", "true") \
         .getOrCreate()
 
-    # Use the virtual "default" namespace
+    # Use the virtual "default" namespace (no CREATE NAMESPACE needed)
     spark.sql("CREATE TABLE lance.default.users (id INT, name STRING)")
     ```
 
-**RestNamespace**: If `ListNamespaces` returns an error, `extra_level=default` is automatically configured.
+**RestNamespace**: If `ListNamespaces` returns an error, `single_level_ns=true` is automatically enabled.
 
 ### For Namespaces with More Than 3 Levels
 
@@ -478,3 +471,32 @@ For example, with Hive3:
 The parent configuration effectively "anchors" your Spark catalog at a specific level within the deeper namespace
 hierarchy, making the extra levels transparent to Spark users while maintaining compatibility with the underlying
 namespace implementation.
+
+## Memory Configuration
+
+Lance Spark uses Arrow for data transfer between native code and Spark, and maintains caches for improved performance.
+
+### Arrow Allocator
+
+Set via environment variable `LANCE_ALLOCATOR_SIZE` (default: unlimited).
+
+Controls the maximum memory allocation for Arrow buffers used in data transfer between Lance native code and Spark.
+
+| Environment Variable   | Default          | Description                              |
+|------------------------|------------------|------------------------------------------|
+| `LANCE_ALLOCATOR_SIZE` | `Long.MAX_VALUE` | Arrow allocator size in bytes (global).  |
+
+```bash
+export LANCE_ALLOCATOR_SIZE=4294967296  # 4GB
+```
+
+### Caching
+
+Lance Spark maintains index and metadata caches to minimize redundant I/O. Cache sizes are configured via environment variables:
+
+| Environment Variable       | Default | Description                      |
+|----------------------------|---------|----------------------------------|
+| `LANCE_INDEX_CACHE_SIZE`   | 6GB     | Index cache size in bytes.       |
+| `LANCE_METADATA_CACHE_SIZE`| 1GB     | Metadata cache size in bytes.    |
+
+For details on how caching works and tuning recommendations, see [Performance Tuning - Caching](performance.md#caching).

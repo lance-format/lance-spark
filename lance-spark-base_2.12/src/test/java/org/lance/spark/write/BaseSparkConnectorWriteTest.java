@@ -40,6 +40,7 @@ import java.nio.file.Path;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import static org.apache.spark.sql.functions.col;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -58,7 +59,7 @@ public abstract class BaseSparkConnectorWriteTest {
         SparkSession.builder()
             .appName("spark-lance-connector-test")
             .master("local")
-            .config("spark.sql.catalog.lance", "org.lance.spark.LanceCatalog")
+            .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
             .config("spark.sql.catalog.lance.max_row_per_file", "1")
             .config("spark.sql.session.timeZone", "UTC")
             .getOrCreate();
@@ -300,6 +301,137 @@ public abstract class BaseSparkConnectorWriteTest {
   }
 
   @Test
+  public void createTableAsSelect(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+    spark.sql("CREATE TABLE lance.`" + path + "` AS SELECT * FROM tmp_view");
+
+    Dataset<Row> result =
+        spark.read().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, path).load();
+    assertEquals(2, result.count());
+  }
+
+  @Test
+  public void replaceTableAsSelect(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    // Create initial table
+    spark.sql("CREATE TABLE lance.`" + path + "` AS SELECT * FROM tmp_view");
+
+    // Replace with different data
+    spark.sql(
+        "REPLACE TABLE lance.`" + path + "` AS SELECT id * 10 AS id, name, address FROM tmp_view");
+
+    Dataset<Row> result =
+        spark.read().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, path).load();
+    assertEquals(2, result.count());
+    // Verify data was replaced (ids should be 10, 20)
+    assertEquals(1, result.filter(col("id").equalTo(10)).count());
+    assertEquals(1, result.filter(col("id").equalTo(20)).count());
+    assertEquals(0, result.filter(col("id").equalTo(1)).count());
+  }
+
+  @Test
+  public void replaceTableAsSelectWithDifferentSchema(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    // Create initial table with schema: (id INT, name STRING, value DOUBLE)
+    StructType schema1 =
+        new StructType()
+            .add("id", DataTypes.IntegerType)
+            .add("name", DataTypes.StringType)
+            .add("value", DataTypes.DoubleType);
+    List<Row> data1 =
+        Arrays.asList(RowFactory.create(1, "Alice", 10.5), RowFactory.create(2, "Bob", 20.3));
+    Dataset<Row> df1 = spark.createDataFrame(data1, schema1);
+    df1.createOrReplaceTempView("initial_data");
+    spark.sql("CREATE TABLE lance.`" + path + "` AS SELECT * FROM initial_data");
+
+    // Replace with incompatible schema: (id STRING, data BINARY)
+    // Note: id changes from INT to STRING (not coercible), completely different columns
+    StructType schema2 =
+        new StructType().add("id", DataTypes.StringType).add("data", DataTypes.BinaryType);
+    List<Row> data2 =
+        Arrays.asList(
+            RowFactory.create("row1", new byte[] {1, 2, 3}),
+            RowFactory.create("row2", new byte[] {4, 5, 6}),
+            RowFactory.create("row3", new byte[] {7, 8, 9}));
+    Dataset<Row> df2 = spark.createDataFrame(data2, schema2);
+    df2.createOrReplaceTempView("replacement_data");
+
+    // This should succeed but currently fails with schema mismatch error
+    spark.sql("REPLACE TABLE lance.`" + path + "` AS SELECT * FROM replacement_data");
+
+    Dataset<Row> result =
+        spark.read().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, path).load();
+    assertEquals(3, result.count());
+
+    // Verify new schema
+    StructType resultSchema = result.schema();
+    assertEquals(2, resultSchema.fields().length);
+    assertEquals("id", resultSchema.fields()[0].name());
+    assertEquals(DataTypes.StringType, resultSchema.fields()[0].dataType());
+    assertEquals("data", resultSchema.fields()[1].name());
+    assertEquals(DataTypes.BinaryType, resultSchema.fields()[1].dataType());
+
+    // Verify data
+    List<String> ids =
+        result.select("id").collectAsList().stream()
+            .map(r -> r.getString(0))
+            .sorted()
+            .collect(Collectors.toList());
+    assertEquals(Arrays.asList("row1", "row2", "row3"), ids);
+  }
+
+  @Test
+  public void createOrReplaceTableAsSelect(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    // First call - creates the table
+    spark.sql("CREATE OR REPLACE TABLE lance.`" + path + "` AS SELECT * FROM tmp_view");
+
+    Dataset<Row> result1 =
+        spark.read().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, path).load();
+    assertEquals(2, result1.count());
+
+    // Second call - replaces with different data
+    spark.sql(
+        "CREATE OR REPLACE TABLE lance.`"
+            + path
+            + "` AS SELECT id * 10 AS id, name, address FROM tmp_view");
+
+    Dataset<Row> result2 =
+        spark.read().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, path).load();
+    assertEquals(2, result2.count());
+    assertEquals(1, result2.filter(col("id").equalTo(10)).count());
+    assertEquals(1, result2.filter(col("id").equalTo(20)).count());
+  }
+
+  @Test
+  public void replaceTableSchemaOnly(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    // Create initial table with data
+    spark.sql("CREATE TABLE lance.`" + path + "` AS SELECT * FROM tmp_view");
+
+    // Replace with schema only (no data)
+    spark.sql("REPLACE TABLE lance.`" + path + "` (new_id INT, value STRING)");
+
+    Dataset<Row> result =
+        spark.read().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, path).load();
+    assertEquals(0, result.count());
+    // Verify new schema
+    StructType resultSchema = result.schema();
+    assertEquals(2, resultSchema.fields().length);
+    assertEquals("new_id", resultSchema.fields()[0].name());
+    assertEquals("value", resultSchema.fields()[1].name());
+  }
+
+  @Test
   public void writeWithInvalidBatchSizeFails(TestInfo testInfo) {
     String datasetName = testInfo.getTestMethod().get().getName();
     try {
@@ -348,17 +480,17 @@ public abstract class BaseSparkConnectorWriteTest {
     assertTrue(checkDataset(3, outputPath));
 
     // check timestamp as of
-    DateTimeFormatter format = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    DateTimeFormatter format = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS");
     String date = version_3.getDataTime().format(format);
     String sql = String.format("select * from lance.`%s`  TIMESTAMP AS OF '%s'", outputPath, date);
 
     List<Row> res = spark.sql(sql).collectAsList();
-    assertEquals(1, res.size());
+    assertEquals(2, res.size());
 
     // check version as of
     List<Row> res2 =
         spark.sql("select * from lance.`" + outputPath + "`  VERSION AS OF " + 2).collectAsList();
-    assertEquals(1, res2.size());
+    assertEquals(2, res2.size());
   }
 
   private boolean checkDataset(int expectedSize, String path) {

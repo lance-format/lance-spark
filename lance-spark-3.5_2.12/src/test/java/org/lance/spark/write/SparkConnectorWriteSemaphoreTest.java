@@ -53,7 +53,7 @@ public class SparkConnectorWriteSemaphoreTest {
         SparkSession.builder()
             .appName("spark-lance-connector-semaphore-test")
             .master("local")
-            .config("spark.sql.catalog.lance", "org.lance.spark.LanceCatalog")
+            .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
             .getOrCreate();
     StructType schema =
         new StructType(

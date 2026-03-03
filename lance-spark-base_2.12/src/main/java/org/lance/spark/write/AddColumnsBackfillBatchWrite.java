@@ -13,10 +13,12 @@
  */
 package org.lance.spark.write;
 
+import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.ReadOptions;
+import org.lance.Transaction;
 import org.lance.fragment.FragmentMergeResult;
 import org.lance.io.StorageOptionsProvider;
 import org.lance.operation.Merge;
@@ -146,11 +148,15 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
           .forEach(fragments::add);
     }
 
-    // Commit merge operation using transaction builder
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false, false);
+    // Commit merge operation using CommitBuilder
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false);
     try (Dataset dataset = openDataset(writeOptions)) {
       Merge merge = Merge.builder().fragments(fragments).schema(arrowSchema).build();
-      dataset.newTransactionBuilder().operation(merge).build().commit();
+      try (Transaction txn =
+              new Transaction.Builder().readVersion(dataset.version()).operation(merge).build();
+          Dataset committed = new CommitBuilder(dataset).execute(txn)) {
+        // auto-close txn and committed dataset
+      }
     }
   }
 
@@ -160,10 +166,14 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
           .allocator(LanceRuntime.allocator())
           .namespace(writeOptions.getNamespace())
           .tableId(writeOptions.getTableId())
+          .session(LanceRuntime.session())
           .build();
     } else {
       ReadOptions readOptions =
-          new ReadOptions.Builder().setStorageOptions(writeOptions.getStorageOptions()).build();
+          new ReadOptions.Builder()
+              .setStorageOptions(writeOptions.getStorageOptions())
+              .setSession(LanceRuntime.session())
+              .build();
       return Dataset.open()
           .allocator(LanceRuntime.allocator())
           .uri(writeOptions.getDatasetUri())
@@ -183,7 +193,8 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
     StorageOptionsProvider provider =
         LanceRuntime.getOrCreateStorageOptionsProvider(namespaceImpl, namespaceProperties, tableId);
 
-    ReadOptions.Builder builder = new ReadOptions.Builder().setStorageOptions(merged);
+    ReadOptions.Builder builder =
+        new ReadOptions.Builder().setStorageOptions(merged).setSession(LanceRuntime.session());
     if (provider != null) {
       builder.setStorageOptionsProvider(provider);
     }
@@ -272,7 +283,7 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
       BufferAllocator allocator = LanceRuntime.allocator();
       data =
           VectorSchemaRoot.create(
-              LanceArrowUtils.toArrowSchema(writerSchema, "UTC", false, false), allocator);
+              LanceArrowUtils.toArrowSchema(writerSchema, "UTC", false), allocator);
 
       writer = org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(data, writerSchema);
     }

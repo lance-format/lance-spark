@@ -19,8 +19,10 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Tests for {@link LanceSparkCatalogConfig#from(Map)} storage.* prefix handling. */
+/** Tests for {@link LanceSparkCatalogConfig}. */
 public class LanceSparkCatalogConfigTest {
 
   @Test
@@ -66,5 +68,77 @@ public class LanceSparkCatalogConfigTest {
     expected.put("", "v"); // substring after "storage." is empty
 
     assertEquals(expected, config.getStorageOptions());
+  }
+
+  @Test
+  public void testEnableStableRowIdsDefaultsToFalse() {
+    Map<String, String> catalogOptions = new HashMap<>();
+    catalogOptions.put("storage.region", "us-west-2");
+
+    LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
+
+    assertFalse(config.isEnableStableRowIds());
+  }
+
+  @Test
+  public void testEnableStableRowIdsWhenSetToTrue() {
+    Map<String, String> catalogOptions = new HashMap<>();
+    catalogOptions.put("enable_stable_row_ids", "true");
+
+    LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
+
+    assertTrue(config.isEnableStableRowIds());
+  }
+
+  @Test
+  public void testEnableStableRowIdsCaseInsensitive() {
+    Map<String, String> catalogOptions = new HashMap<>();
+    catalogOptions.put("enable_stable_row_ids", "True");
+
+    LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
+
+    assertTrue(config.isEnableStableRowIds());
+  }
+
+  @Test
+  public void testTablePropertiesOverrideCatalogDefault() {
+    // Catalog default is false
+    Map<String, String> catalogOptions = new HashMap<>();
+    LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
+
+    // TBLPROPERTIES overrides to true
+    Map<String, String> tableProperties = new HashMap<>();
+    tableProperties.put("enable_stable_row_ids", "true");
+
+    assertFalse(config.isEnableStableRowIds());
+    assertTrue(config.isEnableStableRowIds(tableProperties));
+  }
+
+  @Test
+  public void testTablePropertiesCanDisableCatalogDefault() {
+    // Catalog default is true
+    Map<String, String> catalogOptions = new HashMap<>();
+    catalogOptions.put("enable_stable_row_ids", "true");
+    LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
+
+    // TBLPROPERTIES overrides to false
+    Map<String, String> tableProperties = new HashMap<>();
+    tableProperties.put("enable_stable_row_ids", "false");
+
+    assertTrue(config.isEnableStableRowIds());
+    assertFalse(config.isEnableStableRowIds(tableProperties));
+  }
+
+  @Test
+  public void testTablePropertiesFallsThroughToCatalogDefault() {
+    // Catalog default is true
+    Map<String, String> catalogOptions = new HashMap<>();
+    catalogOptions.put("enable_stable_row_ids", "true");
+    LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
+
+    // No override in TBLPROPERTIES - falls through to catalog default
+    Map<String, String> tableProperties = new HashMap<>();
+
+    assertTrue(config.isEnableStableRowIds(tableProperties));
   }
 }

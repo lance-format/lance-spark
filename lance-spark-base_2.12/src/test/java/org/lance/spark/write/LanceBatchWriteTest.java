@@ -67,7 +67,8 @@ public class LanceBatchWriteTest {
               null, // initialStorageOptions
               null, // namespaceImpl
               null, // namespaceProperties
-              null); // tableId
+              null, // tableId
+              null); // stagedCommit
       DataWriterFactory factor = lanceBatchWrite.createBatchWriterFactory(() -> 1);
 
       int rows = 132;

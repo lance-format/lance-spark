@@ -18,6 +18,10 @@ public class LanceConstant {
   public static final String ROW_ID = "_rowid";
   public static final String ROW_ADDRESS = "_rowaddr";
 
+  // CDF (Change Data Feed) version tracking columns
+  public static final String ROW_CREATED_AT_VERSION = "_row_created_at_version";
+  public static final String ROW_LAST_UPDATED_AT_VERSION = "_row_last_updated_at_version";
+
   // Blob metadata column suffixes
   public static final String BLOB_POSITION_SUFFIX = "__blob_pos";
   public static final String BLOB_SIZE_SUFFIX = "__blob_size";

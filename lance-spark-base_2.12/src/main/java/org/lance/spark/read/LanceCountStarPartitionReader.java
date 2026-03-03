@@ -110,7 +110,7 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
   private ColumnarBatch createCountResultBatch(long count, StructType resultSchema) {
     VectorSchemaRoot root =
         VectorSchemaRoot.create(
-            LanceArrowUtils.toArrowSchema(resultSchema, "UTC", false, false), allocator);
+            LanceArrowUtils.toArrowSchema(resultSchema, "UTC", false), allocator);
 
     root.allocateNew();
     BigIntVector countVector = (BigIntVector) root.getVector("count");

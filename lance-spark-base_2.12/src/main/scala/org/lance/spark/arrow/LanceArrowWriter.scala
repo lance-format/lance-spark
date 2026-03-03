@@ -42,13 +42,11 @@ object LanceArrowWriter {
   def create(
       schema: StructType,
       timeZoneId: String,
-      errorOnDuplicatedFieldNames: Boolean = true,
-      largeVarTypes: Boolean = false): LanceArrowWriter = {
+      errorOnDuplicatedFieldNames: Boolean = true): LanceArrowWriter = {
     val arrowSchema = LanceArrowUtils.toArrowSchema(
       schema,
       timeZoneId,
-      errorOnDuplicatedFieldNames,
-      largeVarTypes)
+      errorOnDuplicatedFieldNames)
     val root = VectorSchemaRoot.create(arrowSchema, new RootAllocator(Long.MaxValue))
     create(root, schema)
   }
