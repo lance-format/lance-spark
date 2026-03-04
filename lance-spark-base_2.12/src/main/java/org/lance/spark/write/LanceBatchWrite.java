@@ -88,6 +88,14 @@ public class LanceBatchWrite implements BatchWrite {
   }
 
   private Dataset openDataset() {
+    if (writeOptions.hasNamespace()) {
+      return Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .namespace(writeOptions.getNamespace())
+          .tableId(writeOptions.getTableId())
+          .session(LanceRuntime.session())
+          .build();
+    }
     String uri = writeOptions.getDatasetUri();
     ReadOptions readOptions = buildReadOptions();
     return Dataset.open()
