@@ -17,7 +17,6 @@ import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.FragmentMetadata;
-import org.lance.ReadOptions;
 import org.lance.Transaction;
 import org.lance.fragment.FragmentUpdateResult;
 import org.lance.io.StorageOptionsProvider;
@@ -169,30 +168,6 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
     }
   }
 
-  private static Dataset openDatasetWithCredentialRefresh(
-      LanceSparkWriteOptions writeOptions,
-      Map<String, String> initialStorageOptions,
-      String namespaceImpl,
-      Map<String, String> namespaceProperties,
-      List<String> tableId) {
-    Map<String, String> merged =
-        LanceRuntime.mergeStorageOptions(writeOptions.getStorageOptions(), initialStorageOptions);
-    StorageOptionsProvider provider =
-        LanceRuntime.getOrCreateStorageOptionsProvider(namespaceImpl, namespaceProperties, tableId);
-
-    ReadOptions.Builder builder =
-        new ReadOptions.Builder().setStorageOptions(merged).setSession(LanceRuntime.session());
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider);
-    }
-
-    return Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .uri(writeOptions.getDatasetUri())
-        .readOptions(builder.build())
-        .build();
-  }
-
   public static class UpdateColumnsWriter implements DataWriter<InternalRow> {
     private final LanceSparkWriteOptions writeOptions;
     private final StructType schema;
@@ -205,11 +180,8 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
      */
     private final Map<String, String> initialStorageOptions;
 
-    /** Namespace configuration for credential refresh on workers. */
-    private final String namespaceImpl;
-
-    private final Map<String, String> namespaceProperties;
-    private final List<String> tableId;
+    /** StorageOptionsProvider for dynamic credential refresh on workers. */
+    private final StorageOptionsProvider provider;
 
     private long[] fieldsModified;
     private StructType writerSchema;
@@ -230,9 +202,9 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
       this.fragmentIdField = schema.fieldIndex(LanceDataset.FRAGMENT_ID_COLUMN.name());
       this.updatedFragments = new ArrayList<>();
       this.initialStorageOptions = initialStorageOptions;
-      this.namespaceImpl = namespaceImpl;
-      this.namespaceProperties = namespaceProperties;
-      this.tableId = tableId;
+      this.provider =
+          LanceRuntime.getOrCreateStorageOptionsProvider(
+              namespaceImpl, namespaceProperties, tableId);
 
       // Build writer schema: only include columns to update + _rowaddr for matching
       this.writerSchema = new StructType();
@@ -298,8 +270,9 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
 
         // Use Dataset to get the fragment and update columns
         try (Dataset dataset =
-            openDatasetWithCredentialRefresh(
-                writeOptions, initialStorageOptions, namespaceImpl, namespaceProperties, tableId)) {
+            Utils.openDataset(
+                writeOptions.getDatasetUri(),
+                writeOptions.toReadOptions(initialStorageOptions, provider))) {
           Fragment fragment = new Fragment(dataset, fragmentId);
           FragmentUpdateResult result =
               fragment.updateColumns(

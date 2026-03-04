@@ -222,6 +222,27 @@ public class LanceSparkWriteOptions implements Serializable {
   }
 
   /**
+   * Converts this to Lance ReadOptions for worker-side operations with credential refresh.
+   *
+   * @param initialStorageOptions initial storage options from describeTable on the driver
+   * @param provider a StorageOptionsProvider for dynamic credential refresh, or null
+   * @return ReadOptions with merged storage options, session, and credential provider
+   */
+  public org.lance.ReadOptions toReadOptions(
+      Map<String, String> initialStorageOptions, org.lance.io.StorageOptionsProvider provider) {
+    Map<String, String> merged =
+        LanceRuntime.mergeStorageOptions(storageOptions, initialStorageOptions);
+    org.lance.ReadOptions.Builder builder =
+        new org.lance.ReadOptions.Builder()
+            .setStorageOptions(merged)
+            .setSession(LanceRuntime.session());
+    if (provider != null) {
+      builder.setStorageOptionsProvider(provider);
+    }
+    return builder.build();
+  }
+
+  /**
    * Converts this to Lance WriteParams for the native library.
    *
    * @return WriteParams for the Lance native library

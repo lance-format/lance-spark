@@ -66,7 +66,7 @@ public class Utils {
   }
 
   /** Opens a dataset via URI with the given read options. */
-  private static Dataset openDataset(String uri, ReadOptions readOptions) {
+  public static Dataset openDataset(String uri, ReadOptions readOptions) {
     return Dataset.open()
         .allocator(LanceRuntime.allocator())
         .uri(uri)
