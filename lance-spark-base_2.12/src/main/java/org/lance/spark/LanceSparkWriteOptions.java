@@ -235,9 +235,7 @@ public class LanceSparkWriteOptions implements Serializable {
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(storageOptions, initialStorageOptions);
     ReadOptions.Builder builder =
-        new ReadOptions.Builder()
-            .setStorageOptions(merged)
-            .setSession(LanceRuntime.session());
+        new ReadOptions.Builder().setStorageOptions(merged).setSession(LanceRuntime.session());
     if (provider != null) {
       builder.setStorageOptionsProvider(provider);
     }
