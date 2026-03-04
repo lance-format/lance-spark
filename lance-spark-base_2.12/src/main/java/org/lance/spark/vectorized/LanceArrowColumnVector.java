@@ -15,8 +15,8 @@ package org.lance.spark.vectorized;
 
 import org.lance.spark.utils.BlobUtils;
 
-import org.apache.arrow.vector.FixedSizeBinaryVector;
 import org.apache.arrow.vector.DateMilliVector;
+import org.apache.arrow.vector.FixedSizeBinaryVector;
 import org.apache.arrow.vector.LargeVarCharVector;
 import org.apache.arrow.vector.UInt1Vector;
 import org.apache.arrow.vector.UInt2Vector;
