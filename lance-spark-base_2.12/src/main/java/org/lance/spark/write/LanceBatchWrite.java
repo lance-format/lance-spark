@@ -82,11 +82,8 @@ public class LanceBatchWrite implements BatchWrite {
 
     // For staged operations, the dataset is managed by StagedCommit.
     // For non-staged operations, open to capture version for commit.
-    this.dataset = (stagedCommit != null) ? Optional.empty() : Optional.of(openDataset());
-  }
-
-  private Dataset openDataset() {
-    return Utils.openDataset(writeOptions);
+    this.dataset =
+        (stagedCommit != null) ? Optional.empty() : Optional.of(Utils.openDataset(writeOptions));
   }
 
   @Override

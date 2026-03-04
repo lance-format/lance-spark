@@ -13,9 +13,11 @@
  */
 package org.lance.spark;
 
+import org.lance.ReadOptions;
 import org.lance.WriteParams;
 import org.lance.WriteParams.LanceFileVersion;
 import org.lance.WriteParams.WriteMode;
+import org.lance.io.StorageOptionsProvider;
 import org.lance.namespace.LanceNamespace;
 
 import com.google.common.base.Preconditions;
@@ -209,12 +211,12 @@ public class LanceSparkWriteOptions implements Serializable {
    *
    * @return ReadOptions with storage options, session, and credential provider
    */
-  public org.lance.ReadOptions toReadOptions() {
-    org.lance.ReadOptions.Builder builder =
-        new org.lance.ReadOptions.Builder()
+  public ReadOptions toReadOptions() {
+    ReadOptions.Builder builder =
+        new ReadOptions.Builder()
             .setStorageOptions(storageOptions)
             .setSession(LanceRuntime.session());
-    org.lance.io.StorageOptionsProvider provider = getStorageOptionsProvider();
+    StorageOptionsProvider provider = getStorageOptionsProvider();
     if (provider != null) {
       builder.setStorageOptionsProvider(provider);
     }
@@ -228,12 +230,12 @@ public class LanceSparkWriteOptions implements Serializable {
    * @param provider a StorageOptionsProvider for dynamic credential refresh, or null
    * @return ReadOptions with merged storage options, session, and credential provider
    */
-  public org.lance.ReadOptions toReadOptions(
-      Map<String, String> initialStorageOptions, org.lance.io.StorageOptionsProvider provider) {
+  public ReadOptions toReadOptions(
+      Map<String, String> initialStorageOptions, StorageOptionsProvider provider) {
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(storageOptions, initialStorageOptions);
-    org.lance.ReadOptions.Builder builder =
-        new org.lance.ReadOptions.Builder()
+    ReadOptions.Builder builder =
+        new ReadOptions.Builder()
             .setStorageOptions(merged)
             .setSession(LanceRuntime.session());
     if (provider != null) {
