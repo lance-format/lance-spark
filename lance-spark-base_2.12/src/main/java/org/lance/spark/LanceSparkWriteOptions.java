@@ -205,6 +205,23 @@ public class LanceSparkWriteOptions implements Serializable {
   }
 
   /**
+   * Converts this to Lance ReadOptions for opening existing datasets.
+   *
+   * @return ReadOptions with storage options, session, and credential provider
+   */
+  public org.lance.ReadOptions toReadOptions() {
+    org.lance.ReadOptions.Builder builder =
+        new org.lance.ReadOptions.Builder()
+            .setStorageOptions(storageOptions)
+            .setSession(LanceRuntime.session());
+    org.lance.io.StorageOptionsProvider provider = getStorageOptionsProvider();
+    if (provider != null) {
+      builder.setStorageOptionsProvider(provider);
+    }
+    return builder.build();
+  }
+
+  /**
    * Converts this to Lance WriteParams for the native library.
    *
    * @return WriteParams for the Lance native library

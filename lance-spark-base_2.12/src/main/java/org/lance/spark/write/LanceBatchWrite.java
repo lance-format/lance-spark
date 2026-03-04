@@ -16,14 +16,12 @@ package org.lance.spark.write;
 import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.FragmentMetadata;
-import org.lance.ReadOptions;
 import org.lance.Transaction;
-import org.lance.namespace.LanceNamespaceStorageOptionsProvider;
 import org.lance.operation.Append;
 import org.lance.operation.Operation;
 import org.lance.operation.Overwrite;
-import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.connector.write.BatchWrite;
@@ -88,35 +86,7 @@ public class LanceBatchWrite implements BatchWrite {
   }
 
   private Dataset openDataset() {
-    if (writeOptions.hasNamespace()) {
-      return Dataset.open()
-          .allocator(LanceRuntime.allocator())
-          .namespace(writeOptions.getNamespace())
-          .tableId(writeOptions.getTableId())
-          .session(LanceRuntime.session())
-          .build();
-    }
-    String uri = writeOptions.getDatasetUri();
-    ReadOptions readOptions = buildReadOptions();
-    return Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .uri(uri)
-        .readOptions(readOptions)
-        .build();
-  }
-
-  private ReadOptions buildReadOptions() {
-    Map<String, String> merged =
-        LanceRuntime.mergeStorageOptions(writeOptions.getStorageOptions(), initialStorageOptions);
-    LanceNamespaceStorageOptionsProvider provider =
-        LanceRuntime.getOrCreateStorageOptionsProvider(namespaceImpl, namespaceProperties, tableId);
-
-    ReadOptions.Builder builder =
-        new ReadOptions.Builder().setStorageOptions(merged).setSession(LanceRuntime.session());
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider);
-    }
-    return builder.build();
+    return Utils.openDataset(writeOptions);
   }
 
   @Override

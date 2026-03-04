@@ -25,6 +25,7 @@ import org.lance.operation.Update;
 import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
@@ -144,7 +145,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
     Set<Integer> updatedFragmentIds =
         updatedFragments.stream().map(FragmentMetadata::getId).collect(Collectors.toSet());
 
-    try (Dataset dataset = openDataset(writeOptions)) {
+    try (Dataset dataset = Utils.openDataset(writeOptions)) {
       // Add unmodified fragments back
       dataset.getFragments().stream()
           .filter(f -> !updatedFragmentIds.contains(f.getId()))
@@ -153,7 +154,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
     }
 
     // Commit update operation using CommitBuilder
-    try (Dataset dataset = openDataset(writeOptions)) {
+    try (Dataset dataset = Utils.openDataset(writeOptions)) {
       Update update =
           Update.builder()
               .updatedFragments(updatedFragments)
@@ -165,28 +166,6 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
           Dataset committed = new CommitBuilder(dataset).execute(txn)) {
         // auto-close txn and committed dataset
       }
-    }
-  }
-
-  private static Dataset openDataset(LanceSparkWriteOptions writeOptions) {
-    if (writeOptions.hasNamespace()) {
-      return Dataset.open()
-          .allocator(LanceRuntime.allocator())
-          .namespace(writeOptions.getNamespace())
-          .tableId(writeOptions.getTableId())
-          .session(LanceRuntime.session())
-          .build();
-    } else {
-      ReadOptions readOptions =
-          new ReadOptions.Builder()
-              .setStorageOptions(writeOptions.getStorageOptions())
-              .setSession(LanceRuntime.session())
-              .build();
-      return Dataset.open()
-          .allocator(LanceRuntime.allocator())
-          .uri(writeOptions.getDatasetUri())
-          .readOptions(readOptions)
-          .build();
     }
   }
 
