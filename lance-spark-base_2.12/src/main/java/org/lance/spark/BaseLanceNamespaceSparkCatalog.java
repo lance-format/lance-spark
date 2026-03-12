@@ -101,6 +101,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
           || firstPart.startsWith("s3://")
           || firstPart.startsWith("gs://")
           || firstPart.startsWith("az://")
+          || firstPart.startsWith("abfss://")
           || firstPart.startsWith("file://")
           || firstPart.startsWith("hdfs://")) {
         return true;
@@ -113,6 +114,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         || name.startsWith("s3://")
         || name.startsWith("gs://")
         || name.startsWith("az://")
+        || name.startsWith("abfss://")
         || name.startsWith("file://")
         || name.startsWith("hdfs://");
   }
