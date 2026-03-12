@@ -15,7 +15,6 @@ package org.lance.spark;
 
 import org.lance.ReadOptions;
 import org.lance.WriteParams;
-import org.lance.WriteParams.LanceFileVersion;
 import org.lance.WriteParams.WriteMode;
 import org.lance.io.StorageOptionsProvider;
 import org.lance.namespace.LanceNamespace;
@@ -69,7 +68,7 @@ public class LanceSparkWriteOptions implements Serializable {
   private final Integer maxRowsPerFile;
   private final Integer maxRowsPerGroup;
   private final Long maxBytesPerFile;
-  private final LanceFileVersion dataStorageVersion;
+  private final String dataStorageVersion;
   private final boolean useQueuedWriteBuffer;
   private final int queueDepth;
   private final int batchSize;
@@ -144,7 +143,7 @@ public class LanceSparkWriteOptions implements Serializable {
     return maxBytesPerFile;
   }
 
-  public LanceFileVersion getDataStorageVersion() {
+  public String getDataStorageVersion() {
     return dataStorageVersion;
   }
 
@@ -308,7 +307,7 @@ public class LanceSparkWriteOptions implements Serializable {
     private Integer maxRowsPerFile;
     private Integer maxRowsPerGroup;
     private Long maxBytesPerFile;
-    private LanceFileVersion dataStorageVersion;
+    private String dataStorageVersion;
     private boolean useQueuedWriteBuffer = DEFAULT_USE_QUEUED_WRITE_BUFFER;
     private int queueDepth = DEFAULT_QUEUE_DEPTH;
     private int batchSize = DEFAULT_BATCH_SIZE;
@@ -343,7 +342,7 @@ public class LanceSparkWriteOptions implements Serializable {
       return this;
     }
 
-    public Builder dataStorageVersion(LanceFileVersion dataStorageVersion) {
+    public Builder dataStorageVersion(String dataStorageVersion) {
       this.dataStorageVersion = dataStorageVersion;
       return this;
     }
@@ -399,8 +398,7 @@ public class LanceSparkWriteOptions implements Serializable {
         this.maxBytesPerFile = Long.parseLong(options.get(CONFIG_MAX_BYTES_PER_FILE));
       }
       if (options.containsKey(CONFIG_DATA_STORAGE_VERSION)) {
-        this.dataStorageVersion =
-            LanceFileVersion.valueOf(options.get(CONFIG_DATA_STORAGE_VERSION));
+        this.dataStorageVersion = options.get(CONFIG_DATA_STORAGE_VERSION);
       }
       if (options.containsKey(CONFIG_USE_QUEUED_WRITE_BUFFER)) {
         this.useQueuedWriteBuffer =
