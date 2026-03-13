@@ -9,6 +9,11 @@
         <relativePath>../pom.xml</relativePath>
     </parent>
 
+    <properties>
+        <!-- Use Arrow 18.x for Java 21 support -->
+        <arrow.version>${arrow18.version}</arrow.version>
+    </properties>
+
     <artifactId>lance-spark-bundle-3.5_2.12</artifactId>
     <name>${project.artifactId}</name>
     <description>Bundled Jar of Apache Spark 3.5 Connector for Lance</description>
