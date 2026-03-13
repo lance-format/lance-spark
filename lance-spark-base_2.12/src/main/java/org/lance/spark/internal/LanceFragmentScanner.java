@@ -62,8 +62,16 @@ public class LanceFragmentScanner implements AutoCloseable {
         scanOptions.filter(inputPartition.getWhereCondition().get());
       }
       scanOptions.batchSize(readOptions.getBatchSize());
+      scanOptions.prefilter(readOptions.isPrefilter());
       if (readOptions.getNearest() != null) {
         scanOptions.nearest(readOptions.getNearest());
+        // We strictly set `prefilter = true` here to ensure query correctness.
+        // This is necessary due to the combination of two factors:
+        // 1. Spark currently performs the vector search by individually scanning each fragment.
+        // 2. Lance mandates that `prefilter` must be enabled for fragmented vector queries.
+        // If Spark's execution model or Lance's search functionality changes in the future,
+        // we need to revisit this.
+        scanOptions.prefilter(true);
       }
       if (inputPartition.getLimit().isPresent()) {
         scanOptions.limit(inputPartition.getLimit().get());
