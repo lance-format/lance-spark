@@ -14,11 +14,13 @@
 package org.lance.spark.utils;
 
 import org.lance.Dataset;
+import org.lance.ReadOptions;
 import org.lance.Version;
 import org.lance.namespace.LanceNamespace;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkCatalogConfig;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.LanceSparkWriteOptions;
 
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.connector.catalog.Identifier;
@@ -53,21 +55,45 @@ public class Utils {
     return versionID;
   }
 
+  /** Opens a dataset via namespace path. */
+  private static Dataset openDataset(LanceNamespace namespace, List<String> tableId) {
+    return Dataset.open()
+        .allocator(LanceRuntime.allocator())
+        .namespace(namespace)
+        .tableId(tableId)
+        .session(LanceRuntime.session())
+        .build();
+  }
+
+  /** Opens a dataset via URI with the given read options. */
+  public static Dataset openDataset(String uri, ReadOptions readOptions) {
+    return Dataset.open()
+        .allocator(LanceRuntime.allocator())
+        .uri(uri)
+        .readOptions(readOptions)
+        .build();
+  }
+
+  /** Opens a dataset using read options, dispatching to namespace or URI path. */
   public static Dataset openDataset(LanceSparkReadOptions readOptions) {
     if (readOptions.hasNamespace()) {
+      // Read path passes readOptions for version/blockSize/etc. even on namespace path
       return Dataset.open()
           .allocator(LanceRuntime.allocator())
           .namespace(readOptions.getNamespace())
           .tableId(readOptions.getTableId())
           .readOptions(readOptions.toReadOptions())
           .build();
-    } else {
-      return Dataset.open()
-          .allocator(LanceRuntime.allocator())
-          .uri(readOptions.getDatasetUri())
-          .readOptions(readOptions.toReadOptions())
-          .build();
     }
+    return openDataset(readOptions.getDatasetUri(), readOptions.toReadOptions());
+  }
+
+  /** Opens a dataset using write options, dispatching to namespace or URI path. */
+  public static Dataset openDataset(LanceSparkWriteOptions writeOptions) {
+    if (writeOptions.hasNamespace()) {
+      return openDataset(writeOptions.getNamespace(), writeOptions.getTableId());
+    }
+    return openDataset(writeOptions.getDatasetUri(), writeOptions.toReadOptions());
   }
 
   public static StructType getSchema(Identifier ident, LanceSparkReadOptions readOptions)

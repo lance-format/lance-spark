@@ -128,6 +128,8 @@ public class StagedCommit {
     try (Transaction txn = new Transaction.Builder().operation(operation).build();
         Dataset committed =
             new CommitBuilder(datasetUri, LanceRuntime.allocator())
+                .namespace(namespace)
+                .tableId(tableId)
                 .writeParams(storageOptions)
                 .execute(txn)) {
       // auto-close txn and committed dataset

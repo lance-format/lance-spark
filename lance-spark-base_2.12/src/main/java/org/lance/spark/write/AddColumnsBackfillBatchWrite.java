@@ -17,7 +17,6 @@ import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.FragmentMetadata;
-import org.lance.ReadOptions;
 import org.lance.Transaction;
 import org.lance.fragment.FragmentMergeResult;
 import org.lance.io.StorageOptionsProvider;
@@ -25,6 +24,7 @@ import org.lance.operation.Merge;
 import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
@@ -141,7 +141,7 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
         fragments.stream().map(FragmentMetadata::getId).collect(Collectors.toSet());
 
     // Get existing fragments
-    try (Dataset dataset = openDataset(writeOptions)) {
+    try (Dataset dataset = Utils.openDataset(writeOptions)) {
       dataset.getFragments().stream()
           .filter(f -> !mergedFragmentIds.contains(f.getId()))
           .map(Fragment::metadata)
@@ -150,7 +150,7 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
 
     // Commit merge operation using CommitBuilder
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false);
-    try (Dataset dataset = openDataset(writeOptions)) {
+    try (Dataset dataset = Utils.openDataset(writeOptions)) {
       Merge merge = Merge.builder().fragments(fragments).schema(arrowSchema).build();
       try (Transaction txn =
               new Transaction.Builder().readVersion(dataset.version()).operation(merge).build();
@@ -158,52 +158,6 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
         // auto-close txn and committed dataset
       }
     }
-  }
-
-  private static Dataset openDataset(LanceSparkWriteOptions writeOptions) {
-    if (writeOptions.hasNamespace()) {
-      return Dataset.open()
-          .allocator(LanceRuntime.allocator())
-          .namespace(writeOptions.getNamespace())
-          .tableId(writeOptions.getTableId())
-          .session(LanceRuntime.session())
-          .build();
-    } else {
-      ReadOptions readOptions =
-          new ReadOptions.Builder()
-              .setStorageOptions(writeOptions.getStorageOptions())
-              .setSession(LanceRuntime.session())
-              .build();
-      return Dataset.open()
-          .allocator(LanceRuntime.allocator())
-          .uri(writeOptions.getDatasetUri())
-          .readOptions(readOptions)
-          .build();
-    }
-  }
-
-  private static Dataset openDatasetWithCredentialRefresh(
-      LanceSparkWriteOptions writeOptions,
-      Map<String, String> initialStorageOptions,
-      String namespaceImpl,
-      Map<String, String> namespaceProperties,
-      List<String> tableId) {
-    Map<String, String> merged =
-        LanceRuntime.mergeStorageOptions(writeOptions.getStorageOptions(), initialStorageOptions);
-    StorageOptionsProvider provider =
-        LanceRuntime.getOrCreateStorageOptionsProvider(namespaceImpl, namespaceProperties, tableId);
-
-    ReadOptions.Builder builder =
-        new ReadOptions.Builder().setStorageOptions(merged).setSession(LanceRuntime.session());
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider);
-    }
-
-    return Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .uri(writeOptions.getDatasetUri())
-        .readOptions(builder.build())
-        .build();
   }
 
   public static class AddColumnsWriter implements DataWriter<InternalRow> {
@@ -218,11 +172,8 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
      */
     private final Map<String, String> initialStorageOptions;
 
-    /** Namespace configuration for credential refresh on workers. */
-    private final String namespaceImpl;
-
-    private final Map<String, String> namespaceProperties;
-    private final List<String> tableId;
+    /** StorageOptionsProvider for dynamic credential refresh on workers. */
+    private final StorageOptionsProvider provider;
 
     private Schema mergedSchema;
     private StructType writerSchema;
@@ -243,9 +194,9 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
       this.fragmentIdField = schema.fieldIndex(LanceDataset.FRAGMENT_ID_COLUMN.name());
       this.fragments = new ArrayList<>();
       this.initialStorageOptions = initialStorageOptions;
-      this.namespaceImpl = namespaceImpl;
-      this.namespaceProperties = namespaceProperties;
-      this.tableId = tableId;
+      this.provider =
+          LanceRuntime.getOrCreateStorageOptionsProvider(
+              namespaceImpl, namespaceProperties, tableId);
 
       this.writerSchema = new StructType();
       Arrays.stream(schema.fields())
@@ -310,8 +261,9 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
 
         // Use Dataset to get the fragment and merge columns
         try (Dataset dataset =
-            openDatasetWithCredentialRefresh(
-                writeOptions, initialStorageOptions, namespaceImpl, namespaceProperties, tableId)) {
+            Utils.openDataset(
+                writeOptions.getDatasetUri(),
+                writeOptions.toReadOptions(initialStorageOptions, provider))) {
           Fragment fragment = new Fragment(dataset, fragmentId);
           FragmentMergeResult result =
               fragment.mergeColumns(
