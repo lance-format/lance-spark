@@ -57,13 +57,17 @@ public class StagedCommit {
 
   /** Creates a StagedCommit for an existing table (REPLACE or CREATE_OR_REPLACE on existing). */
   public static StagedCommit forExistingTable(
-      Dataset dataset, Schema schema, LanceNamespace namespace, List<String> tableId) {
+      Dataset dataset,
+      Schema schema,
+      Map<String, String> storageOptions,
+      LanceNamespace namespace,
+      List<String> tableId) {
     return new StagedCommit(
         Optional.of(dataset),
         Collections.emptyList(),
         schema,
         null,
-        null,
+        storageOptions,
         false,
         namespace,
         tableId);
@@ -138,10 +142,19 @@ public class StagedCommit {
 
   private void commitExistingTable() {
     Dataset ds = dataset.get();
+    String uri = ds.uri();
+    long version = ds.version();
+    ds.close();
+
     Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
     try (Transaction txn =
-            new Transaction.Builder().readVersion(ds.version()).operation(operation).build();
-        Dataset committed = new CommitBuilder(ds).execute(txn)) {
+            new Transaction.Builder().readVersion(version).operation(operation).build();
+        Dataset committed =
+            new CommitBuilder(uri, LanceRuntime.allocator())
+                .namespace(namespace)
+                .tableId(tableId)
+                .writeParams(storageOptions)
+                .execute(txn)) {
       // auto-close txn and committed dataset
     }
   }

@@ -154,7 +154,10 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
       Merge merge = Merge.builder().fragments(fragments).schema(arrowSchema).build();
       try (Transaction txn =
               new Transaction.Builder().readVersion(dataset.version()).operation(merge).build();
-          Dataset committed = new CommitBuilder(dataset).execute(txn)) {
+          Dataset committed =
+              new CommitBuilder(dataset)
+                  .writeParams(writeOptions.getStorageOptions())
+                  .execute(txn)) {
         // auto-close txn and committed dataset
       }
     }

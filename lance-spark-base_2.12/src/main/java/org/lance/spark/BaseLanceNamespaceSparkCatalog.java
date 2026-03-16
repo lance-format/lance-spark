@@ -811,8 +811,10 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     Dataset ds = openDataset(readOptions);
+    Map<String, String> merged =
+        LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
     StagedCommit stagedCommit =
-        StagedCommit.forExistingTable(ds, arrowSchema, namespace, tableIdList);
+        StagedCommit.forExistingTable(ds, arrowSchema, merged, namespace, tableIdList);
     return createStagedDataset(
         readOptions,
         processedSchema,
@@ -841,7 +843,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
     }
 
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
-    StagedCommit stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, null, null);
+    StagedCommit stagedCommit =
+        StagedCommit.forExistingTable(
+            ds, arrowSchema, catalogConfig.getStorageOptions(), null, null);
     return createStagedDataset(readOptions, processedSchema, null, null, null, stagedCommit);
   }
 
@@ -894,13 +898,12 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     StagedCommit stagedCommit;
+    Map<String, String> merged =
+        LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
     if (exists) {
       Dataset ds = openDataset(readOptions);
-      stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, namespace, tableIdList);
+      stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, merged, namespace, tableIdList);
     } else {
-      Map<String, String> merged =
-          LanceRuntime.mergeStorageOptions(
-              catalogConfig.getStorageOptions(), initialStorageOptions);
       stagedCommit =
           StagedCommit.forNewTable(arrowSchema, location, merged, namespace, tableIdList);
     }
@@ -929,7 +932,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     if (exists) {
       Dataset ds = openDataset(readOptions);
-      stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, null, null);
+      stagedCommit =
+          StagedCommit.forExistingTable(
+              ds, arrowSchema, catalogConfig.getStorageOptions(), null, null);
     } else {
       stagedCommit =
           StagedCommit.forNewTable(
