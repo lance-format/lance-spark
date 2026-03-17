@@ -66,6 +66,21 @@ public class SparkWrite implements Write {
 
   @Override
   public BatchWrite toBatch() {
+    if (writeOptions.isServerSideWrite()) {
+      if (namespaceImpl == null) {
+        throw new IllegalArgumentException(
+            "Server-side write requires a namespace implementation. "
+                + "Configure with: spark.sql.catalog.<name>.impl=<namespace-impl>");
+      }
+      if (stagedCommit != null) {
+        throw new UnsupportedOperationException(
+            "Server-side write does not support staged commits (CREATE OR REPLACE TABLE). "
+                + "Use INSERT INTO or INSERT OVERWRITE instead.");
+      }
+      return new ServerSideBatchWrite(
+          schema, writeOptions, overwrite, namespaceImpl, namespaceProperties, tableId);
+    }
+
     return new LanceBatchWrite(
         schema,
         writeOptions,
@@ -137,6 +152,7 @@ public class SparkWrite implements Write {
                   .maxRowsPerGroup(writeOptions.getMaxRowsPerGroup())
                   .queueDepth(writeOptions.getQueueDepth())
                   .useQueuedWriteBuffer(writeOptions.isUseQueuedWriteBuffer())
+                  .serverSideWrite(writeOptions.isServerSideWrite())
                   .writeMode(WriteParams.WriteMode.OVERWRITE)
                   .build();
 
