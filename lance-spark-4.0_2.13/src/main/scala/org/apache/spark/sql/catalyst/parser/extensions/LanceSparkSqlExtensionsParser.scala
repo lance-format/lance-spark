@@ -81,12 +81,12 @@ class LanceSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserInt
     try {
       delegate.parsePlan(sqlText)
     } catch {
-      case _: Exception => parse(sqlText)
+      case _: org.apache.spark.sql.catalyst.parser.ParseException => parse(sqlText)
     }
   }
 
   override def parseQuery(sqlText: String): LogicalPlan = {
-    delegate.parsePlan(sqlText)
+    delegate.parseQuery(sqlText)
   }
 
   override def parseRoutineParam(sqlText: String): StructType =
