@@ -18,7 +18,7 @@ import org.antlr.v4.runtime.atn.PredictionMode
 import org.antlr.v4.runtime.misc.{Interval, ParseCancellationException}
 import org.apache.spark.sql.catalyst.{FunctionIdentifier, TableIdentifier}
 import org.apache.spark.sql.catalyst.expressions.Expression
-import org.apache.spark.sql.catalyst.parser.ParserInterface
+import org.apache.spark.sql.catalyst.parser.{ParseException, ParserInterface}
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.types.{DataType, StructType}
 
@@ -81,7 +81,7 @@ class LanceSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserInt
     try {
       delegate.parsePlan(sqlText)
     } catch {
-      case _: org.apache.spark.sql.catalyst.parser.ParseException => parse(sqlText)
+      case _: ParseException => parse(sqlText)
     }
   }
 
