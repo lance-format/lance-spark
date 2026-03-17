@@ -13,4 +13,4 @@
  */
 package org.lance.spark.update;
 
-public class UpdateTableTest extends BaseUpdateTableTest {}
+public class AddIndexTest extends BaseAddIndexTest {}
