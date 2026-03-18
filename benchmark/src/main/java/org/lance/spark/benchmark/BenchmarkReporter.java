@@ -30,8 +30,9 @@ public class BenchmarkReporter {
   }
 
   public void writeCsv(String outputPath) throws IOException {
+    boolean hasMetrics = results.stream().anyMatch(r -> r.getMetrics() != null);
     try (PrintWriter pw = new PrintWriter(new FileWriter(outputPath))) {
-      pw.println(BenchmarkResult.csvHeader());
+      pw.println(hasMetrics ? BenchmarkResult.csvHeaderWithMetrics() : BenchmarkResult.csvHeader());
       for (BenchmarkResult r : results) {
         pw.println(r.toCsvLine());
       }
@@ -87,6 +88,8 @@ public class BenchmarkReporter {
     }
 
     // Print header
+    boolean hasMetrics = results.stream().anyMatch(r -> r.getMetrics() != null);
+
     System.out.println();
     System.out.println("=== TPC-DS Benchmark Summary ===");
     System.out.println();
@@ -97,6 +100,9 @@ public class BenchmarkReporter {
     }
     if (formats.size() >= 2) {
       header.append(String.format(" %10s", "Ratio"));
+    }
+    if (hasMetrics) {
+      header.append(String.format(" %10s %10s %10s", "CPU(ms)", "Read", "Shuffle"));
     }
     header.append(String.format(" %8s", "Status"));
     System.out.println(header);
@@ -136,6 +142,20 @@ public class BenchmarkReporter {
         // Single format - no ratio column
       } else {
         line.append(String.format(" %10s", ""));
+      }
+
+      // Append metrics columns (from first format's first iteration with metrics)
+      if (hasMetrics) {
+        QueryMetrics qm = findMetricsForQuery(queryName);
+        if (qm != null) {
+          line.append(String.format(
+              " %10d %10s %10s",
+              qm.getExecutorCpuTimeNs() / 1_000_000,
+              formatBytes(qm.getBytesRead()),
+              formatBytes(qm.getShuffleReadBytes())));
+        } else {
+          line.append(String.format(" %10s %10s %10s", "-", "-", "-"));
+        }
       }
 
       if (allFormatsPresent) {
@@ -192,6 +212,27 @@ public class BenchmarkReporter {
       if (mismatchCount == 0) {
         System.out.println("Row count validation: all matching");
       }
+    }
+  }
+
+  private QueryMetrics findMetricsForQuery(String queryName) {
+    for (BenchmarkResult r : results) {
+      if (r.getQueryName().equals(queryName) && r.getMetrics() != null) {
+        return r.getMetrics();
+      }
+    }
+    return null;
+  }
+
+  private static String formatBytes(long bytes) {
+    if (bytes < 1024) {
+      return bytes + "B";
+    } else if (bytes < 1024 * 1024) {
+      return String.format("%.0fKB", bytes / 1024.0);
+    } else if (bytes < 1024L * 1024 * 1024) {
+      return String.format("%.0fMB", bytes / (1024.0 * 1024));
+    } else {
+      return String.format("%.1fGB", bytes / (1024.0 * 1024 * 1024));
     }
   }
 }

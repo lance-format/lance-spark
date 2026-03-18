@@ -18,7 +18,10 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.apache.spark.sql.Dataset;
@@ -29,15 +32,37 @@ public class TpcdsQueryRunner {
 
   private final SparkSession spark;
   private final int iterations;
+  private final boolean explain;
+  private final QueryMetricsListener metricsListener;
+  private final Set<String> queryFilter;
 
   public TpcdsQueryRunner(SparkSession spark, int iterations) {
+    this(spark, iterations, false, null, null);
+  }
+
+  public TpcdsQueryRunner(
+      SparkSession spark,
+      int iterations,
+      boolean explain,
+      QueryMetricsListener metricsListener,
+      String queriesFilter) {
     this.spark = spark;
     this.iterations = iterations;
+    this.explain = explain;
+    this.metricsListener = metricsListener;
+    if (queriesFilter != null && !queriesFilter.isEmpty()) {
+      this.queryFilter = new HashSet<>(Arrays.asList(queriesFilter.split(",")));
+    } else {
+      this.queryFilter = null;
+    }
   }
 
   public List<BenchmarkResult> runAllQueries(String format) {
     List<BenchmarkResult> results = new ArrayList<>();
     List<String> queryNames = getAvailableQueries();
+    if (queryFilter != null) {
+      queryNames = queryNames.stream().filter(queryFilter::contains).collect(Collectors.toList());
+    }
 
     System.out.println(
         "Running " + queryNames.size() + " queries x " + iterations + " iterations for " + format);
@@ -57,8 +82,11 @@ public class TpcdsQueryRunner {
         System.out.printf(
             "  [%s] %s iter=%d time=%dms rows=%d%n",
             status, queryName, i, result.getElapsedMs(), result.getRowCount());
+        if (result.getMetrics() != null) {
+          System.out.println("       Metrics: " + result.getMetrics().toSummaryString());
+        }
         if (!result.isSuccess()) {
-          System.out.println("        Error: " + result.getErrorMessage());
+          System.out.println("       Error: " + result.getErrorMessage());
         }
         System.out.flush();
       }
@@ -68,11 +96,39 @@ public class TpcdsQueryRunner {
   }
 
   private BenchmarkResult runQuery(String queryName, String format, String sql, int iteration) {
+    // Split on semicolons to handle multi-statement queries
+    String[] statements = sql.split(";");
+
+    // Find the first non-empty statement for EXPLAIN
+    String firstStatement = null;
+    for (String stmt : statements) {
+      String trimmed = stmt.trim();
+      if (!trimmed.isEmpty()) {
+        firstStatement = trimmed;
+        break;
+      }
+    }
+
+    // Print EXPLAIN on first iteration if enabled
+    if (explain && iteration == 1 && firstStatement != null) {
+      try {
+        System.out.println("  --- EXPLAIN " + queryName + " ---");
+        spark.sql("EXPLAIN EXTENDED " + firstStatement).show(false);
+        System.out.flush();
+      } catch (Exception e) {
+        System.out.println("  (EXPLAIN failed: " + e.getMessage() + ")");
+      }
+    }
+
+    // Set job group and reset metrics listener
+    String jobGroup = format + "." + queryName + ".iter" + iteration;
+    spark.sparkContext().setJobGroup(jobGroup, queryName, false);
+    if (metricsListener != null) {
+      metricsListener.reset(jobGroup);
+    }
+
     long start = System.currentTimeMillis();
     try {
-      // Split on semicolons to handle multi-statement queries; execute each and
-      // keep the last result for row count.
-      String[] statements = sql.split(";");
       long rowCount = 0;
       for (String stmt : statements) {
         String trimmed = stmt.trim();
@@ -83,7 +139,9 @@ public class TpcdsQueryRunner {
         rowCount = result.count();
       }
       long elapsed = System.currentTimeMillis() - start;
-      return BenchmarkResult.success(queryName, format, iteration, elapsed, rowCount);
+
+      QueryMetrics metrics = metricsListener != null ? metricsListener.getMetrics() : null;
+      return BenchmarkResult.success(queryName, format, iteration, elapsed, rowCount, metrics);
     } catch (Exception e) {
       long elapsed = System.currentTimeMillis() - start;
       String msg = e.getMessage();
@@ -91,6 +149,8 @@ public class TpcdsQueryRunner {
         msg = msg.substring(0, 200) + "...";
       }
       return BenchmarkResult.failure(queryName, format, iteration, elapsed, msg);
+    } finally {
+      spark.sparkContext().clearJobGroup();
     }
   }
 

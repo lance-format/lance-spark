@@ -22,6 +22,7 @@ public class BenchmarkResult {
   private final long rowCount;
   private final boolean success;
   private final String errorMessage;
+  private final QueryMetrics metrics;
 
   private BenchmarkResult(
       String queryName,
@@ -30,7 +31,8 @@ public class BenchmarkResult {
       long elapsedMs,
       long rowCount,
       boolean success,
-      String errorMessage) {
+      String errorMessage,
+      QueryMetrics metrics) {
     this.queryName = queryName;
     this.format = format;
     this.iteration = iteration;
@@ -38,16 +40,29 @@ public class BenchmarkResult {
     this.rowCount = rowCount;
     this.success = success;
     this.errorMessage = errorMessage;
+    this.metrics = metrics;
   }
 
   public static BenchmarkResult success(
       String queryName, String format, int iteration, long elapsedMs, long rowCount) {
-    return new BenchmarkResult(queryName, format, iteration, elapsedMs, rowCount, true, null);
+    return new BenchmarkResult(queryName, format, iteration, elapsedMs, rowCount, true, null, null);
+  }
+
+  public static BenchmarkResult success(
+      String queryName,
+      String format,
+      int iteration,
+      long elapsedMs,
+      long rowCount,
+      QueryMetrics metrics) {
+    return new BenchmarkResult(
+        queryName, format, iteration, elapsedMs, rowCount, true, null, metrics);
   }
 
   public static BenchmarkResult failure(
       String queryName, String format, int iteration, long elapsedMs, String errorMessage) {
-    return new BenchmarkResult(queryName, format, iteration, elapsedMs, -1, false, errorMessage);
+    return new BenchmarkResult(
+        queryName, format, iteration, elapsedMs, -1, false, errorMessage, null);
   }
 
   public String getQueryName() {
@@ -78,19 +93,32 @@ public class BenchmarkResult {
     return errorMessage;
   }
 
+  public QueryMetrics getMetrics() {
+    return metrics;
+  }
+
   public String toCsvLine() {
-    return String.join(
-        ",",
-        queryName,
-        format,
-        String.valueOf(iteration),
-        String.valueOf(elapsedMs),
-        String.valueOf(rowCount),
-        String.valueOf(success),
-        errorMessage == null ? "" : "\"" + errorMessage.replace("\"", "\"\"") + "\"");
+    String base =
+        String.join(
+            ",",
+            queryName,
+            format,
+            String.valueOf(iteration),
+            String.valueOf(elapsedMs),
+            String.valueOf(rowCount),
+            String.valueOf(success),
+            errorMessage == null ? "" : "\"" + errorMessage.replace("\"", "\"\"") + "\"");
+    if (metrics != null) {
+      base += "," + metrics.toCsvFragment();
+    }
+    return base;
   }
 
   public static String csvHeader() {
     return "query,format,iteration,elapsed_ms,row_count,success,error";
+  }
+
+  public static String csvHeaderWithMetrics() {
+    return csvHeader() + "," + QueryMetrics.csvHeaderFragment();
   }
 }

@@ -21,12 +21,18 @@
 #   --formats <list>   Comma-separated formats (default: parquet,lance)
 #   --iterations <n>   Iterations per query (default: 1)
 #   --rebuild          Force rebuild of benchmark jar and Docker image
+#   --explain          Print EXPLAIN EXTENDED for each query (first iteration)
+#   --metrics          Capture per-stage task metrics via SparkListener
+#   --queries <list>   Comma-separated query names to run (default: all)
+#   --ui               Enable Spark UI on port 4040
 #   --help             Show this help
 #
 # Examples:
 #   ./benchmark/scripts/run-docker-benchmark.sh
 #   ./benchmark/scripts/run-docker-benchmark.sh --sf 1 --formats parquet,lance --iterations 3
 #   ./benchmark/scripts/run-docker-benchmark.sh --rebuild --sf 10
+#   ./benchmark/scripts/run-docker-benchmark.sh --rebuild --formats parquet --explain --metrics
+#   ./benchmark/scripts/run-docker-benchmark.sh --formats parquet --ui
 
 set -euo pipefail
 
@@ -44,6 +50,10 @@ SPARK_VERSION=3.5
 SCALA_VERSION=2.12
 DOCKER_IMAGE="lance-spark-benchmark:latest"
 DRIVER_MEMORY="4g"
+EXPLAIN=false
+METRICS=false
+QUERIES=""
+UI=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -52,8 +62,12 @@ while [[ $# -gt 0 ]]; do
     --iterations)  ITERATIONS="$2"; shift 2 ;;
     --rebuild)     REBUILD=true; shift ;;
     --memory)      DRIVER_MEMORY="$2"; shift 2 ;;
+    --explain)     EXPLAIN=true; shift ;;
+    --metrics)     METRICS=true; shift ;;
+    --queries)     QUERIES="$2"; shift 2 ;;
+    --ui)          UI=true; shift ;;
     --help)
-      head -25 "$0" | grep "^#" | sed 's/^# \?//'
+      head -35 "$0" | grep "^#" | sed 's/^# \?//'
       exit 0
       ;;
     *) echo "Unknown option: $1"; exit 1 ;;
@@ -65,6 +79,9 @@ echo "  Scale factor:  ${SF}"
 echo "  Formats:       ${FORMATS}"
 echo "  Iterations:    ${ITERATIONS}"
 echo "  Driver memory: ${DRIVER_MEMORY}"
+if [ "${EXPLAIN}" = true ]; then echo "  Explain:       enabled"; fi
+if [ "${METRICS}" = true ]; then echo "  Metrics:       enabled"; fi
+if [ "${UI}" = true ]; then echo "  Spark UI:      enabled (port 4040)"; fi
 echo ""
 
 # --- Step 1: Build bundle if needed ---
@@ -145,12 +162,36 @@ JAVA_OPTS="${JAVA_OPTS} --add-opens=java.base/sun.util.calendar=ALL-UNNAMED"
 JAVA_OPTS="${JAVA_OPTS} -Djdk.reflect.useDirectMethodHandle=false"
 JAVA_OPTS="${JAVA_OPTS} -Dio.netty.tryReflectionSetAccessible=true"
 
-docker run --rm --name lance-benchmark \
-  --memory=8g \
-  -v "${DATA_DIR}:/home/lance/data" \
+# Build docker run options
+DOCKER_OPTS="--rm --name lance-benchmark --memory=8g -v ${DATA_DIR}:/home/lance/data"
+if [ "${UI}" = true ]; then
+  DOCKER_OPTS="${DOCKER_OPTS} -p 4040:4040"
+fi
+
+# Build Spark conf for UI
+SPARK_UI_CONF="spark.ui.enabled=false"
+SPARK_EVENT_LOG_CONF=""
+if [ "${UI}" = true ]; then
+  SPARK_UI_CONF="spark.ui.enabled=true"
+  SPARK_EVENT_LOG_CONF="--conf spark.eventLog.enabled=true --conf spark.eventLog.dir=/home/lance/data/spark-events"
+fi
+
+# Build extra benchmark args
+BENCHMARK_EXTRA_ARGS=""
+if [ "${EXPLAIN}" = true ]; then
+  BENCHMARK_EXTRA_ARGS="${BENCHMARK_EXTRA_ARGS} --explain"
+fi
+if [ "${METRICS}" = true ]; then
+  BENCHMARK_EXTRA_ARGS="${BENCHMARK_EXTRA_ARGS} --metrics"
+fi
+if [ -n "${QUERIES}" ]; then
+  BENCHMARK_EXTRA_ARGS="${BENCHMARK_EXTRA_ARGS} --queries ${QUERIES}"
+fi
+
+docker run ${DOCKER_OPTS} \
   "${DOCKER_IMAGE}" \
   bash -c "
-    mkdir -p /home/lance/data/raw /home/lance/results
+    mkdir -p /home/lance/data/raw /home/lance/results /home/lance/data/spark-events
 
     # Skip data generation if raw data already exists
     if ls /home/lance/data/raw/*.dat 1>/dev/null 2>&1; then
@@ -170,7 +211,8 @@ docker run --rm --name lance-benchmark \
       --master 'local[*]' \\
       --driver-memory ${DRIVER_MEMORY} \\
       --conf 'spark.driver.extraJavaOptions=${JAVA_OPTS}' \\
-      --conf spark.ui.enabled=false \\
+      --conf ${SPARK_UI_CONF} \\
+      ${SPARK_EVENT_LOG_CONF} \\
       --conf spark.sql.adaptive.enabled=true \\
       --conf spark.log.level=ERROR \\
       /home/lance/benchmark/lance-spark-benchmark-0.3.0-beta.1.jar \\
@@ -178,5 +220,5 @@ docker run --rm --name lance-benchmark \
       --data-dir /home/lance/data \\
       --results-dir /home/lance/results \\
       --formats '${FORMATS}' \\
-      --iterations ${ITERATIONS} 2>/dev/null
+      --iterations ${ITERATIONS}${BENCHMARK_EXTRA_ARGS} 2>/dev/null
   "

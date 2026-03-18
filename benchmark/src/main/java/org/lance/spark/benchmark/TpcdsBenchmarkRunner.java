@@ -28,6 +28,9 @@ public class TpcdsBenchmarkRunner {
     String resultsDir = null;
     String formatsStr = "lance,parquet";
     int iterations = 3;
+    boolean explain = false;
+    boolean metrics = false;
+    String queries = null;
 
     for (int i = 0; i < args.length; i++) {
       switch (args[i]) {
@@ -45,6 +48,15 @@ public class TpcdsBenchmarkRunner {
           break;
         case "--iterations":
           iterations = Integer.parseInt(args[++i]);
+          break;
+        case "--explain":
+          explain = true;
+          break;
+        case "--metrics":
+          metrics = true;
+          break;
+        case "--queries":
+          queries = args[++i];
           break;
         default:
           System.err.println("Unknown argument: " + args[i]);
@@ -65,8 +77,16 @@ public class TpcdsBenchmarkRunner {
         SparkSession.builder().appName("TPC-DS Benchmark").getOrCreate();
 
     try {
+      // Register metrics listener if requested
+      QueryMetricsListener metricsListener = null;
+      if (metrics) {
+        metricsListener = new QueryMetricsListener();
+        spark.sparkContext().addSparkListener(metricsListener);
+      }
+
       TpcdsDataLoader loader = new TpcdsDataLoader(spark, rawDataDir, dataDir);
-      TpcdsQueryRunner runner = new TpcdsQueryRunner(spark, iterations);
+      TpcdsQueryRunner runner =
+          new TpcdsQueryRunner(spark, iterations, explain, metricsListener, queries);
       List<BenchmarkResult> allResults = new ArrayList<>();
 
       for (String format : formats) {
@@ -112,6 +132,9 @@ public class TpcdsBenchmarkRunner {
             + " --data-dir <path>"
             + " --results-dir <path>"
             + " [--formats lance,parquet]"
-            + " [--iterations 3]");
+            + " [--iterations 3]"
+            + " [--explain]"
+            + " [--metrics]"
+            + " [--queries q1,q3,q14a]");
   }
 }
