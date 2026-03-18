@@ -191,6 +191,27 @@ docker-test:
 		"pytest /home/lance/tests/ -v --timeout=180"
 
 # =============================================================================
+# Benchmark
+# =============================================================================
+
+.PHONY: benchmark-build
+benchmark-build:
+	cd benchmark && mvn package -DskipTests
+
+.PHONY: benchmark-run
+benchmark-run:
+	cd benchmark && ./scripts/run-benchmark.sh $(SF) $(FORMATS) $(SPARK_MASTER) $(ITERATIONS)
+
+.PHONY: benchmark-docker
+benchmark-docker:
+	./benchmark/scripts/run-docker-benchmark.sh --sf $(SF) --formats $(FORMATS) --iterations $(ITERATIONS)
+
+SF ?= 1
+FORMATS ?= lance,parquet
+SPARK_MASTER ?= local[*]
+ITERATIONS ?= 3
+
+# =============================================================================
 # Documentation
 # =============================================================================
 
@@ -232,6 +253,11 @@ help:
 	@echo "  docker-down            - Stop docker containers"
 	@echo "  docker-build-test-full - Build test image (with Spark and bundle)"
 	@echo "  docker-test            - Run integration tests in lance-spark-test container"
+	@echo ""
+	@echo "Benchmark:"
+	@echo "  benchmark-build        - Build benchmark jar"
+	@echo "  benchmark-run          - Run TPC-DS benchmark (SF=1 FORMATS=lance,parquet)"
+	@echo "  benchmark-docker       - Run TPC-DS benchmark in Docker (SF=1 FORMATS=lance,parquet)"
 	@echo ""
 	@echo "Documentation:"
 	@echo "  serve-docs     - Serve documentation locally"

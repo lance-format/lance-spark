@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1
+# Dockerfile for running TPC-DS benchmarks with lance-spark.
+# Based on Dockerfile.test-full but adds dsdgen build tools and benchmark jar.
+
+FROM ubuntu:24.04
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      curl \
+      openjdk-17-jdk-headless \
+      build-essential \
+      git \
+      bison \
+      flex && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV SPARK_HOME="/opt/spark"
+ENV PATH="${SPARK_HOME}/sbin:${SPARK_HOME}/bin:${PATH}"
+
+ARG SPARK_DOWNLOAD_VERSION=3.5.8
+ARG SPARK_MAJOR_VERSION=3.5
+ARG SCALA_VERSION=2.12
+ARG SPARK_SCALA_SUFFIX=
+
+RUN mkdir -p ${SPARK_HOME} \
+    && curl https://archive.apache.org/dist/spark/spark-${SPARK_DOWNLOAD_VERSION}/spark-${SPARK_DOWNLOAD_VERSION}-bin-hadoop3${SPARK_SCALA_SUFFIX}.tgz \
+       -o spark.tgz \
+    && tar xzf spark.tgz --directory ${SPARK_HOME} --strip-components 1 \
+    && rm spark.tgz
+
+# Copy lance-spark bundle into Spark jars
+COPY lance-spark-bundle-${SPARK_MAJOR_VERSION}_${SCALA_VERSION}-*.jar ${SPARK_HOME}/jars/
+
+# Spark configuration
+COPY spark-defaults.conf ${SPARK_HOME}/conf/
+RUN chmod u+x ${SPARK_HOME}/sbin/* && \
+    chmod u+x ${SPARK_HOME}/bin/*
+
+# Create working directories
+RUN mkdir -p /home/lance/benchmark /home/lance/spark-events /home/lance/data
+
+# Copy benchmark jar
+COPY lance-spark-benchmark-*.jar /home/lance/benchmark/
+
+# Clone and build dsdgen
+RUN git clone --depth 1 https://github.com/gregrahn/tpcds-kit.git /opt/tpcds-kit && \
+    cd /opt/tpcds-kit/tools && \
+    make OS=LINUX CFLAGS="-D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -DYYDEBUG -DLINUX -g -Wall -fcommon"
+
+WORKDIR /home/lance
+
+CMD ["tail", "-f", "/dev/null"]
