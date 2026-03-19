@@ -424,14 +424,20 @@ case class RangeBTreeIndexBuilder(
     val fieldsNum = schema.fields.length
 
     // Write the rows in the range partition to arrow stream
-    while (rowsIter.hasNext) {
-      val row = rowsIter.next()
-      (0 until fieldsNum).foreach { ordinal =>
-        writer.field(ordinal).write(row, ordinal)
+    try {
+      while (rowsIter.hasNext) {
+        val row = rowsIter.next()
+        (0 until fieldsNum).foreach { ordinal =>
+          writer.field(ordinal).write(row, ordinal)
+        }
       }
-    }
 
-    writer.finish()
+      writer.finish()
+    } catch {
+      case e: Throwable =>
+        CloseableUtil.closeQuietly(data)
+        throw e
+    }
 
     // No rows are written
     if (data.getRowCount == 0) {
