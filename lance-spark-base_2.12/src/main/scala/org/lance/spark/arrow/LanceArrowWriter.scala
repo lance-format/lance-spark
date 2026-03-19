@@ -385,15 +385,30 @@ private[arrow] class MapWriter(
 private[arrow] class StructWriter(
     val valueVector: StructVector,
     val children: Array[LanceArrowFieldWriter]) extends LanceArrowFieldWriter {
-  override def setNull(): Unit = {}
+  override def setNull(): Unit = {
+    // When the parent struct is null, we must still write null placeholders to all
+    // child vectors and advance their counts. Arrow requires child vectors to have
+    // the same length as the parent StructVector; skipping children would cause
+    // index misalignment for all subsequent rows.
+    var i = 0
+    while (i < children.length) {
+      children(i).setNull()
+      children(i).count += 1
+      i += 1
+    }
+    valueVector.setNull(count)
+  }
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    // Must mark the parent struct as valid BEFORE writing children.
+    // Lance v2.1+ structural encoders check parent validity before encoding children;
+    // if this is called after, the encoder sees an unset bit and treats the struct as NULL.
+    valueVector.setIndexDefined(count)
     val struct = input.getStruct(ordinal, children.length)
     var i = 0
     while (i < children.length) {
       children(i).write(struct, i)
       i += 1
     }
-    valueVector.setIndexDefined(count)
   }
   override def finish(): Unit = {
     super.finish()

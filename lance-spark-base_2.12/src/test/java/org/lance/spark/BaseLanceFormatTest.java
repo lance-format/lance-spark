@@ -19,11 +19,14 @@ import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SaveMode;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -31,6 +34,9 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Base test class for reading/writing Lance tables using spark.read.format("lance").load() and
@@ -192,5 +198,199 @@ public abstract class BaseLanceFormatTest {
     assertEquals(2L, result.get(1).getLong(0));
     assertEquals(3L, result.get(2).getLong(0));
     assertEquals(4L, result.get(3).getLong(0));
+  }
+
+  /** Helper: writes data to a Lance dataset and reads it back ordered by "id". */
+  private List<Row> writeAndReadStruct(
+      List<Row> data, StructType schema, String version, String tag) {
+    String outputPath = tempDir.resolve("test_struct_" + tag + "_" + version + ".lance").toString();
+    spark
+        .createDataFrame(data, schema)
+        .write()
+        .format("lance")
+        .option("data_storage_version", version)
+        .mode(SaveMode.ErrorIfExists)
+        .save(outputPath);
+    return spark.read().format("lance").load(outputPath).orderBy("id").collectAsList();
+  }
+
+  private static StructType createAddressSchema() {
+    return new StructType(
+        new StructField[] {
+          DataTypes.createStructField("city", DataTypes.StringType, true),
+          DataTypes.createStructField("country", DataTypes.StringType, true)
+        });
+  }
+
+  private static StructType createIdAddressSchema(StructType addressSchema) {
+    return new StructType(
+        new StructField[] {
+          DataTypes.createStructField("id", DataTypes.IntegerType, false),
+          DataTypes.createStructField("address", addressSchema, true)
+        });
+  }
+
+  /**
+   * Tests that struct columns are correctly written and read back for all Lance format versions.
+   * Reproduces issue #119: struct columns written with Lance format v2.1/v2.2 were always NULL
+   * because StructWriter did not set the validity bit on the parent StructVector.
+   */
+  @ParameterizedTest
+  @ValueSource(strings = {"V2_0", "V2_1", "V2_2"})
+  public void testStructColumnWithFormatVersion(String version) {
+    StructType schema = createIdAddressSchema(createAddressSchema());
+    List<Row> data =
+        Arrays.asList(
+            RowFactory.create(1, RowFactory.create("Beijing", "China")),
+            RowFactory.create(2, RowFactory.create("New York", "USA")));
+
+    List<Row> result = writeAndReadStruct(data, schema, version, "non_null");
+
+    assertEquals(2, result.size());
+    assertNotNull(
+        result.get(0).getStruct(1),
+        "Struct column should not be NULL for format version " + version);
+    assertEquals("Beijing", result.get(0).getStruct(1).getString(0));
+    assertEquals("China", result.get(0).getStruct(1).getString(1));
+    assertNotNull(
+        result.get(1).getStruct(1),
+        "Struct column should not be NULL for format version " + version);
+    assertEquals("New York", result.get(1).getStruct(1).getString(0));
+    assertEquals("USA", result.get(1).getStruct(1).getString(1));
+  }
+
+  /**
+   * Tests that null struct values mixed with non-null structs are correctly written and read back.
+   * Verifies the setNull() fix in StructWriter that propagates null to child vectors, keeping child
+   * vector counts aligned with the parent StructVector. Without this fix, child vectors become
+   * shorter than the parent, causing index misalignment for all rows after a null struct.
+   *
+   * <p>Only tests V2_1+ because V2_0 legacy encoders read null structs as empty structs rather than
+   * null — this is a known behavioral difference in V2_0's CoreFieldEncodingStrategy, not a bug.
+   */
+  @ParameterizedTest
+  @ValueSource(strings = {"V2_1", "V2_2"})
+  public void testNullStructColumnWithFormatVersion(String version) {
+    StructType schema = createIdAddressSchema(createAddressSchema());
+    List<Row> data =
+        Arrays.asList(
+            RowFactory.create(1, RowFactory.create("Beijing", "China")),
+            RowFactory.create(2, null),
+            RowFactory.create(3, null), // consecutive nulls
+            RowFactory.create(4, RowFactory.create("New York", "USA")));
+
+    List<Row> result = writeAndReadStruct(data, schema, version, "null_mixed");
+
+    assertEquals(4, result.size());
+    assertNotNull(result.get(0).getStruct(1));
+    assertEquals("Beijing", result.get(0).getStruct(1).getString(0));
+    assertEquals("China", result.get(0).getStruct(1).getString(1));
+    assertTrue(
+        result.get(1).isNullAt(1),
+        "Null struct should be read back as NULL for format version " + version);
+    assertTrue(
+        result.get(2).isNullAt(1),
+        "Consecutive null struct should be read back as NULL for format version " + version);
+    // Row after consecutive nulls — validates count alignment accumulates correctly
+    assertNotNull(
+        result.get(3).getStruct(1),
+        "Non-null struct after consecutive nulls should not be NULL for format version " + version);
+    assertEquals("New York", result.get(3).getStruct(1).getString(0));
+    assertEquals("USA", result.get(3).getStruct(1).getString(1));
+  }
+
+  /**
+   * Tests that V2_0 legacy encoders read null structs as empty structs rather than null. This is a
+   * known behavioral difference: V2_0's CoreFieldEncodingStrategy does not preserve null semantics
+   * for struct types, so a null struct is read back as a non-null struct with null child fields.
+   */
+  @Test
+  public void testNullStructV2_0ReadsAsEmptyStruct() {
+    StructType schema = createIdAddressSchema(createAddressSchema());
+    List<Row> data =
+        Arrays.asList(
+            RowFactory.create(1, RowFactory.create("Beijing", "China")),
+            RowFactory.create(2, null),
+            RowFactory.create(3, RowFactory.create("New York", "USA")));
+
+    List<Row> result = writeAndReadStruct(data, schema, "V2_0", "v20_null_behavior");
+
+    assertEquals(3, result.size());
+    // V2_0: null struct is read back as non-null with null child fields (known behavior)
+    assertFalse(
+        result.get(1).isNullAt(1),
+        "V2_0 legacy encoder reads null struct as empty struct, not null");
+    Row emptyStruct = result.get(1).getStruct(1);
+    assertNotNull(emptyStruct);
+    assertTrue(emptyStruct.isNullAt(0), "city should be null in V2_0 empty struct");
+    assertTrue(emptyStruct.isNullAt(1), "country should be null in V2_0 empty struct");
+    // Non-null rows should still be correct
+    assertEquals("Beijing", result.get(0).getStruct(1).getString(0));
+    assertEquals("New York", result.get(2).getStruct(1).getString(0));
+  }
+
+  /**
+   * Tests that nested structs with null values at different levels are correctly handled. Verifies
+   * that StructWriter.setNull() recursively propagates null to all descendant child vectors,
+   * keeping counts aligned at every nesting level.
+   */
+  @ParameterizedTest
+  @ValueSource(strings = {"V2_1", "V2_2"})
+  public void testNestedStructWithNullValues(String version) {
+    // Schema: id INT, person STRUCT<name: STRING, address: STRUCT<city: STRING, country: STRING>>
+    StructType addressSchema = createAddressSchema();
+    StructType personSchema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("name", DataTypes.StringType, true),
+              DataTypes.createStructField("address", addressSchema, true)
+            });
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.IntegerType, false),
+              DataTypes.createStructField("person", personSchema, true)
+            });
+
+    List<Row> data =
+        Arrays.asList(
+            RowFactory.create(1, RowFactory.create("Alice", RowFactory.create("Beijing", "China"))),
+            RowFactory.create(2, null), // entire outer struct is null
+            RowFactory.create(3, RowFactory.create("Bob", RowFactory.create("New York", "USA"))),
+            RowFactory.create(4, RowFactory.create("Charlie", null)), // inner struct is null
+            RowFactory.create(5, RowFactory.create("Diana", RowFactory.create("Tokyo", "Japan"))));
+
+    List<Row> result = writeAndReadStruct(data, schema, version, "nested");
+
+    assertEquals(5, result.size());
+
+    // Row 1 (id=1): fully populated nested struct
+    assertNotNull(result.get(0).getStruct(1));
+    assertEquals("Alice", result.get(0).getStruct(1).getString(0));
+    assertNotNull(result.get(0).getStruct(1).getStruct(1));
+    assertEquals("Beijing", result.get(0).getStruct(1).getStruct(1).getString(0));
+
+    // Row 2 (id=2): entire outer struct is null
+    assertTrue(
+        result.get(1).isNullAt(1), "Outer struct should be NULL for format version " + version);
+
+    // Row 3 (id=3): fully populated — validates alignment after outer null
+    assertNotNull(result.get(2).getStruct(1));
+    assertEquals("Bob", result.get(2).getStruct(1).getString(0));
+    assertEquals("New York", result.get(2).getStruct(1).getStruct(1).getString(0));
+    assertEquals("USA", result.get(2).getStruct(1).getStruct(1).getString(1));
+
+    // Row 4 (id=4): outer struct non-null, inner address struct is null
+    assertNotNull(result.get(3).getStruct(1));
+    assertEquals("Charlie", result.get(3).getStruct(1).getString(0));
+    assertTrue(
+        result.get(3).getStruct(1).isNullAt(1),
+        "Inner address struct should be NULL for format version " + version);
+
+    // Row 5 (id=5): fully populated — validates alignment after inner null
+    assertNotNull(result.get(4).getStruct(1));
+    assertEquals("Diana", result.get(4).getStruct(1).getString(0));
+    assertEquals("Tokyo", result.get(4).getStruct(1).getStruct(1).getString(0));
+    assertEquals("Japan", result.get(4).getStruct(1).getStruct(1).getString(1));
   }
 }

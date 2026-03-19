@@ -26,9 +26,9 @@ SPARK_DOWNLOAD_VERSION := $(SPARK_DOWNLOAD_VERSION_$(SPARK_VERSION))
 PY4J_VERSION := $(PY4J_VERSION_$(SPARK_VERSION))
 
 # Spark 3.x default binaries are Scala 2.12; Scala 2.13 needs explicit suffix.
-# Spark 4.0 only supports Scala 2.13, so no suffix is needed.
+# Spark 4.x only supports Scala 2.13, so no suffix is needed.
 ifeq ($(SCALA_VERSION),2.13)
-  ifneq ($(SPARK_VERSION),4.0)
+  ifeq ($(filter 4.%,$(SPARK_VERSION)),)
     SPARK_SCALA_SUFFIX := -scala2.13
   else
     SPARK_SCALA_SUFFIX :=

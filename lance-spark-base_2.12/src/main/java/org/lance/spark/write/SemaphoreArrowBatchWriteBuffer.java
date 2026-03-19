@@ -25,15 +25,15 @@ import org.apache.spark.sql.util.LanceArrowUtils;
 import javax.annotation.concurrent.GuardedBy;
 
 import java.io.IOException;
-import java.util.concurrent.Semaphore;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Buffers Spark rows into Arrow batches for consumption by Lance fragment creation.
  *
  * <p>This class bridges the producer (Spark thread writing rows) and consumer (Lance native code
- * pulling batches via ArrowReader interface). It uses semaphores to synchronize between the two
- * threads - the producer blocks until the consumer is ready for more data, and vice versa.
+ * pulling batches via ArrowReader interface). It uses a lock with conditions to synchronize between
+ * the two threads - the producer blocks until the consumer is ready for more data, and vice versa.
  *
  * @see QueuedArrowBatchWriteBuffer for a queue-based alternative with better pipelining
  */
@@ -42,13 +42,17 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
   private final StructType sparkSchema;
   private final int batchSize;
 
-  @GuardedBy("monitor")
-  private volatile boolean finished = false;
+  private final ReentrantLock lock = new ReentrantLock();
+  private final Condition canWrite = lock.newCondition();
+  private final Condition batchReady = lock.newCondition();
+
+  @GuardedBy("lock")
+  private boolean finished = false;
+
+  @GuardedBy("lock")
+  private int count;
 
   private org.lance.spark.arrow.LanceArrowWriter arrowWriter = null;
-  private final AtomicInteger count = new AtomicInteger(0);
-  private final Semaphore writeToken;
-  private final Semaphore loadToken;
 
   public SemaphoreArrowBatchWriteBuffer(
       BufferAllocator allocator, Schema schema, StructType sparkSchema, int batchSize) {
@@ -58,8 +62,9 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
     this.schema = schema;
     this.sparkSchema = sparkSchema;
     this.batchSize = batchSize;
-    this.writeToken = new Semaphore(0);
-    this.loadToken = new Semaphore(0);
+    // Start with count = batchSize so the writer blocks on canWrite.await() until the
+    // reader's prepareLoadNextBatch() initializes arrowWriter and resets count to 0.
+    this.count = batchSize;
   }
 
   /** Simplified constructor that uses LanceRuntime allocator and converts Spark schema to Arrow. */
@@ -72,28 +77,53 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
   }
 
   @Override
+  public void onTaskComplete() {
+    lock.lock();
+    try {
+      canWrite.signalAll();
+      batchReady.signalAll();
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  @Override
   public void write(InternalRow row) {
     Preconditions.checkNotNull(row);
+    lock.lock();
     try {
-      // wait util prepareLoadNextBatch to release write token
-      writeToken.acquire();
+      checkForError();
 
-      // Write to Arrow buffer
+      // wait until prepareLoadNextBatch signals that writes are available
+      while (count >= batchSize) {
+        canWrite.await();
+        checkForError();
+      }
+
       arrowWriter.write(row);
+      count++;
 
-      if (count.incrementAndGet() == batchSize) {
-        // notify loadNextBatch to take the batch
-        loadToken.release();
+      if (count == batchSize) {
+        batchReady.signal();
       }
     } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
       throw new RuntimeException(e);
+    } finally {
+      lock.unlock();
     }
   }
 
   @Override
   public void setFinished() {
-    finished = true;
-    loadToken.release();
+    lock.lock();
+    try {
+      finished = true;
+      batchReady.signal();
+      canWrite.signalAll();
+    } finally {
+      lock.unlock();
+    }
   }
 
   @Override
@@ -102,38 +132,42 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
     arrowWriter =
         org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(
             this.getVectorSchemaRoot(), sparkSchema);
-    // release batch size token for write
-    writeToken.release(batchSize);
+    lock.lock();
+    try {
+      count = 0;
+      canWrite.signalAll();
+    } finally {
+      lock.unlock();
+    }
   }
 
   @Override
   public boolean loadNextBatch() throws IOException {
     prepareLoadNextBatch();
+    lock.lock();
     try {
-      if (finished && count.get() == 0) {
+      if (finished && count == 0) {
         return false;
       }
 
-      // wait util batch is full or finished
-      loadToken.acquire();
+      // wait until batch is full or finished
+      while (count < batchSize && !finished) {
+        batchReady.await();
+        checkForError();
+      }
 
-      // Finish the batch (flush Arrow vectors)
       arrowWriter.finish();
 
       if (!finished) {
-        count.set(0);
         return true;
       } else {
-        // true if it has some rows and return false if there is no record
-        if (count.get() > 0) {
-          count.set(0);
-          return true;
-        } else {
-          return false;
-        }
+        return count > 0;
       }
     } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
       throw new RuntimeException(e);
+    } finally {
+      lock.unlock();
     }
   }
 

@@ -149,6 +149,7 @@ public class LanceScanBuilder
         offset,
         topNSortOrders,
         pushedAggregation,
+        pushedFilters,
         statistics,
         initialStorageOptions,
         namespaceImpl,

@@ -148,6 +148,8 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
     Preconditions.checkNotNull(row);
     Preconditions.checkState(!producerFinished, "Cannot write after setFinished() is called");
 
+    checkForError();
+
     try {
       currentArrowWriter.write(row);
 
@@ -158,8 +160,15 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
         currentArrowWriter.finish();
         currentBatch.setRowCount(count);
 
-        // Put in queue (blocks only if queue is full)
-        batchQueue.put(currentBatch);
+        // Put in queue, periodically checking for consumer errors
+        try {
+          while (!batchQueue.offer(currentBatch, 100, TimeUnit.MILLISECONDS)) {
+            checkForError();
+          }
+        } catch (RuntimeException e) {
+          currentBatch.close();
+          throw e;
+        }
 
         // Allocate new batch for next writes
         allocateNewBatch();
@@ -186,7 +195,14 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
       if (remainingRows > 0) {
         currentArrowWriter.finish();
         currentBatch.setRowCount(remainingRows);
-        batchQueue.put(currentBatch);
+        try {
+          while (!batchQueue.offer(currentBatch, 100, TimeUnit.MILLISECONDS)) {
+            checkForError();
+          }
+        } catch (RuntimeException e) {
+          currentBatch.close();
+          throw e;
+        }
       } else {
         // No remaining rows, close the empty batch
         currentBatch.close();
