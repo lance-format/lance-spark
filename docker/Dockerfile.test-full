@@ -67,6 +67,9 @@ RUN mkdir -p /home/lance/warehouse /home/lance/spark-events /home/lance/data
 RUN mkdir -p /home/lance/tests
 COPY tests/ /home/lance/tests/
 
+# Disable EC2 IMDS credential discovery to avoid interference on CI runners
+ENV AWS_EC2_METADATA_DISABLED=true
+
 WORKDIR ${SPARK_HOME}
 COPY entrypoint.sh .
 

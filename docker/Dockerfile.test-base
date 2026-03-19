@@ -25,6 +25,8 @@ RUN python3 -m venv /opt/venv && \
     pip install pytest pytest-timeout packaging azure-storage-blob boto3
 
 ENV PATH="/opt/venv/bin:$PATH"
+# Disable EC2 IMDS credential discovery to avoid interference on CI runners
+ENV AWS_EC2_METADATA_DISABLED=true
 ENV SPARK_HOME="/opt/spark"
 ENV PYTHONPATH="${SPARK_HOME}/python:${PYTHONPATH}"
 ENV PATH="${SPARK_HOME}/sbin:${SPARK_HOME}/bin:${PATH}"
