@@ -6,7 +6,7 @@ Runs the [TPC-DS](http://www.tpc.org/tpcds/) query suite against Lance and Parqu
 
 ## Quick Start (Docker)
 
-The Docker-based runner provides a reproducible environment — no host Spark or dsdgen installation required, consistent results across machines, and potential for CI integration.
+The Docker-based runner is useful for local debugging (no host Spark or dsdgen installation required) and CI integration.
 
 ```bash
 # Compare Lance vs Parquet (default), scale factor 1

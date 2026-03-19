@@ -13,9 +13,8 @@
 
 # TPC-DS Benchmark runner for lance-spark (Docker-based).
 #
-# Runs benchmarks inside a Docker container for reproducibility: no host
-# Spark or dsdgen installation is required, results are consistent across
-# machines, and the image can be reused in CI.
+# Runs benchmarks inside a Docker container, useful for local debugging
+# (no host Spark or dsdgen installation required) and CI integration.
 #
 # Usage:
 #   ./benchmark/scripts/run-docker-benchmark.sh [OPTIONS]
