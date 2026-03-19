@@ -236,7 +236,7 @@ public abstract class BaseLanceFormatTest {
    * because StructWriter did not set the validity bit on the parent StructVector.
    */
   @ParameterizedTest
-  @ValueSource(strings = {"V2_0", "V2_1", "V2_2"})
+  @ValueSource(strings = {"2.0", "2.1", "2.2"})
   public void testStructColumnWithFormatVersion(String version) {
     StructType schema = createIdAddressSchema(createAddressSchema());
     List<Row> data =
@@ -269,7 +269,7 @@ public abstract class BaseLanceFormatTest {
    * null — this is a known behavioral difference in V2_0's CoreFieldEncodingStrategy, not a bug.
    */
   @ParameterizedTest
-  @ValueSource(strings = {"V2_1", "V2_2"})
+  @ValueSource(strings = {"2.1", "2.2"})
   public void testNullStructColumnWithFormatVersion(String version) {
     StructType schema = createIdAddressSchema(createAddressSchema());
     List<Row> data =
@@ -313,7 +313,7 @@ public abstract class BaseLanceFormatTest {
             RowFactory.create(2, null),
             RowFactory.create(3, RowFactory.create("New York", "USA")));
 
-    List<Row> result = writeAndReadStruct(data, schema, "V2_0", "v20_null_behavior");
+    List<Row> result = writeAndReadStruct(data, schema, "2.0", "v20_null_behavior");
 
     assertEquals(3, result.size());
     // V2_0: null struct is read back as non-null with null child fields (known behavior)
@@ -335,7 +335,7 @@ public abstract class BaseLanceFormatTest {
    * keeping counts aligned at every nesting level.
    */
   @ParameterizedTest
-  @ValueSource(strings = {"V2_1", "V2_2"})
+  @ValueSource(strings = {"2.1", "2.2"})
   public void testNestedStructWithNullValues(String version) {
     // Schema: id INT, person STRUCT<name: STRING, address: STRUCT<city: STRING, country: STRING>>
     StructType addressSchema = createAddressSchema();
