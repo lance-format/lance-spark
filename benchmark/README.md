@@ -2,22 +2,30 @@
 
 Runs the [TPC-DS](http://www.tpc.org/tpcds/) query suite against Lance and Parquet formats using Apache Spark, comparing query performance, correctness, and resource usage.
 
+`parquet` here refers to Spark's built-in Parquet reader, used as a performance baseline. Delta and Iceberg are not included because they require additional catalog/metastore tooling outside lance-spark's scope.
+
 ## Quick Start (Docker)
 
-The Docker-based runner handles everything — building jars, generating data, and executing queries in an isolated container.
+The Docker-based runner provides a reproducible environment — no host Spark or dsdgen installation required, consistent results across machines, and potential for CI integration.
 
 ```bash
 # Compare Lance vs Parquet (default), scale factor 1
-./benchmark/scripts/run-docker-benchmark.sh
+make benchmark-docker
 
 # Lance only, with profiling
+make benchmark-docker FORMATS=lance
+
+# Rebuild everything from scratch
+make benchmark-docker SF=10 FORMATS=parquet,lance ITERATIONS=3
+```
+
+Or call the script directly for additional flags:
+
+```bash
 ./benchmark/scripts/run-docker-benchmark.sh --formats lance --explain --metrics
 
 # Run a single query with profiling
 ./benchmark/scripts/run-docker-benchmark.sh --formats parquet,lance --queries q3 --explain --metrics
-
-# Rebuild everything from scratch
-./benchmark/scripts/run-docker-benchmark.sh --rebuild --formats parquet,lance --iterations 3
 ```
 
 ### Docker Options
@@ -51,13 +59,24 @@ The Docker-based runner handles everything — building jars, generating data, a
 For running directly on a machine with Spark installed:
 
 ```bash
+# Build the jars first
+make bundle SPARK_VERSION=3.5 SCALA_VERSION=2.12
+make benchmark-build
+
+# Run the benchmark
 ./benchmark/scripts/run-benchmark.sh [SCALE_FACTOR] [FORMATS] [SPARK_MASTER] [ITERATIONS]
 
 # Examples
 ./benchmark/scripts/run-benchmark.sh 1 lance,parquet local[*] 3
+
+# Override Spark/Scala versions
+SPARK_VERSION=3.5 SCALA_VERSION=2.12 ./benchmark/scripts/run-benchmark.sh 1
+
+# Enable profiling flags
+EXPLAIN=true METRICS=true QUERIES=q3,q55 ./benchmark/scripts/run-benchmark.sh 1
 ```
 
-This script installs `dsdgen`, generates data, builds the benchmark jar, and submits via `spark-submit`. Set `SPARK_HOME` if `spark-submit` is not on your `PATH`.
+Set `SPARK_HOME` if `spark-submit` is not on your `PATH`.
 
 ## Running on an External Cluster
 
@@ -66,39 +85,37 @@ To benchmark against a standalone or YARN cluster with data in an object store (
 ### 1. Build the jars
 
 ```bash
-# Build the lance-spark bundle
 make bundle SPARK_VERSION=3.5 SCALA_VERSION=2.12
-
-# Build the benchmark jar
-cd benchmark && mvn package -DskipTests -q
+make benchmark-build
 ```
 
-### 2. Generate and upload TPC-DS data
+### 2. Generate TPC-DS data and write directly to object store
 
-Generate raw data locally, convert to the target formats, then upload:
+Use `spark-submit` with object store paths so data is written directly — no local generation and upload step needed:
 
 ```bash
-# Generate raw CSV data (scale factor 10)
-./benchmark/scripts/install-dsdgen.sh
-./benchmark/scripts/generate-data.sh 10 /tmp/tpcds-raw
-
-# Convert to Lance/Parquet and upload (example using a local Spark session)
 spark-submit \
   --class org.lance.spark.benchmark.TpcdsBenchmarkRunner \
   --master local[*] \
   --jars path/to/lance-spark-bundle-3.5_2.12-*.jar \
   --conf spark.sql.extensions=org.lance.spark.LanceSparkSessionExtension \
+  --conf spark.hadoop.fs.s3a.access.key=YOUR_KEY \
+  --conf spark.hadoop.fs.s3a.secret.key=YOUR_SECRET \
+  --conf spark.hadoop.fs.s3a.endpoint=s3.amazonaws.com \
   benchmark/target/lance-spark-benchmark-*.jar \
   --raw-data /tmp/tpcds-raw \
-  --data-dir /tmp/tpcds-converted \
-  --results-dir /tmp/results \
+  --data-dir s3a://my-bucket/tpcds/sf10 \
+  --results-dir s3a://my-bucket/tpcds/sf10/results \
   --formats parquet,lance \
   --iterations 1
+```
 
-# Upload converted data to your object store
-aws s3 sync /tmp/tpcds-converted/lance s3://my-bucket/tpcds/sf10/lance/
-aws s3 sync /tmp/tpcds-converted/parquet s3://my-bucket/tpcds/sf10/parquet/
-# or: gsutil -m rsync -r /tmp/tpcds-converted gs://my-bucket/tpcds/sf10/
+Alternatively, use the script with object store env vars:
+
+```bash
+DATA_DIR=s3a://my-bucket/tpcds/sf10 \
+RESULTS_DIR=s3a://my-bucket/tpcds/sf10/results \
+./benchmark/scripts/run-benchmark.sh 10 parquet,lance local[*] 1
 ```
 
 ### 3. Submit to the cluster

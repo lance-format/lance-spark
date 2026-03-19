@@ -13,6 +13,10 @@
 
 # TPC-DS Benchmark runner for lance-spark (Docker-based).
 #
+# Runs benchmarks inside a Docker container for reproducibility: no host
+# Spark or dsdgen installation is required, results are consistent across
+# machines, and the image can be reused in CI.
+#
 # Usage:
 #   ./benchmark/scripts/run-docker-benchmark.sh [OPTIONS]
 #
@@ -115,14 +119,7 @@ if [ "${REBUILD}" = true ] || [ -z "${IMAGE_EXISTS}" ]; then
   cp "${BENCHMARK_JAR}" "${DOCKER_DIR}/"
   cd "${DOCKER_DIR}"
 
-  # Determine Spark download version
-  SPARK_DOWNLOAD_VERSION=$(grep "SPARK_DOWNLOAD_VERSION_${SPARK_VERSION}" "${DOCKER_DIR}/versions.mk" | cut -d= -f2 | tr -d ' ')
-  if [ -z "${SPARK_DOWNLOAD_VERSION}" ]; then
-    SPARK_DOWNLOAD_VERSION="3.5.8"
-  fi
-
   docker build \
-    --build-arg SPARK_DOWNLOAD_VERSION="${SPARK_DOWNLOAD_VERSION}" \
     --build-arg SPARK_MAJOR_VERSION="${SPARK_VERSION}" \
     --build-arg SCALA_VERSION="${SCALA_VERSION}" \
     -f Dockerfile.benchmark \
