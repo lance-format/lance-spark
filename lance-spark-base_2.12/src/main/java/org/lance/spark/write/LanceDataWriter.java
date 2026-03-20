@@ -27,8 +27,6 @@ import org.apache.spark.sql.connector.write.DataWriter;
 import org.apache.spark.sql.connector.write.DataWriterFactory;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
 import org.apache.spark.sql.types.StructType;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.List;
@@ -40,7 +38,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 public class LanceDataWriter implements DataWriter<InternalRow> {
-  private static final Logger LOG = LoggerFactory.getLogger(LanceDataWriter.class);
   private ArrowBatchWriteBuffer writeBuffer;
   private FutureTask<List<FragmentMetadata>> fragmentCreationTask;
   private Thread fragmentCreationThread;
@@ -137,14 +134,6 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       int batchSize = writeOptions.getBatchSize();
       boolean useQueuedBuffer = writeOptions.isUseQueuedWriteBuffer();
 
-      LOG.warn(
-          "createWriter: datasetUri={}, writeOptions.storageOptions.keys={}, "
-              + "initialStorageOptions.keys={}, writeMode={}",
-          writeOptions.getDatasetUri(),
-          writeOptions.getStorageOptions().keySet(),
-          initialStorageOptions != null ? initialStorageOptions.keySet() : "null",
-          writeOptions.getWriteMode());
-
       // Merge initial storage options with write options
       WriteParams params = buildWriteParams();
 
@@ -181,8 +170,6 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
     private WriteParams buildWriteParams() {
       Map<String, String> merged =
           LanceRuntime.mergeStorageOptions(writeOptions.getStorageOptions(), initialStorageOptions);
-
-      LOG.warn("buildWriteParams: merged storageOptions keys={}", merged.keySet());
 
       WriteParams.Builder builder = new WriteParams.Builder();
       builder.withMode(writeOptions.getWriteMode());

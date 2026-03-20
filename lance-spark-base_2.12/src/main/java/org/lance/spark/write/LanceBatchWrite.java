@@ -30,8 +30,6 @@ import org.apache.spark.sql.connector.write.PhysicalWriteInfo;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.Arrays;
 import java.util.List;
@@ -40,7 +38,6 @@ import java.util.Optional;
 import java.util.stream.Collectors;
 
 public class LanceBatchWrite implements BatchWrite {
-  private static final Logger LOG = LoggerFactory.getLogger(LanceBatchWrite.class);
   private final StructType schema;
   private final LanceSparkWriteOptions writeOptions;
   private final boolean overwrite;
@@ -82,14 +79,6 @@ public class LanceBatchWrite implements BatchWrite {
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
     this.stagedCommit = stagedCommit;
-
-    LOG.warn(
-        "LanceBatchWrite: datasetUri={}, staged={}, writeOptions.storageOptions.keys={}, "
-            + "initialStorageOptions.keys={}",
-        writeOptions.getDatasetUri(),
-        stagedCommit != null,
-        writeOptions.getStorageOptions().keySet(),
-        initialStorageOptions != null ? initialStorageOptions.keySet() : "null");
 
     // For staged operations, the dataset is managed by StagedCommit.
     // For non-staged operations, open to capture version for commit.
