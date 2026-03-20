@@ -361,7 +361,6 @@ public abstract class BaseSparkConnectorWriteTest {
     Dataset<Row> df2 = spark.createDataFrame(data2, schema2);
     df2.createOrReplaceTempView("replacement_data");
 
-    // This should succeed but currently fails with schema mismatch error
     spark.sql("REPLACE TABLE lance.`" + path + "` AS SELECT * FROM replacement_data");
 
     Dataset<Row> result =

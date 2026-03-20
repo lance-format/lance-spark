@@ -126,7 +126,8 @@ public class LanceBatchWrite implements BatchWrite {
         }
         try (Transaction txn =
                 new Transaction.Builder().readVersion(ds.version()).operation(operation).build();
-            Dataset committed = new CommitBuilder(ds).execute(txn)) {
+            Dataset committed =
+                new CommitBuilder(ds).writeParams(writeOptions.getStorageOptions()).execute(txn)) {
           // auto-close txn and committed dataset
         }
       } finally {

@@ -55,13 +55,14 @@ public class Utils {
     return versionID;
   }
 
-  /** Opens a dataset via namespace path. */
-  private static Dataset openDataset(LanceNamespace namespace, List<String> tableId) {
+  /** Opens a dataset via namespace path with read options (storage credentials, etc.). */
+  private static Dataset openDataset(
+      LanceNamespace namespace, List<String> tableId, ReadOptions readOptions) {
     return Dataset.open()
         .allocator(LanceRuntime.allocator())
         .namespace(namespace)
         .tableId(tableId)
-        .session(LanceRuntime.session())
+        .readOptions(readOptions)
         .build();
   }
 
@@ -77,13 +78,8 @@ public class Utils {
   /** Opens a dataset using read options, dispatching to namespace or URI path. */
   public static Dataset openDataset(LanceSparkReadOptions readOptions) {
     if (readOptions.hasNamespace()) {
-      // Read path passes readOptions for version/blockSize/etc. even on namespace path
-      return Dataset.open()
-          .allocator(LanceRuntime.allocator())
-          .namespace(readOptions.getNamespace())
-          .tableId(readOptions.getTableId())
-          .readOptions(readOptions.toReadOptions())
-          .build();
+      return openDataset(
+          readOptions.getNamespace(), readOptions.getTableId(), readOptions.toReadOptions());
     }
     return openDataset(readOptions.getDatasetUri(), readOptions.toReadOptions());
   }
@@ -91,7 +87,8 @@ public class Utils {
   /** Opens a dataset using write options, dispatching to namespace or URI path. */
   public static Dataset openDataset(LanceSparkWriteOptions writeOptions) {
     if (writeOptions.hasNamespace()) {
-      return openDataset(writeOptions.getNamespace(), writeOptions.getTableId());
+      return openDataset(
+          writeOptions.getNamespace(), writeOptions.getTableId(), writeOptions.toReadOptions());
     }
     return openDataset(writeOptions.getDatasetUri(), writeOptions.toReadOptions());
   }

@@ -151,6 +151,62 @@ public abstract class BaseDeleteTableTest {
         Arrays.asList(Row.of(1, "Alice", 100), Row.of(3, "Charlie", 300), Row.of(4, "Tom", 100)));
   }
 
+  /**
+   * Verifies that DELETE with a {@code _rowaddr} filter only affects the target row (issue #117).
+   *
+   * <p>Without fragment pruning, lance-core's {@code Fragment.newScan()} incorrectly returns rows
+   * from non-matching fragments, causing a {@code DELETE WHERE _rowaddr = X} to delete the entire
+   * dataset. This test validates both the correctness fix and the fragment ID mapping CONTRACT used
+   * by {@code RowAddressFilterAnalyzer}: {@code LanceSplit.getFragments()} returns Integer values
+   * that match {@code (int)(rowAddr >>> 32)}. If lance-core ever changes the {@code _rowaddr}
+   * encoding or fragment ID assignment, this test will fail.
+   *
+   * <p>Setup: 3 separate INSERTs create 3 fragments. We read back all rows with {@code _rowaddr},
+   * pick the {@code _rowaddr} of a specific row, delete by that address, and verify only that row
+   * is removed while all other rows (including those in other fragments) remain.
+   */
+  @Test
+  public void testDeleteByRowAddrOnlyAffectsTargetFragment() {
+    TableOperator op = new TableOperator(spark, catalogName);
+    op.create();
+
+    // Lance creates one fragment per append operation, so 3 INSERTs → 3 fragments.
+    // The assertion below verifies this assumption holds at runtime.
+    op.insert(Arrays.asList(Row.of(1, "Alice", 100), Row.of(2, "Bob", 200)));
+    op.insert(Arrays.asList(Row.of(3, "Charlie", 300), Row.of(4, "Dave", 400)));
+    op.insert(Collections.singletonList(Row.of(5, "Eve", 500)));
+
+    // Read back _rowaddr for each row
+    String fullTable = catalogName + ".default." + op.tableName;
+    List<org.apache.spark.sql.Row> rowsWithAddr =
+        spark.sql("SELECT id, _rowaddr FROM " + fullTable + " ORDER BY id").collectAsList();
+    Assertions.assertEquals(5, rowsWithAddr.size());
+
+    // Verify that rows span at least 2 distinct fragments (fragment ID = upper 32 bits)
+    long distinctFragments =
+        rowsWithAddr.stream().map(r -> (int) (r.getLong(1) >>> 32)).distinct().count();
+    Assertions.assertTrue(
+        distinctFragments >= 2,
+        "Expected rows to span at least 2 fragments, but got " + distinctFragments);
+
+    // Pick the _rowaddr of the row with id=1 (in the first fragment) and delete it
+    long targetAddr =
+        rowsWithAddr.stream()
+            .filter(r -> r.getInt(0) == 1)
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("Row id=1 not found"))
+            .getLong(1);
+    spark.sql("DELETE FROM " + fullTable + " WHERE _rowaddr = " + targetAddr);
+
+    // Verify: only id=1 is deleted, all other rows (across all fragments) remain
+    op.check(
+        Arrays.asList(
+            Row.of(2, "Bob", 200),
+            Row.of(3, "Charlie", 300),
+            Row.of(4, "Dave", 400),
+            Row.of(5, "Eve", 500)));
+  }
+
   private static class TableOperator {
     private final SparkSession spark;
     private final String catalogName;

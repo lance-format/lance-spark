@@ -16,11 +16,14 @@ package org.apache.spark.sql.catalyst.parser.extensions
 import org.apache.spark.sql.catalyst.analysis.{UnresolvedIdentifier, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.parser.ParserInterface
 import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, LogicalPlan, NamedArgument, Optimize, ShowIndexes, UpdateColumnsBackfill, Vacuum}
+import org.lance.spark.utils.ParserUtils
 
 import scala.jdk.CollectionConverters._
 
 class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
   extends LanceSqlExtensionsBaseVisitor[AnyRef] {
+
+  private def cleanIdentifier(text: String): String = ParserUtils.cleanIdentifier(text)
 
   override def visitSingleStatement(ctx: LanceSqlExtensionsParser.SingleStatementContext)
       : LogicalPlan = {
@@ -31,7 +34,7 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
       : AddColumnsBackfill = {
     val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
     val columnNames = visitColumnList(ctx.columnList())
-    val source = UnresolvedRelation(Seq(ctx.identifier().getText))
+    val source = UnresolvedRelation(Seq(cleanIdentifier(ctx.identifier().getText)))
     AddColumnsBackfill(table, columnNames, source)
   }
 
@@ -39,27 +42,27 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
       ctx: LanceSqlExtensionsParser.UpdateColumnsBackfillContext): UpdateColumnsBackfill = {
     val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
     val columnNames = visitColumnList(ctx.columnList())
-    val source = UnresolvedRelation(Seq(ctx.identifier().getText))
+    val source = UnresolvedRelation(Seq(cleanIdentifier(ctx.identifier().getText)))
     UpdateColumnsBackfill(table, columnNames, source)
   }
 
   override def visitMultipartIdentifier(ctx: LanceSqlExtensionsParser.MultipartIdentifierContext)
       : Seq[String] = {
-    ctx.parts.asScala.map(_.getText).toSeq
+    ctx.parts.asScala.map(p => cleanIdentifier(p.getText)).toSeq
   }
 
   /**
    * Visit identifier list.
    */
   override def visitColumnList(ctx: LanceSqlExtensionsParser.ColumnListContext): Seq[String] = {
-    ctx.columns.asScala.map(_.getText).toSeq
+    ctx.columns.asScala.map(c => cleanIdentifier(c.getText)).toSeq
   }
 
   override def visitOptimize(ctx: LanceSqlExtensionsParser.OptimizeContext): Optimize = {
     val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
     val args = ctx.namedArgument().asScala.map(a =>
       NamedArgument(
-        a.identifier().getText,
+        cleanIdentifier(a.identifier().getText),
         a.constant().accept(this)))
       .toSeq
 
@@ -70,7 +73,7 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
     val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
     val args = ctx.namedArgument().asScala.map(a =>
       NamedArgument(
-        a.identifier().getText,
+        cleanIdentifier(a.identifier().getText),
         a.constant().accept(this)))
       .toSeq
 
@@ -79,12 +82,12 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
 
   override def visitCreateIndex(ctx: LanceSqlExtensionsParser.CreateIndexContext): AddIndex = {
     val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
-    val indexName = ctx.indexName.getText
-    val method = ctx.method.getText
+    val indexName = cleanIdentifier(ctx.indexName.getText)
+    val method = cleanIdentifier(ctx.method.getText)
     val columns = visitColumnList(ctx.columnList())
     val args = ctx.namedArgument().asScala.map(a =>
       NamedArgument(
-        a.identifier().getText,
+        cleanIdentifier(a.identifier().getText),
         a.constant().accept(this)))
       .toSeq
 

@@ -27,6 +27,7 @@ import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
+import org.lance.spark.utils.Utils;
 
 import com.google.common.collect.ImmutableList;
 import org.apache.arrow.c.ArrowArrayStream;
@@ -143,7 +144,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
               });
 
       // Use SDK directly to update fragments
-      try (Dataset dataset = openDataset(writeOptions)) {
+      try (Dataset dataset = Utils.openDataset(writeOptions)) {
         Update update =
             Update.builder()
                 .removedFragmentIds(removedFragmentIds)
@@ -153,31 +154,12 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
         try (Transaction txn =
                 new Transaction.Builder().readVersion(dataset.version()).operation(update).build();
-            Dataset committed = new CommitBuilder(dataset).execute(txn)) {
+            Dataset committed =
+                new CommitBuilder(dataset)
+                    .writeParams(writeOptions.getStorageOptions())
+                    .execute(txn)) {
           // auto-close txn and committed dataset
         }
-      }
-    }
-
-    private Dataset openDataset(LanceSparkWriteOptions options) {
-      if (options.hasNamespace()) {
-        return Dataset.open()
-            .allocator(LanceRuntime.allocator())
-            .namespace(options.getNamespace())
-            .tableId(options.getTableId())
-            .session(LanceRuntime.session())
-            .build();
-      } else {
-        ReadOptions readOptions =
-            new ReadOptions.Builder()
-                .setStorageOptions(options.getStorageOptions())
-                .setSession(LanceRuntime.session())
-                .build();
-        return Dataset.open()
-            .allocator(LanceRuntime.allocator())
-            .uri(options.getDatasetUri())
-            .readOptions(readOptions)
-            .build();
       }
     }
 
