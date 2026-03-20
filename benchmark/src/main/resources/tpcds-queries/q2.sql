@@ -21,7 +21,7 @@ wswscs AS (
   WHERE d_date_sk = sold_date_sk
   GROUP BY d_week_seq
 )
-SELECT d1.d_week_seq,
+SELECT y.d_week_seq,
   ROUND(sun_sales1 / sun_sales2, 2),
   ROUND(mon_sales1 / mon_sales2, 2),
   ROUND(tue_sales1 / tue_sales2, 2),
@@ -47,5 +47,5 @@ FROM (
   FROM wswscs, date_dim d2
   WHERE d2.d_week_seq = wswscs.d_week_seq AND d2.d_year = 2001 + 1
 ) z
-WHERE d1.d_week_seq = d2.d_week_seq - 53
-ORDER BY d1.d_week_seq
+WHERE y.d_week_seq = z.d_week_seq - 53
+ORDER BY y.d_week_seq
