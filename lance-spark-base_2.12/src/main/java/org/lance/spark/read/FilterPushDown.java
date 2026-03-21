@@ -32,6 +32,7 @@ import org.apache.spark.sql.sources.StringContains;
 import org.apache.spark.sql.sources.StringEndsWith;
 import org.apache.spark.sql.sources.StringStartsWith;
 
+import java.math.BigDecimal;
 import java.sql.Date;
 import java.sql.Timestamp;
 import java.util.ArrayList;
@@ -176,8 +177,21 @@ public class FilterPushDown {
   }
 
   private static String compileValue(Object value) {
-    if (value instanceof String || value instanceof Timestamp || value instanceof Date) {
+    if (value instanceof Date) {
+      return "date '" + value + "'";
+    } else if (value instanceof Timestamp) {
+      return "timestamp '" + value + "'";
+    } else if (value instanceof String) {
       return "'" + value + "'";
+    } else if (value instanceof BigDecimal) {
+      BigDecimal bd = (BigDecimal) value;
+      return "CAST("
+          + bd.toPlainString()
+          + " AS DECIMAL("
+          + bd.precision()
+          + ", "
+          + bd.scale()
+          + "))";
     } else if (value instanceof Object[]) {
       Object[] array = (Object[]) value;
       StringBuilder sb = new StringBuilder();
