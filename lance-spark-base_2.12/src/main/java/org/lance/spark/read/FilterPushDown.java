@@ -176,7 +176,11 @@ public class FilterPushDown {
   }
 
   private static String compileValue(Object value) {
-    if (value instanceof String || value instanceof Timestamp || value instanceof Date) {
+    if (value instanceof Date) {
+      return "date '" + value + "'";
+    } else if (value instanceof Timestamp) {
+      return "timestamp '" + value + "'";
+    } else if (value instanceof String) {
       return "'" + value + "'";
     } else if (value instanceof Object[]) {
       Object[] array = (Object[]) value;
