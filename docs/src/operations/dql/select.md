@@ -236,7 +236,7 @@ These options control how data is read from Lance datasets. They can be set usin
 
 | Option                | Type    | Default | Description                                                                                                       |
 |-----------------------|---------|---------|-------------------------------------------------------------------------------------------------------------------|
-| `batch_size`          | Integer | `512`   | Number of rows to read per batch during scanning. Larger values may improve throughput but increase memory usage. |
+| `batch_size`          | Integer | `8192`  | Number of rows to read per batch during scanning. Larger values may improve throughput but increase memory usage. |
 | `version`             | Integer | Latest  | Specific dataset version to read. If not specified, reads the latest version.                                     |
 | `block_size`          | Integer | -       | Block size in bytes for reading data.                                                                             |
 | `index_cache_size`    | Integer | -       | Size of the index cache in number of entries.                                                                     |
@@ -257,7 +257,7 @@ These options control how data is read from Lance datasets. They can be set usin
     # Reading with options
     df = spark.read \
         .format("lance") \
-        .option("batch_size", "1024") \
+        .option("batch_size", "16384") \
         .option("version", "5") \
         .load("/path/to/dataset.lance")
     ```
@@ -267,7 +267,7 @@ These options control how data is read from Lance datasets. They can be set usin
     // Reading with options
     val df = spark.read
         .format("lance")
-        .option("batch_size", "1024")
+        .option("batch_size", "16384")
         .option("version", "5")
         .load("/path/to/dataset.lance")
     ```
@@ -277,27 +277,30 @@ These options control how data is read from Lance datasets. They can be set usin
     // Reading with options
     Dataset<Row> df = spark.read()
         .format("lance")
-        .option("batch_size", "1024")
+        .option("batch_size", "16384")
         .option("version", "5")
         .load("/path/to/dataset.lance");
     ```
 
 ### Example: Tuning Batch Size for Performance
 
+The default `batch_size` is already `8192`, which works well for most scan-heavy workloads.
+Increase it further only when you want to trade more memory for higher throughput on very large scans.
+
 === "Python"
     ```python
-    # Larger batch size for better throughput on large scans
+    # Larger batch size for better throughput on especially large scans
     df = spark.read \
         .format("lance") \
-        .option("batch_size", "4096") \
+        .option("batch_size", "32768") \
         .load("/path/to/dataset.lance")
     ```
 
 === "Scala"
     ```scala
-    // Larger batch size for better throughput on large scans
+    // Larger batch size for better throughput on especially large scans
     val df = spark.read
         .format("lance")
-        .option("batch_size", "4096")
+        .option("batch_size", "32768")
         .load("/path/to/dataset.lance")
     ```

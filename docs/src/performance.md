@@ -105,6 +105,25 @@ For large scans, increasing this to match your CPU core count enables more concu
 export LANCE_IO_THREADS=128
 ```
 
+### Batch Size
+
+Set via Spark read option `batch_size` (default: 8192).
+
+Controls the number of rows per batch during vectorized reads.
+Lance Spark now uses a larger default batch size that works well for most OLAP and scan-heavy workloads,
+so users typically do not need to override it just to get good baseline scan performance.
+
+Increase this value for especially large sequential scans if you want to trade more memory for throughput.
+Lower it for memory-constrained workloads or more latency-sensitive reads.
+
+```python
+df = spark.read \
+    .option("batch_size", "16384") \
+    .table("my_table") \
+    .select("embedding") \
+    .collect()
+```
+
 ## Caching
 
 Lance Spark uses a multi-level caching strategy to minimize redundant I/O and improve query performance.
