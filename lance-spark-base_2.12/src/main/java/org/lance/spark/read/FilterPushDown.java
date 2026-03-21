@@ -185,13 +185,11 @@ public class FilterPushDown {
       return "'" + value + "'";
     } else if (value instanceof BigDecimal) {
       BigDecimal bd = (BigDecimal) value;
-      return "CAST("
-          + bd.toPlainString()
-          + " AS DECIMAL("
-          + bd.precision()
-          + ", "
-          + bd.scale()
-          + "))";
+      int scale = bd.scale();
+      // Java returns precision=1 for zero regardless of scale (e.g. 0.00 → precision=1, scale=2).
+      // Arrow requires precision >= scale, so clamp precision up if needed.
+      int precision = Math.max(bd.precision(), scale);
+      return "CAST(" + bd.toPlainString() + " AS DECIMAL(" + precision + ", " + scale + "))";
     } else if (value instanceof Object[]) {
       Object[] array = (Object[]) value;
       StringBuilder sb = new StringBuilder();

@@ -152,6 +152,23 @@ public class FilterPushDownTest {
   }
 
   @Test
+  public void testDecimalZeroValuePrecisionClamped() {
+    // Java's BigDecimal returns precision=1 for zero regardless of scale, e.g.
+    // new BigDecimal("0.00") has precision=1 and scale=2. Arrow rejects DECIMAL(1,2) because
+    // scale > precision is invalid. The fix clamps: precision = max(precision, scale).
+    Filter[] filters =
+        new Filter[] {
+          new GreaterThan("net_paid", new BigDecimal("0.00")),
+          new GreaterThan("net_profit", new BigDecimal("1.00"))
+        };
+    Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
+    assertTrue(whereClause.isPresent());
+    assertEquals(
+        "(net_paid > CAST(0.00 AS DECIMAL(2, 2))) AND (net_profit > CAST(1.00 AS DECIMAL(3, 2)))",
+        whereClause.get());
+  }
+
+  @Test
   public void testDateFilterPushDown() {
     // Date literals must use the 'date' keyword so Lance's DataFusion parser produces Date32,
     // not Utf8, which would fail type resolution against Date columns.
