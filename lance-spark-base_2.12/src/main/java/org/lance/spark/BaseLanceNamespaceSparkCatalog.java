@@ -589,6 +589,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     tableIdList.forEach(describeRequest::addIdItem);
     DescribeTableResponse describeResponse = namespace.describeTable(describeRequest);
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
+    boolean managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
 
     // Create read options with namespace settings
     LanceSparkReadOptions readOptions =
@@ -600,7 +601,12 @@ public abstract class BaseLanceNamespaceSparkCatalog
             Optional.of(tableIdList),
             name);
     return createDataset(
-        readOptions, processedSchema, initialStorageOptions, namespaceImpl, namespaceProperties);
+        readOptions,
+        processedSchema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        managedVersioning);
   }
 
   /**
@@ -630,7 +636,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     } catch (IllegalArgumentException e) {
       throw new TableAlreadyExistsException(ident);
     }
-    return createDataset(readOptions, processedSchema, null, null, null);
+    return createDataset(readOptions, processedSchema, null, null, null, false);
   }
 
   @Override
@@ -730,6 +736,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     DeclareTableResponse declareResponse = namespace.declareTable(declareRequest);
     String location = declareResponse.getLocation();
     Map<String, String> initialStorageOptions = declareResponse.getStorageOptions();
+    boolean managedVersioning = Boolean.TRUE.equals(declareResponse.getManagedVersioning());
 
     LanceSparkReadOptions readOptions =
         createReadOptions(
@@ -744,13 +751,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
     StagedCommit stagedCommit =
-        StagedCommit.forNewTable(arrowSchema, location, merged, namespace, tableIdList);
+        StagedCommit.forNewTable(
+            arrowSchema, location, merged, namespace, tableIdList, managedVersioning);
     return createStagedDataset(
         readOptions,
         processedSchema,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
+        managedVersioning,
         stagedCommit);
   }
 
@@ -767,8 +776,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     StagedCommit stagedCommit =
         StagedCommit.forNewTable(
-            arrowSchema, datasetUri, catalogConfig.getStorageOptions(), null, null);
-    return createStagedDataset(readOptions, processedSchema, null, null, null, stagedCommit);
+            arrowSchema, datasetUri, catalogConfig.getStorageOptions(), null, null, false);
+    return createStagedDataset(readOptions, processedSchema, null, null, null, false, stagedCommit);
   }
 
   @Override
@@ -801,6 +810,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     }
     String location = describeResponse.getLocation();
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
+    boolean managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
 
     LanceSparkReadOptions readOptions =
         createReadOptions(
@@ -816,13 +826,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
     StagedCommit stagedCommit =
-        StagedCommit.forExistingTable(ds, arrowSchema, merged, namespace, tableIdList);
+        StagedCommit.forExistingTable(
+            ds, arrowSchema, merged, namespace, tableIdList, managedVersioning);
     return createStagedDataset(
         readOptions,
         processedSchema,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
+        managedVersioning,
         stagedCommit);
   }
 
@@ -847,8 +859,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     StagedCommit stagedCommit =
         StagedCommit.forExistingTable(
-            ds, arrowSchema, catalogConfig.getStorageOptions(), null, null);
-    return createStagedDataset(readOptions, processedSchema, null, null, null, stagedCommit);
+            ds, arrowSchema, catalogConfig.getStorageOptions(), null, null, false);
+    return createStagedDataset(readOptions, processedSchema, null, null, null, false, stagedCommit);
   }
 
   @Override
@@ -874,6 +886,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     boolean exists = tableExists(ident);
     String location;
     Map<String, String> initialStorageOptions;
+    boolean managedVersioning;
 
     if (!exists) {
       DeclareTableRequest declareRequest = new DeclareTableRequest();
@@ -881,12 +894,14 @@ public abstract class BaseLanceNamespaceSparkCatalog
       DeclareTableResponse declareResponse = namespace.declareTable(declareRequest);
       location = declareResponse.getLocation();
       initialStorageOptions = declareResponse.getStorageOptions();
+      managedVersioning = Boolean.TRUE.equals(declareResponse.getManagedVersioning());
     } else {
       DescribeTableRequest describeRequest = new DescribeTableRequest();
       tableIdList.forEach(describeRequest::addIdItem);
       DescribeTableResponse describeResponse = namespace.describeTable(describeRequest);
       location = describeResponse.getLocation();
       initialStorageOptions = describeResponse.getStorageOptions();
+      managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
     }
 
     LanceSparkReadOptions readOptions =
@@ -904,10 +919,13 @@ public abstract class BaseLanceNamespaceSparkCatalog
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
     if (exists) {
       Dataset ds = openDataset(readOptions);
-      stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, merged, namespace, tableIdList);
+      stagedCommit =
+          StagedCommit.forExistingTable(
+              ds, arrowSchema, merged, namespace, tableIdList, managedVersioning);
     } else {
       stagedCommit =
-          StagedCommit.forNewTable(arrowSchema, location, merged, namespace, tableIdList);
+          StagedCommit.forNewTable(
+              arrowSchema, location, merged, namespace, tableIdList, managedVersioning);
     }
     return createStagedDataset(
         readOptions,
@@ -915,6 +933,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
+        managedVersioning,
         stagedCommit);
   }
 
@@ -936,13 +955,13 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Dataset ds = openDataset(readOptions);
       stagedCommit =
           StagedCommit.forExistingTable(
-              ds, arrowSchema, catalogConfig.getStorageOptions(), null, null);
+              ds, arrowSchema, catalogConfig.getStorageOptions(), null, null, false);
     } else {
       stagedCommit =
           StagedCommit.forNewTable(
-              arrowSchema, datasetUri, catalogConfig.getStorageOptions(), null, null);
+              arrowSchema, datasetUri, catalogConfig.getStorageOptions(), null, null, false);
     }
-    return createStagedDataset(readOptions, processedSchema, null, null, null, stagedCommit);
+    return createStagedDataset(readOptions, processedSchema, null, null, null, false, stagedCommit);
   }
 
   /**
@@ -1124,8 +1143,14 @@ public abstract class BaseLanceNamespaceSparkCatalog
     StructType schema = getSchema(ident, readOptions);
 
     // Create read options with namespace support
+    boolean managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
     return createDataset(
-        readOptions, schema, initialStorageOptions, namespaceImpl, namespaceProperties);
+        readOptions,
+        schema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        managedVersioning);
   }
 
   /**
@@ -1161,7 +1186,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
             datasetUri, catalogConfig, versionId, Optional.empty(), Optional.empty(), name);
     StructType schema = getSchema(ident, readOptions);
 
-    return createDataset(readOptions, schema, null, null, null);
+    return createDataset(readOptions, schema, null, null, null, false);
   }
 
   public abstract LanceDataset createDataset(
@@ -1169,7 +1194,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
       StructType sparkSchema,
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
-      Map<String, String> namespaceProperties);
+      Map<String, String> namespaceProperties,
+      boolean managedVersioning);
 
   public abstract LanceDataset createStagedDataset(
       LanceSparkReadOptions readOptions,
@@ -1177,5 +1203,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
+      boolean managedVersioning,
       StagedCommit stagedCommit);
 }
