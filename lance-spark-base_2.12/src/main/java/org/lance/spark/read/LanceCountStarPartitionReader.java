@@ -13,11 +13,12 @@
  */
 package org.lance.spark.read;
 
-import org.lance.Dataset;
+import org.lance.Fragment;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.internal.LanceDatasetCache;
 import org.lance.spark.vectorized.LanceArrowColumnVector;
 
 import com.google.common.collect.Lists;
@@ -63,48 +64,40 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
     LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
     long totalCount = 0;
 
-    try (Dataset dataset = openDataset(readOptions)) {
-      List<Integer> fragmentIds = inputPartition.getLanceSplit().getFragments();
-      if (fragmentIds.isEmpty()) {
-        return 0;
-      }
+    List<Integer> fragmentIds = inputPartition.getLanceSplit().getFragments();
+    if (fragmentIds.isEmpty()) {
+      return 0;
+    }
 
-      ScanOptions.Builder scanOptionsBuilder = new ScanOptions.Builder();
-      if (inputPartition.getWhereCondition().isPresent()) {
-        scanOptionsBuilder.filter(inputPartition.getWhereCondition().get());
-      }
-      scanOptionsBuilder.withRowId(true);
-      scanOptionsBuilder.columns(Lists.newArrayList());
-      scanOptionsBuilder.fragmentIds(fragmentIds);
-      try (LanceScanner scanner = dataset.newScan(scanOptionsBuilder.build())) {
+    ScanOptions.Builder scanOptionsBuilder = new ScanOptions.Builder();
+    if (inputPartition.getWhereCondition().isPresent()) {
+      scanOptionsBuilder.filter(inputPartition.getWhereCondition().get());
+    }
+    scanOptionsBuilder.withRowId(true);
+    scanOptionsBuilder.columns(Lists.newArrayList());
+    ScanOptions scanOptions = scanOptionsBuilder.build();
+
+    for (int fragmentId : fragmentIds) {
+      Fragment fragment =
+          LanceDatasetCache.getFragment(
+              readOptions,
+              fragmentId,
+              inputPartition.getInitialStorageOptions(),
+              inputPartition.getNamespaceImpl(),
+              inputPartition.getNamespaceProperties());
+
+      try (LanceScanner scanner = fragment.newScan(scanOptions)) {
         try (ArrowReader reader = scanner.scanBatches()) {
           while (reader.loadNextBatch()) {
             totalCount += reader.getVectorSchemaRoot().getRowCount();
           }
         }
       } catch (Exception e) {
-        throw new RuntimeException("Failed to scan fragment " + fragmentIds, e);
+        throw new RuntimeException("Failed to scan fragment " + fragmentId, e);
       }
     }
 
     return totalCount;
-  }
-
-  private Dataset openDataset(LanceSparkReadOptions readOptions) {
-    if (readOptions.hasNamespace()) {
-      return Dataset.open()
-          .allocator(allocator)
-          .namespace(readOptions.getNamespace())
-          .tableId(readOptions.getTableId())
-          .readOptions(readOptions.toReadOptions())
-          .build();
-    } else {
-      return Dataset.open()
-          .allocator(allocator)
-          .uri(readOptions.getDatasetUri())
-          .readOptions(readOptions.toReadOptions())
-          .build();
-    }
   }
 
   private ColumnarBatch createCountResultBatch(long count, StructType resultSchema) {
