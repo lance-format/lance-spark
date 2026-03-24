@@ -30,9 +30,9 @@ import org.slf4j.LoggerFactory;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
 
 /**
  * Cache for Lance datasets with session sharing.
@@ -51,27 +51,21 @@ public class LanceDatasetCache {
 
   private static final Logger LOG = LoggerFactory.getLogger(LanceDatasetCache.class);
 
-  /** Cached dataset with pre-loaded fragments. */
+  /** Cached dataset with lazily-loaded fragments. */
   public static class CachedDataset {
     private final Dataset dataset;
-    private final Map<Integer, Fragment> fragments;
+    private final Map<Integer, Fragment> fragments = new ConcurrentHashMap<>();
 
     CachedDataset(Dataset dataset) {
       this.dataset = dataset;
-      this.fragments =
-          dataset.getFragments().stream().collect(Collectors.toMap(Fragment::getId, f -> f));
     }
 
     public Dataset getDataset() {
       return dataset;
     }
 
-    public Map<Integer, Fragment> getFragments() {
-      return fragments;
-    }
-
     public Fragment getFragment(int fragmentId) {
-      return fragments.get(fragmentId);
+      return fragments.computeIfAbsent(fragmentId, id -> dataset.getFragment(id));
     }
   }
 
@@ -248,17 +242,7 @@ public class LanceDatasetCache {
       Map<String, String> namespaceProperties) {
     CachedDataset cached =
         getDataset(readOptions, initialStorageOptions, namespaceImpl, namespaceProperties);
-    Fragment fragment = cached.getFragment(fragmentId);
-    if (fragment == null) {
-      throw new IllegalStateException(
-          String.format(
-              "Fragment %d not found in dataset at %s (version=%s). Available fragments: %s",
-              fragmentId,
-              readOptions.getDatasetUri(),
-              readOptions.getVersion(),
-              cached.getFragments().keySet()));
-    }
-    return fragment;
+    return cached.getFragment(fragmentId);
   }
 
   private static Dataset openDataset(DatasetCacheKey key) {
