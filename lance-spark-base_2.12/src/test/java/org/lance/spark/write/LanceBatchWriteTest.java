@@ -68,6 +68,7 @@ public class LanceBatchWriteTest {
               null, // namespaceImpl
               null, // namespaceProperties
               null, // tableId
+              false, // managedVersioning
               null); // stagedCommit
       DataWriterFactory factor = lanceBatchWrite.createBatchWriterFactory(() -> 1);
 

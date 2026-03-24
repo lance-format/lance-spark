@@ -17,9 +17,11 @@ import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.FragmentMetadata;
 import org.lance.Transaction;
+import org.lance.namespace.LanceNamespace;
 import org.lance.operation.Append;
 import org.lance.operation.Operation;
 import org.lance.operation.Overwrite;
+import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.utils.Utils;
 
@@ -53,6 +55,7 @@ public class LanceBatchWrite implements BatchWrite {
 
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
+  private final boolean managedVersioning;
 
   /**
    * Dataset opened at start for existing tables to ensure version consistency. Empty for staged
@@ -70,6 +73,7 @@ public class LanceBatchWrite implements BatchWrite {
       String namespaceImpl,
       Map<String, String> namespaceProperties,
       List<String> tableId,
+      boolean managedVersioning,
       StagedCommit stagedCommit) {
     this.schema = schema;
     this.writeOptions = writeOptions;
@@ -78,6 +82,7 @@ public class LanceBatchWrite implements BatchWrite {
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
+    this.managedVersioning = managedVersioning;
     this.stagedCommit = stagedCommit;
 
     // For staged operations, the dataset is managed by StagedCommit.
@@ -124,10 +129,16 @@ public class LanceBatchWrite implements BatchWrite {
         } else {
           operation = Append.builder().fragments(fragments).build();
         }
+        CommitBuilder commitBuilder =
+            new CommitBuilder(ds).writeParams(writeOptions.getStorageOptions());
+        if (managedVersioning) {
+          LanceNamespace namespace =
+              LanceRuntime.getOrCreateNamespace(namespaceImpl, namespaceProperties);
+          commitBuilder.namespace(namespace).tableId(tableId);
+        }
         try (Transaction txn =
                 new Transaction.Builder().readVersion(ds.version()).operation(operation).build();
-            Dataset committed =
-                new CommitBuilder(ds).writeParams(writeOptions.getStorageOptions()).execute(txn)) {
+            Dataset committed = commitBuilder.execute(txn)) {
           // auto-close txn and committed dataset
         }
       } finally {

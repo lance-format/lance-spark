@@ -54,6 +54,7 @@ public class StagedCommit {
   private final boolean isNewTable;
   private final LanceNamespace namespace;
   private final List<String> tableId;
+  private final boolean managedVersioning;
 
   /** Creates a StagedCommit for an existing table (REPLACE or CREATE_OR_REPLACE on existing). */
   public static StagedCommit forExistingTable(
@@ -61,7 +62,8 @@ public class StagedCommit {
       Schema schema,
       Map<String, String> storageOptions,
       LanceNamespace namespace,
-      List<String> tableId) {
+      List<String> tableId,
+      boolean managedVersioning) {
     return new StagedCommit(
         Optional.of(dataset),
         Collections.emptyList(),
@@ -70,7 +72,8 @@ public class StagedCommit {
         storageOptions,
         false,
         namespace,
-        tableId);
+        tableId,
+        managedVersioning);
   }
 
   /** Creates a StagedCommit for a new table (CREATE or CREATE_OR_REPLACE on non-existing). */
@@ -79,7 +82,8 @@ public class StagedCommit {
       String datasetUri,
       Map<String, String> storageOptions,
       LanceNamespace namespace,
-      List<String> tableId) {
+      List<String> tableId,
+      boolean managedVersioning) {
     return new StagedCommit(
         Optional.empty(),
         Collections.emptyList(),
@@ -88,7 +92,8 @@ public class StagedCommit {
         storageOptions,
         true,
         namespace,
-        tableId);
+        tableId,
+        managedVersioning);
   }
 
   private StagedCommit(
@@ -99,7 +104,8 @@ public class StagedCommit {
       Map<String, String> storageOptions,
       boolean isNewTable,
       LanceNamespace namespace,
-      List<String> tableId) {
+      List<String> tableId,
+      boolean managedVersioning) {
     this.dataset = dataset;
     this.fragments = new ArrayList<>(fragments);
     this.schema = schema;
@@ -108,6 +114,7 @@ public class StagedCommit {
     this.isNewTable = isNewTable;
     this.namespace = namespace;
     this.tableId = tableId;
+    this.managedVersioning = managedVersioning;
   }
 
   public void setFragments(List<FragmentMetadata> fragments) {
@@ -129,13 +136,13 @@ public class StagedCommit {
 
   private void commitNewTable() {
     Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
+    CommitBuilder builder =
+        new CommitBuilder(datasetUri, LanceRuntime.allocator()).writeParams(storageOptions);
+    if (managedVersioning) {
+      builder.namespace(namespace).tableId(tableId);
+    }
     try (Transaction txn = new Transaction.Builder().operation(operation).build();
-        Dataset committed =
-            new CommitBuilder(datasetUri, LanceRuntime.allocator())
-                .namespace(namespace)
-                .tableId(tableId)
-                .writeParams(storageOptions)
-                .execute(txn)) {
+        Dataset committed = builder.execute(txn)) {
       // auto-close txn and committed dataset
     }
   }
@@ -147,14 +154,14 @@ public class StagedCommit {
     ds.close();
 
     Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
+    CommitBuilder builder =
+        new CommitBuilder(uri, LanceRuntime.allocator()).writeParams(storageOptions);
+    if (managedVersioning) {
+      builder.namespace(namespace).tableId(tableId);
+    }
     try (Transaction txn =
             new Transaction.Builder().readVersion(version).operation(operation).build();
-        Dataset committed =
-            new CommitBuilder(uri, LanceRuntime.allocator())
-                .namespace(namespace)
-                .tableId(tableId)
-                .writeParams(storageOptions)
-                .execute(txn)) {
+        Dataset committed = builder.execute(txn)) {
       // auto-close txn and committed dataset
     }
   }
