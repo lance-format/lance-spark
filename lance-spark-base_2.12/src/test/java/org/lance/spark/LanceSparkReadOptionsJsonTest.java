@@ -96,13 +96,13 @@ public class LanceSparkReadOptionsJsonTest {
   }
 
   @Test
-  public void testDefaultBatchSizeIs8192() {
+  public void testDefaultBatchSizeIsUnset() {
     Map<String, String> properties = new HashMap<>();
     properties.put("path", "s3://bucket/path");
 
     LanceSparkReadOptions options = LanceSparkReadOptions.from(properties);
 
-    Assertions.assertEquals(8192, options.getBatchSize());
+    Assertions.assertNull(options.getBatchSize());
   }
 
   @Test
@@ -113,6 +113,6 @@ public class LanceSparkReadOptionsJsonTest {
 
     LanceSparkReadOptions options = LanceSparkReadOptions.from(properties);
 
-    Assertions.assertEquals(16384, options.getBatchSize());
+    Assertions.assertEquals(Integer.valueOf(16384), options.getBatchSize());
   }
 }

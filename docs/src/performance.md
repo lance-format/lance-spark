@@ -107,10 +107,10 @@ export LANCE_IO_THREADS=128
 
 ### Batch Size
 
-Set via Spark read option `batch_size` (default: 8192).
+Set via Spark read option `batch_size`. If unset, Spark inherits the lance-core read default.
 
 Controls the number of rows per batch during vectorized reads.
-Lance Spark now uses a larger default batch size that works well for most OLAP and scan-heavy workloads,
+The inherited default works well for most OLAP and scan-heavy workloads,
 so users typically do not need to override it just to get good baseline scan performance.
 
 Increase this value for especially large sequential scans if you want to trade more memory for throughput.

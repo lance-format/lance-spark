@@ -236,7 +236,7 @@ These options control how data is read from Lance datasets. They can be set usin
 
 | Option                | Type    | Default | Description                                                                                                       |
 |-----------------------|---------|---------|-------------------------------------------------------------------------------------------------------------------|
-| `batch_size`          | Integer | `8192`  | Number of rows to read per batch during scanning. Larger values may improve throughput but increase memory usage. |
+| `batch_size`          | Integer | `lance-core default` | Number of rows to read per batch during scanning. When unset, Spark inherits the lance-core default. Larger values may improve throughput but increase memory usage. |
 | `version`             | Integer | Latest  | Specific dataset version to read. If not specified, reads the latest version.                                     |
 | `block_size`          | Integer | -       | Block size in bytes for reading data.                                                                             |
 | `index_cache_size`    | Integer | -       | Size of the index cache in number of entries.                                                                     |
@@ -284,7 +284,7 @@ These options control how data is read from Lance datasets. They can be set usin
 
 ### Example: Tuning Batch Size for Performance
 
-The default `batch_size` is already `8192`, which works well for most scan-heavy workloads.
+When `batch_size` is unset, Spark inherits the lance-core default, which works well for most scan-heavy workloads.
 Increase it further only when you want to trade more memory for higher throughput on very large scans.
 
 === "Python"
