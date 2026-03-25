@@ -173,35 +173,7 @@ public class LanceDataset
    * @param namespaceImpl namespace implementation type for credential refresh on workers
    * @param namespaceProperties namespace connection properties for credential refresh on workers
    * @param managedVersioning whether namespace manages versioning (commits go through namespace)
-   */
-  public LanceDataset(
-      LanceSparkReadOptions readOptions,
-      StructType sparkSchema,
-      Map<String, String> initialStorageOptions,
-      String namespaceImpl,
-      Map<String, String> namespaceProperties,
-      boolean managedVersioning) {
-    this(
-        readOptions,
-        sparkSchema,
-        initialStorageOptions,
-        namespaceImpl,
-        namespaceProperties,
-        managedVersioning,
-        null,
-        null);
-  }
-
-  /**
-   * Creates a Lance dataset with staging support.
-   *
-   * @param readOptions read options including dataset URI and settings
-   * @param sparkSchema spark struct type
-   * @param initialStorageOptions initial storage options fetched from namespace.describeTable()
-   * @param namespaceImpl namespace implementation type for credential refresh on workers
-   * @param namespaceProperties namespace connection properties for credential refresh on workers
-   * @param managedVersioning whether namespace manages versioning (commits go through namespace)
-   * @param stagedCommit the eagerly created staged commit, or null for non-staged tables
+   * @param dataStorageVersion the file format version for writes, or null to use default
    */
   public LanceDataset(
       LanceSparkReadOptions readOptions,
@@ -210,7 +182,7 @@ public class LanceDataset
       String namespaceImpl,
       Map<String, String> namespaceProperties,
       boolean managedVersioning,
-      StagedCommit stagedCommit) {
+      String dataStorageVersion) {
     this(
         readOptions,
         sparkSchema,
@@ -218,8 +190,8 @@ public class LanceDataset
         namespaceImpl,
         namespaceProperties,
         managedVersioning,
-        stagedCommit,
-        null);
+        null,
+        dataStorageVersion);
   }
 
   /**
