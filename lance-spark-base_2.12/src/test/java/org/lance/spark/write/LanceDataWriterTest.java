@@ -35,8 +35,10 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 public class LanceDataWriterTest {
   @TempDir static Path tempDir;
@@ -72,6 +74,62 @@ public class LanceDataWriterTest {
       List<FragmentMetadata> fragments = commitMessage.getFragments();
       assertEquals(1, fragments.size());
       assertEquals(rows, fragments.get(0).getPhysicalRows());
+    }
+  }
+
+  /**
+   * Tests that abort() does not hang when called after partial writes. This reproduces the deadlock
+   * reported in issue #114: when a Spark task fails mid-write, the driver calls abort() which must
+   * complete promptly. Before the fix, abort() would hang because the fragment creation thread's
+   * consumer side was blocked waiting for more data that would never come.
+   */
+  @Test
+  public void testAbortDoesNotHang(TestInfo testInfo) throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
+      Schema schema = new Schema(Collections.singletonList(field));
+      LanceSparkWriteOptions writeOptions =
+          LanceSparkWriteOptions.from(
+              tempDir.resolve(datasetName + LanceSparkReadOptions.LANCE_FILE_SUFFIX).toString());
+      StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
+      LanceDataWriter.WriterFactory writerFactory =
+          new LanceDataWriter.WriterFactory(
+              sparkSchema,
+              writeOptions,
+              null, // initialStorageOptions
+              null, // namespaceImpl
+              null, // namespaceProperties
+              null); // tableId
+      LanceDataWriter dataWriter = (LanceDataWriter) writerFactory.createWriter(0, 0);
+
+      // Write partial data (fewer rows than batch size) to create the deadlock scenario:
+      // the consumer thread is waiting for a full batch while the producer stops writing.
+      int partialRows = 5;
+      for (int i = 0; i < partialRows; i++) {
+        InternalRow row = new GenericInternalRow(new Object[] {i});
+        dataWriter.write(row);
+      }
+
+      // abort() must complete within a reasonable time.
+      // Before the fix, this would hang indefinitely because the fragment creation
+      // thread was blocked in loadNextBatch() waiting for more data.
+      Thread abortThread =
+          new Thread(
+              () -> {
+                try {
+                  dataWriter.abort();
+                } catch (IOException e) {
+                  // ExecutionException is expected since fragment creation may fail on abort
+                }
+              });
+      abortThread.start();
+      abortThread.join(TimeUnit.SECONDS.toMillis(30));
+
+      assertFalse(
+          abortThread.isAlive(),
+          "abort() should complete within 30 seconds, but it is still hanging. "
+              + "This indicates the deadlock from issue #114 is present.");
     }
   }
 }

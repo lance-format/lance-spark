@@ -65,6 +65,7 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
+      boolean managedVersioning,
       String fileFormatVersion) {
     return new LancePositionDeltaDataset(
         readOptions,
@@ -72,6 +73,7 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
+        managedVersioning,
         fileFormatVersion);
   }
 
@@ -82,6 +84,7 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
+      boolean managedVersioning,
       StagedCommit stagedCommit,
       String fileFormatVersion) {
     return new LancePositionDeltaDataset(
@@ -90,6 +93,7 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
+        managedVersioning,
         stagedCommit,
         fileFormatVersion);
   }

@@ -14,8 +14,10 @@
 package org.lance.spark.read;
 
 import org.lance.Dataset;
+import org.lance.ReadOptions;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
+import org.lance.namespace.LanceNamespaceStorageOptionsProvider;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.vectorized.LanceArrowColumnVector;
@@ -32,6 +34,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Partition reader for pushed down aggregates. This reader computes the aggregate result directly
@@ -91,20 +94,32 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
   }
 
   private Dataset openDataset(LanceSparkReadOptions readOptions) {
-    if (readOptions.hasNamespace()) {
-      return Dataset.open()
-          .allocator(allocator)
-          .namespace(readOptions.getNamespace())
-          .tableId(readOptions.getTableId())
-          .readOptions(readOptions.toReadOptions())
-          .build();
-    } else {
-      return Dataset.open()
-          .allocator(allocator)
-          .uri(readOptions.getDatasetUri())
-          .readOptions(readOptions.toReadOptions())
-          .build();
+    Map<String, String> merged =
+        LanceRuntime.mergeStorageOptions(
+            readOptions.getStorageOptions(), inputPartition.getInitialStorageOptions());
+    LanceNamespaceStorageOptionsProvider provider =
+        LanceRuntime.getOrCreateStorageOptionsProvider(
+            inputPartition.getNamespaceImpl(),
+            inputPartition.getNamespaceProperties(),
+            readOptions.getTableId());
+
+    ReadOptions.Builder builder =
+        new ReadOptions.Builder()
+            .setStorageOptions(merged)
+            .setSession(LanceRuntime.session(readOptions.getCatalogName()));
+
+    if (provider != null) {
+      builder.setStorageOptionsProvider(provider);
     }
+    if (readOptions.getVersion() != null) {
+      builder.setVersion(readOptions.getVersion());
+    }
+
+    return Dataset.open()
+        .allocator(LanceRuntime.allocator())
+        .uri(readOptions.getDatasetUri())
+        .readOptions(builder.build())
+        .build();
   }
 
   private ColumnarBatch createCountResultBatch(long count, StructType resultSchema) {
@@ -130,7 +145,8 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
     long rowCount = computeCount();
     StructType countSchema =
         new StructType().add("count", org.apache.spark.sql.types.DataTypes.LongType);
-    return createCountResultBatch(rowCount, countSchema);
+    currentBatch = createCountResultBatch(rowCount, countSchema);
+    return currentBatch;
   }
 
   @Override

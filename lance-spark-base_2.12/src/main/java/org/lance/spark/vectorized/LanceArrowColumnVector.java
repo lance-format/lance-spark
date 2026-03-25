@@ -15,6 +15,8 @@ package org.lance.spark.vectorized;
 
 import org.lance.spark.utils.BlobUtils;
 
+import org.apache.arrow.vector.DateMilliVector;
+import org.apache.arrow.vector.FixedSizeBinaryVector;
 import org.apache.arrow.vector.LargeVarCharVector;
 import org.apache.arrow.vector.UInt1Vector;
 import org.apache.arrow.vector.UInt2Vector;
@@ -38,11 +40,13 @@ public class LanceArrowColumnVector extends ColumnVector {
   private UInt2Accessor uInt2Accessor;
   private UInt4Accessor uInt4Accessor;
   private UInt8Accessor uInt8Accessor;
+  private FixedSizeBinaryAccessor fixedSizeBinaryAccessor;
   private FixedSizeListAccessor fixedSizeListAccessor;
   private BlobStructAccessor blobStructAccessor;
   private LanceArrayAccessor arrayAccessor;
   private LanceLargeArrayAccessor largeArrayAccessor;
   private LargeVarCharAccessor largeVarCharAccessor;
+  private DateMilliAccessor dateMilliAccessor;
   private LanceStructAccessor structAccessor;
   private ArrowColumnVector arrowColumnVector;
 
@@ -57,6 +61,8 @@ public class LanceArrowColumnVector extends ColumnVector {
       uInt4Accessor = new UInt4Accessor((UInt4Vector) vector);
     } else if (vector instanceof UInt8Vector) {
       uInt8Accessor = new UInt8Accessor((UInt8Vector) vector);
+    } else if (vector instanceof FixedSizeBinaryVector) {
+      fixedSizeBinaryAccessor = new FixedSizeBinaryAccessor((FixedSizeBinaryVector) vector);
     } else if (vector instanceof FixedSizeListVector) {
       fixedSizeListAccessor = new FixedSizeListAccessor((FixedSizeListVector) vector);
     } else if (vector instanceof StructVector && BlobUtils.isBlobArrowField(vector.getField())) {
@@ -69,6 +75,8 @@ public class LanceArrowColumnVector extends ColumnVector {
       largeArrayAccessor = new LanceLargeArrayAccessor((LargeListVector) vector);
     } else if (vector instanceof LargeVarCharVector) {
       largeVarCharAccessor = new LargeVarCharAccessor((LargeVarCharVector) vector);
+    } else if (vector instanceof DateMilliVector) {
+      dateMilliAccessor = new DateMilliAccessor((DateMilliVector) vector);
     } else {
       arrowColumnVector = new ArrowColumnVector(vector);
     }
@@ -88,6 +96,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     if (uInt8Accessor != null) {
       uInt8Accessor.close();
     }
+    if (fixedSizeBinaryAccessor != null) {
+      fixedSizeBinaryAccessor.close();
+    }
     if (fixedSizeListAccessor != null) {
       fixedSizeListAccessor.close();
     }
@@ -102,6 +113,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (largeVarCharAccessor != null) {
       largeVarCharAccessor.close();
+    }
+    if (dateMilliAccessor != null) {
+      dateMilliAccessor.close();
     }
     if (structAccessor != null) {
       structAccessor.close();
@@ -125,6 +139,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     if (uInt8Accessor != null) {
       return uInt8Accessor.getNullCount() > 0;
     }
+    if (fixedSizeBinaryAccessor != null) {
+      return fixedSizeBinaryAccessor.getNullCount() > 0;
+    }
     if (fixedSizeListAccessor != null) {
       return fixedSizeListAccessor.getNullCount() > 0;
     }
@@ -139,6 +156,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (largeVarCharAccessor != null) {
       return largeVarCharAccessor.getNullCount() > 0;
+    }
+    if (dateMilliAccessor != null) {
+      return dateMilliAccessor.getNullCount() > 0;
     }
     if (structAccessor != null) {
       return structAccessor.getNullCount() > 0;
@@ -163,6 +183,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     if (uInt8Accessor != null) {
       return uInt8Accessor.getNullCount();
     }
+    if (fixedSizeBinaryAccessor != null) {
+      return fixedSizeBinaryAccessor.getNullCount();
+    }
     if (fixedSizeListAccessor != null) {
       return fixedSizeListAccessor.getNullCount();
     }
@@ -177,6 +200,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (largeVarCharAccessor != null) {
       return largeVarCharAccessor.getNullCount();
+    }
+    if (dateMilliAccessor != null) {
+      return dateMilliAccessor.getNullCount();
     }
     if (structAccessor != null) {
       return structAccessor.getNullCount();
@@ -201,6 +227,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     if (uInt8Accessor != null) {
       return uInt8Accessor.isNullAt(rowId);
     }
+    if (fixedSizeBinaryAccessor != null) {
+      return fixedSizeBinaryAccessor.isNullAt(rowId);
+    }
     if (fixedSizeListAccessor != null) {
       return fixedSizeListAccessor.isNullAt(rowId);
     }
@@ -215,6 +244,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (largeVarCharAccessor != null) {
       return largeVarCharAccessor.isNullAt(rowId);
+    }
+    if (dateMilliAccessor != null) {
+      return dateMilliAccessor.isNullAt(rowId);
     }
     if (structAccessor != null) {
       return structAccessor.isNullAt(rowId);
@@ -256,6 +288,9 @@ public class LanceArrowColumnVector extends ColumnVector {
   public int getInt(int rowId) {
     if (uInt2Accessor != null) {
       return uInt2Accessor.getInt(rowId);
+    }
+    if (dateMilliAccessor != null) {
+      return dateMilliAccessor.getInt(rowId);
     }
     if (arrowColumnVector != null) {
       return arrowColumnVector.getInt(rowId);
@@ -339,6 +374,9 @@ public class LanceArrowColumnVector extends ColumnVector {
 
   @Override
   public byte[] getBinary(int rowId) {
+    if (fixedSizeBinaryAccessor != null) {
+      return fixedSizeBinaryAccessor.getBinary(rowId);
+    }
     if (blobStructAccessor != null) {
       return new byte[0];
     }

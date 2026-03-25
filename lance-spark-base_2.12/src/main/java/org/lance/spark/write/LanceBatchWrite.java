@@ -16,14 +16,14 @@ package org.lance.spark.write;
 import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.FragmentMetadata;
-import org.lance.ReadOptions;
 import org.lance.Transaction;
-import org.lance.namespace.LanceNamespaceStorageOptionsProvider;
+import org.lance.namespace.LanceNamespace;
 import org.lance.operation.Append;
 import org.lance.operation.Operation;
 import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.connector.write.BatchWrite;
@@ -55,6 +55,7 @@ public class LanceBatchWrite implements BatchWrite {
 
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
+  private final boolean managedVersioning;
 
   /**
    * Dataset opened at start for existing tables to ensure version consistency. Empty for staged
@@ -72,6 +73,7 @@ public class LanceBatchWrite implements BatchWrite {
       String namespaceImpl,
       Map<String, String> namespaceProperties,
       List<String> tableId,
+      boolean managedVersioning,
       StagedCommit stagedCommit) {
     this.schema = schema;
     this.writeOptions = writeOptions;
@@ -80,35 +82,13 @@ public class LanceBatchWrite implements BatchWrite {
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
+    this.managedVersioning = managedVersioning;
     this.stagedCommit = stagedCommit;
 
     // For staged operations, the dataset is managed by StagedCommit.
     // For non-staged operations, open to capture version for commit.
-    this.dataset = (stagedCommit != null) ? Optional.empty() : Optional.of(openDataset());
-  }
-
-  private Dataset openDataset() {
-    String uri = writeOptions.getDatasetUri();
-    ReadOptions readOptions = buildReadOptions();
-    return Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .uri(uri)
-        .readOptions(readOptions)
-        .build();
-  }
-
-  private ReadOptions buildReadOptions() {
-    Map<String, String> merged =
-        LanceRuntime.mergeStorageOptions(writeOptions.getStorageOptions(), initialStorageOptions);
-    LanceNamespaceStorageOptionsProvider provider =
-        LanceRuntime.getOrCreateStorageOptionsProvider(namespaceImpl, namespaceProperties, tableId);
-
-    ReadOptions.Builder builder =
-        new ReadOptions.Builder().setStorageOptions(merged).setSession(LanceRuntime.session());
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider);
-    }
-    return builder.build();
+    this.dataset =
+        (stagedCommit != null) ? Optional.empty() : Optional.of(Utils.openDataset(writeOptions));
   }
 
   @Override
@@ -149,9 +129,16 @@ public class LanceBatchWrite implements BatchWrite {
         } else {
           operation = Append.builder().fragments(fragments).build();
         }
+        CommitBuilder commitBuilder =
+            new CommitBuilder(ds).writeParams(writeOptions.getStorageOptions());
+        if (managedVersioning) {
+          LanceNamespace namespace =
+              LanceRuntime.getOrCreateNamespace(namespaceImpl, namespaceProperties);
+          commitBuilder.namespace(namespace).tableId(tableId);
+        }
         try (Transaction txn =
                 new Transaction.Builder().readVersion(ds.version()).operation(operation).build();
-            Dataset committed = new CommitBuilder(ds).execute(txn)) {
+            Dataset committed = commitBuilder.execute(txn)) {
           // auto-close txn and committed dataset
         }
       } finally {

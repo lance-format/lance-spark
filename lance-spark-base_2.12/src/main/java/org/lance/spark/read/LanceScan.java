@@ -30,18 +30,25 @@ import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.read.Statistics;
 import org.apache.spark.sql.connector.read.SupportsReportStatistics;
 import org.apache.spark.sql.internal.connector.SupportsMetadata;
+import org.apache.spark.sql.sources.Filter;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import scala.collection.immutable.Map;
 
 import java.io.Serializable;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 public class LanceScan
     implements Batch, Scan, SupportsMetadata, SupportsReportStatistics, Serializable {
   private static final long serialVersionUID = 947284762748623947L;
+  private static final Logger LOG = LoggerFactory.getLogger(LanceScan.class);
 
   private final StructType schema;
   private final LanceSparkReadOptions readOptions;
@@ -50,6 +57,7 @@ public class LanceScan
   private final Optional<Integer> offset;
   private final Optional<List<ColumnOrdering>> topNSortOrders;
   private final Optional<Aggregation> pushedAggregation;
+  private final Filter[] pushedFilters;
   private final LanceStatistics statistics;
   private final String scanId = UUID.randomUUID().toString();
 
@@ -72,6 +80,7 @@ public class LanceScan
       Optional<Integer> offset,
       Optional<List<ColumnOrdering>> topNSortOrders,
       Optional<Aggregation> pushedAggregation,
+      Filter[] pushedFilters,
       LanceStatistics statistics,
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
@@ -83,6 +92,8 @@ public class LanceScan
     this.offset = offset;
     this.topNSortOrders = topNSortOrders;
     this.pushedAggregation = pushedAggregation;
+    this.pushedFilters =
+        pushedFilters != null ? Arrays.copyOf(pushedFilters, pushedFilters.length) : new Filter[0];
     this.statistics = statistics;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
@@ -97,7 +108,7 @@ public class LanceScan
   @Override
   public InputPartition[] planInputPartitions() {
     LanceSplit.ScanPlanResult planResult = LanceSplit.planScan(readOptions);
-    List<LanceSplit> splits = planResult.getSplits();
+    List<LanceSplit> splits = pruneByRowAddrFilters(planResult.getSplits());
 
     // Use resolved version for snapshot isolation - ensures all workers read the same version
     LanceSparkReadOptions resolvedReadOptions =
@@ -121,6 +132,57 @@ public class LanceScan
                     namespaceImpl,
                     namespaceProperties))
         .toArray(InputPartition[]::new);
+  }
+
+  /**
+   * Prunes splits based on {@code _rowaddr} filters — skipping fragment opens, scan setup, and task
+   * scheduling for fragments that provably cannot match the query predicate.
+   *
+   * <p>CONTRACT: {@link LanceSplit#getFragments()} returns Lance fragment IDs as Integer values
+   * that match {@code (int)(rowAddr >>> 32)} — the same encoding used by {@link
+   * org.lance.spark.join.FragmentAwareJoinUtils}. This is verified by {@link
+   * LanceSplit#planScan(LanceSparkReadOptions)} which maps {@code Fragment.getId()} directly.
+   *
+   * <p>Note: an empty allowedIds set is valid — it means the filter is unsatisfiable (e.g. {@code
+   * _rowaddr = 0 AND _rowaddr = 4294967296L}) and no fragments can match, resulting in zero rows
+   * returned.
+   */
+  private List<LanceSplit> pruneByRowAddrFilters(List<LanceSplit> allSplits) {
+    java.util.Optional<Set<Integer>> targetFragmentIds =
+        RowAddressFilterAnalyzer.extractTargetFragmentIds(pushedFilters);
+    if (!targetFragmentIds.isPresent()) {
+      return allSplits;
+    }
+    Set<Integer> allowedIds = targetFragmentIds.get();
+    // Assumes each LanceSplit maps to a single fragment. If splits ever
+    // bundle multiple fragments, consider sub-split level pruning.
+    List<LanceSplit> pruned =
+        allSplits.stream()
+            .filter(
+                split -> {
+                  if (split.getFragments().size() > 1) {
+                    LOG.warn(
+                        "Split contains {} fragments;" + " sub-split pruning not implemented",
+                        split.getFragments().size());
+                  }
+                  return split.getFragments().stream().anyMatch(allowedIds::contains);
+                })
+            .collect(Collectors.toList());
+    if (pruned.size() < allSplits.size()) {
+      LOG.debug(
+          "Pruned fragments by _rowaddr filters: {} of {} splits retained,"
+              + " allowed fragment IDs: {}",
+          pruned.size(),
+          allSplits.size(),
+          allowedIds);
+    } else {
+      LOG.debug(
+          "No fragments pruned by _rowaddr filters: all {} splits retained,"
+              + " allowed fragment IDs: {}",
+          allSplits.size(),
+          allowedIds);
+    }
+    return pruned;
   }
 
   @Override

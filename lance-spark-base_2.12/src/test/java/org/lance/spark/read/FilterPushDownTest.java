@@ -18,6 +18,10 @@ import org.lance.spark.utils.Optional;
 import org.apache.spark.sql.sources.*;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
+import java.sql.Date;
+import java.sql.Timestamp;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 public class FilterPushDownTest {
@@ -102,5 +106,91 @@ public class FilterPushDownTest {
     Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
     assertTrue(whereClause.isPresent());
     assertEquals("(age > 30) AND (salary IN ('500','600'))", whereClause.get());
+  }
+
+  @Test
+  public void testDecimalFilterPushDown() {
+    // Decimal comparisons must use CAST so Lance's DataFusion parser produces Decimal128,
+    // not Float64, which would fail type resolution against Decimal columns.
+    Filter[] filters =
+        new Filter[] {
+          new GreaterThanOrEqual("net_profit", new BigDecimal("100.00")),
+          new LessThanOrEqual("net_profit", new BigDecimal("200.00"))
+        };
+    Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
+    assertTrue(whereClause.isPresent());
+    assertEquals(
+        "(net_profit >= CAST(100.00 AS DECIMAL(5, 2))) AND (net_profit <= CAST(200.00 AS DECIMAL(5, 2)))",
+        whereClause.get());
+  }
+
+  @Test
+  public void testDecimalInFilterPushDown() {
+    Object[] values =
+        new Object[] {new BigDecimal("100.00"), new BigDecimal("150.00"), new BigDecimal("200.00")};
+    Filter[] filters = new Filter[] {new In("price", values)};
+    Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
+    assertTrue(whereClause.isPresent());
+    assertEquals(
+        "(price IN (CAST(100.00 AS DECIMAL(5, 2)),CAST(150.00 AS DECIMAL(5, 2)),CAST(200.00 AS DECIMAL(5, 2))))",
+        whereClause.get());
+  }
+
+  @Test
+  public void testDecimalWithVaryingScaleAndPrecision() {
+    // Verify precision/scale are taken from the BigDecimal value itself
+    Filter[] filters =
+        new Filter[] {
+          new GreaterThan("amount", new BigDecimal("1234567.89")),
+          new LessThan("amount", new BigDecimal("0.5"))
+        };
+    Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
+    assertTrue(whereClause.isPresent());
+    assertEquals(
+        "(amount > CAST(1234567.89 AS DECIMAL(9, 2))) AND (amount < CAST(0.5 AS DECIMAL(1, 1)))",
+        whereClause.get());
+  }
+
+  @Test
+  public void testDecimalZeroValuePrecisionClamped() {
+    // Java's BigDecimal returns precision=1 for zero regardless of scale, e.g.
+    // new BigDecimal("0.00") has precision=1 and scale=2. Arrow rejects DECIMAL(1,2) because
+    // scale > precision is invalid. The fix clamps: precision = max(precision, scale).
+    Filter[] filters =
+        new Filter[] {
+          new GreaterThan("net_paid", new BigDecimal("0.00")),
+          new GreaterThan("net_profit", new BigDecimal("1.00"))
+        };
+    Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
+    assertTrue(whereClause.isPresent());
+    assertEquals(
+        "(net_paid > CAST(0.00 AS DECIMAL(2, 2))) AND (net_profit > CAST(1.00 AS DECIMAL(3, 2)))",
+        whereClause.get());
+  }
+
+  @Test
+  public void testDateFilterPushDown() {
+    // Date literals must use the 'date' keyword so Lance's DataFusion parser produces Date32,
+    // not Utf8, which would fail type resolution against Date columns.
+    Filter[] filters =
+        new Filter[] {
+          new GreaterThanOrEqual("d_date", Date.valueOf("2000-08-23")),
+          new LessThanOrEqual("d_date", Date.valueOf("2000-09-06"))
+        };
+    Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
+    assertTrue(whereClause.isPresent());
+    assertEquals(
+        "(d_date >= date '2000-08-23') AND (d_date <= date '2000-09-06')", whereClause.get());
+  }
+
+  @Test
+  public void testTimestampFilterPushDown() {
+    // Timestamp literals must use the 'timestamp' keyword so Lance's DataFusion parser produces
+    // Timestamp, not Utf8.
+    Filter[] filters =
+        new Filter[] {new EqualTo("created_at", Timestamp.valueOf("2024-01-15 10:30:00.0"))};
+    Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
+    assertTrue(whereClause.isPresent());
+    assertEquals("(created_at == timestamp '2024-01-15 10:30:00.0')", whereClause.get());
   }
 }

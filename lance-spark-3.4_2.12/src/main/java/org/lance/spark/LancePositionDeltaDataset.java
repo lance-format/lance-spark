@@ -28,8 +28,15 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
       StructType sparkSchema,
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
-      Map<String, String> namespaceProperties) {
-    super(readOptions, sparkSchema, initialStorageOptions, namespaceImpl, namespaceProperties);
+      Map<String, String> namespaceProperties,
+      boolean managedVersioning) {
+    super(
+        readOptions,
+        sparkSchema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        managedVersioning);
   }
 
   public LancePositionDeltaDataset(
@@ -38,6 +45,7 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
+      boolean managedVersioning,
       StagedCommit stagedCommit) {
     super(
         readOptions,
@@ -45,6 +53,7 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
+        managedVersioning,
         stagedCommit);
   }
 
@@ -54,6 +63,7 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
+      boolean managedVersioning,
       String fileFormatVersion) {
     super(
         readOptions,
@@ -61,6 +71,7 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
+        managedVersioning,
         null,
         fileFormatVersion);
   }
@@ -71,6 +82,7 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
+      boolean managedVersioning,
       StagedCommit stagedCommit,
       String fileFormatVersion) {
     super(
@@ -79,6 +91,7 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
+        managedVersioning,
         stagedCommit,
         fileFormatVersion);
   }

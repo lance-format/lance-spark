@@ -23,6 +23,7 @@ package org.apache.spark.sql.util
  * It has been modified by the Lance developers to fit the needs of the Lance project.
  */
 
+import org.apache.arrow.vector.types.DateUnit
 import org.apache.arrow.vector.types.pojo.{Field, FieldType}
 import org.apache.arrow.vector.types.pojo.ArrowType
 import org.apache.spark.SparkUnsupportedOperationException
@@ -114,6 +115,43 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
     roundtrip(new StructType().add(
       "struct",
       new StructType().add("i", IntegerType).add("arr", ArrayType(IntegerType))))
+  }
+
+  test("nested date millisecond types") {
+    val dateMilliField = new Field(
+      "d",
+      new FieldType(true, new ArrowType.Date(DateUnit.MILLISECOND), null, null),
+      java.util.Collections.emptyList())
+    val nestedStructField = new Field(
+      "s",
+      new FieldType(true, ArrowType.Struct.INSTANCE, null, null),
+      java.util.Arrays.asList(dateMilliField))
+
+    val nestedStructType =
+      LanceArrowUtils.fromArrowField(nestedStructField).asInstanceOf[StructType]
+    assert(nestedStructType("d").dataType === DateType)
+
+    val keyField = new Field(
+      "key",
+      new FieldType(false, ArrowType.Utf8.INSTANCE, null, null),
+      java.util.Collections.emptyList())
+    val valueField = new Field(
+      "value",
+      new FieldType(true, new ArrowType.Date(DateUnit.MILLISECOND), null, null),
+      java.util.Collections.emptyList())
+    val entriesField = new Field(
+      "entries",
+      new FieldType(false, ArrowType.Struct.INSTANCE, null, null),
+      java.util.Arrays.asList(keyField, valueField))
+    val mapField = new Field(
+      "m",
+      new FieldType(true, new ArrowType.Map(false), null, null),
+      java.util.Arrays.asList(entriesField))
+
+    val mapType = LanceArrowUtils.fromArrowField(mapField).asInstanceOf[MapType]
+    assert(mapType.keyType === StringType)
+    assert(mapType.valueType === DateType)
+    assert(mapType.valueContainsNull)
   }
 
   test("struct with duplicated field names") {
