@@ -524,7 +524,7 @@ public abstract class BaseSparkConnectorWriteTest {
     spark.sql(
         "CREATE TABLE lance.`"
             + path
-            + "` (id INT, name STRING) TBLPROPERTIES ('file_format_version' = 'LEGACY')");
+            + "` (id INT, name STRING) TBLPROPERTIES ('data_storage_version' = 'LEGACY')");
 
     try (org.lance.Dataset ds =
         org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
@@ -541,7 +541,7 @@ public abstract class BaseSparkConnectorWriteTest {
     spark.sql(
         "CREATE TABLE lance.`"
             + path
-            + "` TBLPROPERTIES ('file_format_version' = 'STABLE') AS SELECT * FROM tmp_view");
+            + "` TBLPROPERTIES ('data_storage_version' = 'STABLE') AS SELECT * FROM tmp_view");
 
     try (org.lance.Dataset ds =
         org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
@@ -563,7 +563,7 @@ public abstract class BaseSparkConnectorWriteTest {
     spark.sql(
         "CREATE TABLE lance.`"
             + path
-            + "` (id INT, name STRING) TBLPROPERTIES ('file_format_version' = 'LEGACY')");
+            + "` (id INT, name STRING) TBLPROPERTIES ('data_storage_version' = 'LEGACY')");
 
     // Verify initial storage version
     try (org.lance.Dataset ds =

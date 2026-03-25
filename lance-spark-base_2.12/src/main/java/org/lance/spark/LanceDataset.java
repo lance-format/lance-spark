@@ -162,7 +162,7 @@ public class LanceDataset
    * The file format version for this table. Used to ensure writes use the same version as the
    * table. Null means the default version will be used.
    */
-  private final String fileFormatVersion;
+  private final String dataStorageVersion;
 
   /**
    * Creates a Lance dataset.
@@ -232,7 +232,7 @@ public class LanceDataset
    * @param namespaceProperties namespace connection properties for credential refresh on workers
    * @param managedVersioning whether namespace manages versioning (commits go through namespace)
    * @param stagedCommit the eagerly created staged commit, or null for non-staged tables
-   * @param fileFormatVersion the file format version for writes, or null to use default
+   * @param dataStorageVersion the file format version for writes, or null to use default
    */
   public LanceDataset(
       LanceSparkReadOptions readOptions,
@@ -242,7 +242,7 @@ public class LanceDataset
       Map<String, String> namespaceProperties,
       boolean managedVersioning,
       StagedCommit stagedCommit,
-      String fileFormatVersion) {
+      String dataStorageVersion) {
     this.readOptions = readOptions;
     this.sparkSchema = sparkSchema;
     this.initialStorageOptions = initialStorageOptions;
@@ -250,7 +250,7 @@ public class LanceDataset
     this.namespaceProperties = namespaceProperties;
     this.managedVersioning = managedVersioning;
     this.stagedCommit = stagedCommit;
-    this.fileFormatVersion = fileFormatVersion;
+    this.dataStorageVersion = dataStorageVersion;
   }
 
   public LanceSparkReadOptions readOptions() {
@@ -269,8 +269,8 @@ public class LanceDataset
     return namespaceProperties;
   }
 
-  public String getFileFormatVersion() {
-    return fileFormatVersion;
+  public String getDataStorageVersion() {
+    return dataStorageVersion;
   }
 
   @Override
@@ -322,8 +322,8 @@ public class LanceDataset
             .fromOptions(mergedOptions);
     // Use table's file format version if not explicitly set in write options
     if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)
-        && fileFormatVersion != null) {
-      writeOptionsBuilder.fileFormatVersion(fileFormatVersion);
+        && dataStorageVersion != null) {
+      writeOptionsBuilder.dataStorageVersion(dataStorageVersion);
     }
     LanceSparkWriteOptions writeOptions = writeOptionsBuilder.build();
 

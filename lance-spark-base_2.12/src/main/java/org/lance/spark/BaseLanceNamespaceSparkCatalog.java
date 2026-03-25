@@ -580,9 +580,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
             .mode(WriteParams.WriteMode.CREATE)
             .enableStableRowIds(catalogConfig.isEnableStableRowIds(properties))
             .storageOptions(catalogConfig.getStorageOptions());
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
-    if (fileFormatVersion != null) {
-      writeBuilder.dataStorageVersion(fileFormatVersion);
+    String dataStorageVersion = catalogConfig.getDataStorageVersion(properties);
+    if (dataStorageVersion != null) {
+      writeBuilder.dataStorageVersion(dataStorageVersion);
     }
     try (Dataset dataset = writeBuilder.execute()) {
       location = dataset.uri();
@@ -611,7 +611,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         namespaceImpl,
         namespaceProperties,
         managedVersioning,
-        fileFormatVersion);
+        dataStorageVersion);
   }
 
   /**
@@ -628,7 +628,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         createReadOptions(
             datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
 
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
+    String dataStorageVersion = catalogConfig.getDataStorageVersion(properties);
     try {
       WriteDatasetBuilder writeBuilder =
           Dataset.write()
@@ -638,14 +638,14 @@ public abstract class BaseLanceNamespaceSparkCatalog
               .mode(WriteParams.WriteMode.CREATE)
               .enableStableRowIds(catalogConfig.isEnableStableRowIds(properties))
               .storageOptions(readOptions.getStorageOptions());
-      if (fileFormatVersion != null) {
-        writeBuilder.dataStorageVersion(fileFormatVersion);
+      if (dataStorageVersion != null) {
+        writeBuilder.dataStorageVersion(dataStorageVersion);
       }
       writeBuilder.execute().close();
     } catch (IllegalArgumentException e) {
       throw new TableAlreadyExistsException(ident);
     }
-    return createDataset(readOptions, processedSchema, null, null, null, false, fileFormatVersion);
+    return createDataset(readOptions, processedSchema, null, null, null, false, dataStorageVersion);
   }
 
   @Override
@@ -762,7 +762,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     StagedCommit stagedCommit =
         StagedCommit.forNewTable(
             arrowSchema, location, merged, namespace, tableIdList, managedVersioning);
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
+    String dataStorageVersion = catalogConfig.getDataStorageVersion(properties);
     return createStagedDataset(
         readOptions,
         processedSchema,
@@ -771,7 +771,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         namespaceProperties,
         managedVersioning,
         stagedCommit,
-        fileFormatVersion);
+        dataStorageVersion);
   }
 
   /** Stage create a table at a direct path. */
@@ -788,9 +788,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
     StagedCommit stagedCommit =
         StagedCommit.forNewTable(
             arrowSchema, datasetUri, catalogConfig.getStorageOptions(), null, null, false);
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
+    String dataStorageVersion = catalogConfig.getDataStorageVersion(properties);
     return createStagedDataset(
-        readOptions, processedSchema, null, null, null, false, stagedCommit, fileFormatVersion);
+        readOptions, processedSchema, null, null, null, false, stagedCommit, dataStorageVersion);
   }
 
   @Override
@@ -842,9 +842,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
         StagedCommit.forExistingTable(
             ds, arrowSchema, merged, namespace, tableIdList, managedVersioning);
     // Use specified file format version, or fall back to existing table's version
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
-    if (fileFormatVersion == null) {
-      fileFormatVersion = ds.getLanceFileFormatVersion();
+    String dataStorageVersion = catalogConfig.getDataStorageVersion(properties);
+    if (dataStorageVersion == null) {
+      dataStorageVersion = ds.getLanceFileFormatVersion();
     }
     return createStagedDataset(
         readOptions,
@@ -854,7 +854,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         namespaceProperties,
         managedVersioning,
         stagedCommit,
-        fileFormatVersion);
+        dataStorageVersion);
   }
 
   /** Stage replace a table at a direct path. */
@@ -880,12 +880,12 @@ public abstract class BaseLanceNamespaceSparkCatalog
         StagedCommit.forExistingTable(
             ds, arrowSchema, catalogConfig.getStorageOptions(), null, null, false);
     // Use specified file format version, or fall back to existing table's version
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
-    if (fileFormatVersion == null) {
-      fileFormatVersion = ds.getLanceFileFormatVersion();
+    String dataStorageVersion = catalogConfig.getDataStorageVersion(properties);
+    if (dataStorageVersion == null) {
+      dataStorageVersion = ds.getLanceFileFormatVersion();
     }
     return createStagedDataset(
-        readOptions, processedSchema, null, null, null, false, stagedCommit, fileFormatVersion);
+        readOptions, processedSchema, null, null, null, false, stagedCommit, dataStorageVersion);
   }
 
   @Override
@@ -941,7 +941,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     StagedCommit stagedCommit;
     // Use specified file format version, or fall back to existing table's version
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
+    String dataStorageVersion = catalogConfig.getDataStorageVersion(properties);
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
     if (exists) {
@@ -949,8 +949,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
       stagedCommit =
           StagedCommit.forExistingTable(
               ds, arrowSchema, merged, namespace, tableIdList, managedVersioning);
-      if (fileFormatVersion == null) {
-        fileFormatVersion = ds.getLanceFileFormatVersion();
+      if (dataStorageVersion == null) {
+        dataStorageVersion = ds.getLanceFileFormatVersion();
       }
     } else {
       stagedCommit =
@@ -965,7 +965,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         namespaceProperties,
         managedVersioning,
         stagedCommit,
-        fileFormatVersion);
+        dataStorageVersion);
   }
 
   /** Stage create or replace a table at a direct path. */
@@ -982,15 +982,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     StagedCommit stagedCommit;
     // Use specified file format version, or fall back to existing table's version
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
+    String dataStorageVersion = catalogConfig.getDataStorageVersion(properties);
 
     if (exists) {
       Dataset ds = openDataset(readOptions);
       stagedCommit =
           StagedCommit.forExistingTable(
               ds, arrowSchema, catalogConfig.getStorageOptions(), null, null, false);
-      if (fileFormatVersion == null) {
-        fileFormatVersion = ds.getLanceFileFormatVersion();
+      if (dataStorageVersion == null) {
+        dataStorageVersion = ds.getLanceFileFormatVersion();
       }
     } else {
       stagedCommit =
@@ -998,7 +998,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
               arrowSchema, datasetUri, catalogConfig.getStorageOptions(), null, null, false);
     }
     return createStagedDataset(
-        readOptions, processedSchema, null, null, null, false, stagedCommit, fileFormatVersion);
+        readOptions, processedSchema, null, null, null, false, stagedCommit, dataStorageVersion);
   }
 
   /**
@@ -1179,11 +1179,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
             location, catalogConfig, versionId, Optional.of(namespace), Optional.of(tableId), name);
 
     // Read schema and file format version from the dataset
-    String fileFormatVersion;
+    String dataStorageVersion;
     StructType schema;
     try (Dataset dataset = openDataset(readOptions)) {
       schema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
-      fileFormatVersion = dataset.getLanceFileFormatVersion();
+      dataStorageVersion = dataset.getLanceFileFormatVersion();
     }
 
     // Create read options with namespace support
@@ -1195,7 +1195,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         namespaceImpl,
         namespaceProperties,
         managedVersioning,
-        fileFormatVersion);
+        dataStorageVersion);
   }
 
   /**
@@ -1231,16 +1231,16 @@ public abstract class BaseLanceNamespaceSparkCatalog
             datasetUri, catalogConfig, versionId, Optional.empty(), Optional.empty(), name);
 
     // Read schema and file format version from the dataset
-    String fileFormatVersion;
+    String dataStorageVersion;
     StructType schema;
     try (Dataset dataset = openDataset(readOptions)) {
       schema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
-      fileFormatVersion = dataset.getLanceFileFormatVersion();
+      dataStorageVersion = dataset.getLanceFileFormatVersion();
     } catch (IllegalArgumentException e) {
       throw new NoSuchTableException(ident);
     }
 
-    return createDataset(readOptions, schema, null, null, null, false, fileFormatVersion);
+    return createDataset(readOptions, schema, null, null, null, false, dataStorageVersion);
   }
 
   public abstract LanceDataset createDataset(
@@ -1250,7 +1250,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       String namespaceImpl,
       Map<String, String> namespaceProperties,
       boolean managedVersioning,
-      String fileFormatVersion);
+      String dataStorageVersion);
 
   public abstract LanceDataset createStagedDataset(
       LanceSparkReadOptions readOptions,
@@ -1260,5 +1260,5 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Map<String, String> namespaceProperties,
       boolean managedVersioning,
       StagedCommit stagedCommit,
-      String fileFormatVersion);
+      String dataStorageVersion);
 }

@@ -44,7 +44,7 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
 
   private final Map<String, String> namespaceProperties;
 
-  private final String fileFormatVersion;
+  private final String dataStorageVersion;
 
   public LancePositionDeltaOperation(
       Command command,
@@ -53,14 +53,14 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
-      String fileFormatVersion) {
+      String dataStorageVersion) {
     this.command = command;
     this.sparkSchema = sparkSchema;
     this.readOptions = readOptions;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
-    this.fileFormatVersion = fileFormatVersion;
+    this.dataStorageVersion = dataStorageVersion;
   }
 
   @Override
@@ -83,8 +83,8 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
             .storageOptions(readOptions.getStorageOptions())
             .namespace(readOptions.getNamespace())
             .tableId(readOptions.getTableId());
-    if (fileFormatVersion != null) {
-      writeOptionsBuilder.fileFormatVersion(fileFormatVersion);
+    if (dataStorageVersion != null) {
+      writeOptionsBuilder.dataStorageVersion(dataStorageVersion);
     }
     LanceSparkWriteOptions writeOptions = writeOptionsBuilder.build();
     return new SparkPositionDeltaWriteBuilder(

@@ -35,7 +35,7 @@ public class LanceRowLevelOperationBuilder implements RowLevelOperationBuilder {
 
   private final Map<String, String> namespaceProperties;
 
-  private final String fileFormatVersion;
+  private final String dataStorageVersion;
 
   public LanceRowLevelOperationBuilder(
       RowLevelOperation.Command command,
@@ -44,14 +44,14 @@ public class LanceRowLevelOperationBuilder implements RowLevelOperationBuilder {
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
-      String fileFormatVersion) {
+      String dataStorageVersion) {
     this.command = command;
     this.sparkSchema = sparkSchema;
     this.readOptions = readOptions;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
-    this.fileFormatVersion = fileFormatVersion;
+    this.dataStorageVersion = dataStorageVersion;
   }
 
   @Override
@@ -63,6 +63,6 @@ public class LanceRowLevelOperationBuilder implements RowLevelOperationBuilder {
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
-        fileFormatVersion);
+        dataStorageVersion);
   }
 }

@@ -44,7 +44,7 @@ public class LanceSparkCatalogConfig {
   /** Known table option keys. */
   public static final String TABLE_OPT_ENABLE_STABLE_ROW_IDS = "enable_stable_row_ids";
 
-  public static final String TABLE_OPT_FILE_FORMAT_VERSION = "file_format_version";
+  public static final String TABLE_OPT_FILE_FORMAT_VERSION = "data_storage_version";
 
   private final Map<String, String> storageOptions;
   private final Map<String, String> tableOptions;
@@ -91,9 +91,9 @@ public class LanceSparkCatalogConfig {
     if (stableRowIds != null) {
       tableOpts.put(TABLE_OPT_ENABLE_STABLE_ROW_IDS, stableRowIds);
     }
-    String fileFormatVersion = catalogOptions.get(TABLE_OPT_FILE_FORMAT_VERSION);
-    if (fileFormatVersion != null) {
-      tableOpts.put(TABLE_OPT_FILE_FORMAT_VERSION, fileFormatVersion);
+    String dataStorageVersion = catalogOptions.get(TABLE_OPT_FILE_FORMAT_VERSION);
+    if (dataStorageVersion != null) {
+      tableOpts.put(TABLE_OPT_FILE_FORMAT_VERSION, dataStorageVersion);
     }
 
     return builder().storageOptions(nativeOptions).tableOptions(tableOpts).build();
@@ -147,7 +147,7 @@ public class LanceSparkCatalogConfig {
    *
    * @return the file format version string, or null if not specified
    */
-  public String getFileFormatVersion() {
+  public String getDataStorageVersion() {
     return tableOptions.get(TABLE_OPT_FILE_FORMAT_VERSION);
   }
 
@@ -158,12 +158,12 @@ public class LanceSparkCatalogConfig {
    * @param tableProperties the TBLPROPERTIES from CREATE TABLE
    * @return the file format version string, or null if not specified
    */
-  public String getFileFormatVersion(Map<String, String> tableProperties) {
+  public String getDataStorageVersion(Map<String, String> tableProperties) {
     String override = tableProperties.get(TABLE_OPT_FILE_FORMAT_VERSION);
     if (override != null) {
       return override;
     }
-    return getFileFormatVersion();
+    return getDataStorageVersion();
   }
 
   @Override

@@ -138,7 +138,7 @@ public class SparkWrite implements Write {
                   .tableId(writeOptions.getTableId())
                   .batchSize(writeOptions.getBatchSize())
                   .datasetUri(writeOptions.getDatasetUri())
-                  .fileFormatVersion(writeOptions.getFileFormatVersion())
+                  .dataStorageVersion(writeOptions.getDataStorageVersion())
                   .maxBytesPerFile(writeOptions.getMaxBytesPerFile())
                   .maxRowsPerFile(writeOptions.getMaxRowsPerFile())
                   .maxRowsPerGroup(writeOptions.getMaxRowsPerGroup())
