@@ -66,21 +66,20 @@ object LanceArrowUtils {
         val containsNull = elementField.isNullable
         ArrayType(elementType, containsNull)
       case struct: ArrowType.Struct =>
-        if (isBlobField(field)) {
-          // Lance returns blob columns as structs with position and size fields
-          // Keep it as a struct but handle unsigned Int64 fields
-          val fields = field.getChildren.asScala.map { childField =>
-            val childType = childField.getType match {
-              case int: ArrowType.Int if !int.getIsSigned && int.getBitWidth == 8 * 8 => LongType
-              case _ => fromArrowField(childField)
-            }
-            StructField(childField.getName, childType, childField.isNullable)
-          }.toArray
-          StructType(fields)
-        } else {
-          // Regular struct, use standard conversion
-          ArrowUtils.fromArrowField(field)
-        }
+        // Always recurse through LanceArrowUtils for struct children so special cases
+        // like Date(MILLISECOND), FixedSizeBinary, etc. are applied in nested schemas too.
+        val blobField = isBlobField(field)
+        val fields = field.getChildren.asScala.map { childField =>
+          val childType = childField.getType match {
+            // Lance returns blob columns as structs with unsigned Int64 position/size fields.
+            case int: ArrowType.Int
+                if blobField && !int.getIsSigned && int.getBitWidth == 8 * 8 =>
+              LongType
+            case _ => fromArrowField(childField)
+          }
+          StructField(childField.getName, childType, childField.isNullable)
+        }.toArray
+        StructType(fields)
       case largeBinary: ArrowType.LargeBinary if isBlobField(field) =>
         // Lance returns LargeBinary in schema but Struct in data for blob columns
         // We need to handle this as binary to match the schema
@@ -91,6 +90,16 @@ object LanceArrowUtils {
       case _: ArrowType.LargeBinary =>
         // LargeBinary maps back to BinaryType in Spark
         BinaryType
+      case _: ArrowType.FixedSizeBinary =>
+        // Spark ArrowUtils doesn't support FixedSizeBinary. Read as BinaryType.
+        BinaryType
+      case date: ArrowType.Date =>
+        // Spark ArrowUtils doesn't support Date(MILLISECOND). Normalize both Arrow date units
+        // to Spark DateType.
+        date.getUnit match {
+          case DateUnit.DAY => DateType
+          case DateUnit.MILLISECOND => DateType
+        }
       case l: ArrowType.List =>
         val children = field.getChildren
         if (children.isEmpty) {
@@ -100,6 +109,25 @@ object LanceArrowUtils {
         val elementType = fromArrowField(elementField)
         val containsNull = elementField.isNullable
         ArrayType(elementType, containsNull)
+      case _: ArrowType.Map =>
+        // Keep map conversion recursive to avoid delegating nested unsupported Arrow types
+        // back to Spark ArrowUtils.
+        val children = field.getChildren
+        if (children.isEmpty) {
+          throw new SparkException(s"Map field ${field.getName} has no children")
+        }
+        val entriesField = children.get(0)
+        val entryChildren = entriesField.getChildren
+        if (entryChildren.size() < 2) {
+          throw new SparkException(
+            s"Map field ${field.getName} has invalid entries struct: expected key/value children")
+        }
+        val keyField = entryChildren.get(0)
+        val valueField = entryChildren.get(1)
+        MapType(
+          fromArrowField(keyField),
+          fromArrowField(valueField),
+          valueField.isNullable)
       case _ => ArrowUtils.fromArrowField(field)
     }
   }
@@ -128,15 +156,13 @@ object LanceArrowUtils {
   def toArrowSchema(
       schema: StructType,
       timeZoneId: String,
-      errorOnDuplicatedFieldNames: Boolean,
-      largeVarTypes: Boolean = false): Schema = {
+      errorOnDuplicatedFieldNames: Boolean): Schema = {
     new Schema(schema.map { field =>
       toArrowField(
         field.name,
         deduplicateFieldNames(field.dataType, errorOnDuplicatedFieldNames),
         field.nullable,
         timeZoneId,
-        largeVarTypes,
         field.metadata)
     }.asJava)
   }
@@ -146,9 +172,8 @@ object LanceArrowUtils {
       dt: DataType,
       nullable: Boolean,
       timeZoneId: String,
-      largeVarTypes: Boolean = false,
       metadata: org.apache.spark.sql.types.Metadata = null): Field = {
-    var large: Boolean = largeVarTypes
+    var large: Boolean = false
     var meta: Map[String, String] = Map.empty
 
     if (metadata != null) {
@@ -177,14 +202,14 @@ object LanceArrowUtils {
             name,
             fieldType,
             Seq(
-              toArrowField("element", elementType, containsNull, timeZoneId, large)).asJava)
+              toArrowField("element", elementType, containsNull, timeZoneId)).asJava)
         } else {
           val fieldType = new FieldType(nullable, ArrowType.List.INSTANCE, null, meta.asJava)
           new Field(
             name,
             fieldType,
             Seq(
-              toArrowField("element", elementType, containsNull, timeZoneId, large)).asJava)
+              toArrowField("element", elementType, containsNull, timeZoneId)).asJava)
         }
       case StructType(fields) =>
         val fieldType = new FieldType(nullable, ArrowType.Struct.INSTANCE, null, meta.asJava)
@@ -192,7 +217,7 @@ object LanceArrowUtils {
           name,
           fieldType,
           fields.map { field =>
-            toArrowField(field.name, field.dataType, field.nullable, timeZoneId, large)
+            toArrowField(field.name, field.dataType, field.nullable, timeZoneId)
           }.toSeq.asJava)
       case MapType(keyType, valueType, valueContainsNull) =>
         val mapType = new FieldType(nullable, new ArrowType.Map(false), null, meta.asJava)
@@ -206,10 +231,9 @@ object LanceArrowUtils {
               .add(MapVector.KEY_NAME, keyType, nullable = false)
               .add(MapVector.VALUE_NAME, valueType, nullable = valueContainsNull),
             nullable = false,
-            timeZoneId,
-            largeVarTypes)).asJava)
+            timeZoneId)).asJava)
       case udt: UserDefinedType[_] =>
-        toArrowField(name, udt.sqlType, nullable, timeZoneId, largeVarTypes)
+        toArrowField(name, udt.sqlType, nullable, timeZoneId)
       case dataType =>
         val fieldType =
           new FieldType(nullable, toArrowType(dataType, timeZoneId, large, name), null, meta.asJava)

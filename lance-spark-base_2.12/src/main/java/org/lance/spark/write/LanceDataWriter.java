@@ -73,6 +73,12 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
 
   @Override
   public void abort() throws IOException {
+    // Signal the write buffer that no more data will be produced.
+    // This unblocks the fragment creation thread's consumer side
+    // (which reads from the buffer via ArrowReader interface),
+    // preventing a deadlock where the consumer waits for more data
+    // while we wait for the consumer to finish.
+    writeBuffer.setFinished();
     fragmentCreationThread.interrupt();
     try {
       // Have a timeout to avoid hanging in native method indefinitely
@@ -107,21 +113,13 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
     private final Map<String, String> namespaceProperties;
     private final List<String> tableId;
 
-    /**
-     * When true, indicates this is a staged operation (REPLACE TABLE, CREATE OR REPLACE). For
-     * staged operations, we don't pass WriteMode to Fragment.create() so that Lance uses the
-     * stream's schema directly instead of validating against the existing dataset schema.
-     */
-    private final boolean isStagedOperation;
-
     protected WriterFactory(
         StructType schema,
         LanceSparkWriteOptions writeOptions,
         Map<String, String> initialStorageOptions,
         String namespaceImpl,
         Map<String, String> namespaceProperties,
-        List<String> tableId,
-        boolean isStagedOperation) {
+        List<String> tableId) {
       // Everything passed to writer factory should be serializable
       this.schema = schema;
       this.writeOptions = writeOptions;
@@ -129,7 +127,6 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       this.namespaceImpl = namespaceImpl;
       this.namespaceProperties = namespaceProperties;
       this.tableId = tableId;
-      this.isStagedOperation = isStagedOperation;
     }
 
     @Override
@@ -162,7 +159,8 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
                   writeOptions.getDatasetUri(), arrowStream, params, storageOptionsProvider);
             }
           };
-      FutureTask<List<FragmentMetadata>> fragmentCreationTask = new FutureTask<>(fragmentCreator);
+      FutureTask<List<FragmentMetadata>> fragmentCreationTask =
+          writeBuffer.createTrackedTask(fragmentCreator);
       Thread fragmentCreationThread = new Thread(fragmentCreationTask);
       fragmentCreationThread.start();
 
@@ -174,12 +172,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
           LanceRuntime.mergeStorageOptions(writeOptions.getStorageOptions(), initialStorageOptions);
 
       WriteParams.Builder builder = new WriteParams.Builder();
-      // For staged operations (REPLACE TABLE, CREATE OR REPLACE), don't set the write mode.
-      // This allows Lance to use the stream's schema directly instead of loading and
-      // validating against the existing dataset schema.
-      if (!isStagedOperation) {
-        builder.withMode(writeOptions.getWriteMode());
-      }
+      builder.withMode(writeOptions.getWriteMode());
       if (writeOptions.getMaxRowsPerFile() != null) {
         builder.withMaxRowsPerFile(writeOptions.getMaxRowsPerFile());
       }

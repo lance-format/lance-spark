@@ -13,15 +13,17 @@
  */
 package org.lance.spark.write;
 
+import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.FragmentMetadata;
-import org.lance.ReadOptions;
+import org.lance.Transaction;
 import org.lance.fragment.FragmentMergeResult;
 import org.lance.operation.Merge;
 import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -130,40 +132,25 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
         fragments.stream().map(FragmentMetadata::getId).collect(Collectors.toSet());
 
     // Get existing fragments
-    try (Dataset dataset = openDataset(writeOptions)) {
+    try (Dataset dataset = Utils.openDataset(writeOptions)) {
       dataset.getFragments().stream()
           .filter(f -> !mergedFragmentIds.contains(f.getId()))
           .map(Fragment::metadata)
           .forEach(fragments::add);
     }
 
-    // Commit merge operation using transaction builder
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false, false);
-    try (Dataset dataset = openDataset(writeOptions)) {
+    // Commit merge operation using CommitBuilder
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false);
+    try (Dataset dataset = Utils.openDataset(writeOptions)) {
       Merge merge = Merge.builder().fragments(fragments).schema(arrowSchema).build();
-      dataset.newTransactionBuilder().operation(merge).build().commit();
-    }
-  }
-
-  private static Dataset openDataset(LanceSparkWriteOptions writeOptions) {
-    if (writeOptions.hasNamespace()) {
-      return Dataset.open()
-          .allocator(LanceRuntime.allocator())
-          .namespace(writeOptions.getNamespace())
-          .tableId(writeOptions.getTableId())
-          .session(LanceRuntime.session())
-          .build();
-    } else {
-      ReadOptions readOptions =
-          new ReadOptions.Builder()
-              .setStorageOptions(writeOptions.getStorageOptions())
-              .setSession(LanceRuntime.session())
-              .build();
-      return Dataset.open()
-          .allocator(LanceRuntime.allocator())
-          .uri(writeOptions.getDatasetUri())
-          .readOptions(readOptions)
-          .build();
+      try (Transaction txn =
+              new Transaction.Builder().readVersion(dataset.version()).operation(merge).build();
+          Dataset committed =
+              new CommitBuilder(dataset)
+                  .writeParams(writeOptions.getStorageOptions())
+                  .execute(txn)) {
+        // auto-close txn and committed dataset
+      }
     }
   }
 

@@ -13,15 +13,17 @@
  */
 package org.lance.spark.write;
 
+import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.FragmentMetadata;
-import org.lance.ReadOptions;
+import org.lance.Transaction;
 import org.lance.fragment.FragmentUpdateResult;
 import org.lance.operation.Update;
 import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.spark.sql.catalyst.InternalRow;
@@ -132,7 +134,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
     Set<Integer> updatedFragmentIds =
         updatedFragments.stream().map(FragmentMetadata::getId).collect(Collectors.toSet());
 
-    try (Dataset dataset = openDataset(writeOptions)) {
+    try (Dataset dataset = Utils.openDataset(writeOptions)) {
       // Add unmodified fragments back
       dataset.getFragments().stream()
           .filter(f -> !updatedFragmentIds.contains(f.getId()))
@@ -140,37 +142,22 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
           .forEach(updatedFragments::add);
     }
 
-    // Commit update operation using transaction builder
-    try (Dataset dataset = openDataset(writeOptions)) {
+    // Commit update operation using CommitBuilder
+    try (Dataset dataset = Utils.openDataset(writeOptions)) {
       Update update =
           Update.builder()
               .updatedFragments(updatedFragments)
               .fieldsModified(fieldsModified)
               .updateMode(Optional.of(Update.UpdateMode.RewriteColumns))
               .build();
-      dataset.newTransactionBuilder().operation(update).build().commit();
-    }
-  }
-
-  private static Dataset openDataset(LanceSparkWriteOptions writeOptions) {
-    if (writeOptions.hasNamespace()) {
-      return Dataset.open()
-          .allocator(LanceRuntime.allocator())
-          .namespace(writeOptions.getNamespace())
-          .tableId(writeOptions.getTableId())
-          .session(LanceRuntime.session())
-          .build();
-    } else {
-      ReadOptions readOptions =
-          new ReadOptions.Builder()
-              .setStorageOptions(writeOptions.getStorageOptions())
-              .setSession(LanceRuntime.session())
-              .build();
-      return Dataset.open()
-          .allocator(LanceRuntime.allocator())
-          .uri(writeOptions.getDatasetUri())
-          .readOptions(readOptions)
-          .build();
+      try (Transaction txn =
+              new Transaction.Builder().readVersion(dataset.version()).operation(update).build();
+          Dataset committed =
+              new CommitBuilder(dataset)
+                  .writeParams(writeOptions.getStorageOptions())
+                  .execute(txn)) {
+        // auto-close txn and committed dataset
+      }
     }
   }
 

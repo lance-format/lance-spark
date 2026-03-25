@@ -26,9 +26,9 @@ SPARK_DOWNLOAD_VERSION := $(SPARK_DOWNLOAD_VERSION_$(SPARK_VERSION))
 PY4J_VERSION := $(PY4J_VERSION_$(SPARK_VERSION))
 
 # Spark 3.x default binaries are Scala 2.12; Scala 2.13 needs explicit suffix.
-# Spark 4.0 only supports Scala 2.13, so no suffix is needed.
+# Spark 4.x only supports Scala 2.13, so no suffix is needed.
 ifeq ($(SCALA_VERSION),2.13)
-  ifneq ($(SPARK_VERSION),4.0)
+  ifeq ($(filter 4.%,$(SPARK_VERSION)),)
     SPARK_SCALA_SUFFIX := -scala2.13
   else
     SPARK_SCALA_SUFFIX :=
@@ -191,6 +191,27 @@ docker-test:
 		"pytest /home/lance/tests/ -v --timeout=180"
 
 # =============================================================================
+# Benchmark
+# =============================================================================
+
+.PHONY: benchmark-build
+benchmark-build:
+	cd benchmark && mvn package -DskipTests
+
+.PHONY: benchmark-run
+benchmark-run:
+	cd benchmark && ./scripts/run-benchmark.sh $(SF) $(FORMATS) $(SPARK_MASTER) $(ITERATIONS)
+
+.PHONY: benchmark-docker
+benchmark-docker:
+	./benchmark/scripts/run-docker-benchmark.sh --sf $(SF) --formats $(FORMATS) --iterations $(ITERATIONS)
+
+SF ?= 1
+FORMATS ?= lance,parquet
+SPARK_MASTER ?= local[*]
+ITERATIONS ?= 3
+
+# =============================================================================
 # Documentation
 # =============================================================================
 
@@ -232,6 +253,11 @@ help:
 	@echo "  docker-down            - Stop docker containers"
 	@echo "  docker-build-test-full - Build test image (with Spark and bundle)"
 	@echo "  docker-test            - Run integration tests in lance-spark-test container"
+	@echo ""
+	@echo "Benchmark:"
+	@echo "  benchmark-build        - Build benchmark jar"
+	@echo "  benchmark-run          - Run TPC-DS benchmark (SF=1 FORMATS=lance,parquet)"
+	@echo "  benchmark-docker       - Run TPC-DS benchmark in Docker (SF=1 FORMATS=lance,parquet)"
 	@echo ""
 	@echo "Documentation:"
 	@echo "  serve-docs     - Serve documentation locally"

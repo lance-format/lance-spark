@@ -21,7 +21,7 @@ import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
 import org.apache.spark.unsafe.types.UTF8String
 import org.json4s.JsonAST.{JBool, JDouble, JField, JInt, JNull, JObject, JString}
 import org.json4s.jackson.JsonMethods.{compact, render}
-import org.lance.Dataset
+import org.lance.{CommitBuilder, Dataset, Transaction}
 import org.lance.ReadOptions
 import org.lance.index.{Index, IndexOptions, IndexParams, IndexType}
 import org.lance.index.scalar.ScalarIndexParams
@@ -156,11 +156,27 @@ case class AddIndexExec(
         .fragments(fragmentIds.asJava)
         .build()
 
-      val op = AddIndexOperation.builder().withNewIndices(Collections.singletonList(index)).build()
-      val newDataset = dataset.newTransactionBuilder().operation(op).build().commit()
+      // Find existing indices with the same name to mark as removed (for replace)
+      val removedIndices = dataset.getIndexes.asScala
+        .filter(_.name() == indexName)
+        .toList.asJava
 
-      // close the committed new dataset to release resources
-      newDataset.close()
+      val op = AddIndexOperation.builder()
+        .withNewIndices(Collections.singletonList(index))
+        .withRemovedIndices(removedIndices)
+        .build()
+      val txn = new Transaction.Builder()
+        .readVersion(dataset.version())
+        .operation(op)
+        .build()
+      try {
+        val newDataset = new CommitBuilder(dataset)
+          .writeParams(readOptions.getStorageOptions)
+          .execute(txn)
+        newDataset.close()
+      } finally {
+        txn.close()
+      }
     } finally {
       dataset.close()
     }

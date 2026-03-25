@@ -74,8 +74,82 @@ public abstract class BaseLanceNamespaceSparkCatalog
   private static final Logger logger =
       LoggerFactory.getLogger(BaseLanceNamespaceSparkCatalog.class);
 
-  /** Used to specify the namespace implementation to use */
+  /**
+   * Used to specify the namespace implementation to use. Optional when using path-based access
+   * only.
+   */
   private static final String CONFIG_IMPL = "impl";
+
+  /** Indicates path-based only mode when impl is not configured. */
+  private boolean pathBasedOnly = false;
+
+  /**
+   * Checks if an identifier represents a path-based table location (e.g., /path/to/table or
+   * s3://bucket/path). This handles both LanceIdentifier and regular Identifier where the namespace
+   * contains a path.
+   */
+  private static boolean isPathBasedIdentifier(Identifier ident) {
+    if (ident instanceof LanceIdentifier) {
+      return true;
+    }
+
+    // Check if the namespace looks like a path (contains "/" or is a URI scheme)
+    String[] namespace = ident.namespace();
+    if (namespace != null && namespace.length > 0) {
+      String firstPart = namespace[0];
+      if (firstPart.contains("/")
+          || firstPart.startsWith("s3://")
+          || firstPart.startsWith("gs://")
+          || firstPart.startsWith("az://")
+          || firstPart.startsWith("abfss://")
+          || firstPart.startsWith("file://")
+          || firstPart.startsWith("hdfs://")) {
+        return true;
+      }
+    }
+
+    // Check if name looks like an absolute path
+    String name = ident.name();
+    return name.startsWith("/")
+        || name.startsWith("s3://")
+        || name.startsWith("gs://")
+        || name.startsWith("az://")
+        || name.startsWith("abfss://")
+        || name.startsWith("file://")
+        || name.startsWith("hdfs://");
+  }
+
+  /**
+   * Extracts the full dataset URI from an identifier. For LanceIdentifier, uses location(). For
+   * path-based regular identifiers, reconstructs the path from namespace and name.
+   */
+  private static String getDatasetUri(Identifier ident) {
+    if (ident instanceof LanceIdentifier) {
+      return ((LanceIdentifier) ident).location();
+    }
+
+    // Reconstruct path from namespace and name
+    String[] namespace = ident.namespace();
+    String name = ident.name();
+
+    if (namespace == null || namespace.length == 0) {
+      return name;
+    }
+
+    // Join namespace parts with "/" and append the name
+    StringBuilder sb = new StringBuilder();
+    for (String ns : namespace) {
+      if (sb.length() > 0 && !sb.toString().endsWith("/")) {
+        sb.append("/");
+      }
+      sb.append(ns);
+    }
+    if (!sb.toString().endsWith("/")) {
+      sb.append("/");
+    }
+    sb.append(name);
+    return sb.toString();
+  }
 
   /**
    * Enable single-level namespace mode with a virtual "default" namespace.
@@ -128,8 +202,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
     // Parse catalog configuration
     this.catalogConfig = LanceSparkCatalogConfig.from(this.storageOptions);
 
+    // impl is optional - if not provided, catalog operates in path-based only mode
     if (!options.containsKey(CONFIG_IMPL)) {
-      throw new IllegalArgumentException("Missing required configuration: " + CONFIG_IMPL);
+      this.pathBasedOnly = true;
+      this.parentPrefix = Optional.empty();
+      this.namespaceImpl = null;
+      this.namespaceProperties = new HashMap<>();
+      this.namespace = null;
+      this.singleLevelNs = false;
+      return;
     }
     String impl = options.get(CONFIG_IMPL);
 
@@ -377,6 +458,12 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   @Override
   public Identifier[] listTables(String[] namespace) throws NoSuchNamespaceException {
+    // Path-based mode doesn't support listing tables
+    if (pathBasedOnly || this.namespace == null) {
+      throw new UnsupportedOperationException(
+          "Table listing requires namespace configuration. Use 'impl' config.");
+    }
+
     String[] actualNamespace = removeSingleLevelPrefixFromNamespace(namespace);
     actualNamespace = addParentPrefix(actualNamespace);
 
@@ -402,6 +489,16 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   @Override
   public boolean tableExists(Identifier ident) {
+    // Handle path-based access
+    if (isPathBasedIdentifier(ident)) {
+      return tableExistsAtPath(ident);
+    }
+
+    // Require namespace to be configured for namespace-based access
+    if (pathBasedOnly || namespace == null) {
+      return false;
+    }
+
     // Transform identifier for API call
     Identifier actualIdent = transformIdentifierForApi(ident);
 
@@ -414,6 +511,19 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     try {
       this.namespace.tableExists(request);
+      return true;
+    } catch (Exception e) {
+      return false;
+    }
+  }
+
+  /** Checks if a table exists at a direct path. */
+  private boolean tableExistsAtPath(Identifier ident) {
+    String datasetUri = getDatasetUri(ident);
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
+    try (Dataset dataset = openDataset(readOptions)) {
       return true;
     } catch (Exception e) {
       return false;
@@ -439,6 +549,18 @@ public abstract class BaseLanceNamespaceSparkCatalog
   public Table createTable(
       Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
       throws TableAlreadyExistsException, NoSuchNamespaceException {
+
+    // Handle path-based access
+    if (isPathBasedIdentifier(ident)) {
+      return createTableAtPath(ident, schema, properties);
+    }
+
+    // Require namespace to be configured for namespace-based access
+    if (pathBasedOnly || namespace == null) {
+      throw new IllegalStateException(
+          "Namespace not configured. Use 'impl' config for namespace-based access.");
+    }
+
     Identifier actualIdent = transformIdentifierForApi(ident);
 
     // Build the table ID for credential vending
@@ -454,7 +576,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
             .allocator(LanceRuntime.allocator())
             .namespace(namespace)
             .tableId(tableIdList)
-            .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false))
+            .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true))
             .mode(WriteParams.WriteMode.CREATE)
             .enableStableRowIds(catalogConfig.isEnableStableRowIds(properties))
             .storageOptions(catalogConfig.getStorageOptions())
@@ -467,6 +589,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     tableIdList.forEach(describeRequest::addIdItem);
     DescribeTableResponse describeResponse = namespace.describeTable(describeRequest);
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
+    boolean managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
 
     // Create read options with namespace settings
     LanceSparkReadOptions readOptions =
@@ -478,7 +601,42 @@ public abstract class BaseLanceNamespaceSparkCatalog
             Optional.of(tableIdList),
             name);
     return createDataset(
-        readOptions, processedSchema, initialStorageOptions, namespaceImpl, namespaceProperties);
+        readOptions,
+        processedSchema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        managedVersioning);
+  }
+
+  /**
+   * Creates a table at a direct path. This supports path-based access patterns like
+   * df.write.format("lance").save(path).
+   */
+  private Table createTableAtPath(
+      Identifier ident, StructType schema, Map<String, String> properties)
+      throws TableAlreadyExistsException {
+    String datasetUri = getDatasetUri(ident);
+
+    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
+
+    try {
+      Dataset.write()
+          .allocator(LanceRuntime.allocator())
+          .uri(datasetUri)
+          .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true))
+          .mode(WriteParams.WriteMode.CREATE)
+          .enableStableRowIds(catalogConfig.isEnableStableRowIds(properties))
+          .storageOptions(readOptions.getStorageOptions())
+          .execute()
+          .close();
+    } catch (IllegalArgumentException e) {
+      throw new TableAlreadyExistsException(ident);
+    }
+    return createDataset(readOptions, processedSchema, null, null, null, false);
   }
 
   @Override
@@ -488,6 +646,16 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   @Override
   public boolean dropTable(Identifier ident) {
+    // Handle path-based access
+    if (isPathBasedIdentifier(ident)) {
+      return dropTableAtPath(ident);
+    }
+
+    // Require namespace to be configured for namespace-based access
+    if (pathBasedOnly || namespace == null) {
+      return false;
+    }
+
     try {
       Identifier tableId = transformIdentifierForApi(ident);
       DeregisterTableRequest deregisterRequest = new DeregisterTableRequest();
@@ -503,8 +671,25 @@ public abstract class BaseLanceNamespaceSparkCatalog
     }
   }
 
+  /** Drops a table at a direct path. */
+  private boolean dropTableAtPath(Identifier ident) {
+    String datasetUri = getDatasetUri(ident);
+    Dataset.drop(datasetUri, catalogConfig.getStorageOptions());
+    return true;
+  }
+
   @Override
   public boolean purgeTable(Identifier ident) {
+    // Handle path-based access (same as dropTable for path-based)
+    if (isPathBasedIdentifier(ident)) {
+      return dropTableAtPath(ident);
+    }
+
+    // Require namespace to be configured for namespace-based access
+    if (pathBasedOnly || namespace == null) {
+      return false;
+    }
+
     try {
       Identifier tableId = transformIdentifierForApi(ident);
       DropTableRequest dropRequest = new DropTableRequest();
@@ -530,6 +715,18 @@ public abstract class BaseLanceNamespaceSparkCatalog
   public StagedTable stageCreate(
       Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
       throws TableAlreadyExistsException, NoSuchNamespaceException {
+
+    // Handle path-based access
+    if (isPathBasedIdentifier(ident)) {
+      return stageCreateAtPath(ident, schema, properties);
+    }
+
+    // Require namespace to be configured for namespace-based access
+    if (pathBasedOnly || namespace == null) {
+      throw new IllegalStateException(
+          "Namespace not configured. Use 'impl' config for namespace-based access.");
+    }
+
     Identifier actualIdent = transformIdentifierForApi(ident);
     List<String> tableIdList = buildTableId(actualIdent);
     StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
@@ -539,6 +736,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     DeclareTableResponse declareResponse = namespace.declareTable(declareRequest);
     String location = declareResponse.getLocation();
     Map<String, String> initialStorageOptions = declareResponse.getStorageOptions();
+    boolean managedVersioning = Boolean.TRUE.equals(declareResponse.getManagedVersioning());
 
     LanceSparkReadOptions readOptions =
         createReadOptions(
@@ -549,24 +747,55 @@ public abstract class BaseLanceNamespaceSparkCatalog
             Optional.of(tableIdList),
             name);
 
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
     StagedCommit stagedCommit =
-        StagedCommit.forNewTable(arrowSchema, location, merged, namespace, tableIdList);
+        StagedCommit.forNewTable(
+            arrowSchema, location, merged, namespace, tableIdList, managedVersioning);
     return createStagedDataset(
         readOptions,
         processedSchema,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
+        managedVersioning,
         stagedCommit);
+  }
+
+  /** Stage create a table at a direct path. */
+  private StagedTable stageCreateAtPath(
+      Identifier ident, StructType schema, Map<String, String> properties) {
+    String datasetUri = getDatasetUri(ident);
+    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
+
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
+    StagedCommit stagedCommit =
+        StagedCommit.forNewTable(
+            arrowSchema, datasetUri, catalogConfig.getStorageOptions(), null, null, false);
+    return createStagedDataset(readOptions, processedSchema, null, null, null, false, stagedCommit);
   }
 
   @Override
   public StagedTable stageReplace(
       Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
       throws NoSuchNamespaceException, NoSuchTableException {
+
+    // Handle path-based access
+    if (isPathBasedIdentifier(ident)) {
+      return stageReplaceAtPath(ident, schema, properties);
+    }
+
+    // Require namespace to be configured for namespace-based access
+    if (pathBasedOnly || namespace == null) {
+      throw new IllegalStateException(
+          "Namespace not configured. Use 'impl' config for namespace-based access.");
+    }
+
     Identifier actualIdent = transformIdentifierForApi(ident);
     List<String> tableIdList = buildTableId(actualIdent);
     StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
@@ -581,6 +810,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     }
     String location = describeResponse.getLocation();
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
+    boolean managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
 
     LanceSparkReadOptions readOptions =
         createReadOptions(
@@ -591,23 +821,64 @@ public abstract class BaseLanceNamespaceSparkCatalog
             Optional.of(tableIdList),
             name);
 
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     Dataset ds = openDataset(readOptions);
+    Map<String, String> merged =
+        LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
     StagedCommit stagedCommit =
-        StagedCommit.forExistingTable(ds, arrowSchema, namespace, tableIdList);
+        StagedCommit.forExistingTable(
+            ds, arrowSchema, merged, namespace, tableIdList, managedVersioning);
     return createStagedDataset(
         readOptions,
         processedSchema,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
+        managedVersioning,
         stagedCommit);
+  }
+
+  /** Stage replace a table at a direct path. */
+  private StagedTable stageReplaceAtPath(
+      Identifier ident, StructType schema, Map<String, String> properties)
+      throws NoSuchTableException {
+    String datasetUri = getDatasetUri(ident);
+    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
+
+    Dataset ds;
+    try {
+      ds = openDataset(readOptions);
+    } catch (Exception e) {
+      throw new NoSuchTableException(ident);
+    }
+
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
+    StagedCommit stagedCommit =
+        StagedCommit.forExistingTable(
+            ds, arrowSchema, catalogConfig.getStorageOptions(), null, null, false);
+    return createStagedDataset(readOptions, processedSchema, null, null, null, false, stagedCommit);
   }
 
   @Override
   public StagedTable stageCreateOrReplace(
       Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
       throws NoSuchNamespaceException {
+
+    // Handle path-based access
+    if (isPathBasedIdentifier(ident)) {
+      return stageCreateOrReplaceAtPath(ident, schema, properties);
+    }
+
+    // Require namespace to be configured for namespace-based access
+    if (pathBasedOnly || namespace == null) {
+      throw new IllegalStateException(
+          "Namespace not configured. Use 'impl' config for namespace-based access.");
+    }
+
     Identifier actualIdent = transformIdentifierForApi(ident);
     List<String> tableIdList = buildTableId(actualIdent);
     StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
@@ -615,6 +886,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     boolean exists = tableExists(ident);
     String location;
     Map<String, String> initialStorageOptions;
+    boolean managedVersioning;
 
     if (!exists) {
       DeclareTableRequest declareRequest = new DeclareTableRequest();
@@ -622,12 +894,14 @@ public abstract class BaseLanceNamespaceSparkCatalog
       DeclareTableResponse declareResponse = namespace.declareTable(declareRequest);
       location = declareResponse.getLocation();
       initialStorageOptions = declareResponse.getStorageOptions();
+      managedVersioning = Boolean.TRUE.equals(declareResponse.getManagedVersioning());
     } else {
       DescribeTableRequest describeRequest = new DescribeTableRequest();
       tableIdList.forEach(describeRequest::addIdItem);
       DescribeTableResponse describeResponse = namespace.describeTable(describeRequest);
       location = describeResponse.getLocation();
       initialStorageOptions = describeResponse.getStorageOptions();
+      managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
     }
 
     LanceSparkReadOptions readOptions =
@@ -639,17 +913,19 @@ public abstract class BaseLanceNamespaceSparkCatalog
             Optional.of(tableIdList),
             name);
 
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true, false);
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     StagedCommit stagedCommit;
+    Map<String, String> merged =
+        LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
     if (exists) {
       Dataset ds = openDataset(readOptions);
-      stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, namespace, tableIdList);
-    } else {
-      Map<String, String> merged =
-          LanceRuntime.mergeStorageOptions(
-              catalogConfig.getStorageOptions(), initialStorageOptions);
       stagedCommit =
-          StagedCommit.forNewTable(arrowSchema, location, merged, namespace, tableIdList);
+          StagedCommit.forExistingTable(
+              ds, arrowSchema, merged, namespace, tableIdList, managedVersioning);
+    } else {
+      stagedCommit =
+          StagedCommit.forNewTable(
+              arrowSchema, location, merged, namespace, tableIdList, managedVersioning);
     }
     return createStagedDataset(
         readOptions,
@@ -657,7 +933,35 @@ public abstract class BaseLanceNamespaceSparkCatalog
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
+        managedVersioning,
         stagedCommit);
+  }
+
+  /** Stage create or replace a table at a direct path. */
+  private StagedTable stageCreateOrReplaceAtPath(
+      Identifier ident, StructType schema, Map<String, String> properties) {
+    String datasetUri = getDatasetUri(ident);
+    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
+
+    boolean exists = tableExistsAtPath(ident);
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
+    StagedCommit stagedCommit;
+
+    if (exists) {
+      Dataset ds = openDataset(readOptions);
+      stagedCommit =
+          StagedCommit.forExistingTable(
+              ds, arrowSchema, catalogConfig.getStorageOptions(), null, null, false);
+    } else {
+      stagedCommit =
+          StagedCommit.forNewTable(
+              arrowSchema, datasetUri, catalogConfig.getStorageOptions(), null, null, false);
+    }
+    return createStagedDataset(readOptions, processedSchema, null, null, null, false, stagedCommit);
   }
 
   /**
@@ -783,6 +1087,17 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Identifier ident, Optional<Long> timestamp, Optional<String> version)
       throws NoSuchTableException {
 
+    // Handle path-based access
+    if (isPathBasedIdentifier(ident)) {
+      return loadTableFromPath(ident, timestamp, version);
+    }
+
+    // Require namespace to be configured for namespace-based access
+    if (pathBasedOnly || namespace == null) {
+      throw new IllegalStateException(
+          "Namespace not configured. Use 'impl' config for namespace-based access.");
+    }
+
     // Transform identifier for API call
     Identifier actualIdent = transformIdentifierForApi(ident);
 
@@ -828,8 +1143,50 @@ public abstract class BaseLanceNamespaceSparkCatalog
     StructType schema = getSchema(ident, readOptions);
 
     // Create read options with namespace support
+    boolean managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
     return createDataset(
-        readOptions, schema, initialStorageOptions, namespaceImpl, namespaceProperties);
+        readOptions,
+        schema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        managedVersioning);
+  }
+
+  /**
+   * Loads a table from a direct path. This supports path-based access patterns like
+   * spark.read.format("lance").load(path).
+   */
+  private Table loadTableFromPath(
+      Identifier ident, Optional<Long> timestamp, Optional<String> version)
+      throws NoSuchTableException {
+    String datasetUri = getDatasetUri(ident);
+
+    Optional<Long> versionId = Optional.empty();
+    if (version.isPresent()) {
+      versionId = Optional.of(Utils.parseVersion(version.get()));
+    } else if (timestamp.isPresent()) {
+      LanceSparkReadOptions readOptions =
+          createReadOptions(
+              datasetUri,
+              catalogConfig,
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              name);
+      try (Dataset dataset = openDataset(readOptions)) {
+        versionId = Optional.of(Utils.findVersion(dataset.listVersions(), timestamp.get()));
+      } catch (IllegalArgumentException e) {
+        throw new NoSuchTableException(ident);
+      }
+    }
+
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            datasetUri, catalogConfig, versionId, Optional.empty(), Optional.empty(), name);
+    StructType schema = getSchema(ident, readOptions);
+
+    return createDataset(readOptions, schema, null, null, null, false);
   }
 
   public abstract LanceDataset createDataset(
@@ -837,7 +1194,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
       StructType sparkSchema,
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
-      Map<String, String> namespaceProperties);
+      Map<String, String> namespaceProperties,
+      boolean managedVersioning);
 
   public abstract LanceDataset createStagedDataset(
       LanceSparkReadOptions readOptions,
@@ -845,5 +1203,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
+      boolean managedVersioning,
       StagedCommit stagedCommit);
 }

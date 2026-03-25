@@ -23,6 +23,7 @@ package org.apache.spark.sql.util
  * It has been modified by the Lance developers to fit the needs of the Lance project.
  */
 
+import org.apache.arrow.vector.types.DateUnit
 import org.apache.arrow.vector.types.pojo.{Field, FieldType}
 import org.apache.arrow.vector.types.pojo.ArrowType
 import org.apache.spark.SparkUnsupportedOperationException
@@ -116,6 +117,43 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
       new StructType().add("i", IntegerType).add("arr", ArrayType(IntegerType))))
   }
 
+  test("nested date millisecond types") {
+    val dateMilliField = new Field(
+      "d",
+      new FieldType(true, new ArrowType.Date(DateUnit.MILLISECOND), null, null),
+      java.util.Collections.emptyList())
+    val nestedStructField = new Field(
+      "s",
+      new FieldType(true, ArrowType.Struct.INSTANCE, null, null),
+      java.util.Arrays.asList(dateMilliField))
+
+    val nestedStructType =
+      LanceArrowUtils.fromArrowField(nestedStructField).asInstanceOf[StructType]
+    assert(nestedStructType("d").dataType === DateType)
+
+    val keyField = new Field(
+      "key",
+      new FieldType(false, ArrowType.Utf8.INSTANCE, null, null),
+      java.util.Collections.emptyList())
+    val valueField = new Field(
+      "value",
+      new FieldType(true, new ArrowType.Date(DateUnit.MILLISECOND), null, null),
+      java.util.Collections.emptyList())
+    val entriesField = new Field(
+      "entries",
+      new FieldType(false, ArrowType.Struct.INSTANCE, null, null),
+      java.util.Arrays.asList(keyField, valueField))
+    val mapField = new Field(
+      "m",
+      new FieldType(true, new ArrowType.Map(false), null, null),
+      java.util.Arrays.asList(entriesField))
+
+    val mapType = LanceArrowUtils.fromArrowField(mapField).asInstanceOf[MapType]
+    assert(mapType.keyType === StringType)
+    assert(mapType.valueType === DateType)
+    assert(mapType.valueContainsNull)
+  }
+
   test("struct with duplicated field names") {
 
     def check(dt: DataType, expected: DataType): Unit = {
@@ -153,7 +191,7 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
       .add("regular_string", StringType, nullable = true)
       .add("large_string", StringType, nullable = true, largeVarCharMetadata)
 
-    val arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", false, false)
+    val arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", false)
 
     // Regular string should use Utf8
     val regularField = arrowSchema.findField("regular_string")
@@ -163,21 +201,4 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
     val largeField = arrowSchema.findField("large_string")
     assert(largeField.getType === ArrowType.LargeUtf8.INSTANCE)
   }
-
-  test("largeVarTypes parameter produces LargeUtf8 for all strings") {
-    val schema = new StructType()
-      .add("string1", StringType, nullable = true)
-      .add("string2", StringType, nullable = true)
-
-    // Without largeVarTypes, should use Utf8
-    val arrowSchemaSmall = LanceArrowUtils.toArrowSchema(schema, "UTC", false, false)
-    assert(arrowSchemaSmall.findField("string1").getType === ArrowType.Utf8.INSTANCE)
-    assert(arrowSchemaSmall.findField("string2").getType === ArrowType.Utf8.INSTANCE)
-
-    // With largeVarTypes=true, should use LargeUtf8
-    val arrowSchemaLarge = LanceArrowUtils.toArrowSchema(schema, "UTC", false, true)
-    assert(arrowSchemaLarge.findField("string1").getType === ArrowType.LargeUtf8.INSTANCE)
-    assert(arrowSchemaLarge.findField("string2").getType === ArrowType.LargeUtf8.INSTANCE)
-  }
-
 }

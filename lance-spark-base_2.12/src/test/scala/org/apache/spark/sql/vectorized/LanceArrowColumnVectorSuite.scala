@@ -29,6 +29,7 @@ import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.{ArrowUtils, LanceArrowUtils}
 import org.apache.spark.unsafe.types.UTF8String
 import org.lance.spark.LanceConstant
+import org.lance.spark.utils.{BlobUtils, LargeVarCharUtils}
 import org.lance.spark.vectorized.LanceArrowColumnVector
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -370,8 +371,19 @@ class LanceArrowColumnVectorSuite extends AnyFunSuite {
   }
 
   test("large_string") {
+    val largeVarCharMetadata = new MetadataBuilder()
+      .putString(
+        LargeVarCharUtils.ARROW_LARGE_VAR_CHAR_KEY,
+        LargeVarCharUtils.ARROW_LARGE_VAR_CHAR_VALUE)
+      .build()
+
     val allocator = ArrowUtils.rootAllocator.newChildAllocator("string", 0, Long.MaxValue)
-    val vector = LanceArrowUtils.toArrowField("string", StringType, nullable = true, null, true)
+    val vector = LanceArrowUtils.toArrowField(
+      "string",
+      StringType,
+      nullable = true,
+      null,
+      largeVarCharMetadata)
       .createVector(allocator).asInstanceOf[LargeVarCharVector]
     vector.allocateNew()
 
@@ -398,7 +410,7 @@ class LanceArrowColumnVectorSuite extends AnyFunSuite {
 
   test("binary") {
     val allocator = ArrowUtils.rootAllocator.newChildAllocator("binary", 0, Long.MaxValue)
-    val vector = LanceArrowUtils.toArrowField("binary", BinaryType, nullable = true, null, false)
+    val vector = LanceArrowUtils.toArrowField("binary", BinaryType, nullable = true, null)
       .createVector(allocator).asInstanceOf[VarBinaryVector]
     vector.allocateNew()
 
@@ -424,9 +436,16 @@ class LanceArrowColumnVectorSuite extends AnyFunSuite {
   }
 
   test("large_binary") {
+    val largeBinaryMetadata = new MetadataBuilder()
+      .putString(
+        BlobUtils.LANCE_ENCODING_BLOB_KEY,
+        BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+      .build()
+
     val allocator = ArrowUtils.rootAllocator.newChildAllocator("binary", 0, Long.MaxValue)
-    val vector = LanceArrowUtils.toArrowField("binary", BinaryType, nullable = true, null, true)
-      .createVector(allocator).asInstanceOf[LargeVarBinaryVector]
+    val vector =
+      LanceArrowUtils.toArrowField("binary", BinaryType, nullable = true, null, largeBinaryMetadata)
+        .createVector(allocator).asInstanceOf[LargeVarBinaryVector]
     vector.allocateNew()
 
     (0 until 10).foreach { i =>

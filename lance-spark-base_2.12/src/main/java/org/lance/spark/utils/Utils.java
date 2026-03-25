@@ -14,11 +14,13 @@
 package org.lance.spark.utils;
 
 import org.lance.Dataset;
+import org.lance.ReadOptions;
 import org.lance.Version;
 import org.lance.namespace.LanceNamespace;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkCatalogConfig;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.LanceSparkWriteOptions;
 
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.connector.catalog.Identifier;
@@ -26,7 +28,6 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 
 import java.time.Instant;
-import java.time.ZonedDateTime;
 import java.util.List;
 
 public class Utils {
@@ -39,11 +40,11 @@ public class Utils {
     long versionID = -1;
     Instant instant = instantFromTimestamp(timestamp);
     for (Version version : versions) {
-      ZonedDateTime dataTime = version.getDataTime();
-      if (dataTime.toInstant().compareTo(instant) < 0) {
+      // Truncate version timestamp to microsecond precision to match Spark's
+      // microsecond timestamp resolution, avoiding sub-microsecond mismatches
+      Instant versionInstant = truncateToMicros(version.getDataTime().toInstant());
+      if (versionInstant.compareTo(instant) <= 0) {
         versionID = version.getId();
-      } else if (dataTime.toInstant().equals(instant)) {
-        return version.getId();
       } else {
         break;
       }
@@ -54,21 +55,42 @@ public class Utils {
     return versionID;
   }
 
+  /** Opens a dataset via namespace path with read options (storage credentials, etc.). */
+  private static Dataset openDataset(
+      LanceNamespace namespace, List<String> tableId, ReadOptions readOptions) {
+    return Dataset.open()
+        .allocator(LanceRuntime.allocator())
+        .namespace(namespace)
+        .tableId(tableId)
+        .readOptions(readOptions)
+        .build();
+  }
+
+  /** Opens a dataset via URI with the given read options. */
+  public static Dataset openDataset(String uri, ReadOptions readOptions) {
+    return Dataset.open()
+        .allocator(LanceRuntime.allocator())
+        .uri(uri)
+        .readOptions(readOptions)
+        .build();
+  }
+
+  /** Opens a dataset using read options, dispatching to namespace or URI path. */
   public static Dataset openDataset(LanceSparkReadOptions readOptions) {
     if (readOptions.hasNamespace()) {
-      return Dataset.open()
-          .allocator(LanceRuntime.allocator())
-          .namespace(readOptions.getNamespace())
-          .tableId(readOptions.getTableId())
-          .readOptions(readOptions.toReadOptions())
-          .build();
-    } else {
-      return Dataset.open()
-          .allocator(LanceRuntime.allocator())
-          .uri(readOptions.getDatasetUri())
-          .readOptions(readOptions.toReadOptions())
-          .build();
+      return openDataset(
+          readOptions.getNamespace(), readOptions.getTableId(), readOptions.toReadOptions());
     }
+    return openDataset(readOptions.getDatasetUri(), readOptions.toReadOptions());
+  }
+
+  /** Opens a dataset using write options, dispatching to namespace or URI path. */
+  public static Dataset openDataset(LanceSparkWriteOptions writeOptions) {
+    if (writeOptions.hasNamespace()) {
+      return openDataset(
+          writeOptions.getNamespace(), writeOptions.getTableId(), writeOptions.toReadOptions());
+    }
+    return openDataset(writeOptions.getDatasetUri(), writeOptions.toReadOptions());
   }
 
   public static StructType getSchema(Identifier ident, LanceSparkReadOptions readOptions)
@@ -129,5 +151,11 @@ public class Utils {
     long sec = Math.floorDiv(epochMicros, 1_000_000L);
     long nanoAdj = Math.floorMod(epochMicros, 1_000_000L) * 1_000L;
     return Instant.ofEpochSecond(sec, nanoAdj);
+  }
+
+  private static Instant truncateToMicros(Instant instant) {
+    long nanos = instant.getNano();
+    long truncatedNanos = (nanos / 1_000L) * 1_000L;
+    return Instant.ofEpochSecond(instant.getEpochSecond(), truncatedNanos);
   }
 }

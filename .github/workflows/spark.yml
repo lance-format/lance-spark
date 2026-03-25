@@ -95,6 +95,8 @@ jobs:
             scala-version: "2.13"
           - spark-version: "4.0"
             scala-version: "2.13"
+          - spark-version: "4.1"
+            scala-version: "2.13"
     steps:
       - uses: actions/checkout@v4
       - name: Set up Java
@@ -103,6 +105,8 @@ jobs:
           distribution: temurin
           java-version: 17
           cache: "maven"
+      - name: Install base
+        run: make install-base SCALA_VERSION=${{ matrix.scala-version }}
       - name: Run tests
         run: make test SPARK_VERSION=${{ matrix.spark-version }} SCALA_VERSION=${{ matrix.scala-version }}
 
@@ -123,6 +127,8 @@ jobs:
           - spark-version: "3.5"
             scala-version: "2.13"
           - spark-version: "4.0"
+            scala-version: "2.13"
+          - spark-version: "4.1"
             scala-version: "2.13"
     steps:
       - uses: actions/checkout@v4

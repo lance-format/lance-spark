@@ -217,6 +217,7 @@ def spark(request):
             .config(f"spark.sql.catalog.{CATALOG}.storage.aws_allow_http", "true")
             .config(f"spark.sql.catalog.{CATALOG}.storage.access_key_id", s3["access_key"])
             .config(f"spark.sql.catalog.{CATALOG}.storage.secret_access_key", s3["secret_key"])
+            .config(f"spark.sql.catalog.{CATALOG}.storage.region", "us-east-1")
         )
 
     session = builder.getOrCreate()

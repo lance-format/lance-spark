@@ -13,12 +13,12 @@
  */
 package org.lance.spark.write;
 
+import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.FragmentMetadata;
-import org.lance.WriteParams;
+import org.lance.Transaction;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.DeregisterTableRequest;
-import org.lance.operation.Operation;
 import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
 
@@ -54,19 +54,26 @@ public class StagedCommit {
   private final boolean isNewTable;
   private final LanceNamespace namespace;
   private final List<String> tableId;
+  private final boolean managedVersioning;
 
   /** Creates a StagedCommit for an existing table (REPLACE or CREATE_OR_REPLACE on existing). */
   public static StagedCommit forExistingTable(
-      Dataset dataset, Schema schema, LanceNamespace namespace, List<String> tableId) {
+      Dataset dataset,
+      Schema schema,
+      Map<String, String> storageOptions,
+      LanceNamespace namespace,
+      List<String> tableId,
+      boolean managedVersioning) {
     return new StagedCommit(
         Optional.of(dataset),
         Collections.emptyList(),
         schema,
         null,
-        null,
+        storageOptions,
         false,
         namespace,
-        tableId);
+        tableId,
+        managedVersioning);
   }
 
   /** Creates a StagedCommit for a new table (CREATE or CREATE_OR_REPLACE on non-existing). */
@@ -75,7 +82,8 @@ public class StagedCommit {
       String datasetUri,
       Map<String, String> storageOptions,
       LanceNamespace namespace,
-      List<String> tableId) {
+      List<String> tableId,
+      boolean managedVersioning) {
     return new StagedCommit(
         Optional.empty(),
         Collections.emptyList(),
@@ -84,7 +92,8 @@ public class StagedCommit {
         storageOptions,
         true,
         namespace,
-        tableId);
+        tableId,
+        managedVersioning);
   }
 
   private StagedCommit(
@@ -95,7 +104,8 @@ public class StagedCommit {
       Map<String, String> storageOptions,
       boolean isNewTable,
       LanceNamespace namespace,
-      List<String> tableId) {
+      List<String> tableId,
+      boolean managedVersioning) {
     this.dataset = dataset;
     this.fragments = new ArrayList<>(fragments);
     this.schema = schema;
@@ -104,6 +114,7 @@ public class StagedCommit {
     this.isNewTable = isNewTable;
     this.namespace = namespace;
     this.tableId = tableId;
+    this.managedVersioning = managedVersioning;
   }
 
   public void setFragments(List<FragmentMetadata> fragments) {
@@ -124,30 +135,35 @@ public class StagedCommit {
   }
 
   private void commitNewTable() {
-    // TODO: This should use namespace and tableId with the Transaction API to create the table.
-    // Currently using URI-based creation as a workaround because:
-    // 1. Transaction API doesn't support creating new datasets
-    //    (throws UnsupportedOperationException)
-    // 2. Namespace API doesn't have a method to finalize a declared table with fragments
-    // Once the SDK supports Transaction.commit() for new datasets with
-    // LanceNamespaceStorageOptionsProvider, switch to that approach for proper credential
-    // refresh support. The table was already declared via namespace.declareTable().
-    try (Dataset ds =
-        Dataset.write()
-            .allocator(LanceRuntime.allocator())
-            .uri(datasetUri)
-            .schema(schema)
-            .mode(WriteParams.WriteMode.CREATE)
-            .storageOptions(storageOptions)
-            .execute()) {
-      Operation operation = Overwrite.builder().fragments(fragments).schema(schema).build();
-      ds.newTransactionBuilder().operation(operation).build().commit();
+    Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
+    CommitBuilder builder =
+        new CommitBuilder(datasetUri, LanceRuntime.allocator()).writeParams(storageOptions);
+    if (managedVersioning) {
+      builder.namespace(namespace).tableId(tableId);
+    }
+    try (Transaction txn = new Transaction.Builder().operation(operation).build();
+        Dataset committed = builder.execute(txn)) {
+      // auto-close txn and committed dataset
     }
   }
 
   private void commitExistingTable() {
-    Operation operation = Overwrite.builder().fragments(fragments).schema(schema).build();
-    dataset.get().newTransactionBuilder().operation(operation).build().commit();
+    Dataset ds = dataset.get();
+    String uri = ds.uri();
+    long version = ds.version();
+    ds.close();
+
+    Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
+    CommitBuilder builder =
+        new CommitBuilder(uri, LanceRuntime.allocator()).writeParams(storageOptions);
+    if (managedVersioning) {
+      builder.namespace(namespace).tableId(tableId);
+    }
+    try (Transaction txn =
+            new Transaction.Builder().readVersion(version).operation(operation).build();
+        Dataset committed = builder.execute(txn)) {
+      // auto-close txn and committed dataset
+    }
   }
 
   /** Closes the dataset without committing. Used for abort scenarios. */

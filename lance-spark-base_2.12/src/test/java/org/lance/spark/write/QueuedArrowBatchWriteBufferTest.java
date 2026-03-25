@@ -26,10 +26,15 @@ import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -505,6 +510,73 @@ public class QueuedArrowBatchWriteBufferTest {
       assertEquals(totalRows, rowsRead.get());
       // Queue should have been used (max size > 0 at some point)
       assertTrue(maxQueueSize.get() >= 0);
+      writeBuffer.close();
+    }
+  }
+
+  @Test
+  public void testWriteErrorPropagation() throws Exception {
+    // Test that the queue buffers batches when consumer is slow
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Schema schema = createIntSchema();
+      StructType sparkSchema = createIntSparkSchema();
+
+      final int totalRows = 100;
+      final int batchSize = 10;
+      final int queueDepth = 4;
+      final QueuedArrowBatchWriteBuffer writeBuffer =
+          new QueuedArrowBatchWriteBuffer(allocator, schema, sparkSchema, batchSize, queueDepth);
+
+      AtomicInteger rowsWritten = new AtomicInteger(0);
+      AtomicInteger rowsRead = new AtomicInteger(0);
+      CountDownLatch readerConsumedBatch = new CountDownLatch(1);
+
+      Callable<Integer> read =
+          () -> {
+            if (writeBuffer.loadNextBatch()) {
+              VectorSchemaRoot root = writeBuffer.getVectorSchemaRoot();
+              rowsRead.addAndGet(root.getRowCount());
+              readerConsumedBatch.countDown();
+
+              // Throw a mock exception after reading a batch
+              throw new RuntimeException("Mock exception");
+            }
+            return rowsRead.get();
+          };
+
+      // Start background thread to read from the queue
+      FutureTask<Integer> readTask = writeBuffer.createTrackedTask(read);
+      Thread readerThread = new Thread(readTask);
+      readerThread.start();
+
+      // Write data to queue until it throws an exception
+      Assertions.assertThrows(
+          RuntimeException.class,
+          () -> {
+            try {
+              for (int i = 0; i < totalRows; i++) {
+                InternalRow row = new GenericInternalRow(new Object[] {i + 1});
+                writeBuffer.write(row);
+                rowsWritten.incrementAndGet();
+
+                if (rowsWritten.get() >= batchSize) {
+                  // Wait for the reader to consume a batch and throw
+                  readerConsumedBatch.await();
+                  // Wait for the reader task to fully complete so checkForError detects it
+                  while (!readTask.isDone()) {
+                    Thread.sleep(1);
+                  }
+                }
+              }
+            } finally {
+              writeBuffer.setFinished();
+            }
+          });
+
+      Assertions.assertThrows(ExecutionException.class, readTask::get);
+
+      assertEquals(batchSize, rowsWritten.get());
+      assertEquals(batchSize, rowsRead.get());
       writeBuffer.close();
     }
   }

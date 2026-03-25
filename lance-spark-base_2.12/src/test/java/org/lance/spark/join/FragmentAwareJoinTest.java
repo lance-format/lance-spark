@@ -50,7 +50,7 @@ public class FragmentAwareJoinTest {
         SparkSession.builder()
             .appName("fragment-aware-join-test")
             .master("local[4]")
-            .config("spark.sql.catalog.lance", "org.lance.spark.LanceCatalog")
+            .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
             .config(
                 "spark.sql.extensions", "org.lance.spark.extensions.LanceSparkSessionExtensions")
             .getOrCreate();

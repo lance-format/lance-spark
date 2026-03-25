@@ -59,7 +59,7 @@ public abstract class BaseSparkConnectorWriteTest {
         SparkSession.builder()
             .appName("spark-lance-connector-test")
             .master("local")
-            .config("spark.sql.catalog.lance", "org.lance.spark.LanceCatalog")
+            .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
             .config("spark.sql.catalog.lance.max_row_per_file", "1")
             .config("spark.sql.session.timeZone", "UTC")
             .getOrCreate();
@@ -361,7 +361,6 @@ public abstract class BaseSparkConnectorWriteTest {
     Dataset<Row> df2 = spark.createDataFrame(data2, schema2);
     df2.createOrReplaceTempView("replacement_data");
 
-    // This should succeed but currently fails with schema mismatch error
     spark.sql("REPLACE TABLE lance.`" + path + "` AS SELECT * FROM replacement_data");
 
     Dataset<Row> result =
@@ -480,17 +479,17 @@ public abstract class BaseSparkConnectorWriteTest {
     assertTrue(checkDataset(3, outputPath));
 
     // check timestamp as of
-    DateTimeFormatter format = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    DateTimeFormatter format = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS");
     String date = version_3.getDataTime().format(format);
     String sql = String.format("select * from lance.`%s`  TIMESTAMP AS OF '%s'", outputPath, date);
 
     List<Row> res = spark.sql(sql).collectAsList();
-    assertEquals(1, res.size());
+    assertEquals(2, res.size());
 
     // check version as of
     List<Row> res2 =
         spark.sql("select * from lance.`" + outputPath + "`  VERSION AS OF " + 2).collectAsList();
-    assertEquals(1, res2.size());
+    assertEquals(2, res2.size());
   }
 
   private boolean checkDataset(int expectedSize, String path) {
