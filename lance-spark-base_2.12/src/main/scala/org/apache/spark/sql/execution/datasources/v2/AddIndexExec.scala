@@ -30,7 +30,7 @@ import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceRunti
 
 import java.util.{Collections, Optional, UUID}
 
-import scala.jdk.CollectionConverters._
+import scala.collection.JavaConverters._
 
 /**
  * Physical execution of distributed CREATE INDEX (ALTER TABLE ... CREATE INDEX ...) for Lance datasets.

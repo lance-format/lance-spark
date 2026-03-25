@@ -18,7 +18,7 @@ import org.apache.spark.sql.catalyst.parser.ParserInterface
 import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, LogicalPlan, NamedArgument, Optimize, ShowIndexes, UpdateColumnsBackfill, Vacuum}
 import org.lance.spark.utils.ParserUtils
 
-import scala.jdk.CollectionConverters._
+import scala.collection.JavaConverters._
 
 class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
   extends LanceSqlExtensionsBaseVisitor[AnyRef] {
