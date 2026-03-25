@@ -21,7 +21,6 @@ import org.lance.Transaction;
 import org.lance.fragment.FragmentMergeResult;
 import org.lance.operation.Merge;
 import org.lance.spark.LanceDataset;
-import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.utils.Utils;
 
