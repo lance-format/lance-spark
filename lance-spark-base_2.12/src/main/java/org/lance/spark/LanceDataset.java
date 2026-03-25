@@ -321,7 +321,7 @@ public class LanceDataset
             .tableId(readOptions.getTableId())
             .fromOptions(mergedOptions);
     // Use table's file format version if not explicitly set in write options
-    if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)
+    if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_DATA_STORAGE_VERSION)
         && dataStorageVersion != null) {
       writeOptionsBuilder.dataStorageVersion(dataStorageVersion);
     }

@@ -594,7 +594,7 @@ public abstract class BaseSparkConnectorWriteTest {
         .write()
         .format(LanceDataSource.name)
         .option(LanceSparkReadOptions.CONFIG_DATASET_URI, path)
-        .option(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION, "LEGACY")
+        .option(LanceSparkWriteOptions.CONFIG_DATA_STORAGE_VERSION, "LEGACY")
         .save();
 
     try (org.lance.Dataset ds =

@@ -52,7 +52,7 @@ public class LanceSparkWriteOptions implements Serializable {
   public static final String CONFIG_MAX_ROWS_PER_FILE = "max_row_per_file";
   public static final String CONFIG_MAX_ROWS_PER_GROUP = "max_rows_per_group";
   public static final String CONFIG_MAX_BYTES_PER_FILE = "max_bytes_per_file";
-  public static final String CONFIG_FILE_FORMAT_VERSION = "data_storage_version";
+  public static final String CONFIG_DATA_STORAGE_VERSION = "data_storage_version";
   public static final String CONFIG_USE_QUEUED_WRITE_BUFFER = "use_queued_write_buffer";
   public static final String CONFIG_QUEUE_DEPTH = "queue_depth";
   public static final String CONFIG_BATCH_SIZE = "batch_size";
@@ -397,8 +397,8 @@ public class LanceSparkWriteOptions implements Serializable {
       if (options.containsKey(CONFIG_MAX_BYTES_PER_FILE)) {
         this.maxBytesPerFile = Long.parseLong(options.get(CONFIG_MAX_BYTES_PER_FILE));
       }
-      if (options.containsKey(CONFIG_FILE_FORMAT_VERSION)) {
-        this.dataStorageVersion = options.get(CONFIG_FILE_FORMAT_VERSION);
+      if (options.containsKey(CONFIG_DATA_STORAGE_VERSION)) {
+        this.dataStorageVersion = options.get(CONFIG_DATA_STORAGE_VERSION);
       }
       if (options.containsKey(CONFIG_USE_QUEUED_WRITE_BUFFER)) {
         this.useQueuedWriteBuffer =
