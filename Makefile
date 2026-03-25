@@ -150,7 +150,6 @@ docker-build-test-base:
 		--build-arg SPARK_SCALA_SUFFIX=$(SPARK_SCALA_SUFFIX) \
 		$(if $(DOCKER_CACHE_FROM),--cache-from $(DOCKER_CACHE_FROM)) \
 		$(if $(DOCKER_CACHE_TO),--cache-to $(DOCKER_CACHE_TO)) \
-		--load \
 		-f Dockerfile.test-base \
 		-t lance-spark-test-base:$(SPARK_VERSION)_$(SCALA_VERSION) \
 		.
@@ -161,10 +160,9 @@ docker-build-test:
 		(echo "Error: Bundle jar not found. Run 'make bundle' first." && exit 1)
 	rm -f docker/lance-spark-bundle-*.jar
 	cp $(BUNDLE_MODULE)/target/$(BUNDLE_MODULE)-*.jar docker/
-	cd docker && docker buildx build --no-cache \
+	cd docker && docker build --no-cache \
 		--build-arg SPARK_MAJOR_VERSION=$(SPARK_VERSION) \
 		--build-arg SCALA_VERSION=$(SCALA_VERSION) \
-		--load \
 		-f Dockerfile.test \
 		-t lance-spark-test:$(SPARK_VERSION)_$(SCALA_VERSION) \
 		.
