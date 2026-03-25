@@ -4,82 +4,103 @@ Runs the [TPC-DS](http://www.tpc.org/tpcds/) query suite against Lance and Parqu
 
 `parquet` here refers to Spark's built-in Parquet reader, used as a performance baseline.
 
+## Architecture
+
+Data generation uses the [Apache Kyuubi TPC-DS connector](https://kyuubi.readthedocs.io/en/master/connector/spark/tpcds.html), a pure-Spark data source that generates TPC-DS data in parallel across executors. No external `dsdgen` binary, CSV files, or intermediate formats are needed — data is written directly into the target format (Lance, Parquet, etc.) and can target any Spark-supported storage (local, S3, GCS, HDFS).
+
+The pipeline is split into two independent Spark jobs:
+
+1. **`TpcdsDataGenerator`** — Reads from the Kyuubi TPC-DS catalog and writes all 24 tables directly into each target format.
+2. **`TpcdsBenchmarkRunner`** — Registers the generated tables and runs the 99 TPC-DS queries, comparing formats.
+
 ### TODO
 - **Delta / Iceberg support** — not yet included because they require additional catalog/metastore tooling outside lance-spark's scope.
 
-## Quick Start (Docker)
-
-The Docker-based runner is useful for local debugging (no host Spark or dsdgen installation required) and CI integration.
-
-```bash
-# Compare Lance vs Parquet (default), scale factor 1
-make benchmark-docker
-
-# Lance only, with profiling
-make benchmark-docker FORMATS=lance
-
-# Rebuild everything from scratch
-make benchmark-docker SF=10 FORMATS=parquet,lance ITERATIONS=3
-```
-
-Or call the script directly for additional flags:
-
-```bash
-./benchmark/scripts/run-docker-benchmark.sh --formats lance --explain --metrics
-
-# Run a single query with profiling
-./benchmark/scripts/run-docker-benchmark.sh --formats parquet,lance --queries q3 --explain --metrics
-```
-
-### Docker Options
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--sf <n>` | TPC-DS scale factor | `1` |
-| `--formats <list>` | Comma-separated formats to benchmark | `parquet,lance` |
-| `--iterations <n>` | Iterations per query | `1` |
-| `--queries <list>` | Comma-separated query names (e.g. `q3,q14a,q55`) | all |
-| `--memory <size>` | Spark driver memory | `4g` |
-| `--rebuild` | Force rebuild of jars and Docker image | off |
-| `--explain` | Print `EXPLAIN EXTENDED` for each query (first iteration) | off |
-| `--metrics` | Capture per-task metrics (CPU, GC, I/O, shuffle) | off |
-| `--ui` | Enable Spark UI on `localhost:4040` | off |
-
-### Profiling Features
-
-**`--explain`** prints the Spark query plan before executing each query (first iteration only), useful for verifying filter/projection pushdown.
-
-**`--metrics`** registers a `SparkListener` that captures per-task stats:
-```
-  [OK] q3 iter=1 time=822ms rows=89
-       Metrics: tasks=12 cpu=680ms gc=15ms read=45MB shuffle_r=2MB shuffle_w=2MB
-```
-
-**`--ui`** exposes the Spark web UI at `http://localhost:4040` while the benchmark runs, with event logging enabled. Useful for inspecting stage DAGs, task timelines, and storage details.
-
-## Running Without Docker
-
-For running directly on a machine with Spark installed:
+## Quick Start
 
 ```bash
 # Build the jars first
 make bundle SPARK_VERSION=3.5 SCALA_VERSION=2.12
 make benchmark-build
 
-# Run the benchmark
-./benchmark/scripts/run-benchmark.sh [SCALE_FACTOR] [FORMATS] [SPARK_MASTER] [ITERATIONS]
+# End-to-end: generate data + run queries
+make benchmark SF=10 FORMATS=parquet,lance ITERATIONS=3
+```
 
-# Examples
-./benchmark/scripts/run-benchmark.sh 1 lance,parquet local[*] 3
+Or run the two phases separately:
+
+```bash
+# Step 1: Generate TPC-DS data (parallel Spark job)
+./benchmark/scripts/generate-data.sh [SCALE_FACTOR] [FORMATS] [SPARK_MASTER]
+
+# Step 2: Run benchmark queries against generated data
+./benchmark/scripts/run-benchmark.sh [FORMATS] [SPARK_MASTER] [ITERATIONS]
+```
+
+### Examples
+
+```bash
+# Generate SF=10 data in both formats
+./benchmark/scripts/generate-data.sh 10 parquet,lance local[*]
+
+# Run queries with profiling
+EXPLAIN=true METRICS=true ./benchmark/scripts/run-benchmark.sh parquet,lance local[*] 3
+
+# Run a subset of queries
+QUERIES=q3,q14a,q55 ./benchmark/scripts/run-benchmark.sh lance local[*] 1
 
 # Override Spark/Scala versions
-SPARK_VERSION=3.5 SCALA_VERSION=2.12 ./benchmark/scripts/run-benchmark.sh 1
-
-# Enable profiling flags
-EXPLAIN=true METRICS=true QUERIES=q3,q55 ./benchmark/scripts/run-benchmark.sh 1
+SPARK_VERSION=3.5 SCALA_VERSION=2.12 ./benchmark/scripts/generate-data.sh 10
 ```
 
 Set `SPARK_HOME` if `spark-submit` is not on your `PATH`.
+
+### Using the Docker environment
+
+If you don't have Spark installed locally, use the existing `spark-lance` Docker container. The benchmark jar, data, and results directories are volume-mounted automatically.
+
+```bash
+# Build jars on the host
+make bundle SPARK_VERSION=3.5 SCALA_VERSION=2.12
+make benchmark-build
+
+# Start the Spark container
+make docker-up
+
+# Generate data (inside the container)
+docker exec spark-lance spark-submit \
+  --class org.lance.spark.benchmark.TpcdsDataGenerator \
+  --master local[*] \
+  /home/lance/benchmark/lance-spark-benchmark-0.3.0-beta.1.jar \
+  --data-dir /home/lance/data --scale-factor 1 --formats parquet,lance
+
+# Run benchmark queries (inside the container)
+docker exec spark-lance spark-submit \
+  --class org.lance.spark.benchmark.TpcdsBenchmarkRunner \
+  --master local[*] \
+  /home/lance/benchmark/lance-spark-benchmark-0.3.0-beta.1.jar \
+  --data-dir /home/lance/data --results-dir /home/lance/results \
+  --formats parquet,lance --iterations 3
+
+# Results appear on the host at benchmark/results/
+```
+
+Or shell in and run interactively:
+
+```bash
+make docker-shell
+# Now inside the container, spark-submit as usual
+```
+
+### Profiling Features
+
+**`EXPLAIN=true`** prints the Spark query plan before executing each query (first iteration only), useful for verifying filter/projection pushdown.
+
+**`METRICS=true`** registers a `SparkListener` that captures per-task stats:
+```
+  [OK] q3 iter=1 time=822ms rows=89
+       Metrics: tasks=12 cpu=680ms gc=15ms read=45MB shuffle_r=2MB shuffle_w=2MB
+```
 
 ## Running on an External Cluster
 
@@ -92,36 +113,33 @@ make bundle SPARK_VERSION=3.5 SCALA_VERSION=2.12
 make benchmark-build
 ```
 
-### 2. Generate TPC-DS data and write directly to object store
+### 2. Generate TPC-DS data directly to object store
 
-Use `spark-submit` with object store paths so data is written directly — no local generation and upload step needed:
+Data generation is a Spark job — it writes directly to any Spark-supported storage:
 
 ```bash
 spark-submit \
-  --class org.lance.spark.benchmark.TpcdsBenchmarkRunner \
+  --class org.lance.spark.benchmark.TpcdsDataGenerator \
   --master local[*] \
+  --driver-memory 8g \
   --jars path/to/lance-spark-bundle-3.5_2.12-*.jar \
   --conf spark.sql.extensions=org.lance.spark.LanceSparkSessionExtension \
   --conf spark.hadoop.fs.s3a.access.key=YOUR_KEY \
   --conf spark.hadoop.fs.s3a.secret.key=YOUR_SECRET \
-  --conf spark.hadoop.fs.s3a.endpoint=s3.amazonaws.com \
   benchmark/target/lance-spark-benchmark-*.jar \
-  --raw-data /tmp/tpcds-raw \
   --data-dir s3a://my-bucket/tpcds/sf10 \
-  --results-dir s3a://my-bucket/tpcds/sf10/results \
-  --formats parquet,lance \
-  --iterations 1
+  --scale-factor 10 \
+  --formats parquet,lance
 ```
 
-Alternatively, use the script with object store env vars:
+Or use the script with env vars:
 
 ```bash
 DATA_DIR=s3a://my-bucket/tpcds/sf10 \
-RESULTS_DIR=s3a://my-bucket/tpcds/sf10/results \
-./benchmark/scripts/run-benchmark.sh 10 parquet,lance local[*] 1
+./benchmark/scripts/generate-data.sh 10 parquet,lance local[*]
 ```
 
-### 3. Submit to the cluster
+### 3. Run benchmark queries on the cluster
 
 ```bash
 spark-submit \
@@ -137,9 +155,7 @@ spark-submit \
   --conf spark.sql.adaptive.enabled=true \
   --conf spark.hadoop.fs.s3a.access.key=YOUR_KEY \
   --conf spark.hadoop.fs.s3a.secret.key=YOUR_SECRET \
-  --conf spark.hadoop.fs.s3a.endpoint=s3.amazonaws.com \
   benchmark/target/lance-spark-benchmark-*.jar \
-  --raw-data s3a://my-bucket/tpcds/sf10/raw \
   --data-dir s3a://my-bucket/tpcds/sf10 \
   --results-dir s3a://my-bucket/tpcds/sf10/results \
   --formats parquet,lance \
@@ -181,15 +197,13 @@ When `--metrics` is enabled, extra columns appear (CPU time, bytes read, shuffle
 ```
 benchmark/
 ├── scripts/
-│   ├── run-docker-benchmark.sh   # Docker-based runner (recommended)
-│   ├── run-benchmark.sh          # Local runner (requires Spark installed)
-│   ├── generate-data.sh          # TPC-DS data generation
-│   └── install-dsdgen.sh         # dsdgen build script
+│   ├── generate-data.sh          # Data generation via Spark + Kyuubi connector
+│   └── run-benchmark.sh          # Query runner
 ├── src/main/java/org/lance/spark/benchmark/
-│   ├── TpcdsBenchmarkRunner.java # Main entry point, arg parsing
+│   ├── TpcdsDataGenerator.java   # Spark job: Kyuubi TPC-DS → Lance/Parquet
+│   ├── TpcdsBenchmarkRunner.java # Main entry point for query benchmarking
+│   ├── TpcdsDataLoader.java      # Register pre-generated tables as temp views
 │   ├── TpcdsQueryRunner.java     # Query execution loop
-│   ├── TpcdsDataLoader.java      # CSV → Lance/Parquet conversion
-│   ├── TpcdsSchemaDefinition.java# Table schemas (24 tables)
 │   ├── BenchmarkResult.java      # Per-query result record
 │   ├── BenchmarkReporter.java    # CSV + summary output
 │   ├── QueryMetrics.java         # Per-query task-level metrics

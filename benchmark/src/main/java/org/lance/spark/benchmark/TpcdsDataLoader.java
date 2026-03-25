@@ -13,98 +13,61 @@
  */
 package org.lance.spark.benchmark;
 
-import java.io.File;
-import java.util.Map;
-
-import org.apache.spark.sql.Dataset;
-import org.apache.spark.sql.Row;
-import org.apache.spark.sql.SaveMode;
 import org.apache.spark.sql.SparkSession;
-import org.apache.spark.sql.types.StructType;
 
+/**
+ * Registers pre-generated TPC-DS tables as Spark temp views for querying.
+ *
+ * <p>Tables must be generated beforehand using {@link TpcdsDataGenerator}.
+ */
 public class TpcdsDataLoader {
 
   private final SparkSession spark;
-  private final String rawDataDir;
   private final String dataDir;
 
-  public TpcdsDataLoader(SparkSession spark, String rawDataDir, String dataDir) {
+  public TpcdsDataLoader(SparkSession spark, String dataDir) {
     this.spark = spark;
-    this.rawDataDir = rawDataDir;
     this.dataDir = dataDir;
   }
 
-  public void loadAllTables(String format) {
-    Map<String, StructType> schemas = TpcdsSchemaDefinition.getAllSchemas();
-    String outputDir = dataDir + "/" + format;
-
-    System.out.println("Loading tables into " + format + " at " + outputDir);
-    System.out.flush();
-
-    for (Map.Entry<String, StructType> entry : schemas.entrySet()) {
-      String tableName = entry.getKey();
-      StructType schema = entry.getValue();
-      loadTable(tableName, schema, format, outputDir);
-    }
-  }
-
-  private void loadTable(String tableName, StructType schema, String format, String outputDir) {
-    String rawFile = rawDataDir + "/" + tableName + ".dat";
-    if (!new File(rawFile).exists()) {
-      System.out.println("  SKIP " + tableName + " (no data file)");
-      System.out.flush();
-      return;
-    }
-
-    boolean isLance = "lance".equalsIgnoreCase(format);
-    String tablePath = outputDir + "/" + tableName;
-    if (isLance) {
-      tablePath = tablePath + ".lance";
-    }
-    if (new File(tablePath).exists()) {
-      System.out.println("  SKIP " + tableName + " (already loaded)");
-      System.out.flush();
-      return;
-    }
-
-    System.out.print("  LOAD " + tableName + "...");
-    System.out.flush();
-    long start = System.currentTimeMillis();
-
-    Dataset<Row> df =
-        spark
-            .read()
-            .option("delimiter", "|")
-            .option("header", "false")
-            .option("emptyValue", "")
-            .schema(schema)
-            .csv(rawFile);
-
-    String writeFormat = isLance ? "lance" : format;
-    SaveMode mode = isLance ? SaveMode.ErrorIfExists : SaveMode.Overwrite;
-
-    df.write().mode(mode).format(writeFormat).save(tablePath);
-
-    long elapsed = System.currentTimeMillis() - start;
-    long count = spark.read().format(writeFormat).load(tablePath).count();
-    System.out.println(" " + count + " rows (" + elapsed + "ms)");
-    System.out.flush();
-  }
-
+  /**
+   * Registers all TPC-DS tables for the given format as temp views.
+   *
+   * @param format the storage format (e.g. "lance", "parquet")
+   */
   public void registerTables(String format) {
     String formatDir = dataDir + "/" + format;
     boolean isLance = "lance".equalsIgnoreCase(format);
     String readFormat = isLance ? "lance" : format;
 
-    for (String tableName : TpcdsSchemaDefinition.getTableNames()) {
+    int registered = 0;
+    for (String tableName : TpcdsDataGenerator.TPCDS_TABLES) {
       String tablePath = formatDir + "/" + tableName;
       if (isLance) {
-        tablePath = tablePath + ".lance";
+        tablePath = TpcdsDataGenerator.toLancePath(tablePath) + ".lance";
       }
-      if (!new File(tablePath).exists()) {
-        continue;
+
+      try {
+        spark.read().format(readFormat).load(tablePath).createOrReplaceTempView(tableName);
+        registered++;
+      } catch (Exception e) {
+        System.out.println("  SKIP " + tableName + " (not found at " + tablePath + ")");
+        System.out.flush();
       }
-      spark.read().format(readFormat).load(tablePath).createOrReplaceTempView(tableName);
+    }
+
+    System.out.println(
+        "Registered " + registered + "/" + TpcdsDataGenerator.TPCDS_TABLES.size()
+            + " tables for format: " + format);
+    System.out.flush();
+  }
+
+  /**
+   * Drops all TPC-DS temp views (used between format runs).
+   */
+  public void unregisterTables() {
+    for (String tableName : TpcdsDataGenerator.TPCDS_TABLES) {
+      spark.catalog().dropTempView(tableName);
     }
   }
 }

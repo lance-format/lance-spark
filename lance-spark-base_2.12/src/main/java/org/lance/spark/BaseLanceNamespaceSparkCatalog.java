@@ -16,6 +16,8 @@ package org.lance.spark;
 import org.lance.Dataset;
 import org.lance.WriteParams;
 import org.lance.namespace.LanceNamespace;
+import org.lance.namespace.errors.ErrorCode;
+import org.lance.namespace.errors.LanceNamespaceException;
 import org.lance.namespace.errors.TableNotFoundException;
 import org.lance.namespace.model.DeclareTableRequest;
 import org.lance.namespace.model.DeclareTableResponse;
@@ -802,12 +804,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     DescribeTableRequest describeRequest = new DescribeTableRequest();
     tableIdList.forEach(describeRequest::addIdItem);
-    DescribeTableResponse describeResponse;
-    try {
-      describeResponse = namespace.describeTable(describeRequest);
-    } catch (TableNotFoundException e) {
-      throw new NoSuchTableException(ident);
-    }
+    DescribeTableResponse describeResponse = describeTableOrThrow(describeRequest, ident);
     String location = describeResponse.getLocation();
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
     boolean managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
@@ -1107,14 +1104,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     // Call describeTable to get location and initial storage options
     DescribeTableRequest describeRequest = new DescribeTableRequest();
     tableId.forEach(describeRequest::addIdItem);
-    DescribeTableResponse describeResponse;
-    try {
-      describeResponse = namespace.describeTable(describeRequest);
-    } catch (TableNotFoundException e) {
-      throw new NoSuchTableException(ident);
-    } catch (RuntimeException e) {
-      throw new RuntimeException("Failed to describe table: " + ident, e);
-    }
+    DescribeTableResponse describeResponse = describeTableOrThrow(describeRequest, ident);
     String location = describeResponse.getLocation();
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
 
@@ -1151,6 +1141,52 @@ public abstract class BaseLanceNamespaceSparkCatalog
         namespaceImpl,
         namespaceProperties,
         managedVersioning);
+  }
+
+  /**
+   * Calls namespace.describeTable and translates table-not-found errors into Spark's {@link
+   * NoSuchTableException}.
+   *
+   * <p>Two catch blocks handle the error:
+   *
+   * <ol>
+   *   <li>{@link LanceNamespaceException} with {@link ErrorCode#TABLE_NOT_FOUND} — catches the
+   *       exception that the JNI bridge creates once the upstream lance-namespace-impls uses typed
+   *       {@code NamespaceError::TableNotFound} (see lance PR #6267 / #6275). This also covers
+   *       {@link TableNotFoundException} (a subclass of {@link LanceNamespaceException}).
+   *   <li>{@link RuntimeException} with message matching — workaround for the current state where
+   *       dir.rs and dir/manifest.rs use {@code Error::namespace_source(String)}, causing the JNI
+   *       downcast to {@code NamespaceError} to fail and fall back to a raw RuntimeException. Two
+   *       known message patterns: "Table does not exist: {name}" (dir.rs) and "Table '{name}' not
+   *       found" (manifest.rs).
+   * </ol>
+   *
+   * <p>TODO: Remove the RuntimeException catch block once lance fixes dir.rs and manifest.rs to use
+   * {@code NamespaceError::TableNotFound}.
+   *
+   * <p>This helper should be used at call sites where {@code NoSuchTableException} is the expected
+   * outcome for missing tables (e.g. {@code loadTableInternal}, {@code stageReplace}). Call sites
+   * where the table is known to exist (e.g. post-creation) should call {@code
+   * namespace.describeTable()} directly, since a missing table there indicates an unexpected error.
+   */
+  private DescribeTableResponse describeTableOrThrow(DescribeTableRequest request, Identifier ident)
+      throws NoSuchTableException {
+    try {
+      return namespace.describeTable(request);
+    } catch (LanceNamespaceException e) {
+      if (e.getErrorCode() == ErrorCode.TABLE_NOT_FOUND) {
+        throw new NoSuchTableException(ident);
+      }
+      throw e;
+    } catch (RuntimeException e) {
+      String msg = e.getMessage();
+      if (msg != null
+          && (msg.contains("Table does not exist")
+              || (msg.contains("Table") && msg.contains("not found")))) {
+        throw new NoSuchTableException(ident);
+      }
+      throw e;
+    }
   }
 
   /**

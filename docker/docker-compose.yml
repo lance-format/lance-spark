@@ -13,6 +13,9 @@ services:
     volumes:
       - ./warehouse:/home/lance/warehouse
       - ./notebooks:/home/lance/notebooks
+      - ../benchmark/target:/home/lance/benchmark
+      - ../benchmark/data:/home/lance/data
+      - ../benchmark/results:/home/lance/results
     environment:
       - AWS_ACCESS_KEY_ID=admin
       - AWS_SECRET_ACCESS_KEY=password
