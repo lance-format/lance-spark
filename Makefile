@@ -140,6 +140,14 @@ docker-shell:
 docker-down: check-docker-compose
 	cd docker && ${DOCKER_COMPOSE} down
 
+# Print resolved Docker build args for use in CI (e.g. GitHub Actions step outputs).
+# This keeps versions.mk as the single source of truth for version mappings.
+.PHONY: print-docker-build-args
+print-docker-build-args:
+	@echo "spark-download-version=$(SPARK_DOWNLOAD_VERSION)"
+	@echo "py4j-version=$(PY4J_VERSION)"
+	@echo "spark-scala-suffix=$(SPARK_SCALA_SUFFIX)"
+
 .PHONY: docker-build-test-base
 docker-build-test-base:
 	cd docker && docker buildx build \
