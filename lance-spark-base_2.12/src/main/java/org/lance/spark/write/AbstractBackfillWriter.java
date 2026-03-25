@@ -106,7 +106,7 @@ public abstract class AbstractBackfillWriter implements DataWriter<InternalRow> 
               BufferAllocator allocator = LanceRuntime.allocator();
               VectorSchemaRoot data =
                   VectorSchemaRoot.create(
-                      LanceArrowUtils.toArrowSchema(writerSchema, "UTC", false, false), allocator);
+                      LanceArrowUtils.toArrowSchema(writerSchema, "UTC", false), allocator);
               org.lance.spark.arrow.LanceArrowWriter writer =
                   org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(data, writerSchema);
               return new FragmentBuffer(data, writer);
