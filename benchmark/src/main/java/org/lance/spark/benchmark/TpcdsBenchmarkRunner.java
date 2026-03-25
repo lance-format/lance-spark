@@ -20,10 +20,15 @@ import java.util.List;
 
 import org.apache.spark.sql.SparkSession;
 
+/**
+ * Runs TPC-DS queries against pre-generated tables and reports results.
+ *
+ * <p>Tables must already exist under {@code <data-dir>/<format>/} — use
+ * {@link TpcdsDataGenerator} to create them first.
+ */
 public class TpcdsBenchmarkRunner {
 
   public static void main(String[] args) throws Exception {
-    String rawDataDir = null;
     String dataDir = null;
     String resultsDir = null;
     String formatsStr = "lance,parquet";
@@ -34,9 +39,6 @@ public class TpcdsBenchmarkRunner {
 
     for (int i = 0; i < args.length; i++) {
       switch (args[i]) {
-        case "--raw-data":
-          rawDataDir = args[++i];
-          break;
         case "--data-dir":
           dataDir = args[++i];
           break;
@@ -65,7 +67,7 @@ public class TpcdsBenchmarkRunner {
       }
     }
 
-    if (rawDataDir == null || dataDir == null || resultsDir == null) {
+    if (dataDir == null || resultsDir == null) {
       System.err.println("Missing required arguments.");
       printUsage();
       System.exit(1);
@@ -84,7 +86,7 @@ public class TpcdsBenchmarkRunner {
         spark.sparkContext().addSparkListener(metricsListener);
       }
 
-      TpcdsDataLoader loader = new TpcdsDataLoader(spark, rawDataDir, dataDir);
+      TpcdsDataLoader loader = new TpcdsDataLoader(spark, dataDir);
       TpcdsQueryRunner runner =
           new TpcdsQueryRunner(spark, iterations, explain, metricsListener, queries);
       List<BenchmarkResult> allResults = new ArrayList<>();
@@ -95,10 +97,7 @@ public class TpcdsBenchmarkRunner {
         System.out.println("=== Format: " + format + " ===");
         System.out.flush();
 
-        // Load data
-        loader.loadAllTables(format);
-
-        // Register tables as temp views
+        // Register pre-generated tables as temp views
         loader.registerTables(format);
 
         // Run queries
@@ -106,9 +105,7 @@ public class TpcdsBenchmarkRunner {
         allResults.addAll(formatResults);
 
         // Unregister tables for next format
-        for (String table : TpcdsSchemaDefinition.getTableNames()) {
-          spark.catalog().dropTempView(table);
-        }
+        loader.unregisterTables();
       }
 
       // Report
@@ -128,7 +125,6 @@ public class TpcdsBenchmarkRunner {
   private static void printUsage() {
     System.err.println(
         "Usage: TpcdsBenchmarkRunner"
-            + " --raw-data <path>"
             + " --data-dir <path>"
             + " --results-dir <path>"
             + " [--formats lance,parquet]"

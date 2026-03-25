@@ -198,18 +198,22 @@ docker-test:
 benchmark-build:
 	cd benchmark && mvn package -DskipTests
 
+.PHONY: benchmark-generate
+benchmark-generate:
+	cd benchmark && DATA_DIR=$(DATA_DIR) ./scripts/generate-data.sh $(SF) $(FORMATS) $(SPARK_MASTER)
+
 .PHONY: benchmark-run
 benchmark-run:
-	cd benchmark && ./scripts/run-benchmark.sh $(SF) $(FORMATS) $(SPARK_MASTER) $(ITERATIONS)
+	cd benchmark && DATA_DIR=$(DATA_DIR) ./scripts/run-benchmark.sh $(FORMATS) $(SPARK_MASTER) $(ITERATIONS)
 
-.PHONY: benchmark-docker
-benchmark-docker:
-	./benchmark/scripts/run-docker-benchmark.sh --sf $(SF) --formats $(FORMATS) --iterations $(ITERATIONS)
+.PHONY: benchmark
+benchmark: benchmark-generate benchmark-run
 
 SF ?= 1
 FORMATS ?= lance,parquet
 SPARK_MASTER ?= local[*]
 ITERATIONS ?= 3
+DATA_DIR ?= benchmark/data
 
 # =============================================================================
 # Documentation
@@ -256,8 +260,9 @@ help:
 	@echo ""
 	@echo "Benchmark:"
 	@echo "  benchmark-build        - Build benchmark jar"
-	@echo "  benchmark-run          - Run TPC-DS benchmark (SF=1 FORMATS=lance,parquet)"
-	@echo "  benchmark-docker       - Run TPC-DS benchmark in Docker (SF=1 FORMATS=lance,parquet)"
+	@echo "  benchmark-generate     - Generate TPC-DS data via Spark (SF=1 FORMATS=lance,parquet)"
+	@echo "  benchmark-run          - Run TPC-DS queries (FORMATS=lance,parquet ITERATIONS=3)"
+	@echo "  benchmark              - Generate data + run queries (end-to-end)"
 	@echo ""
 	@echo "Documentation:"
 	@echo "  serve-docs     - Serve documentation locally"

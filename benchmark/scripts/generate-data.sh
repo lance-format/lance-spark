@@ -11,31 +11,76 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# TPC-DS data generation via Spark (using Kyuubi TPC-DS connector).
+#
+# Generates TPC-DS tables in parallel across Spark executors and writes
+# them directly into the target format(s) — no intermediate files.
+#
+# Usage:
+#   ./generate-data.sh [SCALE_FACTOR] [FORMATS] [SPARK_MASTER]
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BENCHMARK_DIR="${SCRIPT_DIR}/.."
+
+# Configurable Spark/Scala versions (override via environment)
+SPARK_VERSION="${SPARK_VERSION:-3.5}"
+SCALA_VERSION="${SCALA_VERSION:-2.12}"
+
 SCALE_FACTOR="${1:-1}"
-OUTPUT_DIR="${2:-${SCRIPT_DIR}/../data/raw}"
-DSDGEN_DIR="${3:-${SCRIPT_DIR}/../tools/tpcds-kit/tools}"
+FORMATS="${2:-parquet,lance}"
+SPARK_MASTER="${3:-local[*]}"
 
-echo "=== Generating TPC-DS data at SF=${SCALE_FACTOR} ==="
+# Object store / external paths — default to local when unset
+DATA_DIR="${DATA_DIR:-${BENCHMARK_DIR}/data}"
 
-if [ ! -x "${DSDGEN_DIR}/dsdgen" ]; then
-  echo "ERROR: dsdgen not found at ${DSDGEN_DIR}/dsdgen"
-  echo "Run install-dsdgen.sh first."
-  exit 1
+echo "=== TPC-DS Data Generation ==="
+echo "Scale factor:    ${SCALE_FACTOR}"
+echo "Formats:         ${FORMATS}"
+echo "Spark master:    ${SPARK_MASTER}"
+echo "Spark version:   ${SPARK_VERSION}"
+echo "Scala version:   ${SCALA_VERSION}"
+echo "Data dir:        ${DATA_DIR}"
+echo ""
+
+# Step 1: Build benchmark jar if needed
+BENCHMARK_JAR="${BENCHMARK_DIR}/target/lance-spark-benchmark-0.3.0-beta.1.jar"
+if [ ! -f "${BENCHMARK_JAR}" ]; then
+  echo "--- Building benchmark jar ---"
+  cd "${BENCHMARK_DIR}"
+  mvn package -DskipTests -q
+  cd "${SCRIPT_DIR}"
 fi
 
-mkdir -p "${OUTPUT_DIR}"
+# Step 2: Find the bundle jar
+BUNDLE_JAR=$(find "${BENCHMARK_DIR}/.." -path "*/lance-spark-bundle-${SPARK_VERSION}_${SCALA_VERSION}/target/lance-spark-bundle-*.jar" -not -name "*sources*" -not -name "*javadoc*" | head -1)
+if [ -z "${BUNDLE_JAR}" ]; then
+  echo "WARNING: lance-spark bundle jar not found. Building it..."
+  cd "${BENCHMARK_DIR}/.."
+  make bundle SPARK_VERSION="${SPARK_VERSION}" SCALA_VERSION="${SCALA_VERSION}"
+  BUNDLE_JAR=$(find "${BENCHMARK_DIR}/.." -path "*/lance-spark-bundle-${SPARK_VERSION}_${SCALA_VERSION}/target/lance-spark-bundle-*.jar" -not -name "*sources*" -not -name "*javadoc*" | head -1)
+  cd "${SCRIPT_DIR}"
+fi
 
-cd "${DSDGEN_DIR}"
-./dsdgen \
-  -DIR "${OUTPUT_DIR}" \
-  -SCALE "${SCALE_FACTOR}" \
-  -TERMINATE N \
-  -FORCE Y
+# Step 3: Generate data via spark-submit
+SPARK_SUBMIT="spark-submit"
+if [ -n "${SPARK_HOME:-}" ]; then
+  SPARK_SUBMIT="${SPARK_HOME}/bin/spark-submit"
+fi
 
-FILE_COUNT=$(find "${OUTPUT_DIR}" -name "*.dat" | wc -l)
-echo "Generated ${FILE_COUNT} data files in ${OUTPUT_DIR}"
-echo "Scale factor: ${SCALE_FACTOR}"
-du -sh "${OUTPUT_DIR}"
+${SPARK_SUBMIT} \
+  --class org.lance.spark.benchmark.TpcdsDataGenerator \
+  --master "${SPARK_MASTER}" \
+  --driver-memory "${DRIVER_MEMORY:-4g}" \
+  --executor-memory "${EXECUTOR_MEMORY:-4g}" \
+  --jars "${BUNDLE_JAR}" \
+  --conf spark.sql.extensions=org.lance.spark.LanceSparkSessionExtension \
+  --conf spark.driver.extraJavaOptions="-XX:+IgnoreUnrecognizedVMOptions --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED -Dio.netty.tryReflectionSetAccessible=true" \
+  "${BENCHMARK_JAR}" \
+  --data-dir "${DATA_DIR}" \
+  --scale-factor "${SCALE_FACTOR}" \
+  --formats "${FORMATS}"
+
+echo ""
+echo "=== Data generation complete ==="
