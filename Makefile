@@ -150,6 +150,7 @@ docker-build-test-base:
 		--build-arg SPARK_SCALA_SUFFIX=$(SPARK_SCALA_SUFFIX) \
 		$(if $(DOCKER_CACHE_FROM),--cache-from $(DOCKER_CACHE_FROM)) \
 		$(if $(DOCKER_CACHE_TO),--cache-to $(DOCKER_CACHE_TO)) \
+		--load \
 		-f Dockerfile.test-base \
 		-t lance-spark-test-base:$(SPARK_VERSION)_$(SCALA_VERSION) \
 		.
