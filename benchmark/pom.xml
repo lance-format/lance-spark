@@ -85,17 +85,4 @@
             </plugin>
         </plugins>
     </build>
-
-    <profiles>
-        <profile>
-            <id>iceberg</id>
-            <dependencies>
-                <dependency>
-                    <groupId>org.apache.iceberg</groupId>
-                    <artifactId>iceberg-spark-runtime-3.5_${scala.compat.version}</artifactId>
-                    <version>1.5.2</version>
-                </dependency>
-            </dependencies>
-        </profile>
-    </profiles>
 </project>

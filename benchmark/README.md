@@ -2,7 +2,10 @@
 
 Runs the [TPC-DS](http://www.tpc.org/tpcds/) query suite against Lance and Parquet formats using Apache Spark, comparing query performance, correctness, and resource usage.
 
-`parquet` here refers to Spark's built-in Parquet reader, used as a performance baseline. Delta and Iceberg are not included because they require additional catalog/metastore tooling outside lance-spark's scope.
+`parquet` here refers to Spark's built-in Parquet reader, used as a performance baseline.
+
+### TODO
+- **Delta / Iceberg support** — not yet included because they require additional catalog/metastore tooling outside lance-spark's scope.
 
 ## Quick Start (Docker)
 
