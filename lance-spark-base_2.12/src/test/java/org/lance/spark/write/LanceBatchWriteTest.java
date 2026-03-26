@@ -42,6 +42,7 @@ import java.nio.file.Path;
 import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class LanceBatchWriteTest {
   @TempDir static Path tempDir;
@@ -101,6 +102,52 @@ public class LanceBatchWriteTest {
           }
         }
       }
+    }
+  }
+
+  @Test
+  public void testConcurrentWriteConflict(TestInfo testInfo) throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
+      Schema schema = new Schema(Collections.singletonList(field));
+      Dataset.create(allocator, datasetUri, schema, new WriteParams.Builder().build()).close();
+
+      LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
+      StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
+
+      // Create two writers simultaneously — both capture the same initial version
+      LanceBatchWrite writerA =
+          new LanceBatchWrite(
+              sparkSchema, writeOptions, false, null, null, null, null, false, null);
+      LanceBatchWrite writerB =
+          new LanceBatchWrite(
+              sparkSchema, writeOptions, false, null, null, null, null, false, null);
+
+      // Write data through both writers
+      WriterCommitMessage messageA = writeRows(writerA, sparkSchema, 10, 0);
+      WriterCommitMessage messageB = writeRows(writerB, sparkSchema, 10, 100);
+
+      // Writer A commits first — succeeds, advancing version
+      writerA.commit(new WriterCommitMessage[] {messageA});
+
+      // Writer B commits second — should fail because its readVersion is stale
+      assertThrows(Exception.class, () -> writerB.commit(new WriterCommitMessage[] {messageB}));
+    }
+  }
+
+  /** Helper: write rows through a LanceBatchWrite and return the commit message. */
+  private WriterCommitMessage writeRows(
+      LanceBatchWrite batchWrite, StructType sparkSchema, int numRows, int startValue)
+      throws Exception {
+    DataWriterFactory factory = batchWrite.createBatchWriterFactory(() -> 1);
+    try (DataWriter<InternalRow> writer = factory.createWriter(0, 0)) {
+      for (int i = 0; i < numRows; i++) {
+        InternalRow row = new GenericInternalRow(new Object[] {startValue + i});
+        writer.write(row);
+      }
+      return writer.commit();
     }
   }
 }
