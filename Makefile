@@ -38,7 +38,7 @@ else
 endif
 
 # Optional Docker build cache flags (set in CI for layer caching)
-# Example: make docker-build-test-full DOCKER_CACHE_FROM="type=gha" DOCKER_CACHE_TO="type=gha,mode=max"
+# Example: make docker-build-test-base DOCKER_CACHE_FROM="type=gha" DOCKER_CACHE_TO="type=gha,mode=max"
 DOCKER_CACHE_FROM ?=
 DOCKER_CACHE_TO ?=
 
@@ -140,16 +140,27 @@ docker-shell:
 docker-down: check-docker-compose
 	cd docker && ${DOCKER_COMPOSE} down
 
+# Print resolved Docker build args for use in CI (e.g. GitHub Actions step outputs).
+# This keeps versions.mk as the single source of truth for version mappings.
+.PHONY: print-docker-build-args
+print-docker-build-args:
+	@echo "spark-download-version=$(SPARK_DOWNLOAD_VERSION)"
+	@echo "py4j-version=$(PY4J_VERSION)"
+	@echo "spark-scala-suffix=$(SPARK_SCALA_SUFFIX)"
+
 .PHONY: docker-build-test-base
 docker-build-test-base:
-	cd docker && docker build \
+	cd docker && docker buildx build \
 		--build-arg SPARK_DOWNLOAD_VERSION=$(SPARK_DOWNLOAD_VERSION) \
 		--build-arg SPARK_MAJOR_VERSION=$(SPARK_VERSION) \
 		--build-arg SCALA_VERSION=$(SCALA_VERSION) \
 		--build-arg PY4J_VERSION=$(PY4J_VERSION) \
 		--build-arg SPARK_SCALA_SUFFIX=$(SPARK_SCALA_SUFFIX) \
+		$(if $(DOCKER_CACHE_FROM),--cache-from $(DOCKER_CACHE_FROM)) \
+		$(if $(DOCKER_CACHE_TO),--cache-to $(DOCKER_CACHE_TO)) \
+		--load \
 		-f Dockerfile.test-base \
-		-t ghcr.io/hamersaw/lance-spark-test-base:$(SPARK_VERSION)_$(SCALA_VERSION) \
+		-t lance-spark-test-base:$(SPARK_VERSION)_$(SCALA_VERSION) \
 		.
 
 .PHONY: docker-build-test
@@ -191,6 +202,31 @@ docker-test:
 		"pytest /home/lance/tests/ -v --timeout=180"
 
 # =============================================================================
+# Benchmark
+# =============================================================================
+
+.PHONY: benchmark-build
+benchmark-build:
+	cd benchmark && mvn package -DskipTests
+
+.PHONY: benchmark-generate
+benchmark-generate:
+	cd benchmark && DATA_DIR=$(DATA_DIR) ./scripts/generate-data.sh $(SF) $(FORMATS) $(SPARK_MASTER)
+
+.PHONY: benchmark-run
+benchmark-run:
+	cd benchmark && DATA_DIR=$(DATA_DIR) ./scripts/run-benchmark.sh $(FORMATS) $(SPARK_MASTER) $(ITERATIONS)
+
+.PHONY: benchmark
+benchmark: benchmark-generate benchmark-run
+
+SF ?= 1
+FORMATS ?= lance,parquet
+SPARK_MASTER ?= local[*]
+ITERATIONS ?= 3
+DATA_DIR ?= benchmark/data
+
+# =============================================================================
 # Documentation
 # =============================================================================
 
@@ -230,8 +266,16 @@ help:
 	@echo "  docker-up              - Start docker containers"
 	@echo "  docker-shell           - Open shell in spark-lance container"
 	@echo "  docker-down            - Stop docker containers"
-	@echo "  docker-build-test-full - Build test image (with Spark and bundle)"
+	@echo "  docker-build-test-base - Build test base image (system deps + Spark)"
+	@echo "  docker-build-test      - Build test image (base + bundle JAR)"
+	@echo "  docker-build-test-full - Build test image (single-stage, with Spark and bundle)"
 	@echo "  docker-test            - Run integration tests in lance-spark-test container"
+	@echo ""
+	@echo "Benchmark:"
+	@echo "  benchmark-build        - Build benchmark jar"
+	@echo "  benchmark-generate     - Generate TPC-DS data via Spark (SF=1 FORMATS=lance,parquet)"
+	@echo "  benchmark-run          - Run TPC-DS queries (FORMATS=lance,parquet ITERATIONS=3)"
+	@echo "  benchmark              - Generate data + run queries (end-to-end)"
 	@echo ""
 	@echo "Documentation:"
 	@echo "  serve-docs     - Serve documentation locally"

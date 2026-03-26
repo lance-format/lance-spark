@@ -22,7 +22,7 @@ import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.LanceArrowUtils
 import org.lance.spark.utils.VectorUtils
 
-import scala.jdk.CollectionConverters._
+import scala.collection.JavaConverters._
 
 /**
  * Custom ArrowWriter implementation that supports converting Spark DataFrame

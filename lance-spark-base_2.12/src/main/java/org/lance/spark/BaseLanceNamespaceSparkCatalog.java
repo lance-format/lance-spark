@@ -16,6 +16,8 @@ package org.lance.spark;
 import org.lance.Dataset;
 import org.lance.WriteParams;
 import org.lance.namespace.LanceNamespace;
+import org.lance.namespace.errors.ErrorCode;
+import org.lance.namespace.errors.LanceNamespaceException;
 import org.lance.namespace.errors.TableNotFoundException;
 import org.lance.namespace.model.DeclareTableRequest;
 import org.lance.namespace.model.DeclareTableResponse;
@@ -589,6 +591,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     tableIdList.forEach(describeRequest::addIdItem);
     DescribeTableResponse describeResponse = namespace.describeTable(describeRequest);
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
+    boolean managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
 
     // Create read options with namespace settings
     LanceSparkReadOptions readOptions =
@@ -600,7 +603,12 @@ public abstract class BaseLanceNamespaceSparkCatalog
             Optional.of(tableIdList),
             name);
     return createDataset(
-        readOptions, processedSchema, initialStorageOptions, namespaceImpl, namespaceProperties);
+        readOptions,
+        processedSchema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        managedVersioning);
   }
 
   /**
@@ -630,7 +638,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     } catch (IllegalArgumentException e) {
       throw new TableAlreadyExistsException(ident);
     }
-    return createDataset(readOptions, processedSchema, null, null, null);
+    return createDataset(readOptions, processedSchema, null, null, null, false);
   }
 
   @Override
@@ -730,6 +738,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     DeclareTableResponse declareResponse = namespace.declareTable(declareRequest);
     String location = declareResponse.getLocation();
     Map<String, String> initialStorageOptions = declareResponse.getStorageOptions();
+    boolean managedVersioning = Boolean.TRUE.equals(declareResponse.getManagedVersioning());
 
     LanceSparkReadOptions readOptions =
         createReadOptions(
@@ -744,13 +753,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
     StagedCommit stagedCommit =
-        StagedCommit.forNewTable(arrowSchema, location, merged, namespace, tableIdList);
+        StagedCommit.forNewTable(
+            arrowSchema, location, merged, namespace, tableIdList, managedVersioning);
     return createStagedDataset(
         readOptions,
         processedSchema,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
+        managedVersioning,
         stagedCommit);
   }
 
@@ -767,8 +778,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     StagedCommit stagedCommit =
         StagedCommit.forNewTable(
-            arrowSchema, datasetUri, catalogConfig.getStorageOptions(), null, null);
-    return createStagedDataset(readOptions, processedSchema, null, null, null, stagedCommit);
+            arrowSchema, datasetUri, catalogConfig.getStorageOptions(), null, null, false);
+    return createStagedDataset(readOptions, processedSchema, null, null, null, false, stagedCommit);
   }
 
   @Override
@@ -793,14 +804,10 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     DescribeTableRequest describeRequest = new DescribeTableRequest();
     tableIdList.forEach(describeRequest::addIdItem);
-    DescribeTableResponse describeResponse;
-    try {
-      describeResponse = namespace.describeTable(describeRequest);
-    } catch (TableNotFoundException e) {
-      throw new NoSuchTableException(ident);
-    }
+    DescribeTableResponse describeResponse = describeTableOrThrow(describeRequest, ident);
     String location = describeResponse.getLocation();
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
+    boolean managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
 
     LanceSparkReadOptions readOptions =
         createReadOptions(
@@ -816,13 +823,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
     StagedCommit stagedCommit =
-        StagedCommit.forExistingTable(ds, arrowSchema, merged, namespace, tableIdList);
+        StagedCommit.forExistingTable(
+            ds, arrowSchema, merged, namespace, tableIdList, managedVersioning);
     return createStagedDataset(
         readOptions,
         processedSchema,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
+        managedVersioning,
         stagedCommit);
   }
 
@@ -847,8 +856,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     StagedCommit stagedCommit =
         StagedCommit.forExistingTable(
-            ds, arrowSchema, catalogConfig.getStorageOptions(), null, null);
-    return createStagedDataset(readOptions, processedSchema, null, null, null, stagedCommit);
+            ds, arrowSchema, catalogConfig.getStorageOptions(), null, null, false);
+    return createStagedDataset(readOptions, processedSchema, null, null, null, false, stagedCommit);
   }
 
   @Override
@@ -874,6 +883,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     boolean exists = tableExists(ident);
     String location;
     Map<String, String> initialStorageOptions;
+    boolean managedVersioning;
 
     if (!exists) {
       DeclareTableRequest declareRequest = new DeclareTableRequest();
@@ -881,12 +891,14 @@ public abstract class BaseLanceNamespaceSparkCatalog
       DeclareTableResponse declareResponse = namespace.declareTable(declareRequest);
       location = declareResponse.getLocation();
       initialStorageOptions = declareResponse.getStorageOptions();
+      managedVersioning = Boolean.TRUE.equals(declareResponse.getManagedVersioning());
     } else {
       DescribeTableRequest describeRequest = new DescribeTableRequest();
       tableIdList.forEach(describeRequest::addIdItem);
       DescribeTableResponse describeResponse = namespace.describeTable(describeRequest);
       location = describeResponse.getLocation();
       initialStorageOptions = describeResponse.getStorageOptions();
+      managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
     }
 
     LanceSparkReadOptions readOptions =
@@ -904,10 +916,13 @@ public abstract class BaseLanceNamespaceSparkCatalog
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
     if (exists) {
       Dataset ds = openDataset(readOptions);
-      stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, merged, namespace, tableIdList);
+      stagedCommit =
+          StagedCommit.forExistingTable(
+              ds, arrowSchema, merged, namespace, tableIdList, managedVersioning);
     } else {
       stagedCommit =
-          StagedCommit.forNewTable(arrowSchema, location, merged, namespace, tableIdList);
+          StagedCommit.forNewTable(
+              arrowSchema, location, merged, namespace, tableIdList, managedVersioning);
     }
     return createStagedDataset(
         readOptions,
@@ -915,6 +930,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
+        managedVersioning,
         stagedCommit);
   }
 
@@ -936,13 +952,13 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Dataset ds = openDataset(readOptions);
       stagedCommit =
           StagedCommit.forExistingTable(
-              ds, arrowSchema, catalogConfig.getStorageOptions(), null, null);
+              ds, arrowSchema, catalogConfig.getStorageOptions(), null, null, false);
     } else {
       stagedCommit =
           StagedCommit.forNewTable(
-              arrowSchema, datasetUri, catalogConfig.getStorageOptions(), null, null);
+              arrowSchema, datasetUri, catalogConfig.getStorageOptions(), null, null, false);
     }
-    return createStagedDataset(readOptions, processedSchema, null, null, null, stagedCommit);
+    return createStagedDataset(readOptions, processedSchema, null, null, null, false, stagedCommit);
   }
 
   /**
@@ -1088,14 +1104,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     // Call describeTable to get location and initial storage options
     DescribeTableRequest describeRequest = new DescribeTableRequest();
     tableId.forEach(describeRequest::addIdItem);
-    DescribeTableResponse describeResponse;
-    try {
-      describeResponse = namespace.describeTable(describeRequest);
-    } catch (TableNotFoundException e) {
-      throw new NoSuchTableException(ident);
-    } catch (RuntimeException e) {
-      throw new RuntimeException("Failed to describe table: " + ident, e);
-    }
+    DescribeTableResponse describeResponse = describeTableOrThrow(describeRequest, ident);
     String location = describeResponse.getLocation();
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
 
@@ -1124,8 +1133,60 @@ public abstract class BaseLanceNamespaceSparkCatalog
     StructType schema = getSchema(ident, readOptions);
 
     // Create read options with namespace support
+    boolean managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
     return createDataset(
-        readOptions, schema, initialStorageOptions, namespaceImpl, namespaceProperties);
+        readOptions,
+        schema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        managedVersioning);
+  }
+
+  /**
+   * Calls namespace.describeTable and translates table-not-found errors into Spark's {@link
+   * NoSuchTableException}.
+   *
+   * <p>Two catch blocks handle the error:
+   *
+   * <ol>
+   *   <li>{@link LanceNamespaceException} with {@link ErrorCode#TABLE_NOT_FOUND} — catches the
+   *       exception that the JNI bridge creates once the upstream lance-namespace-impls uses typed
+   *       {@code NamespaceError::TableNotFound} (see lance PR #6267 / #6275). This also covers
+   *       {@link TableNotFoundException} (a subclass of {@link LanceNamespaceException}).
+   *   <li>{@link RuntimeException} with message matching — workaround for the current state where
+   *       dir.rs and dir/manifest.rs use {@code Error::namespace_source(String)}, causing the JNI
+   *       downcast to {@code NamespaceError} to fail and fall back to a raw RuntimeException. Two
+   *       known message patterns: "Table does not exist: {name}" (dir.rs) and "Table '{name}' not
+   *       found" (manifest.rs).
+   * </ol>
+   *
+   * <p>TODO: Remove the RuntimeException catch block once lance fixes dir.rs and manifest.rs to use
+   * {@code NamespaceError::TableNotFound}.
+   *
+   * <p>This helper should be used at call sites where {@code NoSuchTableException} is the expected
+   * outcome for missing tables (e.g. {@code loadTableInternal}, {@code stageReplace}). Call sites
+   * where the table is known to exist (e.g. post-creation) should call {@code
+   * namespace.describeTable()} directly, since a missing table there indicates an unexpected error.
+   */
+  private DescribeTableResponse describeTableOrThrow(DescribeTableRequest request, Identifier ident)
+      throws NoSuchTableException {
+    try {
+      return namespace.describeTable(request);
+    } catch (LanceNamespaceException e) {
+      if (e.getErrorCode() == ErrorCode.TABLE_NOT_FOUND) {
+        throw new NoSuchTableException(ident);
+      }
+      throw e;
+    } catch (RuntimeException e) {
+      String msg = e.getMessage();
+      if (msg != null
+          && (msg.contains("Table does not exist")
+              || (msg.contains("Table") && msg.contains("not found")))) {
+        throw new NoSuchTableException(ident);
+      }
+      throw e;
+    }
   }
 
   /**
@@ -1161,7 +1222,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
             datasetUri, catalogConfig, versionId, Optional.empty(), Optional.empty(), name);
     StructType schema = getSchema(ident, readOptions);
 
-    return createDataset(readOptions, schema, null, null, null);
+    return createDataset(readOptions, schema, null, null, null, false);
   }
 
   public abstract LanceDataset createDataset(
@@ -1169,7 +1230,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
       StructType sparkSchema,
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
-      Map<String, String> namespaceProperties);
+      Map<String, String> namespaceProperties,
+      boolean managedVersioning);
 
   public abstract LanceDataset createStagedDataset(
       LanceSparkReadOptions readOptions,
@@ -1177,5 +1239,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
+      boolean managedVersioning,
       StagedCommit stagedCommit);
 }

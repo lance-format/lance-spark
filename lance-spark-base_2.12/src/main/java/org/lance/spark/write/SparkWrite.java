@@ -43,6 +43,7 @@ public class SparkWrite implements Write {
 
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
+  private final boolean managedVersioning;
   private final StagedCommit stagedCommit;
 
   SparkWrite(
@@ -53,6 +54,7 @@ public class SparkWrite implements Write {
       String namespaceImpl,
       Map<String, String> namespaceProperties,
       List<String> tableId,
+      boolean managedVersioning,
       StagedCommit stagedCommit) {
     this.schema = schema;
     this.writeOptions = writeOptions;
@@ -61,6 +63,7 @@ public class SparkWrite implements Write {
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
+    this.managedVersioning = managedVersioning;
     this.stagedCommit = stagedCommit;
   }
 
@@ -74,6 +77,7 @@ public class SparkWrite implements Write {
         namespaceImpl,
         namespaceProperties,
         tableId,
+        managedVersioning,
         stagedCommit);
   }
 
@@ -100,6 +104,7 @@ public class SparkWrite implements Write {
 
     private final Map<String, String> namespaceProperties;
     private final List<String> tableId;
+    private final boolean managedVersioning;
 
     public SparkWriteBuilder(
         StructType schema,
@@ -107,13 +112,15 @@ public class SparkWrite implements Write {
         Map<String, String> initialStorageOptions,
         String namespaceImpl,
         Map<String, String> namespaceProperties,
-        List<String> tableId) {
+        List<String> tableId,
+        boolean managedVersioning) {
       this.schema = schema;
       this.writeOptions = writeOptions;
       this.initialStorageOptions = initialStorageOptions;
       this.namespaceImpl = namespaceImpl;
       this.namespaceProperties = namespaceProperties;
       this.tableId = tableId;
+      this.managedVersioning = managedVersioning;
     }
 
     public void setStagedCommit(StagedCommit stagedCommit) {
@@ -148,6 +155,7 @@ public class SparkWrite implements Write {
           namespaceImpl,
           namespaceProperties,
           tableId,
+          managedVersioning,
           stagedCommit);
     }
 
