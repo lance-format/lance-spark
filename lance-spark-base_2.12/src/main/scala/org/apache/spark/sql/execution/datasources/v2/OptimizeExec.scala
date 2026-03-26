@@ -49,6 +49,8 @@ case class OptimizeExec(
     argsMap.get("batch_size").map(t => builder.withBatchSize(t.value.asInstanceOf[Long]))
     argsMap.get("defer_index_remap").map(t =>
       builder.withDeferIndexRemap(t.value.asInstanceOf[Boolean]))
+    argsMap.get("max_source_fragments").map(t =>
+      builder.withMaxSourceFragments(t.value.asInstanceOf[Long]))
 
     builder.build()
   }

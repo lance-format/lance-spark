@@ -121,7 +121,8 @@ public abstract class BaseOptimizeTest {
                     + "materialize_deletions_threshold=0.2f,"
                     + "num_threads=2,"
                     + "batch_size=2000,"
-                    + "defer_index_remap=true"
+                    + "defer_index_remap=true,"
+                    + "max_source_fragments=128"
                     + ")",
                 fullTable));
 
