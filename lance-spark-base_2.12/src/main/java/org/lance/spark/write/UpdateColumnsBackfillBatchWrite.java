@@ -83,6 +83,12 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
 
+  /**
+   * Dataset opened at start to capture version for commit. Ensures concurrent writes are detected
+   * via optimistic concurrency control.
+   */
+  private final Dataset dataset;
+
   public UpdateColumnsBackfillBatchWrite(
       StructType schema,
       LanceSparkWriteOptions writeOptions,
@@ -98,6 +104,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
+    this.dataset = Utils.openDataset(writeOptions);
   }
 
   @Override
@@ -144,16 +151,14 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
     Set<Integer> updatedFragmentIds =
         updatedFragments.stream().map(FragmentMetadata::getId).collect(Collectors.toSet());
 
-    try (Dataset dataset = Utils.openDataset(writeOptions)) {
-      // Add unmodified fragments back
+    // Use dataset opened at construction time for both fragment lookup and commit
+    // to ensure version consistency for optimistic concurrency control.
+    try {
       dataset.getFragments().stream()
           .filter(f -> !updatedFragmentIds.contains(f.getId()))
           .map(Fragment::metadata)
           .forEach(updatedFragments::add);
-    }
 
-    // Commit update operation using CommitBuilder
-    try (Dataset dataset = Utils.openDataset(writeOptions)) {
       Update update =
           Update.builder()
               .updatedFragments(updatedFragments)
@@ -168,6 +173,8 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
                   .execute(txn)) {
         // auto-close txn and committed dataset
       }
+    } finally {
+      dataset.close();
     }
   }
 
@@ -359,7 +366,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
 
   @Override
   public void abort(WriterCommitMessage[] messages) {
-    throw new UnsupportedOperationException();
+    dataset.close();
   }
 
   @Override

@@ -78,6 +78,12 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
 
+  /**
+   * Dataset opened at start to capture version for commit. Ensures concurrent writes are detected
+   * via optimistic concurrency control.
+   */
+  private final Dataset dataset;
+
   public SparkPositionDeltaWrite(
       StructType sparkSchema,
       LanceSparkWriteOptions writeOptions,
@@ -91,6 +97,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
+    this.dataset = Utils.openDataset(writeOptions);
   }
 
   @Override
@@ -143,8 +150,9 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
                 newFragments.addAll(m.newFragments());
               });
 
-      // Use SDK directly to update fragments
-      try (Dataset dataset = Utils.openDataset(writeOptions)) {
+      // Use dataset opened at construction time to ensure version consistency
+      // for optimistic concurrency control.
+      try {
         Update update =
             Update.builder()
                 .removedFragmentIds(removedFragmentIds)
@@ -160,11 +168,15 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
                     .execute(txn)) {
           // auto-close txn and committed dataset
         }
+      } finally {
+        dataset.close();
       }
     }
 
     @Override
-    public void abort(WriterCommitMessage[] messages) {}
+    public void abort(WriterCommitMessage[] messages) {
+      dataset.close();
+    }
   }
 
   private static class PositionDeltaWriteFactory implements DeltaWriterFactory {

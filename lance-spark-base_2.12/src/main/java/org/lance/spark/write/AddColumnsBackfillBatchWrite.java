@@ -74,6 +74,12 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
 
+  /**
+   * Dataset opened at start to capture version for commit. Ensures concurrent writes are detected
+   * via optimistic concurrency control.
+   */
+  private final Dataset dataset;
+
   public AddColumnsBackfillBatchWrite(
       StructType schema,
       LanceSparkWriteOptions writeOptions,
@@ -89,6 +95,7 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
+    this.dataset = Utils.openDataset(writeOptions);
   }
 
   @Override
@@ -140,17 +147,15 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
     Set<Integer> mergedFragmentIds =
         fragments.stream().map(FragmentMetadata::getId).collect(Collectors.toSet());
 
-    // Get existing fragments
-    try (Dataset dataset = Utils.openDataset(writeOptions)) {
+    // Use dataset opened at construction time for both fragment lookup and commit
+    // to ensure version consistency for optimistic concurrency control.
+    try {
       dataset.getFragments().stream()
           .filter(f -> !mergedFragmentIds.contains(f.getId()))
           .map(Fragment::metadata)
           .forEach(fragments::add);
-    }
 
-    // Commit merge operation using CommitBuilder
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false);
-    try (Dataset dataset = Utils.openDataset(writeOptions)) {
+      Schema arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false);
       Merge merge = Merge.builder().fragments(fragments).schema(arrowSchema).build();
       try (Transaction txn =
               new Transaction.Builder().readVersion(dataset.version()).operation(merge).build();
@@ -160,6 +165,8 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
                   .execute(txn)) {
         // auto-close txn and committed dataset
       }
+    } finally {
+      dataset.close();
     }
   }
 
@@ -351,7 +358,7 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
 
   @Override
   public void abort(WriterCommitMessage[] messages) {
-    throw new UnsupportedOperationException();
+    dataset.close();
   }
 
   @Override
