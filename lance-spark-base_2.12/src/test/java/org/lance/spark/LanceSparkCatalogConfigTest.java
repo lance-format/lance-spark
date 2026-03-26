@@ -20,6 +20,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Tests for {@link LanceSparkCatalogConfig}. */
@@ -140,5 +141,46 @@ public class LanceSparkCatalogConfigTest {
     Map<String, String> tableProperties = new HashMap<>();
 
     assertTrue(config.isEnableStableRowIds(tableProperties));
+  }
+
+  @Test
+  public void testDataStorageVersionDefaultsToNull() {
+    Map<String, String> catalogOptions = new HashMap<>();
+    LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
+
+    assertNull(config.getDataStorageVersion());
+  }
+
+  @Test
+  public void testDataStorageVersionFromCatalogOptions() {
+    Map<String, String> catalogOptions = new HashMap<>();
+    catalogOptions.put("data_storage_version", "LEGACY");
+    LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
+
+    assertEquals("LEGACY", config.getDataStorageVersion());
+  }
+
+  @Test
+  public void testDataStorageVersionTablePropertiesOverrideCatalogDefault() {
+    Map<String, String> catalogOptions = new HashMap<>();
+    catalogOptions.put("data_storage_version", "LEGACY");
+    LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
+
+    Map<String, String> tableProperties = new HashMap<>();
+    tableProperties.put("data_storage_version", "STABLE");
+
+    assertEquals("LEGACY", config.getDataStorageVersion());
+    assertEquals("STABLE", config.getDataStorageVersion(tableProperties));
+  }
+
+  @Test
+  public void testDataStorageVersionTablePropertiesFallsThroughToCatalogDefault() {
+    Map<String, String> catalogOptions = new HashMap<>();
+    catalogOptions.put("data_storage_version", "LEGACY");
+    LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
+
+    Map<String, String> tableProperties = new HashMap<>();
+
+    assertEquals("LEGACY", config.getDataStorageVersion(tableProperties));
   }
 }

@@ -159,7 +159,7 @@ public class LanceDataset
   private final StagedCommit stagedCommit;
 
   /**
-   * The file format version for this table. Used to ensure writes use the same version as the
+   * The data storage version for this table. Used to ensure writes use the same version as the
    * table. Null means the default version will be used.
    */
   private final String dataStorageVersion;
@@ -173,7 +173,7 @@ public class LanceDataset
    * @param namespaceImpl namespace implementation type for credential refresh on workers
    * @param namespaceProperties namespace connection properties for credential refresh on workers
    * @param managedVersioning whether namespace manages versioning (commits go through namespace)
-   * @param dataStorageVersion the file format version for writes, or null to use default
+   * @param dataStorageVersion the data storage version for writes, or null to use default
    */
   public LanceDataset(
       LanceSparkReadOptions readOptions,
@@ -195,7 +195,7 @@ public class LanceDataset
   }
 
   /**
-   * Creates a Lance dataset with staging support and file format version.
+   * Creates a Lance dataset with staging support.
    *
    * @param readOptions read options including dataset URI and settings
    * @param sparkSchema spark struct type
@@ -204,7 +204,7 @@ public class LanceDataset
    * @param namespaceProperties namespace connection properties for credential refresh on workers
    * @param managedVersioning whether namespace manages versioning (commits go through namespace)
    * @param stagedCommit the eagerly created staged commit, or null for non-staged tables
-   * @param dataStorageVersion the file format version for writes, or null to use default
+   * @param dataStorageVersion the data storage version for writes, or null to use default
    */
   public LanceDataset(
       LanceSparkReadOptions readOptions,
@@ -292,7 +292,7 @@ public class LanceDataset
             .namespace(readOptions.getNamespace())
             .tableId(readOptions.getTableId())
             .fromOptions(mergedOptions);
-    // Use table's file format version if not explicitly set in write options
+    // Use table's data storage version if not explicitly set in write options
     if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_DATA_STORAGE_VERSION)
         && dataStorageVersion != null) {
       writeOptionsBuilder.dataStorageVersion(dataStorageVersion);

@@ -63,7 +63,7 @@ case class AddColumnsBackfillExec(
         null,
         null,
         false,
-        null),
+        originalTable.getDataStorageVersion()),
       Some(catalog),
       Some(ident))
 

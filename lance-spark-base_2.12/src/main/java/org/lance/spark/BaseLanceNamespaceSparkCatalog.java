@@ -841,7 +841,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     StagedCommit stagedCommit =
         StagedCommit.forExistingTable(
             ds, arrowSchema, merged, namespace, tableIdList, managedVersioning);
-    // Use specified file format version, or fall back to existing table's version
+    // Use specified data storage version, or fall back to existing table's version
     String dataStorageVersion = catalogConfig.getDataStorageVersion(properties);
     if (dataStorageVersion == null) {
       dataStorageVersion = ds.getLanceFileFormatVersion();
@@ -879,7 +879,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     StagedCommit stagedCommit =
         StagedCommit.forExistingTable(
             ds, arrowSchema, catalogConfig.getStorageOptions(), null, null, false);
-    // Use specified file format version, or fall back to existing table's version
+    // Use specified data storage version, or fall back to existing table's version
     String dataStorageVersion = catalogConfig.getDataStorageVersion(properties);
     if (dataStorageVersion == null) {
       dataStorageVersion = ds.getLanceFileFormatVersion();
@@ -940,7 +940,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     StagedCommit stagedCommit;
-    // Use specified file format version, or fall back to existing table's version
+    // Use specified data storage version, or fall back to existing table's version
     String dataStorageVersion = catalogConfig.getDataStorageVersion(properties);
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
@@ -981,7 +981,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     boolean exists = tableExistsAtPath(ident);
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     StagedCommit stagedCommit;
-    // Use specified file format version, or fall back to existing table's version
+    // Use specified data storage version, or fall back to existing table's version
     String dataStorageVersion = catalogConfig.getDataStorageVersion(properties);
 
     if (exists) {
@@ -1178,7 +1178,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         createReadOptions(
             location, catalogConfig, versionId, Optional.of(namespace), Optional.of(tableId), name);
 
-    // Read schema and file format version from the dataset
+    // Read schema and data storage version from the dataset
     String dataStorageVersion;
     StructType schema;
     try (Dataset dataset = openDataset(readOptions)) {
@@ -1230,7 +1230,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         createReadOptions(
             datasetUri, catalogConfig, versionId, Optional.empty(), Optional.empty(), name);
 
-    // Read schema and file format version from the dataset
+    // Read schema and data storage version from the dataset
     String dataStorageVersion;
     StructType schema;
     try (Dataset dataset = openDataset(readOptions)) {

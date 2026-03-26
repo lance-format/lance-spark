@@ -35,6 +35,7 @@ import java.util.Objects;
  *
  * <ul>
  *   <li>{@code enable_stable_row_ids} - Enable stable row IDs and CDF support (default: false)
+ *   <li>{@code data_storage_version} - Data storage version for new tables
  * </ul>
  */
 public class LanceSparkCatalogConfig {
@@ -143,20 +144,20 @@ public class LanceSparkCatalogConfig {
   }
 
   /**
-   * Returns the file format version from catalog-level table options.
+   * Returns the data storage version from catalog-level table options.
    *
-   * @return the file format version string, or null if not specified
+   * @return the data storage version string, or null if not specified
    */
   public String getDataStorageVersion() {
     return tableOptions.get(TABLE_OPT_DATA_STORAGE_VERSION);
   }
 
   /**
-   * Returns the file format version, allowing per-table TBLPROPERTIES to override the catalog-level
-   * default.
+   * Returns the data storage version, allowing per-table TBLPROPERTIES to override the
+   * catalog-level default.
    *
    * @param tableProperties the TBLPROPERTIES from CREATE TABLE
-   * @return the file format version string, or null if not specified
+   * @return the data storage version string, or null if not specified
    */
   public String getDataStorageVersion(Map<String, String> tableProperties) {
     String override = tableProperties.get(TABLE_OPT_DATA_STORAGE_VERSION);
