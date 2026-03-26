@@ -117,13 +117,13 @@ public class LanceBatchWriteTest {
       LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
       StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
 
-      // Create two writers simultaneously — both capture the same initial version
+      // Create two overwrite writers simultaneously — both capture the same initial version.
+      // Overwrites conflict because they both replace all fragments.
+      // (Concurrent appends don't conflict since they add independent fragments.)
       LanceBatchWrite writerA =
-          new LanceBatchWrite(
-              sparkSchema, writeOptions, false, null, null, null, null, false, null);
+          new LanceBatchWrite(sparkSchema, writeOptions, true, null, null, null, null, false, null);
       LanceBatchWrite writerB =
-          new LanceBatchWrite(
-              sparkSchema, writeOptions, false, null, null, null, null, false, null);
+          new LanceBatchWrite(sparkSchema, writeOptions, true, null, null, null, null, false, null);
 
       // Write data through both writers
       WriterCommitMessage messageA = writeRows(writerA, sparkSchema, 10, 0);

@@ -309,9 +309,11 @@ public abstract class BaseUpdateColumnsBackfillTest {
         updateMsg = writer.commit();
       }
 
-      // Bump version with a separate append (version 2 -> 3)
+      // Bump version with an overwrite (version 2 -> 3).
+      // An overwrite replaces all fragments, which conflicts with the pending Update.
+      // (An append wouldn't conflict since it adds independent fragments.)
       LanceBatchWrite bumpWrite =
-          new LanceBatchWrite(dataSchema, writeOptions, false, null, null, null, null, false, null);
+          new LanceBatchWrite(dataSchema, writeOptions, true, null, null, null, null, false, null);
       DataWriterFactory bumpFactory = bumpWrite.createBatchWriterFactory(() -> 1);
       WriterCommitMessage bumpMsg;
       try (DataWriter<InternalRow> writer = bumpFactory.createWriter(0, 0)) {
