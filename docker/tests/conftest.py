@@ -86,7 +86,7 @@ def azurite():
     }
 
     proc.terminate()
-    proc.wait(timeout=10)
+    proc.wait(timeout=30)
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +158,7 @@ def minio():
     }
 
     proc.terminate()
-    proc.wait(timeout=10)
+    proc.wait(timeout=30)
 
 
 # ---------------------------------------------------------------------------
