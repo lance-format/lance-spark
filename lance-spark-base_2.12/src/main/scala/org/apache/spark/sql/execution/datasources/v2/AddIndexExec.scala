@@ -168,14 +168,30 @@ case class AddIndexExec(
 
     IndexUtils.buildIndexType(method) match {
       case IndexType.BTREE =>
-        new RangeBasedBTreeIndexJob(
-          this,
-          readOptions,
-          uuid,
-          nsImpl,
-          nsProps,
-          tableId,
-          initialStorageOpts)
+        val mode = args.find(_.name == "mode").map(_.value.asInstanceOf[String])
+        mode match {
+          case Some("range") =>
+            return new RangeBasedBTreeIndexJob(
+              this,
+              readOptions,
+              uuid,
+              nsImpl,
+              nsProps,
+              tableId,
+              initialStorageOpts)
+
+          case _ =>
+            new FragmentBasedIndexJob(
+              this,
+              readOptions,
+              uuid,
+              fragmentIds,
+              nsImpl,
+              nsProps,
+              tableId,
+              initialStorageOpts)
+        }
+
       case _ =>
         new FragmentBasedIndexJob(
           this,
