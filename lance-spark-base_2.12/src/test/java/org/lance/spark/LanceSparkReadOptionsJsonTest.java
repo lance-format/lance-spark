@@ -94,4 +94,25 @@ public class LanceSparkReadOptionsJsonTest {
     Assertions.assertEquals("vector_col", query.getColumn());
     Assertions.assertArrayEquals(new float[] {1.0f, 2.0f, 3.0f}, query.getKey());
   }
+
+  @Test
+  public void testDefaultBatchSizeIsUnset() {
+    Map<String, String> properties = new HashMap<>();
+    properties.put("path", "s3://bucket/path");
+
+    LanceSparkReadOptions options = LanceSparkReadOptions.from(properties);
+
+    Assertions.assertNull(options.getBatchSize());
+  }
+
+  @Test
+  public void testExplicitBatchSizeOverridesDefault() {
+    Map<String, String> properties = new HashMap<>();
+    properties.put("path", "s3://bucket/path");
+    properties.put("batch_size", "16384");
+
+    LanceSparkReadOptions options = LanceSparkReadOptions.from(properties);
+
+    Assertions.assertEquals(Integer.valueOf(16384), options.getBatchSize());
+  }
 }

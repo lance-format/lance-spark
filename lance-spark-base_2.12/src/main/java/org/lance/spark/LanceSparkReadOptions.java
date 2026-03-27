@@ -61,8 +61,6 @@ public class LanceSparkReadOptions implements Serializable {
   public static final String LANCE_FILE_SUFFIX = ".lance";
 
   private static final boolean DEFAULT_PUSH_DOWN_FILTERS = true;
-  // Changed from 512 to 8192 for better OLAP scan performance (33x improvement)
-  private static final int DEFAULT_BATCH_SIZE = 8192;
   private static final boolean DEFAULT_TOP_N_PUSH_DOWN = true;
 
   private final String datasetUri;
@@ -73,7 +71,7 @@ public class LanceSparkReadOptions implements Serializable {
   private final Integer version;
   private final Integer indexCacheSize;
   private final Integer metadataCacheSize;
-  private final int batchSize;
+  private final Integer batchSize;
   private final Query nearest;
   private final boolean topNPushDown;
   private final Map<String, String> storageOptions;
@@ -206,7 +204,7 @@ public class LanceSparkReadOptions implements Serializable {
     return metadataCacheSize;
   }
 
-  public int getBatchSize() {
+  public Integer getBatchSize() {
     return batchSize;
   }
 
@@ -260,21 +258,24 @@ public class LanceSparkReadOptions implements Serializable {
    * @return a new LanceSparkReadOptions with the specified version
    */
   public LanceSparkReadOptions withVersion(int newVersion) {
-    return builder()
-        .datasetUri(this.datasetUri)
-        .pushDownFilters(this.pushDownFilters)
-        .blockSize(this.blockSize)
-        .version(newVersion)
-        .indexCacheSize(this.indexCacheSize)
-        .metadataCacheSize(this.metadataCacheSize)
-        .batchSize(this.batchSize)
-        .nearest(this.nearest)
-        .topNPushDown(this.topNPushDown)
-        .storageOptions(this.storageOptions)
-        .namespace(this.namespace)
-        .tableId(this.tableId)
-        .catalogName(this.catalogName)
-        .build();
+    Builder builder =
+        builder()
+            .datasetUri(this.datasetUri)
+            .pushDownFilters(this.pushDownFilters)
+            .blockSize(this.blockSize)
+            .version(newVersion)
+            .indexCacheSize(this.indexCacheSize)
+            .metadataCacheSize(this.metadataCacheSize)
+            .nearest(this.nearest)
+            .topNPushDown(this.topNPushDown)
+            .storageOptions(this.storageOptions)
+            .namespace(this.namespace)
+            .tableId(this.tableId)
+            .catalogName(this.catalogName);
+    if (this.batchSize != null) {
+      builder.batchSize(this.batchSize);
+    }
+    return builder.build();
   }
 
   /**
@@ -326,13 +327,13 @@ public class LanceSparkReadOptions implements Serializable {
     }
     LanceSparkReadOptions that = (LanceSparkReadOptions) o;
     return pushDownFilters == that.pushDownFilters
-        && batchSize == that.batchSize
         && topNPushDown == that.topNPushDown
         && Objects.equals(datasetUri, that.datasetUri)
         && Objects.equals(blockSize, that.blockSize)
         && Objects.equals(version, that.version)
         && Objects.equals(indexCacheSize, that.indexCacheSize)
         && Objects.equals(metadataCacheSize, that.metadataCacheSize)
+        && Objects.equals(batchSize, that.batchSize)
         && Objects.equals(storageOptions, that.storageOptions)
         && Objects.equals(tableId, that.tableId);
   }
@@ -361,7 +362,7 @@ public class LanceSparkReadOptions implements Serializable {
     private Integer version;
     private Integer indexCacheSize;
     private Integer metadataCacheSize;
-    private int batchSize = DEFAULT_BATCH_SIZE;
+    private Integer batchSize;
     private boolean topNPushDown = DEFAULT_TOP_N_PUSH_DOWN;
     private Map<String, String> storageOptions = new HashMap<>();
     private LanceNamespace namespace;
