@@ -574,7 +574,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     // Create dataset using namespace - WriteDatasetBuilder handles declareTable internally
     // and properly leverages namespace client for credential vending
-    boolean stableRowIds = catalogConfig.isEnableStableRowIds(properties);
+    final boolean stableRowIds = catalogConfig.isEnableStableRowIds(properties);
     String location;
     try (Dataset dataset =
         Dataset.write()
@@ -589,7 +589,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       location = dataset.uri();
       if (stableRowIds) {
         DatasetConfigUtils.setConfigEntry(
-            dataset, StagedCommit.ENABLE_STABLE_ROW_IDS_CONFIG, "true");
+            dataset, LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS, "true");
       }
     }
 
@@ -632,7 +632,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         createReadOptions(
             datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
 
-    boolean stableRowIds = catalogConfig.isEnableStableRowIds(properties);
+    final boolean stableRowIds = catalogConfig.isEnableStableRowIds(properties);
     try {
       try (Dataset created =
           Dataset.write()
@@ -644,8 +644,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
               .storageOptions(readOptions.getStorageOptions())
               .execute()) {
         if (stableRowIds) {
-          created.updateConfig(
-              Collections.singletonMap(StagedCommit.ENABLE_STABLE_ROW_IDS_CONFIG, "true"));
+          DatasetConfigUtils.setConfigEntry(
+              created, LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS, "true");
         }
       }
     } catch (IllegalArgumentException e) {

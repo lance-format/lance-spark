@@ -17,6 +17,7 @@ import org.lance.Dataset;
 import org.lance.WriteParams;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.utils.DatasetConfigUtils;
 
 import org.apache.arrow.dataset.scanner.Scanner;
 import org.apache.arrow.memory.BufferAllocator;
@@ -128,7 +129,7 @@ public class LanceBatchWriteTest {
         assertTrue(
             beforeUpdate == null || !"true".equalsIgnoreCase(beforeUpdate),
             "enableStableRowIds should not auto-populate config");
-        created.updateConfig(Collections.singletonMap("enable_stable_row_ids", "true"));
+        DatasetConfigUtils.setConfigEntry(created, "enable_stable_row_ids", "true");
       }
 
       // Re-open and verify config persists

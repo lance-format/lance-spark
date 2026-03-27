@@ -23,6 +23,7 @@ import org.lance.namespace.model.DeregisterTableRequest;
 import org.lance.operation.Append;
 import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
+import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.utils.DatasetConfigUtils;
 
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -46,7 +47,6 @@ public class StagedCommit {
 
   private static final String NO_DATASET_URI = null;
   private static final List<FragmentMetadata> NO_INITIAL_FRAGMENTS = Collections.emptyList();
-  public static final String ENABLE_STABLE_ROW_IDS_CONFIG = "enable_stable_row_ids";
 
   private Boolean enableStableRowIds;
   private List<FragmentMetadata> fragments;
@@ -65,12 +65,15 @@ public class StagedCommit {
   private final boolean managedVersioning;
 
   /** Creates a StagedCommit for an existing table (REPLACE or CREATE_OR_REPLACE on existing). */
-  public static StagedCommit forExistingTable(final Dataset dataset, final Schema schema, final StagedCommitOptions options) {
-    return new StagedCommit(Optional.of(dataset), NO_INITIAL_FRAGMENTS, schema, NO_DATASET_URI, options);
+  public static StagedCommit forExistingTable(
+      final Dataset dataset, final Schema schema, final StagedCommitOptions options) {
+    return new StagedCommit(
+        Optional.of(dataset), NO_INITIAL_FRAGMENTS, schema, NO_DATASET_URI, options);
   }
 
   /** Creates a StagedCommit for a new table (CREATE or CREATE_OR_REPLACE on non-existing). */
-  public static StagedCommit forNewTable(final Schema schema, final String datasetUri, final StagedCommitOptions options) {
+  public static StagedCommit forNewTable(
+      final Schema schema, final String datasetUri, final StagedCommitOptions options) {
     return new StagedCommit(Optional.empty(), NO_INITIAL_FRAGMENTS, schema, datasetUri, options);
   }
 
@@ -123,7 +126,8 @@ public class StagedCommit {
   }
 
   private void createTableWithStableRowIds() {
-    try (Dataset created = Dataset.write()
+    try (Dataset created =
+        Dataset.write()
             .allocator(LanceRuntime.allocator())
             .uri(datasetUri)
             .schema(schema)
@@ -134,7 +138,8 @@ public class StagedCommit {
       // enableStableRowIds(true) sets the internal Rust manifest flag but
       // does not populate the user-facing config map. Explicitly set it so
       // that Dataset.getConfig().get("enable_stable_row_ids") returns "true".
-      DatasetConfigUtils.setConfigEntry(created, ENABLE_STABLE_ROW_IDS_CONFIG, "true");
+      DatasetConfigUtils.setConfigEntry(
+          created, LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS, "true");
     }
   }
 
@@ -152,7 +157,8 @@ public class StagedCommit {
 
   private void createTableViaOverwrite() {
     final Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
-    final CommitBuilder builder = new CommitBuilder(datasetUri, LanceRuntime.allocator()).writeParams(storageOptions);
+    final CommitBuilder builder =
+        new CommitBuilder(datasetUri, LanceRuntime.allocator()).writeParams(storageOptions);
     applyManagedVersioning(builder);
     try (Transaction txn = new Transaction.Builder().operation(operation).build();
         Dataset committed = builder.execute(txn)) {
@@ -192,9 +198,10 @@ public class StagedCommit {
       final CommitBuilder builder,
       final long readVersion,
       final org.lance.operation.Operation operation) {
-    try (Transaction txn = new Transaction.Builder().readVersion(readVersion).operation(operation).build();
+    try (Transaction txn =
+            new Transaction.Builder().readVersion(readVersion).operation(operation).build();
         Dataset committed = builder.execute(txn)) {
-      // auto-close
+      // auto-close txn and committed dataset
     }
   }
 

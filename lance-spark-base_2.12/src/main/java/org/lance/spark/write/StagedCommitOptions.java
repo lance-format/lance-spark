@@ -20,6 +20,7 @@ import java.util.Map;
 
 /** Commit-level options for staged table operations (CREATE, REPLACE, CREATE_OR_REPLACE). */
 public class StagedCommitOptions {
+
   private static final LanceNamespace NO_NAMESPACE = null;
   private static final List<String> NO_TABLE_ID = null;
   private static final boolean NO_MANAGED_VERSIONING = false;
