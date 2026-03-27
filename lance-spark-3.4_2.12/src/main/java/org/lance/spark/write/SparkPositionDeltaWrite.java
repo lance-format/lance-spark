@@ -254,8 +254,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       if (writeOptions.getMaxBytesPerFile() != null) {
         builder.withMaxBytesPerFile(writeOptions.getMaxBytesPerFile());
       }
-      if (writeOptions.getDataStorageVersion() != null) {
-        builder.withDataStorageVersion(writeOptions.getDataStorageVersion());
+      if (writeOptions.getFileFormatVersion() != null) {
+        builder.withDataStorageVersion(writeOptions.getFileFormatVersion());
       }
       builder.withStorageOptions(merged);
       return builder.build();

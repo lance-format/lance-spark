@@ -208,7 +208,7 @@ public abstract class BaseLanceFormatTest {
         .createDataFrame(data, schema)
         .write()
         .format("lance")
-        .option("data_storage_version", version)
+        .option("file_format_version", version)
         .mode(SaveMode.ErrorIfExists)
         .save(outputPath);
     return spark.read().format("lance").load(outputPath).orderBy("id").collectAsList();

@@ -35,7 +35,7 @@ import java.util.Objects;
  *
  * <ul>
  *   <li>{@code enable_stable_row_ids} - Enable stable row IDs and CDF support (default: false)
- *   <li>{@code data_storage_version} - Data storage version for new tables
+ *   <li>{@code file_format_version} - File format version for new tables
  * </ul>
  */
 public class LanceSparkCatalogConfig {
@@ -45,7 +45,7 @@ public class LanceSparkCatalogConfig {
   /** Known table option keys. */
   public static final String TABLE_OPT_ENABLE_STABLE_ROW_IDS = "enable_stable_row_ids";
 
-  public static final String TABLE_OPT_DATA_STORAGE_VERSION = "data_storage_version";
+  public static final String TABLE_OPT_FILE_FORMAT_VERSION = "file_format_version";
 
   private final Map<String, String> storageOptions;
   private final Map<String, String> tableOptions;
@@ -92,9 +92,9 @@ public class LanceSparkCatalogConfig {
     if (stableRowIds != null) {
       tableOpts.put(TABLE_OPT_ENABLE_STABLE_ROW_IDS, stableRowIds);
     }
-    String dataStorageVersion = catalogOptions.get(TABLE_OPT_DATA_STORAGE_VERSION);
-    if (dataStorageVersion != null) {
-      tableOpts.put(TABLE_OPT_DATA_STORAGE_VERSION, dataStorageVersion);
+    String fileFormatVersion = catalogOptions.get(TABLE_OPT_FILE_FORMAT_VERSION);
+    if (fileFormatVersion != null) {
+      tableOpts.put(TABLE_OPT_FILE_FORMAT_VERSION, fileFormatVersion);
     }
 
     return builder().storageOptions(nativeOptions).tableOptions(tableOpts).build();
@@ -144,27 +144,27 @@ public class LanceSparkCatalogConfig {
   }
 
   /**
-   * Returns the data storage version from catalog-level table options.
+   * Returns the file format version from catalog-level table options.
    *
-   * @return the data storage version string, or null if not specified
+   * @return the file format version string, or null if not specified
    */
-  public String getDataStorageVersion() {
-    return tableOptions.get(TABLE_OPT_DATA_STORAGE_VERSION);
+  public String getFileFormatVersion() {
+    return tableOptions.get(TABLE_OPT_FILE_FORMAT_VERSION);
   }
 
   /**
-   * Returns the data storage version, allowing per-table TBLPROPERTIES to override the
-   * catalog-level default.
+   * Returns the file format version, allowing per-table TBLPROPERTIES to override the catalog-level
+   * default.
    *
    * @param tableProperties the TBLPROPERTIES from CREATE TABLE
-   * @return the data storage version string, or null if not specified
+   * @return the file format version string, or null if not specified
    */
-  public String getDataStorageVersion(Map<String, String> tableProperties) {
-    String override = tableProperties.get(TABLE_OPT_DATA_STORAGE_VERSION);
+  public String getFileFormatVersion(Map<String, String> tableProperties) {
+    String override = tableProperties.get(TABLE_OPT_FILE_FORMAT_VERSION);
     if (override != null) {
       return override;
     }
-    return getDataStorageVersion();
+    return getFileFormatVersion();
   }
 
   @Override

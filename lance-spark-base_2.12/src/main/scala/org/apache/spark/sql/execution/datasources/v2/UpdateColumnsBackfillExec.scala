@@ -71,7 +71,7 @@ case class UpdateColumnsBackfillExec(
         null,
         null,
         false,
-        originalTable.getDataStorageVersion()),
+        originalTable.getFileFormatVersion()),
       Some(catalog),
       Some(ident))
 

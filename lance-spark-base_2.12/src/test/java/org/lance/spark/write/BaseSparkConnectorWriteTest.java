@@ -524,7 +524,7 @@ public abstract class BaseSparkConnectorWriteTest {
     spark.sql(
         "CREATE TABLE lance.`"
             + path
-            + "` (id INT, name STRING) TBLPROPERTIES ('data_storage_version' = 'LEGACY')");
+            + "` (id INT, name STRING) TBLPROPERTIES ('file_format_version' = 'LEGACY')");
 
     try (org.lance.Dataset ds =
         org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
@@ -541,7 +541,7 @@ public abstract class BaseSparkConnectorWriteTest {
     spark.sql(
         "CREATE TABLE lance.`"
             + path
-            + "` TBLPROPERTIES ('data_storage_version' = 'STABLE') AS SELECT * FROM tmp_view");
+            + "` TBLPROPERTIES ('file_format_version' = 'STABLE') AS SELECT * FROM tmp_view");
 
     try (org.lance.Dataset ds =
         org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
@@ -563,7 +563,7 @@ public abstract class BaseSparkConnectorWriteTest {
     spark.sql(
         "CREATE TABLE lance.`"
             + path
-            + "` (id INT, name STRING) TBLPROPERTIES ('data_storage_version' = 'LEGACY')");
+            + "` (id INT, name STRING) TBLPROPERTIES ('file_format_version' = 'LEGACY')");
 
     // Verify initial storage version
     try (org.lance.Dataset ds =
@@ -599,7 +599,7 @@ public abstract class BaseSparkConnectorWriteTest {
     spark.sql(
         "CREATE TABLE lance.`"
             + path
-            + "` TBLPROPERTIES ('data_storage_version' = 'LEGACY') AS SELECT * FROM tmp_view");
+            + "` TBLPROPERTIES ('file_format_version' = 'LEGACY') AS SELECT * FROM tmp_view");
 
     try (org.lance.Dataset ds =
         org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
@@ -625,7 +625,7 @@ public abstract class BaseSparkConnectorWriteTest {
     spark.sql(
         "CREATE OR REPLACE TABLE lance.`"
             + path
-            + "` TBLPROPERTIES ('data_storage_version' = 'LEGACY') AS SELECT * FROM tmp_view");
+            + "` TBLPROPERTIES ('file_format_version' = 'LEGACY') AS SELECT * FROM tmp_view");
 
     try (org.lance.Dataset ds =
         org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
@@ -654,7 +654,7 @@ public abstract class BaseSparkConnectorWriteTest {
         .write()
         .format(LanceDataSource.name)
         .option(LanceSparkReadOptions.CONFIG_DATASET_URI, path)
-        .option(LanceSparkWriteOptions.CONFIG_DATA_STORAGE_VERSION, "LEGACY")
+        .option(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION, "LEGACY")
         .save();
 
     try (org.lance.Dataset ds =

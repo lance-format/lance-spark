@@ -144,43 +144,43 @@ public class LanceSparkCatalogConfigTest {
   }
 
   @Test
-  public void testDataStorageVersionDefaultsToNull() {
+  public void testFileFormatVersionDefaultsToNull() {
     Map<String, String> catalogOptions = new HashMap<>();
     LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
 
-    assertNull(config.getDataStorageVersion());
+    assertNull(config.getFileFormatVersion());
   }
 
   @Test
-  public void testDataStorageVersionFromCatalogOptions() {
+  public void testFileFormatVersionFromCatalogOptions() {
     Map<String, String> catalogOptions = new HashMap<>();
-    catalogOptions.put("data_storage_version", "LEGACY");
+    catalogOptions.put("file_format_version", "LEGACY");
     LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
 
-    assertEquals("LEGACY", config.getDataStorageVersion());
+    assertEquals("LEGACY", config.getFileFormatVersion());
   }
 
   @Test
-  public void testDataStorageVersionTablePropertiesOverrideCatalogDefault() {
+  public void testFileFormatVersionTablePropertiesOverrideCatalogDefault() {
     Map<String, String> catalogOptions = new HashMap<>();
-    catalogOptions.put("data_storage_version", "LEGACY");
+    catalogOptions.put("file_format_version", "LEGACY");
     LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
 
     Map<String, String> tableProperties = new HashMap<>();
-    tableProperties.put("data_storage_version", "STABLE");
+    tableProperties.put("file_format_version", "STABLE");
 
-    assertEquals("LEGACY", config.getDataStorageVersion());
-    assertEquals("STABLE", config.getDataStorageVersion(tableProperties));
+    assertEquals("LEGACY", config.getFileFormatVersion());
+    assertEquals("STABLE", config.getFileFormatVersion(tableProperties));
   }
 
   @Test
-  public void testDataStorageVersionTablePropertiesFallsThroughToCatalogDefault() {
+  public void testFileFormatVersionTablePropertiesFallsThroughToCatalogDefault() {
     Map<String, String> catalogOptions = new HashMap<>();
-    catalogOptions.put("data_storage_version", "LEGACY");
+    catalogOptions.put("file_format_version", "LEGACY");
     LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
 
     Map<String, String> tableProperties = new HashMap<>();
 
-    assertEquals("LEGACY", config.getDataStorageVersion(tableProperties));
+    assertEquals("LEGACY", config.getFileFormatVersion(tableProperties));
   }
 }
