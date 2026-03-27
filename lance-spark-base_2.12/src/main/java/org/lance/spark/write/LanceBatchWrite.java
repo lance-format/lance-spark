@@ -119,6 +119,11 @@ public class LanceBatchWrite implements BatchWrite {
       // commitStagedChanges() will perform the actual commit.
       stagedCommit.setFragments(fragments);
       stagedCommit.setSchema(arrowSchema);
+      // Sync write-time enableStableRowIds into staged commit
+      final Boolean enableStableRowIds = writeOptions.getEnableStableRowIds();
+      if (enableStableRowIds != null) {
+        stagedCommit.setEnableStableRowIds(enableStableRowIds);
+      }
     } else {
       // For non-staged tables, commit immediately
       Dataset ds = dataset.get();
@@ -131,6 +136,10 @@ public class LanceBatchWrite implements BatchWrite {
         }
         CommitBuilder commitBuilder =
             new CommitBuilder(ds).writeParams(writeOptions.getStorageOptions());
+        final Boolean enableStableRowIds = writeOptions.getEnableStableRowIds();
+        if (enableStableRowIds != null) {
+          commitBuilder.useStableRowIds(enableStableRowIds);
+        }
         if (managedVersioning) {
           LanceNamespace namespace =
               LanceRuntime.getOrCreateNamespace(namespaceImpl, namespaceProperties);

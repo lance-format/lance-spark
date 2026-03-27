@@ -17,10 +17,13 @@ import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.FragmentMetadata;
 import org.lance.Transaction;
+import org.lance.WriteParams;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.DeregisterTableRequest;
+import org.lance.operation.Append;
 import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
+import org.lance.spark.utils.DatasetConfigUtils;
 
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.slf4j.Logger;
@@ -41,6 +44,11 @@ import java.util.Optional;
 public class StagedCommit {
   private static final Logger LOG = LoggerFactory.getLogger(StagedCommit.class);
 
+  private static final String NO_DATASET_URI = null;
+  private static final List<FragmentMetadata> NO_INITIAL_FRAGMENTS = Collections.emptyList();
+  public static final String ENABLE_STABLE_ROW_IDS_CONFIG = "enable_stable_row_ids";
+
+  private Boolean enableStableRowIds;
   private List<FragmentMetadata> fragments;
   private Schema schema;
 
@@ -57,64 +65,31 @@ public class StagedCommit {
   private final boolean managedVersioning;
 
   /** Creates a StagedCommit for an existing table (REPLACE or CREATE_OR_REPLACE on existing). */
-  public static StagedCommit forExistingTable(
-      Dataset dataset,
-      Schema schema,
-      Map<String, String> storageOptions,
-      LanceNamespace namespace,
-      List<String> tableId,
-      boolean managedVersioning) {
-    return new StagedCommit(
-        Optional.of(dataset),
-        Collections.emptyList(),
-        schema,
-        null,
-        storageOptions,
-        false,
-        namespace,
-        tableId,
-        managedVersioning);
+  public static StagedCommit forExistingTable(final Dataset dataset, final Schema schema, final StagedCommitOptions options) {
+    return new StagedCommit(Optional.of(dataset), NO_INITIAL_FRAGMENTS, schema, NO_DATASET_URI, options);
   }
 
   /** Creates a StagedCommit for a new table (CREATE or CREATE_OR_REPLACE on non-existing). */
-  public static StagedCommit forNewTable(
-      Schema schema,
-      String datasetUri,
-      Map<String, String> storageOptions,
-      LanceNamespace namespace,
-      List<String> tableId,
-      boolean managedVersioning) {
-    return new StagedCommit(
-        Optional.empty(),
-        Collections.emptyList(),
-        schema,
-        datasetUri,
-        storageOptions,
-        true,
-        namespace,
-        tableId,
-        managedVersioning);
+  public static StagedCommit forNewTable(final Schema schema, final String datasetUri, final StagedCommitOptions options) {
+    return new StagedCommit(Optional.empty(), NO_INITIAL_FRAGMENTS, schema, datasetUri, options);
   }
 
   private StagedCommit(
-      Optional<Dataset> dataset,
-      List<FragmentMetadata> fragments,
-      Schema schema,
-      String datasetUri,
-      Map<String, String> storageOptions,
-      boolean isNewTable,
-      LanceNamespace namespace,
-      List<String> tableId,
-      boolean managedVersioning) {
+      final Optional<Dataset> dataset,
+      final List<FragmentMetadata> fragments,
+      final Schema schema,
+      final String datasetUri,
+      final StagedCommitOptions options) {
     this.dataset = dataset;
     this.fragments = new ArrayList<>(fragments);
     this.schema = schema;
     this.datasetUri = datasetUri;
-    this.storageOptions = storageOptions;
-    this.isNewTable = isNewTable;
-    this.namespace = namespace;
-    this.tableId = tableId;
-    this.managedVersioning = managedVersioning;
+    this.storageOptions = options.getStorageOptions();
+    this.isNewTable = datasetUri != null;
+    this.enableStableRowIds = options.getEnableStableRowIds();
+    this.namespace = options.getNamespace();
+    this.tableId = options.getTableId();
+    this.managedVersioning = options.isManagedVersioning();
   }
 
   public void setFragments(List<FragmentMetadata> fragments) {
@@ -123,6 +98,10 @@ public class StagedCommit {
 
   public void setSchema(Schema schema) {
     this.schema = schema;
+  }
+
+  public void setEnableStableRowIds(Boolean enableStableRowIds) {
+    this.enableStableRowIds = enableStableRowIds;
   }
 
   /** Performs the actual commit using the stored dataset and fragments. */
@@ -135,34 +114,87 @@ public class StagedCommit {
   }
 
   private void commitNewTable() {
-    Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
-    CommitBuilder builder =
-        new CommitBuilder(datasetUri, LanceRuntime.allocator()).writeParams(storageOptions);
-    if (managedVersioning) {
-      builder.namespace(namespace).tableId(tableId);
+    if (Boolean.TRUE.equals(enableStableRowIds)) {
+      createTableWithStableRowIds();
+      appendFragmentsIfPresent();
+    } else {
+      createTableViaOverwrite();
     }
+  }
+
+  private void createTableWithStableRowIds() {
+    try (Dataset created = Dataset.write()
+            .allocator(LanceRuntime.allocator())
+            .uri(datasetUri)
+            .schema(schema)
+            .mode(WriteParams.WriteMode.CREATE)
+            .enableStableRowIds(true)
+            .storageOptions(storageOptions)
+            .execute()) {
+      // enableStableRowIds(true) sets the internal Rust manifest flag but
+      // does not populate the user-facing config map. Explicitly set it so
+      // that Dataset.getConfig().get("enable_stable_row_ids") returns "true".
+      DatasetConfigUtils.setConfigEntry(created, ENABLE_STABLE_ROW_IDS_CONFIG, "true");
+    }
+  }
+
+  private void appendFragmentsIfPresent() {
+    if (fragments.isEmpty()) {
+      return;
+    }
+    try (Dataset ds = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+      final Append operation = Append.builder().fragments(fragments).build();
+      final CommitBuilder builder = newCommitBuilder(ds);
+      builder.useStableRowIds(true);
+      commitOperation(builder, ds.version(), operation);
+    }
+  }
+
+  private void createTableViaOverwrite() {
+    final Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
+    final CommitBuilder builder = new CommitBuilder(datasetUri, LanceRuntime.allocator()).writeParams(storageOptions);
+    applyManagedVersioning(builder);
     try (Transaction txn = new Transaction.Builder().operation(operation).build();
         Dataset committed = builder.execute(txn)) {
-      // auto-close txn and committed dataset
+      // auto-close
     }
   }
 
   private void commitExistingTable() {
-    Dataset ds = dataset.get();
-    String uri = ds.uri();
-    long version = ds.version();
+    final Dataset ds = dataset.get();
+    final String uri = ds.uri();
+    final long version = ds.version();
     ds.close();
 
-    Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
-    CommitBuilder builder =
+    final Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
+    final CommitBuilder builder =
         new CommitBuilder(uri, LanceRuntime.allocator()).writeParams(storageOptions);
+    if (enableStableRowIds != null) {
+      builder.useStableRowIds(enableStableRowIds);
+    }
+    applyManagedVersioning(builder);
+    commitOperation(builder, version, operation);
+  }
+
+  private CommitBuilder newCommitBuilder(final Dataset dataset) {
+    final CommitBuilder builder = new CommitBuilder(dataset).writeParams(storageOptions);
+    applyManagedVersioning(builder);
+    return builder;
+  }
+
+  private void applyManagedVersioning(final CommitBuilder builder) {
     if (managedVersioning) {
       builder.namespace(namespace).tableId(tableId);
     }
-    try (Transaction txn =
-            new Transaction.Builder().readVersion(version).operation(operation).build();
+  }
+
+  private static void commitOperation(
+      final CommitBuilder builder,
+      final long readVersion,
+      final org.lance.operation.Operation operation) {
+    try (Transaction txn = new Transaction.Builder().readVersion(readVersion).operation(operation).build();
         Dataset committed = builder.execute(txn)) {
-      // auto-close txn and committed dataset
+      // auto-close
     }
   }
 

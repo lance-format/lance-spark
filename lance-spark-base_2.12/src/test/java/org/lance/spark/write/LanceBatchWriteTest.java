@@ -42,6 +42,7 @@ import java.nio.file.Path;
 import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class LanceBatchWriteTest {
   @TempDir static Path tempDir;
@@ -100,6 +101,43 @@ public class LanceBatchWriteTest {
             assertEquals(rows, totalRowsRead);
           }
         }
+      }
+    }
+  }
+
+  @Test
+  public void testEnableStableRowIdsPersistsInConfig(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
+      Schema schema = new Schema(Collections.singletonList(field));
+
+      // Dataset.write().enableStableRowIds(true) sets the Rust manifest flag but does NOT
+      // populate the user-facing config map. Verify that updateConfig fills the gap.
+      try (Dataset created =
+          Dataset.write()
+              .allocator(allocator)
+              .uri(datasetUri)
+              .schema(schema)
+              .mode(WriteParams.WriteMode.CREATE)
+              .enableStableRowIds(true)
+              .execute()) {
+        // Before updateConfig, config does NOT contain enable_stable_row_ids
+        String beforeUpdate = created.getConfig().get("enable_stable_row_ids");
+        assertTrue(
+            beforeUpdate == null || !"true".equalsIgnoreCase(beforeUpdate),
+            "enableStableRowIds should not auto-populate config");
+        created.updateConfig(Collections.singletonMap("enable_stable_row_ids", "true"));
+      }
+
+      // Re-open and verify config persists
+      try (Dataset reopened = Dataset.open(datasetUri, allocator)) {
+        String value = reopened.getConfig().get("enable_stable_row_ids");
+        assertTrue(
+            "true".equalsIgnoreCase(value),
+            "Expected enable_stable_row_ids=true in config after updateConfig, got: "
+                + reopened.getConfig());
       }
     }
   }

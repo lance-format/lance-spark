@@ -29,10 +29,12 @@ import org.lance.namespace.model.DropTableRequest;
 import org.lance.namespace.model.ListTablesRequest;
 import org.lance.namespace.model.ListTablesResponse;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
+import org.lance.spark.utils.DatasetConfigUtils;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.SchemaConverter;
 import org.lance.spark.utils.Utils;
 import org.lance.spark.write.StagedCommit;
+import org.lance.spark.write.StagedCommitOptions;
 
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
@@ -572,6 +574,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     // Create dataset using namespace - WriteDatasetBuilder handles declareTable internally
     // and properly leverages namespace client for credential vending
+    boolean stableRowIds = catalogConfig.isEnableStableRowIds(properties);
     String location;
     try (Dataset dataset =
         Dataset.write()
@@ -580,10 +583,14 @@ public abstract class BaseLanceNamespaceSparkCatalog
             .tableId(tableIdList)
             .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true))
             .mode(WriteParams.WriteMode.CREATE)
-            .enableStableRowIds(catalogConfig.isEnableStableRowIds(properties))
+            .enableStableRowIds(stableRowIds)
             .storageOptions(catalogConfig.getStorageOptions())
             .execute()) {
       location = dataset.uri();
+      if (stableRowIds) {
+        DatasetConfigUtils.setConfigEntry(
+            dataset, StagedCommit.ENABLE_STABLE_ROW_IDS_CONFIG, "true");
+      }
     }
 
     // Call describeTable to get initial storage options for Spark dataset wrapper
@@ -625,16 +632,22 @@ public abstract class BaseLanceNamespaceSparkCatalog
         createReadOptions(
             datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
 
+    boolean stableRowIds = catalogConfig.isEnableStableRowIds(properties);
     try {
-      Dataset.write()
-          .allocator(LanceRuntime.allocator())
-          .uri(datasetUri)
-          .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true))
-          .mode(WriteParams.WriteMode.CREATE)
-          .enableStableRowIds(catalogConfig.isEnableStableRowIds(properties))
-          .storageOptions(readOptions.getStorageOptions())
-          .execute()
-          .close();
+      try (Dataset created =
+          Dataset.write()
+              .allocator(LanceRuntime.allocator())
+              .uri(datasetUri)
+              .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true))
+              .mode(WriteParams.WriteMode.CREATE)
+              .enableStableRowIds(stableRowIds)
+              .storageOptions(readOptions.getStorageOptions())
+              .execute()) {
+        if (stableRowIds) {
+          created.updateConfig(
+              Collections.singletonMap(StagedCommit.ENABLE_STABLE_ROW_IDS_CONFIG, "true"));
+        }
+      }
     } catch (IllegalArgumentException e) {
       throw new TableAlreadyExistsException(ident);
     }
@@ -752,9 +765,14 @@ public abstract class BaseLanceNamespaceSparkCatalog
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
-    StagedCommit stagedCommit =
-        StagedCommit.forNewTable(
-            arrowSchema, location, merged, namespace, tableIdList, managedVersioning);
+    final StagedCommitOptions commitOptions =
+        StagedCommitOptions.of(
+            merged,
+            catalogConfig.isEnableStableRowIds(properties),
+            namespace,
+            tableIdList,
+            managedVersioning);
+    StagedCommit stagedCommit = StagedCommit.forNewTable(arrowSchema, location, commitOptions);
     return createStagedDataset(
         readOptions,
         processedSchema,
@@ -776,9 +794,10 @@ public abstract class BaseLanceNamespaceSparkCatalog
             datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
 
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
-    StagedCommit stagedCommit =
-        StagedCommit.forNewTable(
-            arrowSchema, datasetUri, catalogConfig.getStorageOptions(), null, null, false);
+    final StagedCommitOptions commitOptions =
+        StagedCommitOptions.pathBased(
+            catalogConfig.getStorageOptions(), catalogConfig.isEnableStableRowIds(properties));
+    StagedCommit stagedCommit = StagedCommit.forNewTable(arrowSchema, datasetUri, commitOptions);
     return createStagedDataset(readOptions, processedSchema, null, null, null, false, stagedCommit);
   }
 
@@ -822,9 +841,14 @@ public abstract class BaseLanceNamespaceSparkCatalog
     Dataset ds = openDataset(readOptions);
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
-    StagedCommit stagedCommit =
-        StagedCommit.forExistingTable(
-            ds, arrowSchema, merged, namespace, tableIdList, managedVersioning);
+    final StagedCommitOptions commitOptions =
+        StagedCommitOptions.of(
+            merged,
+            catalogConfig.isEnableStableRowIds(properties),
+            namespace,
+            tableIdList,
+            managedVersioning);
+    StagedCommit stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
     return createStagedDataset(
         readOptions,
         processedSchema,
@@ -854,9 +878,10 @@ public abstract class BaseLanceNamespaceSparkCatalog
     }
 
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
-    StagedCommit stagedCommit =
-        StagedCommit.forExistingTable(
-            ds, arrowSchema, catalogConfig.getStorageOptions(), null, null, false);
+    final StagedCommitOptions commitOptions =
+        StagedCommitOptions.pathBased(
+            catalogConfig.getStorageOptions(), catalogConfig.isEnableStableRowIds(properties));
+    StagedCommit stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
     return createStagedDataset(readOptions, processedSchema, null, null, null, false, stagedCommit);
   }
 
@@ -911,18 +936,21 @@ public abstract class BaseLanceNamespaceSparkCatalog
             name);
 
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
-    StagedCommit stagedCommit;
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
+    final StagedCommitOptions commitOptions =
+        StagedCommitOptions.of(
+            merged,
+            catalogConfig.isEnableStableRowIds(properties),
+            namespace,
+            tableIdList,
+            managedVersioning);
+    StagedCommit stagedCommit;
     if (exists) {
-      Dataset ds = openDataset(readOptions);
       stagedCommit =
-          StagedCommit.forExistingTable(
-              ds, arrowSchema, merged, namespace, tableIdList, managedVersioning);
+          StagedCommit.forExistingTable(openDataset(readOptions), arrowSchema, commitOptions);
     } else {
-      stagedCommit =
-          StagedCommit.forNewTable(
-              arrowSchema, location, merged, namespace, tableIdList, managedVersioning);
+      stagedCommit = StagedCommit.forNewTable(arrowSchema, location, commitOptions);
     }
     return createStagedDataset(
         readOptions,
@@ -946,17 +974,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     boolean exists = tableExistsAtPath(ident);
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
+    final StagedCommitOptions commitOptions =
+        StagedCommitOptions.pathBased(
+            catalogConfig.getStorageOptions(), catalogConfig.isEnableStableRowIds(properties));
     StagedCommit stagedCommit;
-
     if (exists) {
-      Dataset ds = openDataset(readOptions);
       stagedCommit =
-          StagedCommit.forExistingTable(
-              ds, arrowSchema, catalogConfig.getStorageOptions(), null, null, false);
+          StagedCommit.forExistingTable(openDataset(readOptions), arrowSchema, commitOptions);
     } else {
-      stagedCommit =
-          StagedCommit.forNewTable(
-              arrowSchema, datasetUri, catalogConfig.getStorageOptions(), null, null, false);
+      stagedCommit = StagedCommit.forNewTable(arrowSchema, datasetUri, commitOptions);
     }
     return createStagedDataset(readOptions, processedSchema, null, null, null, false, stagedCommit);
   }
