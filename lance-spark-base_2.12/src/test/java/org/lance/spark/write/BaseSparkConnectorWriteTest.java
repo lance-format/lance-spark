@@ -645,6 +645,38 @@ public abstract class BaseSparkConnectorWriteTest {
   }
 
   @Test
+  public void replaceTableChangesStorageVersion(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    // Create table with LEGACY storage version
+    spark.sql(
+        "CREATE TABLE lance.`"
+            + path
+            + "` TBLPROPERTIES ('file_format_version' = 'LEGACY') AS SELECT * FROM tmp_view");
+
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      assertEquals("0.1", ds.getLanceFileFormatVersion());
+    }
+
+    // Replace table with STABLE storage version
+    spark.sql(
+        "REPLACE TABLE lance.`"
+            + path
+            + "` TBLPROPERTIES ('file_format_version' = 'STABLE')"
+            + " AS SELECT id * 10 AS id, name, address FROM tmp_view");
+
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      String version = ds.getLanceFileFormatVersion();
+      assertTrue(
+          version.equals("2.0") || version.equals("2.1"),
+          "Expected STABLE version (2.0 or 2.1), got: " + version);
+    }
+  }
+
+  @Test
   public void writeWithStorageVersionOption(TestInfo testInfo) {
     String datasetName = testInfo.getTestMethod().get().getName();
     String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
