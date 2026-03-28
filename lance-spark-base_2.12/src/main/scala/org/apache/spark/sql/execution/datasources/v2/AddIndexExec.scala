@@ -23,8 +23,9 @@ import org.json4s.JsonAST.{JBool, JDouble, JField, JInt, JNull, JObject, JString
 import org.json4s.jackson.JsonMethods.{compact, render}
 import org.lance.{CommitBuilder, Dataset, Transaction}
 import org.lance.ReadOptions
-import org.lance.index.{Index, IndexOptions, IndexParams, IndexType}
+import org.lance.index.{DistanceType, Index, IndexOptions, IndexParams, IndexType}
 import org.lance.index.scalar.ScalarIndexParams
+import org.lance.index.vector.{IvfBuildParams, PQBuildParams, SQBuildParams, VectorIndexParams, VectorTrainer}
 import org.lance.operation.{CreateIndex => AddIndexOperation}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceRuntime, LanceSparkReadOptions}
 
@@ -115,6 +116,17 @@ case class AddIndexExec(
       case _ => (None, None, None, None)
     }
 
+    // Build index parameters based on method type
+    val indexParamsOpt: Option[IndexParams] = method.toLowerCase match {
+      case "ivf_pq" =>
+        Some(buildIvfIndexParams(readOptions, columns, args, quantizationType = "pq"))
+      case "ivf_flat" =>
+        Some(buildIvfIndexParams(readOptions, columns, args, quantizationType = "flat"))
+      case "ivf_sq" =>
+        Some(buildIvfIndexParams(readOptions, columns, args, quantizationType = "sq"))
+      case _ => None
+    }
+
     // Build per-fragment tasks
     val tasks = fragmentIds.map { fid =>
       IndexTaskExecutor.create(
@@ -128,7 +140,8 @@ case class AddIndexExec(
         nsImpl,
         nsProps,
         tableId,
-        initialStorageOpts)
+        initialStorageOpts,
+        indexParamsOpt.map(encode))
     }.toSeq
 
     val rdd = session.sparkContext.parallelize(tasks, tasks.size)
@@ -186,6 +199,152 @@ case class AddIndexExec(
       UTF8String.fromString(indexName))))
   }
 
+  /**
+   * Build IVF index parameters with specified quantization type.
+   * Supports three quantization types: "flat" (no quantization),
+   * "sq" (scalar quantization), "pq" (product quantization).
+   *
+   * @param readOptions      the read options for opening the dataset
+   * @param columns          the columns to index
+   * @param args             the index arguments
+   * @param quantizationType the quantization type: "flat", "sq", or "pq"
+   * @return the configured IndexParams
+   */
+  private def buildIvfIndexParams(
+      readOptions: LanceSparkReadOptions,
+      columns: Seq[String],
+      args: Seq[NamedArgument],
+      quantizationType: String): IndexParams = {
+    // Helper function to safely convert numeric values to Int
+    def toInt(value: Any): Int = value match {
+      case l: java.lang.Long => l.intValue()
+      case i: java.lang.Integer => i.intValue()
+      case s: java.lang.Short => s.intValue()
+      case b: java.lang.Byte => b.intValue()
+      case _ => throw new IllegalArgumentException(s"Cannot convert $value to Int")
+    }
+
+    // Parse parameters from args
+    val numPartitions = args.find(_.name == "numPartitions")
+      .map(arg => toInt(arg.value))
+      .getOrElse(32) // default value
+    val numSubVectors = args.find(_.name == "numSubVectors")
+      .map(arg => toInt(arg.value))
+      .getOrElse(16)
+    val sampleRate = args.find(_.name == "sampleRate")
+      .map(arg => toInt(arg.value))
+      .getOrElse(256)
+    val maxIters = args.find(_.name == "maxIters")
+      .map(arg => toInt(arg.value))
+      .getOrElse(50)
+    val numBits = args.find(_.name == "numBits")
+      .map(arg => toInt(arg.value))
+      .getOrElse(8) // default value
+    val distanceTypeStr = args.find(_.name == "distanceType")
+      .map(_.value.asInstanceOf[java.lang.String])
+      .getOrElse("L2")
+
+    val distanceType = distanceTypeStr.toLowerCase match {
+      case "l2" => DistanceType.L2
+      case "cosine" => DistanceType.Cosine
+      case "dot" => DistanceType.Dot
+      case _ => DistanceType.L2
+    }
+    val vectorColumnName = columns.head
+
+    // Open dataset to train centroids
+    val dataset = openDataset(readOptions)
+    try {
+      val schema = dataset.getLanceSchema
+      val vectorField = schema.fields().asScala.find(_.getName == vectorColumnName)
+
+      if (vectorField.isEmpty) {
+        throw new IllegalArgumentException(
+          s"Column '$vectorColumnName' not found in dataset. " +
+            s"Available columns: ${schema.fields().asScala.map(_.getName).mkString(", ")}")
+      }
+
+      // Build IVF training parameters
+      val ivfTrainParams = new IvfBuildParams.Builder()
+        .setNumPartitions(numPartitions)
+        .setMaxIters(maxIters)
+        .build()
+
+      // Train IVF centroids
+      val centroids = VectorTrainer.trainIvfCentroids(
+        dataset,
+        vectorColumnName,
+        ivfTrainParams)
+
+      // Build final IVF parameters with centroids
+      val ivfParams = new IvfBuildParams.Builder()
+        .setNumPartitions(numPartitions)
+        .setMaxIters(maxIters)
+        .setCentroids(centroids)
+        .build()
+
+      // Build vector index parameters based on quantization type
+      val vectorIndexParams = quantizationType.toLowerCase match {
+        case "flat" =>
+          // IVF-FLAT: no quantization
+          new VectorIndexParams.Builder(ivfParams)
+            .setDistanceType(distanceType)
+            .build()
+
+        case "sq" =>
+          val sqParams = new SQBuildParams.Builder()
+            .setNumBits(numBits.toShort)
+            .setSampleRate(sampleRate)
+            .build()
+
+          new VectorIndexParams.Builder(ivfParams)
+            .setDistanceType(distanceType)
+            .setSqParams(sqParams)
+            .build()
+
+        case "pq" =>
+          // Build PQ training parameters
+          val pqTrainParams = new PQBuildParams.Builder()
+            .setNumSubVectors(numSubVectors)
+            .setNumBits(numBits)
+            .setMaxIters(maxIters)
+            .setSampleRate(sampleRate)
+            .build()
+
+          // Train PQ codebook
+          val codebook = VectorTrainer.trainPqCodebook(
+            dataset,
+            vectorColumnName,
+            pqTrainParams)
+
+          // Build final PQ parameters with codebook
+          val pqParams = new PQBuildParams.Builder()
+            .setNumSubVectors(numSubVectors)
+            .setNumBits(numBits)
+            .setMaxIters(maxIters)
+            .setSampleRate(sampleRate)
+            .setCodebook(codebook)
+            .build()
+
+          VectorIndexParams.withIvfPqParams(
+            distanceType,
+            ivfParams,
+            pqParams)
+
+        case other =>
+          throw new IllegalArgumentException(s"Unsupported quantization type: $other")
+      }
+
+      // Build IndexParams
+      IndexParams.builder()
+        .setVectorIndexParams(vectorIndexParams)
+        .build()
+
+    } finally {
+      dataset.close()
+    }
+  }
+
   private def openDataset(readOptions: LanceSparkReadOptions): Dataset = {
     if (readOptions.hasNamespace) {
       Dataset.open()
@@ -215,15 +374,19 @@ case class IndexTaskExecutor(
     namespaceImpl: Option[String],
     namespaceProperties: Option[Map[String, String]],
     tableId: Option[List[String]],
-    initialStorageOptions: Option[Map[String, String]]) extends Serializable {
+    initialStorageOptions: Option[Map[String, String]],
+    vectorIndexParams: Option[String] = None) extends Serializable {
 
   def execute(): String = {
     val readOptions = decode[LanceSparkReadOptions](lanceConf)
     val columns = decode[Array[String]](columnsEnc).toSeq
     val indexType = IndexTypeUtils.buildIndexType(method)
-    val params = IndexParams.builder()
-      .setScalarIndexParams(ScalarIndexParams.create(method, json))
-      .build()
+    val params = vectorIndexParams match {
+      case Some(enc) => decode[IndexParams](enc)
+      case None => IndexParams.builder()
+          .setScalarIndexParams(ScalarIndexParams.create(method, json))
+          .build()
+    }
 
     val indexOptions = IndexOptions
       .builder(java.util.Arrays.asList(columns: _*), indexType, params)
@@ -275,7 +438,8 @@ object IndexTaskExecutor {
       namespaceImpl: Option[String],
       namespaceProperties: Option[Map[String, String]],
       tableId: Option[List[String]],
-      initialStorageOptions: Option[Map[String, String]]): IndexTaskExecutor = {
+      initialStorageOptions: Option[Map[String, String]],
+      vectorIndexParams: Option[String] = None): IndexTaskExecutor = {
     IndexTaskExecutor(
       encode(readOptions),
       encode(cols.toArray),
@@ -287,7 +451,8 @@ object IndexTaskExecutor {
       namespaceImpl,
       namespaceProperties,
       tableId,
-      initialStorageOptions)
+      initialStorageOptions,
+      vectorIndexParams)
   }
 }
 
@@ -307,6 +472,9 @@ object IndexTypeUtils {
     method.toLowerCase match {
       case "btree" => IndexType.BTREE
       case "fts" => IndexType.INVERTED
+      case "ivf_pq" => IndexType.IVF_PQ
+      case "ivf_flat" => IndexType.IVF_FLAT
+      case "ivf_sq" => IndexType.IVF_SQ
       case other => throw new UnsupportedOperationException(s"Unsupported index method: $other")
     }
   }
