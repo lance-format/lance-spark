@@ -19,7 +19,8 @@ import org.lance.FragmentMetadata;
 import org.lance.Transaction;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.DeregisterTableRequest;
-import org.lance.operation.Operation;import org.lance.operation.Overwrite;
+import org.lance.operation.Operation;
+import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
 
 import org.apache.arrow.vector.types.pojo.Schema;
