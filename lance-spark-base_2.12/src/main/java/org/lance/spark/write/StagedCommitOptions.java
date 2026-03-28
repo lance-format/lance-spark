@@ -26,14 +26,14 @@ public class StagedCommitOptions {
   private static final boolean NO_MANAGED_VERSIONING = false;
 
   private final Map<String, String> storageOptions;
-  private final Boolean enableStableRowIds;
+  private final boolean enableStableRowIds;
   private final LanceNamespace namespace;
   private final List<String> tableId;
   private final boolean managedVersioning;
 
   private StagedCommitOptions(
       final Map<String, String> storageOptions,
-      final Boolean enableStableRowIds,
+      final boolean enableStableRowIds,
       final LanceNamespace namespace,
       final List<String> tableId,
       final boolean managedVersioning) {
@@ -46,7 +46,7 @@ public class StagedCommitOptions {
 
   public static StagedCommitOptions of(
       final Map<String, String> storageOptions,
-      final Boolean enableStableRowIds,
+      final boolean enableStableRowIds,
       final LanceNamespace namespace,
       final List<String> tableId,
       final boolean managedVersioning) {
@@ -64,7 +64,7 @@ public class StagedCommitOptions {
     return storageOptions;
   }
 
-  public Boolean getEnableStableRowIds() {
+  public boolean isEnableStableRowIds() {
     return enableStableRowIds;
   }
 

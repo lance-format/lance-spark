@@ -573,7 +573,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     // Create dataset using namespace - WriteDatasetBuilder handles declareTable internally
     // and properly leverages namespace client for credential vending
-    final boolean stableRowIds = catalogConfig.isEnableStableRowIds(properties);
     String location;
     WriteDatasetBuilder writeBuilder =
         Dataset.write()
@@ -582,7 +581,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
             .tableId(tableIdList)
             .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true))
             .mode(WriteParams.WriteMode.CREATE)
-            .enableStableRowIds(stableRowIds)
+            .enableStableRowIds(catalogConfig.isEnableStableRowIds(properties))
             .storageOptions(catalogConfig.getStorageOptions());
     String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
     if (fileFormatVersion != null) {
@@ -632,7 +631,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
         createReadOptions(
             datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
 
-    final boolean stableRowIds = catalogConfig.isEnableStableRowIds(properties);
     String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
     try {
       WriteDatasetBuilder writeBuilder =
@@ -641,7 +639,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
               .uri(datasetUri)
               .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true))
               .mode(WriteParams.WriteMode.CREATE)
-              .enableStableRowIds(stableRowIds)
+              .enableStableRowIds(catalogConfig.isEnableStableRowIds(properties))
               .storageOptions(readOptions.getStorageOptions());
       if (fileFormatVersion != null) {
         writeBuilder.dataStorageVersion(fileFormatVersion);

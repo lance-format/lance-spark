@@ -85,7 +85,7 @@ public class StagedCommit {
     this.datasetUri = datasetUri;
     this.storageOptions = options.getStorageOptions();
     this.isNewTable = datasetUri != null;
-    this.enableStableRowIds = options.getEnableStableRowIds();
+    this.enableStableRowIds = options.isEnableStableRowIds();
     this.namespace = options.getNamespace();
     this.tableId = options.getTableId();
     this.managedVersioning = options.isManagedVersioning();
