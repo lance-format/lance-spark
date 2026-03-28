@@ -13,8 +13,9 @@
  */
 package org.lance.spark;
 
-import org.junit.jupiter.api.Test;
 import org.lance.WriteParams;
+
+import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -36,10 +37,7 @@ public class LanceSparkWriteOptionsTest {
     options.put("enable_stable_row_ids", "true");
 
     final LanceSparkWriteOptions writeOptions =
-        LanceSparkWriteOptions.builder()
-            .datasetUri(TEMP_URL)
-            .fromOptions(options)
-            .build();
+        LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(options).build();
 
     assertTrue(writeOptions.getEnableStableRowIds());
   }
@@ -51,10 +49,7 @@ public class LanceSparkWriteOptionsTest {
     options.put("enable_stable_row_ids", "false");
 
     final LanceSparkWriteOptions writeOptions =
-        LanceSparkWriteOptions.builder()
-            .datasetUri(TEMP_URL)
-            .fromOptions(options)
-            .build();
+        LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(options).build();
 
     assertFalse(writeOptions.getEnableStableRowIds());
   }
@@ -70,10 +65,7 @@ public class LanceSparkWriteOptionsTest {
   @Test
   public void testEnableStableRowIdsViaBuilder() {
     final LanceSparkWriteOptions writeOptions =
-        LanceSparkWriteOptions.builder()
-            .datasetUri(TEMP_URL)
-            .enableStableRowIds(true)
-            .build();
+        LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).enableStableRowIds(true).build();
 
     assertTrue(writeOptions.getEnableStableRowIds());
   }
@@ -81,10 +73,7 @@ public class LanceSparkWriteOptionsTest {
   @Test
   public void testToWriteParamsPropagatesStableRowIds() {
     final LanceSparkWriteOptions writeOptions =
-        LanceSparkWriteOptions.builder()
-            .datasetUri(TEMP_URL)
-            .enableStableRowIds(true)
-            .build();
+        LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).enableStableRowIds(true).build();
 
     final WriteParams params = writeOptions.toWriteParams();
     assertTrue(params.getEnableStableRowIds().isPresent());
@@ -112,10 +101,7 @@ public class LanceSparkWriteOptionsTest {
     options.put("enable_stable_row_ids", "true");
 
     final LanceSparkWriteOptions writeOptions =
-        LanceSparkWriteOptions.builder()
-            .datasetUri(TEMP_URL)
-            .fromOptions(options)
-            .build();
+        LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(options).build();
 
     assertEquals(WriteParams.WriteMode.OVERWRITE, writeOptions.getWriteMode());
     assertEquals(1000, writeOptions.getMaxRowsPerFile());
