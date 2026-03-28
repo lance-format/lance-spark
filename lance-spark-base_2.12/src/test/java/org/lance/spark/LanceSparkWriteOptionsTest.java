@@ -107,7 +107,6 @@ public class LanceSparkWriteOptionsTest {
     options.put("max_row_per_file", "1000");
     options.put("max_rows_per_group", "500");
     options.put("max_bytes_per_file", "1048576");
-    options.put("data_storage_version", "2.1");
     options.put("batch_size", "256");
     options.put("enable_stable_row_ids", "true");
 
@@ -121,7 +120,6 @@ public class LanceSparkWriteOptionsTest {
     assertEquals(1000, writeOptions.getMaxRowsPerFile());
     assertEquals(500, writeOptions.getMaxRowsPerGroup());
     assertEquals(1048576L, writeOptions.getMaxBytesPerFile());
-    assertEquals("2.1", writeOptions.getDataStorageVersion());
     assertEquals(256, writeOptions.getBatchSize());
     assertTrue(writeOptions.getEnableStableRowIds());
   }

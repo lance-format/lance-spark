@@ -13,6 +13,11 @@
  */
 package org.lance.spark.write;
 
+import org.lance.Dataset;
+import org.lance.WriteParams;
+import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.TestUtils;
+
 import org.apache.arrow.dataset.scanner.Scanner;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
@@ -32,10 +37,6 @@ import org.apache.spark.sql.util.LanceArrowUtils;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.io.TempDir;
-import org.lance.Dataset;
-import org.lance.WriteParams;
-import org.lance.spark.LanceSparkWriteOptions;
-import org.lance.spark.TestUtils;
 
 import java.nio.file.Path;
 import java.util.Collections;

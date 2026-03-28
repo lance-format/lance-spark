@@ -152,9 +152,7 @@ public class StagedCommit {
   }
 
   private static void commitOperation(
-      final CommitBuilder builder,
-      final long readVersion,
-      final Operation operation) {
+      final CommitBuilder builder, final long readVersion, final Operation operation) {
     try (Transaction txn =
             new Transaction.Builder().readVersion(readVersion).operation(operation).build();
         Dataset committed = builder.execute(txn)) {
