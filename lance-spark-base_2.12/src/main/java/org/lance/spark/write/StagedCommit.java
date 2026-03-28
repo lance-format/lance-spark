@@ -17,14 +17,10 @@ import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.FragmentMetadata;
 import org.lance.Transaction;
-import org.lance.WriteParams;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.DeregisterTableRequest;
-import org.lance.operation.Append;
 import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
-import org.lance.spark.LanceSparkWriteOptions;
-import org.lance.spark.utils.DatasetConfigUtils;
 
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.slf4j.Logger;
@@ -117,48 +113,12 @@ public class StagedCommit {
   }
 
   private void commitNewTable() {
-    if (Boolean.TRUE.equals(enableStableRowIds)) {
-      createTableWithStableRowIds();
-      appendFragmentsIfPresent();
-    } else {
-      createTableViaOverwrite();
-    }
-  }
-
-  private void createTableWithStableRowIds() {
-    try (Dataset created =
-        Dataset.write()
-            .allocator(LanceRuntime.allocator())
-            .uri(datasetUri)
-            .schema(schema)
-            .mode(WriteParams.WriteMode.CREATE)
-            .enableStableRowIds(true)
-            .storageOptions(storageOptions)
-            .execute()) {
-      // enableStableRowIds(true) sets the internal Rust manifest flag but
-      // does not populate the user-facing config map. Explicitly set it so
-      // that Dataset.getConfig().get("enable_stable_row_ids") returns "true".
-      DatasetConfigUtils.setConfigEntry(
-          created, LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS, "true");
-    }
-  }
-
-  private void appendFragmentsIfPresent() {
-    if (fragments.isEmpty()) {
-      return;
-    }
-    try (Dataset ds = Dataset.open(datasetUri, LanceRuntime.allocator())) {
-      final Append operation = Append.builder().fragments(fragments).build();
-      final CommitBuilder builder = newCommitBuilder(ds);
-      builder.useStableRowIds(true);
-      commitOperation(builder, ds.version(), operation);
-    }
-  }
-
-  private void createTableViaOverwrite() {
     final Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
     final CommitBuilder builder =
         new CommitBuilder(datasetUri, LanceRuntime.allocator()).writeParams(storageOptions);
+    if (Boolean.TRUE.equals(enableStableRowIds)) {
+      builder.useStableRowIds(true);
+    }
     applyManagedVersioning(builder);
     try (Transaction txn = new Transaction.Builder().operation(operation).build();
         Dataset committed = builder.execute(txn)) {
@@ -175,17 +135,13 @@ public class StagedCommit {
     final Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
     final CommitBuilder builder =
         new CommitBuilder(uri, LanceRuntime.allocator()).writeParams(storageOptions);
+    // When enableStableRowIds is null, lance-core auto-inherits
+    // the flag from the existing manifest.
     if (enableStableRowIds != null) {
       builder.useStableRowIds(enableStableRowIds);
     }
     applyManagedVersioning(builder);
     commitOperation(builder, version, operation);
-  }
-
-  private CommitBuilder newCommitBuilder(final Dataset dataset) {
-    final CommitBuilder builder = new CommitBuilder(dataset).writeParams(storageOptions);
-    applyManagedVersioning(builder);
-    return builder;
   }
 
   private void applyManagedVersioning(final CommitBuilder builder) {

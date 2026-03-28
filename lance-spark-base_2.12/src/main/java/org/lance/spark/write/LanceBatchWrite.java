@@ -128,6 +128,7 @@ public class LanceBatchWrite implements BatchWrite {
       // For non-staged tables, commit immediately
       Dataset ds = dataset.get();
       try {
+        final Boolean enableStableRowIds = writeOptions.getEnableStableRowIds();
         Operation operation;
         if (isOverwrite) {
           operation = Overwrite.builder().fragments(fragments).schema(arrowSchema).build();
@@ -136,7 +137,10 @@ public class LanceBatchWrite implements BatchWrite {
         }
         CommitBuilder commitBuilder =
             new CommitBuilder(ds).writeParams(writeOptions.getStorageOptions());
-        final Boolean enableStableRowIds = writeOptions.getEnableStableRowIds();
+        // When enableStableRowIds is null (user didn't pass the option),
+        // lance-core auto-inherits the flag from the existing manifest.
+        // Appending to a table with stable row IDs works without
+        // re-specifying the option.
         if (enableStableRowIds != null) {
           commitBuilder.useStableRowIds(enableStableRowIds);
         }

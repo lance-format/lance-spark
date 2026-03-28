@@ -29,7 +29,6 @@ import org.lance.namespace.model.DropTableRequest;
 import org.lance.namespace.model.ListTablesRequest;
 import org.lance.namespace.model.ListTablesResponse;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
-import org.lance.spark.utils.DatasetConfigUtils;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.SchemaConverter;
 import org.lance.spark.utils.Utils;
@@ -587,10 +586,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
             .storageOptions(catalogConfig.getStorageOptions())
             .execute()) {
       location = dataset.uri();
-      if (stableRowIds) {
-        DatasetConfigUtils.setConfigEntry(
-            dataset, LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS, "true");
-      }
     }
 
     // Call describeTable to get initial storage options for Spark dataset wrapper
@@ -634,20 +629,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     final boolean stableRowIds = catalogConfig.isEnableStableRowIds(properties);
     try {
-      try (Dataset created =
-          Dataset.write()
-              .allocator(LanceRuntime.allocator())
-              .uri(datasetUri)
-              .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true))
-              .mode(WriteParams.WriteMode.CREATE)
-              .enableStableRowIds(stableRowIds)
-              .storageOptions(readOptions.getStorageOptions())
-              .execute()) {
-        if (stableRowIds) {
-          DatasetConfigUtils.setConfigEntry(
-              created, LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS, "true");
-        }
-      }
+      Dataset.write()
+          .allocator(LanceRuntime.allocator())
+          .uri(datasetUri)
+          .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true))
+          .mode(WriteParams.WriteMode.CREATE)
+          .enableStableRowIds(stableRowIds)
+          .storageOptions(readOptions.getStorageOptions())
+          .execute()
+          .close();
     } catch (IllegalArgumentException e) {
       throw new TableAlreadyExistsException(ident);
     }

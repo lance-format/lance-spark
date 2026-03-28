@@ -13,11 +13,14 @@
  */
 package org.lance.spark.write;
 
+import org.lance.CommitBuilder;
 import org.lance.Dataset;
+import org.lance.Transaction;
 import org.lance.WriteParams;
+import org.lance.operation.Overwrite;
+import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
-import org.lance.spark.utils.DatasetConfigUtils;
 
 import org.apache.arrow.dataset.scanner.Scanner;
 import org.apache.arrow.memory.BufferAllocator;
@@ -43,6 +46,7 @@ import java.nio.file.Path;
 import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class LanceBatchWriteTest {
@@ -106,40 +110,106 @@ public class LanceBatchWriteTest {
     }
   }
 
+  /**
+   * Verifies that CommitBuilder.useStableRowIds(true) sets the manifest flag (readable via
+   * Dataset.hasStableRowIds()), without requiring a separate config-map entry.
+   */
   @Test
-  public void testEnableStableRowIdsPersistsInConfig(TestInfo testInfo) {
-    String datasetName = testInfo.getTestMethod().get().getName();
-    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
-    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
-      Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
-      Schema schema = new Schema(Collections.singletonList(field));
+  public void testStableRowIdsViaCommitBuilder(final TestInfo testInfo) {
+    final String datasetName = testInfo.getTestMethod().get().getName();
+    final String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    final Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
+    final Schema schema = new Schema(Collections.singletonList(field));
 
-      // Dataset.write().enableStableRowIds(true) sets the Rust manifest flag but does NOT
-      // populate the user-facing config map. Verify that updateConfig fills the gap.
-      try (Dataset created =
-          Dataset.write()
-              .allocator(allocator)
-              .uri(datasetUri)
-              .schema(schema)
-              .mode(WriteParams.WriteMode.CREATE)
-              .enableStableRowIds(true)
-              .execute()) {
-        // Before updateConfig, config does NOT contain enable_stable_row_ids
-        String beforeUpdate = created.getConfig().get("enable_stable_row_ids");
-        assertTrue(
-            beforeUpdate == null || !"true".equalsIgnoreCase(beforeUpdate),
-            "enableStableRowIds should not auto-populate config");
-        DatasetConfigUtils.setConfigEntry(created, "enable_stable_row_ids", "true");
-      }
+    // Create table via CommitBuilder with useStableRowIds(true)
+    final Overwrite createOp =
+        Overwrite.builder().fragments(Collections.emptyList()).schema(schema).build();
+    final CommitBuilder builder =
+        new CommitBuilder(datasetUri, LanceRuntime.allocator()).writeParams(Collections.emptyMap());
+    builder.useStableRowIds(true);
+    try (Transaction txn = new Transaction.Builder().operation(createOp).build();
+        Dataset committed = builder.execute(txn)) {
+      // auto-close
+    }
 
-      // Re-open and verify config persists
-      try (Dataset reopened = Dataset.open(datasetUri, allocator)) {
-        String value = reopened.getConfig().get("enable_stable_row_ids");
-        assertTrue(
-            "true".equalsIgnoreCase(value),
-            "Expected enable_stable_row_ids=true in config after updateConfig, got: "
-                + reopened.getConfig());
+    // Verify manifest flag is set
+    try (Dataset ds = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+      assertTrue(
+          ds.hasStableRowIds(),
+          "hasStableRowIds() should be true after " + "CommitBuilder.useStableRowIds(true)");
+    }
+  }
+
+  /**
+   * Verifies that appending to a table with stable row IDs works even when the append does NOT
+   * re-specify useStableRowIds. Lance-core auto-inherits the flag from the existing manifest.
+   */
+  @Test
+  public void testAppendInheritsStableRowIds(final TestInfo testInfo) {
+    final String datasetName = testInfo.getTestMethod().get().getName();
+    final String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    final Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
+    final Schema schema = new Schema(Collections.singletonList(field));
+
+    // Create table with stable row IDs
+    final Overwrite createOp =
+        Overwrite.builder().fragments(Collections.emptyList()).schema(schema).build();
+    final CommitBuilder createBuilder =
+        new CommitBuilder(datasetUri, LanceRuntime.allocator()).writeParams(Collections.emptyMap());
+    createBuilder.useStableRowIds(true);
+    try (Transaction txn = new Transaction.Builder().operation(createOp).build();
+        Dataset committed = createBuilder.execute(txn)) {
+      // auto-close
+    }
+
+    // Overwrite without re-specifying useStableRowIds.
+    // Lance-core auto-inherits the flag from the existing manifest.
+    try (Dataset ds = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+      final Overwrite overwriteOp =
+          Overwrite.builder().fragments(Collections.emptyList()).schema(schema).build();
+      final CommitBuilder appendBuilder = new CommitBuilder(ds).writeParams(Collections.emptyMap());
+      // Note: NOT calling appendBuilder.useStableRowIds(true)
+      try (Transaction txn =
+              new Transaction.Builder().readVersion(ds.version()).operation(overwriteOp).build();
+          Dataset committed = appendBuilder.execute(txn)) {
+        // auto-close
       }
+    }
+
+    // Verify flag is still set after append
+    try (Dataset ds = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+      assertTrue(
+          ds.hasStableRowIds(),
+          "hasStableRowIds() should remain true after " + "append without re-specifying the flag");
+    }
+  }
+
+  /**
+   * Verifies that creating a table WITHOUT stable row IDs results in hasStableRowIds() returning
+   * false.
+   */
+  @Test
+  public void testTableWithoutStableRowIds(final TestInfo testInfo) {
+    final String datasetName = testInfo.getTestMethod().get().getName();
+    final String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    final Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
+    final Schema schema = new Schema(Collections.singletonList(field));
+
+    // Create table without stable row IDs
+    final Overwrite createOp =
+        Overwrite.builder().fragments(Collections.emptyList()).schema(schema).build();
+    final CommitBuilder builder =
+        new CommitBuilder(datasetUri, LanceRuntime.allocator()).writeParams(Collections.emptyMap());
+    // NOT calling builder.useStableRowIds(true)
+    try (Transaction txn = new Transaction.Builder().operation(createOp).build();
+        Dataset committed = builder.execute(txn)) {
+      // auto-close
+    }
+
+    try (Dataset ds = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+      assertFalse(
+          ds.hasStableRowIds(),
+          "hasStableRowIds() should be false when " + "table is created without the flag");
     }
   }
 }
