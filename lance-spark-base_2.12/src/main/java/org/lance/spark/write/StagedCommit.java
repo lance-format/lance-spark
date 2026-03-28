@@ -122,7 +122,7 @@ public class StagedCommit {
     applyManagedVersioning(builder);
     try (Transaction txn = new Transaction.Builder().operation(operation).build();
         Dataset committed = builder.execute(txn)) {
-      // auto-close
+      // auto-close txn and committed dataset
     }
   }
 
