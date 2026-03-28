@@ -13,9 +13,8 @@
  */
 package org.lance.spark;
 
-import org.lance.WriteParams;
-
 import org.junit.jupiter.api.Test;
+import org.lance.WriteParams;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -28,15 +27,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** Tests for {@link LanceSparkWriteOptions}. */
 public class LanceSparkWriteOptionsTest {
 
+  private final String TEMP_URL = "file:///tmp/test";
+
   @Test
   public void testEnableStableRowIdsParsedFromOptions() {
     final Map<String, String> options = new HashMap<>();
-    options.put("path", "file:///tmp/test");
+    options.put("path", TEMP_URL);
     options.put("enable_stable_row_ids", "true");
 
     final LanceSparkWriteOptions writeOptions =
         LanceSparkWriteOptions.builder()
-            .datasetUri("file:///tmp/test")
+            .datasetUri(TEMP_URL)
             .fromOptions(options)
             .build();
 
@@ -46,12 +47,12 @@ public class LanceSparkWriteOptionsTest {
   @Test
   public void testEnableStableRowIdsFalseFromOptions() {
     final Map<String, String> options = new HashMap<>();
-    options.put("path", "file:///tmp/test");
+    options.put("path", TEMP_URL);
     options.put("enable_stable_row_ids", "false");
 
     final LanceSparkWriteOptions writeOptions =
         LanceSparkWriteOptions.builder()
-            .datasetUri("file:///tmp/test")
+            .datasetUri(TEMP_URL)
             .fromOptions(options)
             .build();
 
@@ -61,7 +62,7 @@ public class LanceSparkWriteOptionsTest {
   @Test
   public void testEnableStableRowIdsNullWhenNotSet() {
     final LanceSparkWriteOptions writeOptions =
-        LanceSparkWriteOptions.builder().datasetUri("file:///tmp/test").build();
+        LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).build();
 
     assertNull(writeOptions.getEnableStableRowIds());
   }
@@ -70,7 +71,7 @@ public class LanceSparkWriteOptionsTest {
   public void testEnableStableRowIdsViaBuilder() {
     final LanceSparkWriteOptions writeOptions =
         LanceSparkWriteOptions.builder()
-            .datasetUri("file:///tmp/test")
+            .datasetUri(TEMP_URL)
             .enableStableRowIds(true)
             .build();
 
@@ -81,7 +82,7 @@ public class LanceSparkWriteOptionsTest {
   public void testToWriteParamsPropagatesStableRowIds() {
     final LanceSparkWriteOptions writeOptions =
         LanceSparkWriteOptions.builder()
-            .datasetUri("file:///tmp/test")
+            .datasetUri(TEMP_URL)
             .enableStableRowIds(true)
             .build();
 
@@ -93,7 +94,7 @@ public class LanceSparkWriteOptionsTest {
   @Test
   public void testToWriteParamsOmitsStableRowIdsWhenNull() {
     final LanceSparkWriteOptions writeOptions =
-        LanceSparkWriteOptions.builder().datasetUri("file:///tmp/test").build();
+        LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).build();
 
     final WriteParams params = writeOptions.toWriteParams();
     assertFalse(params.getEnableStableRowIds().isPresent());
@@ -102,7 +103,7 @@ public class LanceSparkWriteOptionsTest {
   @Test
   public void testFromOptionsWithAllWriteSettings() {
     final Map<String, String> options = new HashMap<>();
-    options.put("path", "file:///tmp/test");
+    options.put("path", TEMP_URL);
     options.put("write_mode", "OVERWRITE");
     options.put("max_row_per_file", "1000");
     options.put("max_rows_per_group", "500");
@@ -112,7 +113,7 @@ public class LanceSparkWriteOptionsTest {
 
     final LanceSparkWriteOptions writeOptions =
         LanceSparkWriteOptions.builder()
-            .datasetUri("file:///tmp/test")
+            .datasetUri(TEMP_URL)
             .fromOptions(options)
             .build();
 
