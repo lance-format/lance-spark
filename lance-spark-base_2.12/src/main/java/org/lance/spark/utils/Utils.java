@@ -22,11 +22,6 @@ import org.lance.spark.LanceSparkCatalogConfig;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.LanceSparkWriteOptions;
 
-import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
-import org.apache.spark.sql.connector.catalog.Identifier;
-import org.apache.spark.sql.types.StructType;
-import org.apache.spark.sql.util.LanceArrowUtils;
-
 import java.time.Instant;
 import java.util.List;
 
@@ -91,15 +86,6 @@ public class Utils {
           writeOptions.getNamespace(), writeOptions.getTableId(), writeOptions.toReadOptions());
     }
     return openDataset(writeOptions.getDatasetUri(), writeOptions.toReadOptions());
-  }
-
-  public static StructType getSchema(Identifier ident, LanceSparkReadOptions readOptions)
-      throws NoSuchTableException {
-    try (Dataset dataset = openDataset(readOptions)) {
-      return LanceArrowUtils.fromArrowSchema(dataset.getSchema());
-    } catch (IllegalArgumentException e) {
-      throw new NoSuchTableException(ident);
-    }
   }
 
   /**
