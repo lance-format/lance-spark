@@ -202,7 +202,7 @@ public abstract class BaseAddIndexTest {
     Dataset<Row> result =
         spark.sql(
             String.format(
-                "alter table %s create index test_index_btree_param using btree (id) with (zone_size=2048, mode='range')",
+                "alter table %s create index test_index_btree_param using btree (id) with (zone_size=2048, build_mode='range')",
                 fullTable));
 
     Assertions.assertEquals(

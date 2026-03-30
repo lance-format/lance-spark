@@ -168,7 +168,7 @@ case class AddIndexExec(
 
     IndexUtils.buildIndexType(method) match {
       case IndexType.BTREE =>
-        val mode = args.find(_.name == "mode").map(_.value.asInstanceOf[String])
+        val mode = args.find(_.name == "build_mode").map(_.value.asInstanceOf[String])
         mode match {
           case Some("range") =>
             return new RangeBasedBTreeIndexJob(
