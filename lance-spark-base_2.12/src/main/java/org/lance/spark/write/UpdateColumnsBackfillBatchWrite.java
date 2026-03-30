@@ -81,7 +81,11 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
       Map<String, String> namespaceProperties,
       List<String> tableId) {
     this.schema = schema;
-    this.writeOptions = writeOptions;
+    try (Dataset ds = Utils.openDataset(writeOptions)) {
+      this.writeOptions = writeOptions.withReadVersion(ds.version());
+      logger.info(
+          "Resolved read version for UPDATE COLUMNS: {}", this.writeOptions.getReadVersion());
+    }
     this.updateColumns = updateColumns;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
@@ -149,8 +153,12 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
               .fieldsModified(fieldsModified)
               .updateMode(Optional.of(Update.UpdateMode.RewriteColumns))
               .build();
+      long readVersion =
+          Objects.requireNonNull(
+              writeOptions.getReadVersion(),
+              "readVersion must be set (resolved in UpdateColumnsBackfillBatchWrite constructor)");
       try (Transaction txn =
-              new Transaction.Builder().readVersion(dataset.version()).operation(update).build();
+              new Transaction.Builder().readVersion(readVersion).operation(update).build();
           Dataset committed =
               new CommitBuilder(dataset)
                   .writeParams(writeOptions.getStorageOptions())

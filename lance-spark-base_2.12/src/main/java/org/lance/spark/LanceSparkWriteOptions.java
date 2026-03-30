@@ -80,6 +80,9 @@ public class LanceSparkWriteOptions implements Serializable {
   /** The table identifier within the namespace, used for credential refresh. */
   private final List<String> tableId;
 
+  /** Pinned read version to open; when null, callers use latest unless they pin elsewhere. */
+  private final Long readVersion;
+
   private LanceSparkWriteOptions(Builder builder) {
     this.datasetUri = builder.datasetUri;
     this.writeMode = builder.writeMode;
@@ -93,6 +96,7 @@ public class LanceSparkWriteOptions implements Serializable {
     this.storageOptions = new HashMap<>(builder.storageOptions);
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
+    this.readVersion = builder.readVersion;
   }
 
   /** Creates a new builder for LanceSparkWriteOptions. */
@@ -171,6 +175,33 @@ public class LanceSparkWriteOptions implements Serializable {
     return tableId;
   }
 
+  public Long getReadVersion() {
+    return readVersion;
+  }
+
+  /** Returns a builder pre-populated with all fields from this instance. */
+  public Builder toBuilder() {
+    return builder()
+        .datasetUri(datasetUri)
+        .writeMode(writeMode)
+        .maxRowsPerFile(maxRowsPerFile)
+        .maxRowsPerGroup(maxRowsPerGroup)
+        .maxBytesPerFile(maxBytesPerFile)
+        .dataStorageVersion(dataStorageVersion)
+        .useQueuedWriteBuffer(useQueuedWriteBuffer)
+        .queueDepth(queueDepth)
+        .batchSize(batchSize)
+        .storageOptions(storageOptions)
+        .namespace(namespace)
+        .tableId(tableId)
+        .readVersion(readVersion);
+  }
+
+  /** Returns a copy of these options with readVersion set to the given version. */
+  public LanceSparkWriteOptions withReadVersion(long version) {
+    return toBuilder().readVersion(version).build();
+  }
+
   public boolean hasNamespace() {
     return namespace != null && tableId != null;
   }
@@ -219,6 +250,9 @@ public class LanceSparkWriteOptions implements Serializable {
     if (provider != null) {
       builder.setStorageOptionsProvider(provider);
     }
+    if (readVersion != null) {
+      builder.setVersion(readVersion);
+    }
     return builder.build();
   }
 
@@ -237,6 +271,9 @@ public class LanceSparkWriteOptions implements Serializable {
         new ReadOptions.Builder().setStorageOptions(merged).setSession(LanceRuntime.session());
     if (provider != null) {
       builder.setStorageOptionsProvider(provider);
+    }
+    if (readVersion != null) {
+      builder.setVersion(readVersion);
     }
     return builder.build();
   }
@@ -281,7 +318,8 @@ public class LanceSparkWriteOptions implements Serializable {
         && Objects.equals(maxBytesPerFile, that.maxBytesPerFile)
         && Objects.equals(fileFormatVersion, that.fileFormatVersion)
         && Objects.equals(storageOptions, that.storageOptions)
-        && Objects.equals(tableId, that.tableId);
+        && Objects.equals(tableId, that.tableId)
+        && Objects.equals(readVersion, that.readVersion);
   }
 
   @Override
@@ -297,7 +335,8 @@ public class LanceSparkWriteOptions implements Serializable {
         queueDepth,
         batchSize,
         storageOptions,
-        tableId);
+        tableId,
+        readVersion);
   }
 
   /** Builder for creating LanceSparkWriteOptions instances. */
@@ -314,6 +353,7 @@ public class LanceSparkWriteOptions implements Serializable {
     private Map<String, String> storageOptions = new HashMap<>();
     private LanceNamespace namespace;
     private List<String> tableId;
+    private Long readVersion;
 
     private Builder() {}
 
@@ -374,6 +414,11 @@ public class LanceSparkWriteOptions implements Serializable {
 
     public Builder tableId(List<String> tableId) {
       this.tableId = tableId;
+      return this;
+    }
+
+    public Builder readVersion(Long readVersion) {
+      this.readVersion = readVersion;
       return this;
     }
 
