@@ -62,7 +62,6 @@ public class LanceFragmentScanner implements AutoCloseable {
         scanOptions.filter(inputPartition.getWhereCondition().get());
       }
       scanOptions.batchSize(readOptions.getBatchSize());
-      scanOptions.prefilter(readOptions.isPrefilter());
       if (readOptions.getNearest() != null) {
         scanOptions.nearest(readOptions.getNearest());
         // We strictly set `prefilter = true` here to ensure query correctness.

@@ -63,7 +63,6 @@ public class LanceSparkReadOptions implements Serializable {
   public static final String CONFIG_NEAREST = "nearest";
   public static final String LANCE_FILE_SUFFIX = ".lance";
 
-  private static final boolean DEFAULT_PREFILTER = false;
   private static final boolean DEFAULT_PUSH_DOWN_FILTERS = true;
   // Changed from 512 to 8192 for better OLAP scan performance (33x improvement)
   private static final int DEFAULT_BATCH_SIZE = 8192;
@@ -73,7 +72,6 @@ public class LanceSparkReadOptions implements Serializable {
   private final String dbPath;
   private final String datasetName;
   private final boolean pushDownFilters;
-  private final boolean prefilter;
   private final Integer blockSize;
   private final Integer version;
   private final Integer indexCacheSize;
@@ -98,7 +96,6 @@ public class LanceSparkReadOptions implements Serializable {
     this.dbPath = paths[0];
     this.datasetName = paths[1];
     this.pushDownFilters = builder.pushDownFilters;
-    this.prefilter = builder.prefilter;
     this.blockSize = builder.blockSize;
     this.version = builder.version;
     this.indexCacheSize = builder.indexCacheSize;
@@ -196,10 +193,6 @@ public class LanceSparkReadOptions implements Serializable {
     return pushDownFilters;
   }
 
-  public boolean isPrefilter() {
-    return prefilter;
-  }
-
   public Integer getBlockSize() {
     return blockSize;
   }
@@ -273,7 +266,6 @@ public class LanceSparkReadOptions implements Serializable {
     return builder()
         .datasetUri(this.datasetUri)
         .pushDownFilters(this.pushDownFilters)
-        .prefilter(this.prefilter)
         .blockSize(this.blockSize)
         .version(newVersion)
         .indexCacheSize(this.indexCacheSize)
@@ -348,7 +340,6 @@ public class LanceSparkReadOptions implements Serializable {
     }
     LanceSparkReadOptions that = (LanceSparkReadOptions) o;
     return pushDownFilters == that.pushDownFilters
-        && prefilter == that.prefilter
         && batchSize == that.batchSize
         && topNPushDown == that.topNPushDown
         && Objects.equals(nearest, that.nearest)
@@ -366,7 +357,6 @@ public class LanceSparkReadOptions implements Serializable {
     return Objects.hash(
         datasetUri,
         pushDownFilters,
-        prefilter,
         blockSize,
         version,
         indexCacheSize,
@@ -382,7 +372,6 @@ public class LanceSparkReadOptions implements Serializable {
   public static class Builder {
     private String datasetUri;
     private boolean pushDownFilters = DEFAULT_PUSH_DOWN_FILTERS;
-    private boolean prefilter = DEFAULT_PREFILTER;
     private Integer blockSize;
     private Query nearest;
     private Integer version;
@@ -404,11 +393,6 @@ public class LanceSparkReadOptions implements Serializable {
 
     public Builder pushDownFilters(boolean pushDownFilters) {
       this.pushDownFilters = pushDownFilters;
-      return this;
-    }
-
-    public Builder prefilter(boolean prefilter) {
-      this.prefilter = prefilter;
       return this;
     }
 
