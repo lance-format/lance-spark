@@ -57,7 +57,17 @@ public class LanceFragmentScanner implements AutoCloseable {
               inputPartition.getNamespaceImpl(),
               inputPartition.getNamespaceProperties());
       ScanOptions.Builder scanOptions = new ScanOptions.Builder();
-      scanOptions.columns(getColumnNames(inputPartition.getSchema()));
+      List<String> projectedColumns = getColumnNames(inputPartition.getSchema());
+      if (projectedColumns.isEmpty() && inputPartition.getSchema().isEmpty()) {
+        // Lance requires at least one projected column. Use _rowid as a lightweight
+        // sentinel so the scanner still returns the correct row count (e.g. SELECT 1).
+        // Only do this when the schema is truly empty; when the schema contains virtual
+        // columns (e.g. _fragid, blob position/size) that are not passed to the scanner
+        // but added later by the batch scanner, adding _rowid here would shift column
+        // indices and cause Spark to read wrong data.
+        scanOptions.withRowId(true);
+      }
+      scanOptions.columns(projectedColumns);
       if (inputPartition.getWhereCondition().isPresent()) {
         scanOptions.filter(inputPartition.getWhereCondition().get());
       }

@@ -18,6 +18,7 @@ import org.lance.Version;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.junit.jupiter.api.AfterEach;
@@ -674,6 +675,23 @@ public abstract class SparkLanceNamespaceTestBase {
     Row row = result.collectAsList().get(0);
     assertEquals(42L, row.getLong(0));
     assertEquals(3.14, row.getDouble(1), 0.001);
+  }
+
+  @Test
+  public void testTableExistsReturnsFalseForNonExistentTable() {
+    // This exercises the loadTable path used by Spark 4.0+ internally
+    // when calling spark.catalog.tableExists()
+    assertFalse(catalog.tableExists(Identifier.of(new String[] {"default"}, "non_existent_table")));
+  }
+
+  @Test
+  public void testLoadNonExistentTableThrowsNoSuchTableException() {
+    // Verifies that loadTable throws NoSuchTableException (not RuntimeException)
+    // for non-existent tables. This is critical for Spark 4.0+ where
+    // spark.catalog.tableExists() calls loadTable() internally.
+    assertThrows(
+        NoSuchTableException.class,
+        () -> catalog.loadTable(Identifier.of(new String[] {"default"}, "non_existent_table")));
   }
 
   private boolean checkDataset(int expectedSize, String tableName) {

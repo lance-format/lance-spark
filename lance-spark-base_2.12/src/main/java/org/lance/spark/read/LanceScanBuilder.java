@@ -158,10 +158,7 @@ public class LanceScanBuilder
 
   @Override
   public void pruneColumns(StructType requiredSchema) {
-    if (!requiredSchema.isEmpty()) {
-      // Get all columns if selecting columns empty(eg: resultDataFrame.count())
-      this.schema = requiredSchema;
-    }
+    this.schema = requiredSchema;
   }
 
   @Override

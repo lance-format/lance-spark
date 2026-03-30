@@ -28,8 +28,17 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
       StructType sparkSchema,
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
-      Map<String, String> namespaceProperties) {
-    super(readOptions, sparkSchema, initialStorageOptions, namespaceImpl, namespaceProperties);
+      Map<String, String> namespaceProperties,
+      boolean managedVersioning,
+      String fileFormatVersion) {
+    super(
+        readOptions,
+        sparkSchema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        managedVersioning,
+        fileFormatVersion);
   }
 
   public LancePositionDeltaDataset(
@@ -38,14 +47,18 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
-      StagedCommit stagedCommit) {
+      boolean managedVersioning,
+      StagedCommit stagedCommit,
+      String fileFormatVersion) {
     super(
         readOptions,
         sparkSchema,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
-        stagedCommit);
+        managedVersioning,
+        stagedCommit,
+        fileFormatVersion);
   }
 
   @Override
@@ -57,6 +70,7 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
         readOptions(),
         getInitialStorageOptions(),
         getNamespaceImpl(),
-        getNamespaceProperties());
+        getNamespaceProperties(),
+        getFileFormatVersion());
   }
 }

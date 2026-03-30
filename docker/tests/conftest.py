@@ -62,7 +62,7 @@ def azurite():
                 raise RuntimeError("azurite-blob exited unexpectedly")
             time.sleep(0.5)
     else:
-        proc.terminate()
+        _stop_process(proc)
         raise RuntimeError("azurite-blob did not become healthy within 30 s")
 
     # Create the blob container using the Azure SDK.
@@ -85,8 +85,7 @@ def azurite():
         "endpoint": f"http://127.0.0.1:{AZURITE_BLOB_PORT}/{AZURITE_ACCOUNT_NAME}",
     }
 
-    proc.terminate()
-    proc.wait(timeout=10)
+    _stop_process(proc)
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +134,7 @@ def minio():
                 raise RuntimeError("minio exited unexpectedly")
             time.sleep(0.5)
     else:
-        proc.terminate()
+        _stop_process(proc)
         raise RuntimeError("minio did not become healthy within 30 s")
 
     # Create the test bucket using boto3.
@@ -157,8 +156,7 @@ def minio():
         "port": MINIO_PORT,
     }
 
-    proc.terminate()
-    proc.wait(timeout=10)
+    _stop_process(proc)
 
 
 # ---------------------------------------------------------------------------
@@ -266,3 +264,16 @@ def cleanup_tables(spark):
     #spark.catalog.dropTempView("tmp_view") if spark.catalog.tableExists("tmp_view") else None
     spark.catalog.dropTempView("source")
     spark.catalog.dropTempView("tmp_view")
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _stop_process(proc, timeout=10):
+    """Terminate a subprocess gracefully, falling back to SIGKILL on timeout."""
+    proc.terminate()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()

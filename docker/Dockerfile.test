@@ -6,7 +6,7 @@
 
 ARG SPARK_MAJOR_VERSION=4.0
 ARG SCALA_VERSION=2.13
-FROM ghcr.io/hamersaw/lance-spark-test-base:${SPARK_MAJOR_VERSION}_${SCALA_VERSION}
+FROM lance-spark-test-base:${SPARK_MAJOR_VERSION}_${SCALA_VERSION}
 
 # Re-declare ARGs needed after FROM
 ARG SPARK_MAJOR_VERSION=4.0

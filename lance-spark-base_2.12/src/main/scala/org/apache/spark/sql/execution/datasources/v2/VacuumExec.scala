@@ -21,7 +21,7 @@ import org.lance.Dataset
 import org.lance.cleanup.CleanupPolicy
 import org.lance.spark.{LanceDataset, LanceRuntime, LanceSparkReadOptions}
 
-import scala.jdk.CollectionConverters._
+import scala.collection.JavaConverters._
 
 case class VacuumExec(
     catalog: TableCatalog,

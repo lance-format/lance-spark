@@ -22,7 +22,7 @@ import org.lance.{Dataset, ReadOptions}
 import org.lance.compaction.{Compaction, CompactionOptions, CompactionTask, RewriteResult}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceRuntime, LanceSparkReadOptions}
 
-import scala.jdk.CollectionConverters._
+import scala.collection.JavaConverters._
 
 case class OptimizeExec(
     catalog: TableCatalog,

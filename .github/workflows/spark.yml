@@ -10,6 +10,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# CI workflow for Spark builds and integration tests
 name: Spark
 
 on:
@@ -138,11 +139,30 @@ jobs:
           distribution: temurin
           java-version: 17
           cache: "maven"
+      - name: Resolve Docker build args
+        id: docker-args
+        run: |
+          make print-docker-build-args SPARK_VERSION=${{ matrix.spark-version }} SCALA_VERSION=${{ matrix.scala-version }} >> $GITHUB_OUTPUT
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+      - name: Build test-base image (cached)
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          file: docker/Dockerfile.test-base
+          load: true
+          tags: lance-spark-test-base:${{ matrix.spark-version }}_${{ matrix.scala-version }}
+          build-args: |
+            SPARK_DOWNLOAD_VERSION=${{ steps.docker-args.outputs.spark-download-version }}
+            SPARK_MAJOR_VERSION=${{ matrix.spark-version }}
+            SCALA_VERSION=${{ matrix.scala-version }}
+            PY4J_VERSION=${{ steps.docker-args.outputs.py4j-version }}
+            SPARK_SCALA_SUFFIX=${{ steps.docker-args.outputs.spark-scala-suffix }}
+          cache-from: type=gha,scope=test-base-${{ matrix.spark-version }}_${{ matrix.scala-version }}
+          cache-to: type=gha,mode=max,scope=test-base-${{ matrix.spark-version }}_${{ matrix.scala-version }}
       - name: Build bundle
         run: make bundle SPARK_VERSION=${{ matrix.spark-version }} SCALA_VERSION=${{ matrix.scala-version }}
-      - name: Build Docker image
-        run: make docker-build-test-full SPARK_VERSION=${{ matrix.spark-version }} SCALA_VERSION=${{ matrix.scala-version }} DOCKER_CACHE_FROM="type=gha" DOCKER_CACHE_TO="type=gha,mode=max"
+      - name: Build test image
+        run: make docker-build-test SPARK_VERSION=${{ matrix.spark-version }} SCALA_VERSION=${{ matrix.scala-version }}
       - name: Run Docker integration tests
         run: make docker-test SPARK_VERSION=${{ matrix.spark-version }} SCALA_VERSION=${{ matrix.scala-version }}

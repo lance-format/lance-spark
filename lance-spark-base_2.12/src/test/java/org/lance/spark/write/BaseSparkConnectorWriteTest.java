@@ -17,6 +17,7 @@ import org.lance.Version;
 import org.lance.spark.LanceDataSource;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
 
 import org.apache.spark.sql.Dataset;
@@ -511,6 +512,186 @@ public abstract class BaseSparkConnectorWriteTest {
     try (org.lance.Dataset dataset =
         org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(datasetUri).build()) {
       return dataset.getVersion();
+    }
+  }
+
+  @Test
+  public void createTableWithStorageVersion(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    // Create table with LEGACY storage version via table property
+    spark.sql(
+        "CREATE TABLE lance.`"
+            + path
+            + "` (id INT, name STRING) TBLPROPERTIES ('file_format_version' = 'LEGACY')");
+
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      assertEquals("0.1", ds.getLanceFileFormatVersion());
+    }
+  }
+
+  @Test
+  public void createTableAsSelectWithStorageVersion(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    // Create table as select with specific storage version
+    spark.sql(
+        "CREATE TABLE lance.`"
+            + path
+            + "` TBLPROPERTIES ('file_format_version' = 'STABLE') AS SELECT * FROM tmp_view");
+
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      // STABLE maps to 2.0 or 2.1 depending on lance version
+      String version = ds.getLanceFileFormatVersion();
+      assertTrue(
+          version.equals("2.0") || version.equals("2.1"),
+          "Expected STABLE version (2.0 or 2.1), got: " + version);
+    }
+  }
+
+  @Test
+  public void createTableWithStorageVersionAndInsert(TestInfo testInfo)
+      throws NoSuchTableException {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    // Create table with LEGACY storage version
+    spark.sql(
+        "CREATE TABLE lance.`"
+            + path
+            + "` (id INT, name STRING) TBLPROPERTIES ('file_format_version' = 'LEGACY')");
+
+    // Verify initial storage version
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      assertEquals("0.1", ds.getLanceFileFormatVersion());
+    }
+
+    // Insert data
+    StructType schema =
+        new StructType().add("id", DataTypes.IntegerType).add("name", DataTypes.StringType);
+    List<Row> data = Arrays.asList(RowFactory.create(1, "Alice"), RowFactory.create(2, "Bob"));
+    Dataset<Row> df = spark.createDataFrame(data, schema);
+    df.writeTo("lance.`" + path + "`").append();
+
+    // Verify data was inserted correctly
+    Dataset<Row> result =
+        spark.read().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, path).load();
+    assertEquals(2, result.count());
+
+    // Verify storage version is preserved after insert
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      assertEquals("0.1", ds.getLanceFileFormatVersion());
+    }
+  }
+
+  @Test
+  public void replaceTablePreservesStorageVersion(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    // Create table with LEGACY storage version
+    spark.sql(
+        "CREATE TABLE lance.`"
+            + path
+            + "` TBLPROPERTIES ('file_format_version' = 'LEGACY') AS SELECT * FROM tmp_view");
+
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      assertEquals("0.1", ds.getLanceFileFormatVersion());
+    }
+
+    // Replace table without specifying storage version - should inherit from existing table
+    spark.sql(
+        "REPLACE TABLE lance.`" + path + "` AS SELECT id * 10 AS id, name, address FROM tmp_view");
+
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      assertEquals("0.1", ds.getLanceFileFormatVersion());
+    }
+  }
+
+  @Test
+  public void createOrReplaceTablePreservesStorageVersion(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    // Create table with LEGACY storage version
+    spark.sql(
+        "CREATE OR REPLACE TABLE lance.`"
+            + path
+            + "` TBLPROPERTIES ('file_format_version' = 'LEGACY') AS SELECT * FROM tmp_view");
+
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      assertEquals("0.1", ds.getLanceFileFormatVersion());
+    }
+
+    // CREATE OR REPLACE without specifying storage version - should inherit from existing table
+    spark.sql(
+        "CREATE OR REPLACE TABLE lance.`"
+            + path
+            + "` AS SELECT id * 10 AS id, name, address FROM tmp_view");
+
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      assertEquals("0.1", ds.getLanceFileFormatVersion());
+    }
+  }
+
+  @Test
+  public void replaceTableChangesStorageVersion(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    // Create table with LEGACY storage version
+    spark.sql(
+        "CREATE TABLE lance.`"
+            + path
+            + "` TBLPROPERTIES ('file_format_version' = 'LEGACY') AS SELECT * FROM tmp_view");
+
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      assertEquals("0.1", ds.getLanceFileFormatVersion());
+    }
+
+    // Replace table with STABLE storage version
+    spark.sql(
+        "REPLACE TABLE lance.`"
+            + path
+            + "` TBLPROPERTIES ('file_format_version' = 'STABLE')"
+            + " AS SELECT id * 10 AS id, name, address FROM tmp_view");
+
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      String version = ds.getLanceFileFormatVersion();
+      assertTrue(
+          version.equals("2.0") || version.equals("2.1"),
+          "Expected STABLE version (2.0 or 2.1), got: " + version);
+    }
+  }
+
+  @Test
+  public void writeWithStorageVersionOption(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    // Write with specific storage version
+    testData
+        .write()
+        .format(LanceDataSource.name)
+        .option(LanceSparkReadOptions.CONFIG_DATASET_URI, path)
+        .option(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION, "LEGACY")
+        .save();
+
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      assertEquals("0.1", ds.getLanceFileFormatVersion());
     }
   }
 }

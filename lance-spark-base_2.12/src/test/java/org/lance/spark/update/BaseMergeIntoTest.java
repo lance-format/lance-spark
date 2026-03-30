@@ -101,7 +101,7 @@ public abstract class BaseMergeIntoTest {
             new org.apache.spark.sql.types.StructType().add("id", "int").add("value", "int"))
         .union(
             spark
-                .range(0, 200)
+                .range(0, 2000)
                 .repartition(SHUFFLE_PARTITIONS)
                 .selectExpr("cast(id + 1000 as int) as id", "cast(id as int) as value"))
         .createOrReplaceTempView("merge_source");
@@ -128,7 +128,7 @@ public abstract class BaseMergeIntoTest {
             .first()
             .getLong(0);
     Assertions.assertEquals(
-        200L, insertedRowCount, "Expected merge to insert 200 rows into new fragments");
+        2000L, insertedRowCount, "Expected merge to insert 2000 rows into new fragments");
     long updatedCount =
         spark
             .sql(
@@ -154,18 +154,26 @@ public abstract class BaseMergeIntoTest {
     Assertions.assertEquals(0L, deletedCount, "Expected rows 5 and 6 to be deleted");
 
     // Inserted rows should span multiple fragments to avoid skew.
-    long insertFragmentCount =
+    List<org.apache.spark.sql.Row> fragStats =
         spark
             .sql(
-                "SELECT COUNT(DISTINCT _fragid) FROM "
+                "SELECT _fragid, COUNT(*) as cnt FROM "
                     + catalogName
                     + ".default."
                     + tableName
-                    + " WHERE tag = 'inserted'")
-            .first()
-            .getLong(0);
+                    + " WHERE tag = 'inserted' GROUP BY _fragid ORDER BY _fragid")
+            .collectAsList();
+    long insertFragmentCount = fragStats.size();
     Assertions.assertTrue(
-        insertFragmentCount >= 2, "Expected inserted rows to span multiple fragments");
+        insertFragmentCount >= 2,
+        "Expected inserted rows to span multiple fragments, but got "
+            + insertFragmentCount
+            + " fragment(s). Distribution: "
+            + fragStats
+            + ". master="
+            + spark.sparkContext().master()
+            + ", shuffle.partitions="
+            + spark.conf().get("spark.sql.shuffle.partitions"));
   }
 
   @Test
