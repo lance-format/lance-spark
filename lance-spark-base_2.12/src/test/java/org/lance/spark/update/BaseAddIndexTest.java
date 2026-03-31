@@ -196,6 +196,37 @@ public abstract class BaseAddIndexTest {
   }
 
   @Test
+  public void testCreateBTreeIndexWithRangeMode() {
+    prepareDataset();
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index test_index_btree_param using btree (id) with (zone_size=2048, build_mode='range')",
+                fullTable));
+
+    Assertions.assertEquals(
+        "StructType(StructField(fragments_indexed,LongType,true),StructField(index_name,StringType,true))",
+        result.schema().toString());
+
+    Row row = result.collectAsList().get(0);
+    long fragmentsIndexed = row.getLong(0);
+    String indexName = row.getString(1);
+
+    Assertions.assertTrue(fragmentsIndexed >= 2, "Expected at least 2 fragments to be indexed");
+    Assertions.assertEquals("test_index_btree_param", indexName);
+
+    checkIndex("test_index_btree_param");
+
+    // Verify query using the indexed field with zone_size parameter
+    Dataset<Row> query = spark.sql(String.format("select * from %s where id=15", fullTable));
+    Assertions.assertEquals(1L, query.count());
+    Row r = query.collectAsList().get(0);
+    Assertions.assertEquals(15, r.getInt(0));
+    Assertions.assertEquals("text_15", r.getString(1));
+  }
+
+  @Test
   public void testCreateFtsIndex() {
     prepareDataset();
 

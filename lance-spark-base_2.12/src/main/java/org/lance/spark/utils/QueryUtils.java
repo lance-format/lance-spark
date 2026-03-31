@@ -88,10 +88,8 @@ public class QueryUtils {
       writeOptional(gen, "ef", value.getEf());
       writeOptional(gen, "refineFactor", value.getRefineFactor());
 
-      if (value.isUseIndex()) {
-        gen.writeBooleanField("useIndex", true);
-      }
-      writeOptional(gen, "distanceType", value.getDistanceTypeString());
+      gen.writeBooleanField("useIndex", value.isUseIndex());
+      writeOptional(gen, "distanceType", value.getDistanceType());
       gen.writeEndObject();
     }
 

@@ -40,7 +40,7 @@ case class LanceDataSourceV2Strategy(session: SparkSession) extends SparkStrateg
       AddIndexExec(
         asTableCatalog(catalog),
         ident,
-        indexName,
+        indexName.toLowerCase,
         method,
         columns,
         args) :: Nil
