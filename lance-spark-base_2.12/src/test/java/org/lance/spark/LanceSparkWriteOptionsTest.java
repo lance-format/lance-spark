@@ -25,21 +25,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class LanceSparkWriteOptionsTest {
 
   @Test
-  public void toReadOptionsOmitsVersionWhenReadVersionUnset() {
+  public void toReadOptionsOmitsVersionWhenVersionUnset() {
     LanceSparkWriteOptions opts = LanceSparkWriteOptions.from("file:///tmp/t");
-    assertNull(opts.getReadVersion());
+    assertNull(opts.getVersion());
     assertFalse(
         opts.toReadOptions().getVersion().isPresent(),
-        "Unset readVersion must not populate ReadOptions.version");
+        "Unset version must not populate ReadOptions.version");
     assertFalse(
         opts.toReadOptions(new HashMap<>(), null).getVersion().isPresent(),
-        "Unset readVersion must not populate ReadOptions.version");
+        "Unset version must not populate ReadOptions.version");
   }
 
   @Test
-  public void toReadOptionsSetsVersionWhenReadVersionSet() {
+  public void toReadOptionsSetsVersionWhenVersionSet() {
     LanceSparkWriteOptions opts =
-        LanceSparkWriteOptions.builder().datasetUri("file:///tmp/t").readVersion(7L).build();
+        LanceSparkWriteOptions.builder().datasetUri("file:///tmp/t").version(7L).build();
     assertTrue(opts.toReadOptions().getVersion().isPresent());
     assertEquals(7L, opts.toReadOptions().getVersion().get());
     assertTrue(opts.toReadOptions(new HashMap<>(), null).getVersion().isPresent());
@@ -47,10 +47,10 @@ public class LanceSparkWriteOptionsTest {
   }
 
   @Test
-  public void withReadVersionCopiesOptions() {
+  public void withVersionCopiesOptions() {
     LanceSparkWriteOptions base = LanceSparkWriteOptions.from("file:///tmp/t");
-    LanceSparkWriteOptions pinned = base.withReadVersion(3L);
-    assertEquals(3L, pinned.getReadVersion());
-    assertNull(base.getReadVersion());
+    LanceSparkWriteOptions pinned = base.withVersion(3L);
+    assertEquals(3L, pinned.getVersion());
+    assertNull(base.getVersion());
   }
 }

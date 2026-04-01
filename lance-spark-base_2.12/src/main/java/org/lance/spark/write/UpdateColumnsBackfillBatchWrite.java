@@ -82,9 +82,9 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
       List<String> tableId) {
     this.schema = schema;
     try (Dataset ds = Utils.openDataset(writeOptions)) {
-      this.writeOptions = writeOptions.withReadVersion(ds.version());
-      logger.info(
-          "Resolved read version for UPDATE COLUMNS: {}", this.writeOptions.getReadVersion());
+      this.writeOptions = writeOptions.withVersion(ds.version());
+      logger.debug(
+          "Resolved dataset version for UPDATE COLUMNS: {}", this.writeOptions.getVersion());
     }
     this.updateColumns = updateColumns;
     this.initialStorageOptions = initialStorageOptions;
@@ -143,22 +143,19 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
           .filter(f -> !updatedFragmentIds.contains(f.getId()))
           .map(Fragment::metadata)
           .forEach(updatedFragments::add);
-    }
 
-    // Commit update operation using CommitBuilder
-    try (Dataset dataset = Utils.openDataset(writeOptions)) {
       Update update =
           Update.builder()
               .updatedFragments(updatedFragments)
               .fieldsModified(fieldsModified)
               .updateMode(Optional.of(Update.UpdateMode.RewriteColumns))
               .build();
-      long readVersion =
+      long version =
           Objects.requireNonNull(
-              writeOptions.getReadVersion(),
-              "readVersion must be set (resolved in UpdateColumnsBackfillBatchWrite constructor)");
+              writeOptions.getVersion(),
+              "version must be set (resolved in UpdateColumnsBackfillBatchWrite constructor)");
       try (Transaction txn =
-              new Transaction.Builder().readVersion(readVersion).operation(update).build();
+              new Transaction.Builder().readVersion(version).operation(update).build();
           Dataset committed =
               new CommitBuilder(dataset)
                   .writeParams(writeOptions.getStorageOptions())
