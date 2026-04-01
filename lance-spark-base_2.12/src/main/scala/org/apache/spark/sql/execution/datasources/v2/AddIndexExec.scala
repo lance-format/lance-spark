@@ -190,7 +190,7 @@ case class AddIndexExec(
               tableId,
               initialStorageOpts)
 
-          case _ =>
+          case Some("fragment") | None =>
             new FragmentBasedIndexJob(
               this,
               readOptions,
@@ -200,6 +200,10 @@ case class AddIndexExec(
               nsProps,
               tableId,
               initialStorageOpts)
+
+          case Some(unknown) =>
+            throw new IllegalArgumentException(
+              s"Unrecognized build_mode: '$unknown'. Supported values are 'fragment' and 'range'.")
         }
 
       case _ =>

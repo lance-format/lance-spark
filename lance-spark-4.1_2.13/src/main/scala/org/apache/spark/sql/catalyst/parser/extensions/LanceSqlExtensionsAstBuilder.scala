@@ -100,7 +100,8 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
   }
 
   override def visitStringLiteral(ctx: LanceSqlExtensionsParser.StringLiteralContext): String = {
-    ctx.getText
+    val text = ctx.getText
+    text.stripPrefix("'").stripSuffix("'").stripPrefix("\"").stripSuffix("\"")
   }
 
   override def visitBooleanValue(ctx: LanceSqlExtensionsParser.BooleanValueContext)

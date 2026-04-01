@@ -227,6 +227,47 @@ public abstract class BaseAddIndexTest {
   }
 
   @Test
+  public void testCreateBTreeIndexWithFragmentMode() {
+    prepareDataset();
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index test_index_btree_fragment using btree (id) with (build_mode='fragment')",
+                fullTable));
+
+    Row row = result.collectAsList().get(0);
+    long fragmentsIndexed = row.getLong(0);
+    String indexName = row.getString(1);
+
+    Assertions.assertTrue(fragmentsIndexed >= 2, "Expected at least 2 fragments to be indexed");
+    Assertions.assertEquals("test_index_btree_fragment", indexName);
+
+    checkIndex("test_index_btree_fragment");
+  }
+
+  @Test
+  public void testCreateBTreeIndexWithUnrecognizedBuildMode() {
+    prepareDataset();
+
+    IllegalArgumentException exception =
+        Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                spark
+                    .sql(
+                        String.format(
+                            "alter table %s create index test_index_bad_mode using btree (id) with (build_mode='invalid')",
+                            fullTable))
+                    .collect());
+
+    Assertions.assertTrue(
+        exception.getMessage().contains("Unrecognized build_mode"),
+        "Expected error message to mention unrecognized build_mode, got: "
+            + exception.getMessage());
+  }
+
+  @Test
   public void testCreateFtsIndex() {
     prepareDataset();
 
