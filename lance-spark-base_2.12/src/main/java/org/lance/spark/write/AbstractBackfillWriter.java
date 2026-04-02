@@ -188,7 +188,8 @@ public abstract class AbstractBackfillWriter implements DataWriter<InternalRow> 
     ReadOptions.Builder builder =
         new ReadOptions.Builder().setStorageOptions(merged).setSession(LanceRuntime.session());
     if (provider != null) {
-      builder.setStorageOptionsProvider(provider);
+      builder.setStorageOptions(
+          LanceRuntime.mergeStorageOptions(merged, provider.getStorageOptions()));
     }
 
     return Dataset.open()

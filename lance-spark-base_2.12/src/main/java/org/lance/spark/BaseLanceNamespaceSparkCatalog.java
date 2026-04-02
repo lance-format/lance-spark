@@ -576,7 +576,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     WriteDatasetBuilder writeBuilder =
         Dataset.write()
             .allocator(LanceRuntime.allocator())
-            .namespace(namespace)
+            .namespaceClient(namespace)
             .tableId(tableIdList)
             .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true))
             .mode(WriteParams.WriteMode.CREATE)

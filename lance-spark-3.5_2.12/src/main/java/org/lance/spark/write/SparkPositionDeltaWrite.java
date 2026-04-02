@@ -20,8 +20,8 @@ import org.lance.FragmentMetadata;
 import org.lance.ReadOptions;
 import org.lance.RowAddress;
 import org.lance.Transaction;
+import org.lance.WriteFragmentBuilder;
 import org.lance.WriteParams;
-import org.lance.io.StorageOptionsProvider;
 import org.lance.operation.Update;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRuntime;
@@ -215,17 +215,24 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
         writeBuffer = new SemaphoreArrowBatchWriteBuffer(sparkSchema, batchSize);
       }
 
-      // Get storage options provider for credential refresh
-      StorageOptionsProvider storageOptionsProvider = getStorageOptionsProvider();
-
       // Create fragment in background thread
       Callable<List<FragmentMetadata>> fragmentCreator =
           () -> {
             try (ArrowArrayStream arrowStream =
                 ArrowArrayStream.allocateNew(LanceRuntime.allocator())) {
               Data.exportArrayStream(LanceRuntime.allocator(), writeBuffer, arrowStream);
-              return Fragment.create(
-                  writeOptions.getDatasetUri(), arrowStream, params, storageOptionsProvider);
+              WriteFragmentBuilder builder =
+                  Fragment.write()
+                      .datasetUri(writeOptions.getDatasetUri())
+                      .data(arrowStream)
+                      .writeParams(params);
+              if (LanceRuntime.hasNamespaceConfig(namespaceImpl, tableId)) {
+                builder
+                    .namespaceClient(
+                        LanceRuntime.getOrCreateNamespace(namespaceImpl, namespaceProperties))
+                    .tableId(tableId);
+              }
+              return builder.execute();
             }
           };
       FutureTask<List<FragmentMetadata>> fragmentCreationTask =
@@ -259,11 +266,6 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       }
       builder.withStorageOptions(merged);
       return builder.build();
-    }
-
-    private StorageOptionsProvider getStorageOptionsProvider() {
-      return LanceRuntime.getOrCreateStorageOptionsProvider(
-          namespaceImpl, namespaceProperties, tableId);
     }
   }
 

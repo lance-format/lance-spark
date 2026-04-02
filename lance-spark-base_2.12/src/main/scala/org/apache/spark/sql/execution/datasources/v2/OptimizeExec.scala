@@ -140,7 +140,9 @@ case class OptimizeExec(
 
     val builder = new ReadOptions.Builder().setStorageOptions(merged)
     if (provider != null) {
-      builder.setStorageOptionsProvider(provider)
+      builder.setStorageOptions(LanceRuntime.mergeStorageOptions(
+        merged,
+        provider.getStorageOptions))
     }
 
     Dataset.open()
@@ -174,7 +176,9 @@ case class OptimizeTaskExecutor(
 
     val builder = new ReadOptions.Builder().setStorageOptions(merged)
     if (provider != null) {
-      builder.setStorageOptionsProvider(provider)
+      builder.setStorageOptions(LanceRuntime.mergeStorageOptions(
+        merged,
+        provider.getStorageOptions))
     }
 
     val dataset = Dataset.open()

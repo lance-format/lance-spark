@@ -143,7 +143,7 @@ case class AddIndexExec(
     if (readOptions.hasNamespace) {
       Dataset.open()
         .allocator(LanceRuntime.allocator())
-        .namespace(readOptions.getNamespace)
+        .namespaceClient(readOptions.getNamespace)
         .readOptions(readOptions.toReadOptions)
         .tableId(readOptions.getTableId)
         .build()
@@ -611,7 +611,9 @@ object IndexUtils {
 
     val builder = new ReadOptions.Builder().setStorageOptions(merged)
     if (provider != null) {
-      builder.setStorageOptionsProvider(provider)
+      builder.setStorageOptions(LanceRuntime.mergeStorageOptions(
+        merged,
+        provider.getStorageOptions))
     }
 
     Dataset.open()

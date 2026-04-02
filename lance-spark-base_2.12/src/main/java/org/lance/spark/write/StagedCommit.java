@@ -139,7 +139,7 @@ public class StagedCommit {
     CommitBuilder builder =
         new CommitBuilder(datasetUri, LanceRuntime.allocator()).writeParams(storageOptions);
     if (managedVersioning) {
-      builder.namespace(namespace).tableId(tableId);
+      builder.namespaceClient(namespace).tableId(tableId);
     }
     try (Transaction txn = new Transaction.Builder().operation(operation).build();
         Dataset committed = builder.execute(txn)) {
@@ -157,7 +157,7 @@ public class StagedCommit {
     CommitBuilder builder =
         new CommitBuilder(uri, LanceRuntime.allocator()).writeParams(storageOptions);
     if (managedVersioning) {
-      builder.namespace(namespace).tableId(tableId);
+      builder.namespaceClient(namespace).tableId(tableId);
     }
     try (Transaction txn =
             new Transaction.Builder().readVersion(version).operation(operation).build();

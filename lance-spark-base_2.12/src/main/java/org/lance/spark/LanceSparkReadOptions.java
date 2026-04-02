@@ -317,7 +317,8 @@ public class LanceSparkReadOptions implements Serializable {
     }
     StorageOptionsProvider provider = getStorageOptionsProvider();
     if (provider != null) {
-      builder.setStorageOptionsProvider(provider);
+      builder.setStorageOptions(
+          LanceRuntime.mergeStorageOptions(storageOptions, provider.getStorageOptions()));
     }
     return builder.build();
   }

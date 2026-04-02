@@ -217,7 +217,8 @@ public class LanceSparkWriteOptions implements Serializable {
             .setSession(LanceRuntime.session());
     StorageOptionsProvider provider = getStorageOptionsProvider();
     if (provider != null) {
-      builder.setStorageOptionsProvider(provider);
+      builder.setStorageOptions(
+          LanceRuntime.mergeStorageOptions(storageOptions, provider.getStorageOptions()));
     }
     return builder.build();
   }
@@ -236,7 +237,8 @@ public class LanceSparkWriteOptions implements Serializable {
     ReadOptions.Builder builder =
         new ReadOptions.Builder().setStorageOptions(merged).setSession(LanceRuntime.session());
     if (provider != null) {
-      builder.setStorageOptionsProvider(provider);
+      builder.setStorageOptions(
+          LanceRuntime.mergeStorageOptions(merged, provider.getStorageOptions()));
     }
     return builder.build();
   }

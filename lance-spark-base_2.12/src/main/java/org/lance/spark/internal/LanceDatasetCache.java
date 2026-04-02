@@ -274,7 +274,8 @@ public class LanceDatasetCache {
             .setSession(LanceRuntime.session(key.getCatalogName()));
 
     if (provider != null) {
-      builder.setStorageOptionsProvider(provider);
+      builder.setStorageOptions(
+          LanceRuntime.mergeStorageOptions(merged, provider.getStorageOptions()));
     }
     if (key.getVersion() != null) {
       builder.setVersion(key.getVersion());

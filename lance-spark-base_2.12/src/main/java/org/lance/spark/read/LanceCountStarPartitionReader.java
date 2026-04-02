@@ -109,7 +109,8 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
             .setSession(LanceRuntime.session(readOptions.getCatalogName()));
 
     if (provider != null) {
-      builder.setStorageOptionsProvider(provider);
+      builder.setStorageOptions(
+          LanceRuntime.mergeStorageOptions(merged, provider.getStorageOptions()));
     }
     if (readOptions.getVersion() != null) {
       builder.setVersion(readOptions.getVersion());
