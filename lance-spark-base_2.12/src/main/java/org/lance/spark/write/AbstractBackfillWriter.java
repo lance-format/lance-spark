@@ -16,7 +16,7 @@ package org.lance.spark.write;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.ReadOptions;
-import org.lance.io.StorageOptionsProvider;
+import org.lance.namespace.LanceNamespace;
 import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
@@ -182,15 +182,19 @@ public abstract class AbstractBackfillWriter implements DataWriter<InternalRow> 
   private Dataset openDatasetWithCredentialRefresh() {
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(writeOptions.getStorageOptions(), initialStorageOptions);
-    StorageOptionsProvider provider =
-        LanceRuntime.getOrCreateStorageOptionsProvider(namespaceImpl, namespaceProperties, tableId);
+    LanceNamespace namespace =
+        LanceRuntime.getOrCreateNamespace(namespaceImpl, namespaceProperties);
 
     ReadOptions.Builder builder =
         new ReadOptions.Builder().setStorageOptions(merged).setSession(LanceRuntime.session());
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider);
+    if (namespace != null && tableId != null) {
+      return Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .namespaceClient(namespace)
+          .tableId(tableId)
+          .readOptions(builder.build())
+          .build();
     }
-
     return Dataset.open()
         .allocator(LanceRuntime.allocator())
         .uri(writeOptions.getDatasetUri())

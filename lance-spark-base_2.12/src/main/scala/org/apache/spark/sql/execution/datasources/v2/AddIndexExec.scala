@@ -143,7 +143,7 @@ case class AddIndexExec(
     if (readOptions.hasNamespace) {
       Dataset.open()
         .allocator(LanceRuntime.allocator())
-        .namespace(readOptions.getNamespace)
+        .namespaceClient(readOptions.getNamespace)
         .readOptions(readOptions.toReadOptions)
         .tableId(readOptions.getTableId)
         .build()
@@ -599,25 +599,34 @@ object IndexUtils {
       namespaceImpl: Option[String],
       namespaceProperties: Option[Map[String, String]],
       tableId: Option[List[String]]): Dataset = {
-    // Build ReadOptions with merged storage options and credential refresh provider
+    // Build ReadOptions with merged storage options.
     val merged = LanceRuntime.mergeStorageOptions(
       readOptions.getStorageOptions,
       initialStorageOptions.map(_.asJava).orNull)
 
-    val provider = LanceRuntime.getOrCreateStorageOptionsProvider(
+    val namespace = Option(LanceRuntime.getOrCreateNamespace(
       namespaceImpl.orNull,
-      namespaceProperties.map(_.asJava).orNull,
-      tableId.map(_.asJava).orNull)
+      namespaceProperties.map(_.asJava).orNull))
 
     val builder = new ReadOptions.Builder().setStorageOptions(merged)
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider)
+    if (readOptions.getVersion != null) {
+      builder.setVersion(readOptions.getVersion.longValue())
     }
 
-    Dataset.open()
-      .allocator(LanceRuntime.allocator())
-      .uri(readOptions.getDatasetUri)
-      .readOptions(builder.build())
-      .build()
+    (namespace, tableId) match {
+      case (Some(ns), Some(id)) =>
+        Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .namespaceClient(ns)
+          .tableId(id.asJava)
+          .readOptions(builder.build())
+          .build()
+      case _ =>
+        Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .uri(readOptions.getDatasetUri)
+          .readOptions(builder.build())
+          .build()
+    }
   }
 }

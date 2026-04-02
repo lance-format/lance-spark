@@ -134,7 +134,7 @@ public class LanceBatchWrite implements BatchWrite {
         if (managedVersioning) {
           LanceNamespace namespace =
               LanceRuntime.getOrCreateNamespace(namespaceImpl, namespaceProperties);
-          commitBuilder.namespace(namespace).tableId(tableId);
+          commitBuilder.namespaceClient(namespace).tableId(tableId);
         }
         try (Transaction txn =
                 new Transaction.Builder().readVersion(ds.version()).operation(operation).build();

@@ -86,7 +86,7 @@ public class LanceSplit implements Serializable {
     if (readOptions.hasNamespace()) {
       return Dataset.open()
           .allocator(LanceRuntime.allocator())
-          .namespace(readOptions.getNamespace())
+          .namespaceClient(readOptions.getNamespace())
           .tableId(readOptions.getTableId())
           .readOptions(readOptions.toReadOptions())
           .build();

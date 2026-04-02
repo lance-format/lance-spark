@@ -16,7 +16,7 @@ package org.lance.spark.internal;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.ReadOptions;
-import org.lance.namespace.LanceNamespaceStorageOptionsProvider;
+import org.lance.namespace.LanceNamespace;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 
@@ -264,22 +264,26 @@ public class LanceDatasetCache {
   private static Dataset openDataset(DatasetCacheKey key) {
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(key.getStorageOptions(), key.getInitialStorageOptions());
-    LanceNamespaceStorageOptionsProvider provider =
-        LanceRuntime.getOrCreateStorageOptionsProvider(
-            key.getNamespaceImpl(), key.getNamespaceProperties(), key.getTableId());
+    LanceNamespace namespace =
+        LanceRuntime.getOrCreateNamespace(key.getNamespaceImpl(), key.getNamespaceProperties());
 
     ReadOptions.Builder builder =
         new ReadOptions.Builder()
             .setStorageOptions(merged)
             .setSession(LanceRuntime.session(key.getCatalogName()));
 
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider);
-    }
     if (key.getVersion() != null) {
       builder.setVersion(key.getVersion());
     }
 
+    if (namespace != null && key.getTableId() != null) {
+      return Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .namespaceClient(namespace)
+          .tableId(key.getTableId())
+          .readOptions(builder.build())
+          .build();
+    }
     return Dataset.open()
         .allocator(LanceRuntime.allocator())
         .uri(key.getUri())

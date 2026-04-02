@@ -131,25 +131,34 @@ case class OptimizeExec(
       nsProps: Option[Map[String, String]],
       tableId: Option[List[String]],
       initialStorageOpts: Option[Map[String, String]]): Dataset = {
-    // Build ReadOptions with merged storage options and credential refresh provider
+    // Build ReadOptions with merged storage options.
     val merged = LanceRuntime.mergeStorageOptions(
       readOptions.getStorageOptions,
       initialStorageOpts.map(_.asJava).orNull)
-    val provider = LanceRuntime.getOrCreateStorageOptionsProvider(
+    val namespace = Option(LanceRuntime.getOrCreateNamespace(
       nsImpl.orNull,
-      nsProps.map(_.asJava).orNull,
-      tableId.map(_.asJava).orNull)
+      nsProps.map(_.asJava).orNull))
 
     val builder = new ReadOptions.Builder().setStorageOptions(merged)
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider)
+    if (readOptions.getVersion != null) {
+      builder.setVersion(readOptions.getVersion.longValue())
     }
 
-    Dataset.open()
-      .allocator(LanceRuntime.allocator())
-      .uri(readOptions.getDatasetUri)
-      .readOptions(builder.build())
-      .build()
+    (namespace, tableId) match {
+      case (Some(ns), Some(id)) =>
+        Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .namespaceClient(ns)
+          .tableId(id.asJava)
+          .readOptions(builder.build())
+          .build()
+      case _ =>
+        Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .uri(readOptions.getDatasetUri)
+          .readOptions(builder.build())
+          .build()
+    }
   }
 }
 
@@ -165,25 +174,34 @@ case class OptimizeTaskExecutor(
     val readOptions = decode[LanceSparkReadOptions](lanceConf)
     val compactionTask = decode[CompactionTask](task)
 
-    // Build ReadOptions with merged storage options and credential refresh provider
+    // Build ReadOptions with merged storage options.
     val merged = LanceRuntime.mergeStorageOptions(
       readOptions.getStorageOptions,
       initialStorageOptions.map(_.asJava).orNull)
-    val provider = LanceRuntime.getOrCreateStorageOptionsProvider(
+    val namespace = Option(LanceRuntime.getOrCreateNamespace(
       namespaceImpl.orNull,
-      namespaceProperties.map(_.asJava).orNull,
-      tableId.map(_.asJava).orNull)
+      namespaceProperties.map(_.asJava).orNull))
 
     val builder = new ReadOptions.Builder().setStorageOptions(merged)
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider)
+    if (readOptions.getVersion != null) {
+      builder.setVersion(readOptions.getVersion.longValue())
     }
 
-    val dataset = Dataset.open()
-      .allocator(LanceRuntime.allocator())
-      .uri(readOptions.getDatasetUri)
-      .readOptions(builder.build())
-      .build()
+    val dataset = (namespace, tableId) match {
+      case (Some(ns), Some(id)) =>
+        Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .namespaceClient(ns)
+          .tableId(id.asJava)
+          .readOptions(builder.build())
+          .build()
+      case _ =>
+        Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .uri(readOptions.getDatasetUri)
+          .readOptions(builder.build())
+          .build()
+    }
 
     try {
       val res = compactionTask.execute(dataset)
