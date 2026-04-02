@@ -1192,22 +1192,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
    * Calls namespace.describeTable and translates table-not-found errors into Spark's {@link
    * NoSuchTableException}.
    *
-   * <p>Two catch blocks handle the error:
-   *
-   * <ol>
-   *   <li>{@link LanceNamespaceException} with {@link ErrorCode#TABLE_NOT_FOUND} — catches the
-   *       exception that the JNI bridge creates once the upstream lance-namespace-impls uses typed
-   *       {@code NamespaceError::TableNotFound} (see lance PR #6267 / #6275). This also covers
-   *       {@link TableNotFoundException} (a subclass of {@link LanceNamespaceException}).
-   *   <li>{@link RuntimeException} with message matching — workaround for the current state where
-   *       dir.rs and dir/manifest.rs use {@code Error::namespace_source(String)}, causing the JNI
-   *       downcast to {@code NamespaceError} to fail and fall back to a raw RuntimeException. Two
-   *       known message patterns: "Table does not exist: {name}" (dir.rs) and "Table '{name}' not
-   *       found" (manifest.rs).
-   * </ol>
-   *
-   * <p>TODO: Remove the RuntimeException catch block once lance fixes dir.rs and manifest.rs to use
-   * {@code NamespaceError::TableNotFound}.
+   * <p>Catches {@link LanceNamespaceException} with {@link ErrorCode#TABLE_NOT_FOUND}, which covers
+   * {@link TableNotFoundException} (a subclass of {@link LanceNamespaceException}).
    *
    * <p>This helper should be used at call sites where {@code NoSuchTableException} is the expected
    * outcome for missing tables (e.g. {@code loadTableInternal}, {@code stageReplace}). Call sites
@@ -1220,14 +1206,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
       return namespace.describeTable(request);
     } catch (LanceNamespaceException e) {
       if (e.getErrorCode() == ErrorCode.TABLE_NOT_FOUND) {
-        throw new NoSuchTableException(ident);
-      }
-      throw e;
-    } catch (RuntimeException e) {
-      String msg = e.getMessage();
-      if (msg != null
-          && (msg.contains("Table does not exist")
-              || (msg.contains("Table") && msg.contains("not found")))) {
         throw new NoSuchTableException(ident);
       }
       throw e;
