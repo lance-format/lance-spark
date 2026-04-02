@@ -187,7 +187,7 @@ public class LanceSparkWriteOptions implements Serializable {
         .maxRowsPerFile(maxRowsPerFile)
         .maxRowsPerGroup(maxRowsPerGroup)
         .maxBytesPerFile(maxBytesPerFile)
-        .dataStorageVersion(dataStorageVersion)
+        .fileFormatVersion(fileFormatVersion)
         .useQueuedWriteBuffer(useQueuedWriteBuffer)
         .queueDepth(queueDepth)
         .batchSize(batchSize)
