@@ -42,10 +42,12 @@ import org.apache.spark.sql.types.TimestampNTZType;
 import org.apache.spark.sql.types.TimestampType;
 import org.apache.spark.sql.types.UserDefinedType;
 import org.apache.spark.sql.types.YearMonthIntervalType;
+import scala.collection.JavaConverters;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.lance.spark.utils.BlobUtils.LANCE_ENCODING_BLOB_KEY;
 import static org.lance.spark.utils.BlobUtils.LANCE_ENCODING_BLOB_VALUE;
@@ -339,6 +341,16 @@ public class SchemaConverter {
     field.setNullable(sparkField.nullable());
     field.setType(
         toJsonArrowDataType(sparkField.dataType(), sparkField.name(), sparkField.metadata()));
+    if (sparkField.metadata() != null) {
+      Map<String, String> stringMap =
+          JavaConverters.mapAsJavaMapConverter(sparkField.metadata().map())
+              .asJava()
+              .entrySet()
+              .stream()
+              .filter(entry -> entry.getValue() != null)
+              .collect(Collectors.toMap(Map.Entry::getKey, entry -> entry.getValue().toString()));
+      field.setMetadata(stringMap);
+    }
     return field;
   }
 
@@ -386,15 +398,16 @@ public class SchemaConverter {
     } else if (sparkType instanceof BinaryType) {
       dataType.setType("binary");
     } else if (sparkType instanceof DateType) {
-      dataType.setType("date");
+      dataType.setType("date32");
     } else if (sparkType instanceof TimestampType) {
       dataType.setType("timestamp");
     } else if (sparkType instanceof TimestampNTZType) {
       dataType.setType("timestamp");
     } else if (sparkType instanceof DecimalType) {
       DecimalType decimalType = (DecimalType) sparkType;
-      dataType.setType("decimal");
-      // Note: precision and scale would need additional fields if supported
+      dataType.setType("decimal128");
+      // This is the convention set in lance-namespace/src/schema.rs
+      dataType.setLength((long) decimalType.precision() * 1000 + decimalType.scale());
     } else if (sparkType instanceof NullType) {
       dataType.setType("null");
     } else if (sparkType instanceof YearMonthIntervalType) {
