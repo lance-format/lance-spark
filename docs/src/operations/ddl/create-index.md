@@ -35,9 +35,10 @@ The `CREATE INDEX` command supports options via the `WITH` clause to control ind
 
 For the `btree` method, the following options are supported:
 
-| Option      | Type | Description                                  |
-|-------------|------|----------------------------------------------|
-| `zone_size` | Long | The number of rows per zone in the B-tree index. |
+| Option      | Type   | Description                                  |
+|-------------|--------|----------------------------------------------|
+| `zone_size` | Long   | The number of rows per zone in the B-tree index. |
+| `build_mode`| String | Index building mode: 'fragment' builds indexes in parallel by fragment; 'range' sorts data by indexed columns first, then partitions and builds indexes in parallel by partition. Default is 'fragment'.|
 
 ### FTS Options
 

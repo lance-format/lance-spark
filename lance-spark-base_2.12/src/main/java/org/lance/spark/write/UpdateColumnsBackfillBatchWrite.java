@@ -19,19 +19,12 @@ import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.Transaction;
 import org.lance.fragment.FragmentUpdateResult;
-import org.lance.io.StorageOptionsProvider;
 import org.lance.operation.Update;
 import org.lance.spark.LanceDataset;
-import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.c.ArrowArrayStream;
-import org.apache.arrow.c.Data;
-import org.apache.arrow.memory.BufferAllocator;
-import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.arrow.vector.ipc.ArrowStreamReader;
-import org.apache.arrow.vector.ipc.ArrowStreamWriter;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.write.BatchWrite;
 import org.apache.spark.sql.connector.write.DataWriter;
@@ -39,13 +32,9 @@ import org.apache.spark.sql.connector.write.DataWriterFactory;
 import org.apache.spark.sql.connector.write.PhysicalWriteInfo;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
 import org.apache.spark.sql.types.StructType;
-import org.apache.spark.sql.util.LanceArrowUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -171,26 +160,9 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
     }
   }
 
-  public static class UpdateColumnsWriter implements DataWriter<InternalRow> {
-    private final LanceSparkWriteOptions writeOptions;
-    private final StructType schema;
-    private final int fragmentIdField;
-    private final List<FragmentMetadata> updatedFragments;
-
-    /**
-     * Initial storage options fetched from namespace.describeTable() on the driver. These are
-     * passed to workers so they can reuse the credentials without calling describeTable again.
-     */
-    private final Map<String, String> initialStorageOptions;
-
-    /** StorageOptionsProvider for dynamic credential refresh on workers. */
-    private final StorageOptionsProvider provider;
-
+  public static class UpdateColumnsWriter extends AbstractBackfillWriter {
+    private final List<FragmentMetadata> updatedFragments = new ArrayList<>();
     private long[] fieldsModified;
-    private StructType writerSchema;
-    private int fragmentId = -1;
-    private VectorSchemaRoot data;
-    private org.lance.spark.arrow.LanceArrowWriter writer = null;
 
     public UpdateColumnsWriter(
         LanceSparkWriteOptions writeOptions,
@@ -200,113 +172,31 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
         String namespaceImpl,
         Map<String, String> namespaceProperties,
         List<String> tableId) {
-      this.writeOptions = writeOptions;
-      this.schema = schema;
-      this.fragmentIdField = schema.fieldIndex(LanceDataset.FRAGMENT_ID_COLUMN.name());
-      this.updatedFragments = new ArrayList<>();
-      this.initialStorageOptions = initialStorageOptions;
-      this.provider =
-          LanceRuntime.getOrCreateStorageOptionsProvider(
-              namespaceImpl, namespaceProperties, tableId);
-
-      // Build writer schema: only include columns to update + _rowaddr for matching
-      this.writerSchema = new StructType();
-      Arrays.stream(schema.fields())
-          .filter(
-              f ->
-                  updateColumns.contains(f.name())
-                      || f.name().equals(LanceDataset.ROW_ADDRESS_COLUMN.name()))
-          .forEach(f -> writerSchema = writerSchema.add(f));
-
-      createWriter();
+      super(
+          writeOptions,
+          schema,
+          updateColumns,
+          initialStorageOptions,
+          namespaceImpl,
+          namespaceProperties,
+          tableId);
     }
 
     @Override
-    public void write(InternalRow record) throws IOException {
-      int fragId = record.getInt(fragmentIdField);
-
-      if (fragmentId == -1) {
-        fragmentId = fragId;
-      }
-
-      if (fragId != fragmentId && data != null) {
-        // New fragment's data is coming, update the current fragment.
-        updateFragment();
-
-        fragmentId = fragId;
-        createWriter();
-      }
-
-      for (int i = 0; i < writerSchema.fields().length; i++) {
-        writer.field(i).write(record, schema.fieldIndex(writerSchema.fields()[i].name()));
-      }
-    }
-
-    private void createWriter() {
-      BufferAllocator allocator = LanceRuntime.allocator();
-      data =
-          VectorSchemaRoot.create(
-              LanceArrowUtils.toArrowSchema(writerSchema, "UTC", false), allocator);
-
-      writer = org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(data, writerSchema);
-    }
-
-    private void updateFragment() {
-      writer.finish();
-
-      ByteArrayOutputStream out = new ByteArrayOutputStream();
-      try (ArrowStreamWriter writer = new ArrowStreamWriter(data, null, out)) {
-        writer.start();
-        writer.writeBatch();
-        writer.end();
-      } catch (IOException e) {
-        throw new RuntimeException("Cannot write schema root", e);
-      }
-
-      byte[] arrowData = out.toByteArray();
-      ByteArrayInputStream in = new ByteArrayInputStream(arrowData);
-      BufferAllocator allocator = LanceRuntime.allocator();
-
-      try (ArrowStreamReader reader = new ArrowStreamReader(in, allocator);
-          ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator)) {
-        Data.exportArrayStream(allocator, reader, stream);
-
-        // Use Dataset to get the fragment and update columns
-        try (Dataset dataset =
-            Utils.openDataset(
-                writeOptions.getDatasetUri(),
-                writeOptions.toReadOptions(initialStorageOptions, provider))) {
-          Fragment fragment = new Fragment(dataset, fragmentId);
-          FragmentUpdateResult result =
-              fragment.updateColumns(
-                  stream,
-                  LanceDataset.ROW_ADDRESS_COLUMN.name(),
-                  LanceDataset.ROW_ADDRESS_COLUMN.name());
-
-          updatedFragments.add(result.getUpdatedFragment());
-          fieldsModified = result.getFieldsModified();
-        }
-      } catch (Exception e) {
-        throw new RuntimeException("Cannot read arrow stream.", e);
-      }
-
-      data.close();
+    protected void processFragment(Fragment fragment, ArrowArrayStream stream) {
+      FragmentUpdateResult result =
+          fragment.updateColumns(
+              stream,
+              LanceDataset.ROW_ADDRESS_COLUMN.name(),
+              LanceDataset.ROW_ADDRESS_COLUMN.name());
+      updatedFragments.add(result.getUpdatedFragment());
+      fieldsModified = result.getFieldsModified();
     }
 
     @Override
-    public WriterCommitMessage commit() {
-      if (fragmentId >= 0 && data != null) {
-        updateFragment();
-      }
-
+    protected WriterCommitMessage buildCommitMessage() {
       return new TaskCommit(updatedFragments, fieldsModified);
     }
-
-    @Override
-    public void abort() {}
-
-    @Override
-    public void close() throws IOException {}
   }
 
   public static class UpdateColumnsWriterFactory implements DataWriterFactory {

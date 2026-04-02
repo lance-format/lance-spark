@@ -26,6 +26,7 @@ import org.apache.arrow.vector.ValueVector;
 import org.apache.arrow.vector.complex.FixedSizeListVector;
 import org.apache.arrow.vector.complex.LargeListVector;
 import org.apache.arrow.vector.complex.ListVector;
+import org.apache.arrow.vector.complex.MapVector;
 import org.apache.arrow.vector.complex.StructVector;
 import org.apache.spark.sql.types.Decimal;
 import org.apache.spark.sql.util.LanceArrowUtils;
@@ -44,6 +45,7 @@ public class LanceArrowColumnVector extends ColumnVector {
   private FixedSizeListAccessor fixedSizeListAccessor;
   private BlobStructAccessor blobStructAccessor;
   private LanceArrayAccessor arrayAccessor;
+  private LanceMapAccessor mapAccessor;
   private LanceLargeArrayAccessor largeArrayAccessor;
   private LargeVarCharAccessor largeVarCharAccessor;
   private DateMilliAccessor dateMilliAccessor;
@@ -69,6 +71,8 @@ public class LanceArrowColumnVector extends ColumnVector {
       blobStructAccessor = new BlobStructAccessor((StructVector) vector);
     } else if (vector instanceof StructVector) {
       structAccessor = new LanceStructAccessor((StructVector) vector);
+    } else if (vector instanceof MapVector) {
+      mapAccessor = new LanceMapAccessor((MapVector) vector);
     } else if (vector instanceof ListVector) {
       arrayAccessor = new LanceArrayAccessor((ListVector) vector);
     } else if (vector instanceof LargeListVector) {
@@ -107,6 +111,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (arrayAccessor != null) {
       arrayAccessor.close();
+    }
+    if (mapAccessor != null) {
+      mapAccessor.close();
     }
     if (largeArrayAccessor != null) {
       largeArrayAccessor.close();
@@ -150,6 +157,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (arrayAccessor != null) {
       return arrayAccessor.getNullCount() > 0;
+    }
+    if (mapAccessor != null) {
+      return mapAccessor.getNullCount() > 0;
     }
     if (largeArrayAccessor != null) {
       return largeArrayAccessor.getNullCount() > 0;
@@ -195,6 +205,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     if (arrayAccessor != null) {
       return arrayAccessor.getNullCount();
     }
+    if (mapAccessor != null) {
+      return mapAccessor.getNullCount();
+    }
     if (largeArrayAccessor != null) {
       return largeArrayAccessor.getNullCount();
     }
@@ -238,6 +251,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (arrayAccessor != null) {
       return arrayAccessor.isNullAt(rowId);
+    }
+    if (mapAccessor != null) {
+      return mapAccessor.isNullAt(rowId);
     }
     if (largeArrayAccessor != null) {
       return largeArrayAccessor.isNullAt(rowId);
@@ -347,6 +363,9 @@ public class LanceArrowColumnVector extends ColumnVector {
 
   @Override
   public ColumnarMap getMap(int ordinal) {
+    if (mapAccessor != null) {
+      return mapAccessor.getMap(ordinal);
+    }
     if (arrowColumnVector != null) {
       return arrowColumnVector.getMap(ordinal);
     }

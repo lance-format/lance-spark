@@ -207,15 +207,21 @@ docker-test:
 
 .PHONY: benchmark-build
 benchmark-build:
-	cd benchmark && mvn package -DskipTests
+	cd benchmark && ../mvnw package -DskipTests \
+		-Dspark.compat.version=$(SPARK_VERSION) \
+		-Dscala.compat.version=$(SCALA_VERSION)
 
 .PHONY: benchmark-generate
 benchmark-generate:
-	cd benchmark && DATA_DIR=$(DATA_DIR) ./scripts/generate-data.sh $(SF) $(FORMATS) $(SPARK_MASTER)
+	cd benchmark && \
+		SPARK_VERSION=$(SPARK_VERSION) SCALA_VERSION=$(SCALA_VERSION) \
+		./scripts/generate-data.sh $(SF) $(FORMATS) $(SPARK_MASTER)
 
 .PHONY: benchmark-run
 benchmark-run:
-	cd benchmark && DATA_DIR=$(DATA_DIR) ./scripts/run-benchmark.sh $(FORMATS) $(SPARK_MASTER) $(ITERATIONS)
+	cd benchmark && \
+		SPARK_VERSION=$(SPARK_VERSION) SCALA_VERSION=$(SCALA_VERSION) \
+		./scripts/run-benchmark.sh $(FORMATS) $(SPARK_MASTER) $(ITERATIONS)
 
 .PHONY: benchmark
 benchmark: benchmark-generate benchmark-run
@@ -224,7 +230,6 @@ SF ?= 1
 FORMATS ?= lance,parquet
 SPARK_MASTER ?= local[*]
 ITERATIONS ?= 3
-DATA_DIR ?= benchmark/data
 
 # =============================================================================
 # Documentation

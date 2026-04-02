@@ -57,13 +57,30 @@ public class LanceFragmentScanner implements AutoCloseable {
               inputPartition.getNamespaceImpl(),
               inputPartition.getNamespaceProperties());
       ScanOptions.Builder scanOptions = new ScanOptions.Builder();
-      scanOptions.columns(getColumnNames(inputPartition.getSchema()));
+      List<String> projectedColumns = getColumnNames(inputPartition.getSchema());
+      if (projectedColumns.isEmpty() && inputPartition.getSchema().isEmpty()) {
+        // Lance requires at least one projected column. Use _rowid as a lightweight
+        // sentinel so the scanner still returns the correct row count (e.g. SELECT 1).
+        // Only do this when the schema is truly empty; when the schema contains virtual
+        // columns (e.g. _fragid, blob position/size) that are not passed to the scanner
+        // but added later by the batch scanner, adding _rowid here would shift column
+        // indices and cause Spark to read wrong data.
+        scanOptions.withRowId(true);
+      }
+      scanOptions.columns(projectedColumns);
       if (inputPartition.getWhereCondition().isPresent()) {
         scanOptions.filter(inputPartition.getWhereCondition().get());
       }
       scanOptions.batchSize(readOptions.getBatchSize());
       if (readOptions.getNearest() != null) {
         scanOptions.nearest(readOptions.getNearest());
+        // We strictly set `prefilter = true` here to ensure query correctness.
+        // This is necessary due to the combination of two factors:
+        // 1. Spark currently performs the vector search by individually scanning each fragment.
+        // 2. Lance mandates that `prefilter` must be enabled for fragmented vector queries.
+        // If Spark's execution model or Lance's search functionality changes in the future,
+        // we need to revisit this.
+        scanOptions.prefilter(true);
       }
       if (inputPartition.getLimit().isPresent()) {
         scanOptions.limit(inputPartition.getLimit().get());

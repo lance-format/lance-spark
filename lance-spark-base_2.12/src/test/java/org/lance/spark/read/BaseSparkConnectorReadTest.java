@@ -19,7 +19,10 @@ import org.lance.spark.TestUtils;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -32,6 +35,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -216,6 +220,184 @@ public abstract class BaseSparkConnectorReadTest {
       }
       assertTrue(found, "Expected batch_size validation error, got: " + e.getMessage());
     }
+  }
+
+  @Test
+  public void emptySchemaQueryShouldNotReadAllColumns() {
+    // SELECT 1 FROM table needs zero data columns from the scan.
+    // The scan should NOT project all table columns (x, y, b, c).
+    Dataset<Row> result = spark.sql("SELECT 1 FROM test_dataset1");
+    assertEquals(TestUtils.TestTable1Config.expectedValues.size(), result.collectAsList().size());
+
+    // The BatchScan should have an empty output (no data columns projected)
+    String physicalPlan = result.queryExecution().executedPlan().toString();
+    assertFalse(
+        physicalPlan.contains("x#"),
+        "Column 'x' should not be projected for SELECT 1: " + physicalPlan);
+    assertFalse(
+        physicalPlan.contains("y#"),
+        "Column 'y' should not be projected for SELECT 1: " + physicalPlan);
+    assertFalse(
+        physicalPlan.contains("b#"),
+        "Column 'b' should not be projected for SELECT 1: " + physicalPlan);
+    assertFalse(
+        physicalPlan.contains("c#"),
+        "Column 'c' should not be projected for SELECT 1: " + physicalPlan);
+  }
+
+  /**
+   * Regression test for <a href="https://github.com/lance-format/lance-spark/issues/334">#334</a>:
+   * nested subquery with COUNT(*) causes all columns to be scanned.
+   *
+   * <p>The optimizer rewrites COUNT(*) to COUNT(1), which needs zero columns from the data source.
+   * Before the fix, {@code pruneColumns} rejected the empty schema, causing a full-table scan.
+   */
+  @Test
+  public void nestedCountStarSubqueryShouldPruneColumns() {
+    // Exact pattern from issue #334 — nested query with COUNT(*) over a filtered subquery
+    Dataset<Row> result =
+        spark.sql(
+            "SELECT COUNT(*) FROM ("
+                + "  SELECT x FROM test_dataset1 WHERE rand(42) < 1.0"
+                + ") as subquery");
+
+    // Verify correct result — all 4 rows pass the filter (rand < 1.0 is always true)
+    assertEquals(4L, result.collectAsList().get(0).getLong(0));
+
+    // The BatchScan should NOT project all table columns
+    String physicalPlan = result.queryExecution().executedPlan().toString();
+    assertFalse(
+        physicalPlan.contains("y#"),
+        "Column 'y' should not be projected in nested COUNT(*): " + physicalPlan);
+    assertFalse(
+        physicalPlan.contains("b#"),
+        "Column 'b' should not be projected in nested COUNT(*): " + physicalPlan);
+    assertFalse(
+        physicalPlan.contains("c#"),
+        "Column 'c' should not be projected in nested COUNT(*): " + physicalPlan);
+  }
+
+  /**
+   * Regression test for <a href="https://github.com/lance-format/lance-spark/issues/334">#334</a>:
+   * nested subquery selecting a single column should prune the rest.
+   *
+   * <p>The outer query references {@code x} from the subquery, so only {@code x} should be scanned
+   * — not the full table schema.
+   */
+  @Test
+  public void nestedSubqueryShouldPruneUnusedColumns() {
+    Dataset<Row> result =
+        spark.sql(
+            "SELECT x FROM (" + "  SELECT x, y FROM test_dataset1 WHERE x > 1" + ") as subquery");
+
+    // x > 1 keeps rows: (2,4,6,-2) and (3,6,9,-3)
+    List<Row> rows = result.collectAsList();
+    assertEquals(2, rows.size());
+
+    // The BatchScan should only project 'x' (the only column the outer query needs),
+    // not 'b' or 'c'
+    String physicalPlan = result.queryExecution().executedPlan().toString();
+    assertFalse(
+        physicalPlan.contains("b#"),
+        "Column 'b' should not be projected in nested subquery: " + physicalPlan);
+    assertFalse(
+        physicalPlan.contains("c#"),
+        "Column 'c' should not be projected in nested subquery: " + physicalPlan);
+  }
+
+  /**
+   * Regression test for <a href="https://github.com/lance-format/lance-spark/issues/334">#334</a>:
+   * DataFrame drop() followed by a non-pushdown filter should prune the dropped column.
+   *
+   * <p>This is the original pattern reported in the issue: {@code
+   * spark.table("my_table").drop("col").filter("rand(42) < 0.01")}
+   */
+  @Test
+  public void dropColumnWithFilterShouldPruneDroppedColumn() {
+    // Drop 'x' and apply a non-pushdown filter (rand is evaluated by Spark, not Lance)
+    Dataset<Row> result = data.drop("x").filter("rand(42) < 1.0");
+
+    // Schema should NOT contain 'x'
+    assertEquals(3, result.schema().fields().length);
+    assertTrue(result.schema().getFieldIndex("x").isEmpty());
+
+    // All 4 rows pass the filter (rand < 1.0 is always true)
+    List<Row> rows = result.collectAsList();
+    assertEquals(4, rows.size());
+    // Each row should have only 3 columns (y, b, c)
+    assertEquals(3, rows.get(0).size());
+
+    // Physical plan should NOT contain the dropped column 'x'
+    String physicalPlan = result.queryExecution().executedPlan().toString();
+    assertFalse(
+        physicalPlan.contains("x#"),
+        "Dropped column 'x' should not appear in the physical plan scan: " + physicalPlan);
+  }
+
+  /**
+   * Regression test for <a href="https://github.com/lance-format/lance-spark/issues/334">#334</a>:
+   * nested COUNT(agg_col) subquery should only scan the aggregated column.
+   *
+   * <p>Unlike COUNT(*)/COUNT(1), COUNT(col) actually needs the column to check for nulls. The scan
+   * should project only that column, not the full table.
+   */
+  @Test
+  public void nestedCountColumnSubqueryShouldOnlyScanAggColumn() {
+    Dataset<Row> result =
+        spark.sql(
+            "SELECT COUNT(x) FROM ("
+                + "  SELECT x FROM test_dataset1 WHERE rand(42) < 1.0"
+                + ") as subquery");
+
+    assertEquals(4L, result.collectAsList().get(0).getLong(0));
+
+    // The BatchScan should only contain 'x' — not y, b, or c
+    String physicalPlan = result.queryExecution().executedPlan().toString();
+    assertFalse(
+        physicalPlan.contains("y#"),
+        "Column 'y' should not be projected for COUNT(x): " + physicalPlan);
+    assertFalse(
+        physicalPlan.contains("b#"),
+        "Column 'b' should not be projected for COUNT(x): " + physicalPlan);
+    assertFalse(
+        physicalPlan.contains("c#"),
+        "Column 'c' should not be projected for COUNT(x): " + physicalPlan);
+  }
+
+  /**
+   * Regression test: filtering on string values containing single quotes (e.g., O'Brien) produced
+   * malformed pushed-down SQL: {@code name == 'O'Brien'} — the unescaped quote broke the string
+   * literal. Without the fix, lance-core's DataFusion tokenizer throws {@code
+   * IllegalArgumentException: Unterminated string literal}, crashing the query. The fix escapes
+   * single quotes as {@code ''} per SQL standard.
+   */
+  @Test
+  public void testFilterWithSingleQuoteInStringValue() {
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("name", DataTypes.StringType, true);
+    List<Row> testData =
+        Arrays.asList(
+            RowFactory.create(1, "O'Brien"),
+            RowFactory.create(2, "Smith"),
+            RowFactory.create(3, "D'Angelo"));
+    Dataset<Row> df = spark.createDataFrame(testData, schema);
+
+    String datasetPath = tempDir.toString() + "/quote_filter_test";
+    df.write().format(LanceDataSource.name).save(datasetPath);
+
+    Dataset<Row> lanceData = spark.read().format(LanceDataSource.name).load(datasetPath);
+
+    Dataset<Row> result = lanceData.filter("name = \"O'Brien\"");
+
+    // Without the fix, this crashes with:
+    //   IllegalArgumentException: Unterminated string literal
+    // because the pushed SQL contains unescaped quotes: name == 'O'Brien'
+    List<Row> rows = result.collectAsList();
+    assertEquals(1, rows.size());
+    assertEquals(1, rows.get(0).getInt(0));
+    assertEquals("O'Brien", rows.get(0).getString(1));
   }
 
   @Test

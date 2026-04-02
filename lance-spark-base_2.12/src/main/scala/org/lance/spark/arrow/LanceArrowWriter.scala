@@ -356,7 +356,9 @@ private[arrow] class MapWriter(
     val structVector: StructVector,
     val keyWriter: LanceArrowFieldWriter,
     val valueWriter: LanceArrowFieldWriter) extends LanceArrowFieldWriter {
-  override def setNull(): Unit = {}
+  override def setNull(): Unit = {
+    valueVector.setNull(count)
+  }
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
     val map = input.getMap(ordinal)
     val keys = map.keyArray()
@@ -364,6 +366,10 @@ private[arrow] class MapWriter(
     var i = 0
     valueVector.startNewValue(count)
     while (i < map.numElements()) {
+      // Mark each entry in the entries struct as non-null.
+      // Arrow Map spec requires entries to be non-nullable; without this,
+      // the validity buffer defaults to unset and Lance rejects the batch.
+      structVector.setIndexDefined(keyWriter.count)
       keyWriter.write(keys, i)
       valueWriter.write(values, i)
       i += 1
@@ -372,11 +378,13 @@ private[arrow] class MapWriter(
   }
   override def finish(): Unit = {
     super.finish()
+    structVector.setValueCount(keyWriter.count)
     keyWriter.finish()
     valueWriter.finish()
   }
   override def reset(): Unit = {
     super.reset()
+    structVector.reset()
     keyWriter.reset()
     valueWriter.reset()
   }

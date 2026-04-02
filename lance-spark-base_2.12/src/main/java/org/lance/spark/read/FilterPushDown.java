@@ -177,12 +177,14 @@ public class FilterPushDown {
   }
 
   private static String compileValue(Object value) {
-    if (value instanceof Date) {
-      return "date '" + value + "'";
+    if (value == null) {
+      return "NULL";
+    } else if (value instanceof Date) {
+      return "date '" + value.toString().replace("'", "''") + "'";
     } else if (value instanceof Timestamp) {
-      return "timestamp '" + value + "'";
+      return "timestamp '" + value.toString().replace("'", "''") + "'";
     } else if (value instanceof String) {
-      return "'" + value + "'";
+      return "'" + ((String) value).replace("'", "''") + "'";
     } else if (value instanceof BigDecimal) {
       BigDecimal bd = (BigDecimal) value;
       int scale = bd.scale();

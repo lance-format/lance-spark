@@ -15,7 +15,7 @@ package org.apache.spark.sql.catalyst.parser.extensions
 
 import org.apache.spark.sql.catalyst.analysis.{UnresolvedIdentifier, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.parser.ParserInterface
-import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, LogicalPlan, NamedArgument, Optimize, ShowIndexes, UpdateColumnsBackfill, Vacuum}
+import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, LanceDropIndex, LogicalPlan, NamedArgument, Optimize, ShowIndexes, UpdateColumnsBackfill, Vacuum}
 import org.lance.spark.utils.ParserUtils
 
 import scala.collection.JavaConverters._
@@ -99,8 +99,15 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
     ShowIndexes(table)
   }
 
+  override def visitDropIndex(ctx: LanceSqlExtensionsParser.DropIndexContext): LanceDropIndex = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val indexName = cleanIdentifier(ctx.indexName.getText)
+    LanceDropIndex(table, indexName)
+  }
+
   override def visitStringLiteral(ctx: LanceSqlExtensionsParser.StringLiteralContext): String = {
-    ctx.getText
+    val text = ctx.getText
+    text.stripPrefix("'").stripSuffix("'").stripPrefix("\"").stripSuffix("\"")
   }
 
   override def visitBooleanValue(ctx: LanceSqlExtensionsParser.BooleanValueContext)

@@ -436,6 +436,90 @@ class TestDDLIndex:
         # Should return with 0 fragments indexed
         assert result[0][0] == 0
 
+    def test_drop_index(self, spark):
+        """Test DROP INDEX removes an existing index."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING,
+                value DOUBLE
+            )
+        """)
+
+        data = [(i, f"Name{i}", float(i * 10)) for i in range(100)]
+        df = spark.createDataFrame(data, ["id", "name", "value"])
+        df.writeTo("default.test_table").append()
+
+        # Create index
+        spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX idx_id USING btree (id)
+        """)
+
+        # Verify index exists via SHOW INDEXES
+        indexes_before = spark.sql("""
+            SHOW INDEXES IN default.test_table
+        """).collect()
+        index_names_before = {row["name"] for row in indexes_before}
+        assert "idx_id" in index_names_before
+
+        # Drop the index
+        result = spark.sql("""
+            ALTER TABLE default.test_table DROP INDEX idx_id
+        """).collect()
+
+        assert len(result) == 1
+        assert result[0]["index_name"] == "idx_id"
+        assert result[0]["status"] == "dropped"
+
+        # Verify index no longer appears in SHOW INDEXES
+        indexes_after = spark.sql("""
+            SHOW INDEXES IN default.test_table
+        """).collect()
+        index_names_after = {row["name"] for row in indexes_after}
+        assert "idx_id" not in index_names_after
+
+    def test_drop_index_then_recreate(self, spark):
+        """Test full lifecycle: create -> drop -> recreate index."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING,
+                value DOUBLE
+            )
+        """)
+
+        data = [(i, f"Name{i}", float(i * 10)) for i in range(100)]
+        df = spark.createDataFrame(data, ["id", "name", "value"])
+        df.writeTo("default.test_table").append()
+
+        # Create -> drop -> recreate
+        spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX idx_id USING btree (id)
+        """)
+        spark.sql("""
+            ALTER TABLE default.test_table DROP INDEX idx_id
+        """)
+        spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX idx_id USING btree (id)
+        """)
+
+        # Verify recreated index exists
+        indexes = spark.sql("""
+            SHOW INDEXES IN default.test_table
+        """).collect()
+        index_names = {row["name"] for row in indexes}
+        assert "idx_id" in index_names
+
+        # Verify queries still work
+        query_result = spark.sql("""
+            SELECT * FROM default.test_table WHERE id = 50
+        """).collect()
+        assert len(query_result) == 1
+        assert query_result[0].id == 50
+
 
 class TestDDLOptimize:
     """Test DDL OPTIMIZE operations for compacting table fragments."""

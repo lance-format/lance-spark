@@ -52,7 +52,7 @@ public class LanceSparkWriteOptions implements Serializable {
   public static final String CONFIG_MAX_ROWS_PER_FILE = "max_row_per_file";
   public static final String CONFIG_MAX_ROWS_PER_GROUP = "max_rows_per_group";
   public static final String CONFIG_MAX_BYTES_PER_FILE = "max_bytes_per_file";
-  public static final String CONFIG_DATA_STORAGE_VERSION = "data_storage_version";
+  public static final String CONFIG_FILE_FORMAT_VERSION = "file_format_version";
   public static final String CONFIG_USE_QUEUED_WRITE_BUFFER = "use_queued_write_buffer";
   public static final String CONFIG_QUEUE_DEPTH = "queue_depth";
   public static final String CONFIG_BATCH_SIZE = "batch_size";
@@ -68,7 +68,7 @@ public class LanceSparkWriteOptions implements Serializable {
   private final Integer maxRowsPerFile;
   private final Integer maxRowsPerGroup;
   private final Long maxBytesPerFile;
-  private final String dataStorageVersion;
+  private final String fileFormatVersion;
   private final boolean useQueuedWriteBuffer;
   private final int queueDepth;
   private final int batchSize;
@@ -86,7 +86,7 @@ public class LanceSparkWriteOptions implements Serializable {
     this.maxRowsPerFile = builder.maxRowsPerFile;
     this.maxRowsPerGroup = builder.maxRowsPerGroup;
     this.maxBytesPerFile = builder.maxBytesPerFile;
-    this.dataStorageVersion = builder.dataStorageVersion;
+    this.fileFormatVersion = builder.fileFormatVersion;
     this.useQueuedWriteBuffer = builder.useQueuedWriteBuffer;
     this.queueDepth = builder.queueDepth;
     this.batchSize = builder.batchSize;
@@ -143,8 +143,8 @@ public class LanceSparkWriteOptions implements Serializable {
     return maxBytesPerFile;
   }
 
-  public String getDataStorageVersion() {
-    return dataStorageVersion;
+  public String getFileFormatVersion() {
+    return fileFormatVersion;
   }
 
   public boolean isUseQueuedWriteBuffer() {
@@ -258,8 +258,8 @@ public class LanceSparkWriteOptions implements Serializable {
     if (maxBytesPerFile != null) {
       builder.withMaxBytesPerFile(maxBytesPerFile);
     }
-    if (dataStorageVersion != null) {
-      builder.withDataStorageVersion(dataStorageVersion);
+    if (fileFormatVersion != null) {
+      builder.withDataStorageVersion(fileFormatVersion);
     }
     if (!storageOptions.isEmpty()) {
       builder.withStorageOptions(storageOptions);
@@ -279,7 +279,7 @@ public class LanceSparkWriteOptions implements Serializable {
         && Objects.equals(maxRowsPerFile, that.maxRowsPerFile)
         && Objects.equals(maxRowsPerGroup, that.maxRowsPerGroup)
         && Objects.equals(maxBytesPerFile, that.maxBytesPerFile)
-        && dataStorageVersion == that.dataStorageVersion
+        && Objects.equals(fileFormatVersion, that.fileFormatVersion)
         && Objects.equals(storageOptions, that.storageOptions)
         && Objects.equals(tableId, that.tableId);
   }
@@ -292,7 +292,7 @@ public class LanceSparkWriteOptions implements Serializable {
         maxRowsPerFile,
         maxRowsPerGroup,
         maxBytesPerFile,
-        dataStorageVersion,
+        fileFormatVersion,
         useQueuedWriteBuffer,
         queueDepth,
         batchSize,
@@ -307,7 +307,7 @@ public class LanceSparkWriteOptions implements Serializable {
     private Integer maxRowsPerFile;
     private Integer maxRowsPerGroup;
     private Long maxBytesPerFile;
-    private String dataStorageVersion;
+    private String fileFormatVersion;
     private boolean useQueuedWriteBuffer = DEFAULT_USE_QUEUED_WRITE_BUFFER;
     private int queueDepth = DEFAULT_QUEUE_DEPTH;
     private int batchSize = DEFAULT_BATCH_SIZE;
@@ -342,8 +342,8 @@ public class LanceSparkWriteOptions implements Serializable {
       return this;
     }
 
-    public Builder dataStorageVersion(String dataStorageVersion) {
-      this.dataStorageVersion = dataStorageVersion;
+    public Builder fileFormatVersion(String fileFormatVersion) {
+      this.fileFormatVersion = fileFormatVersion;
       return this;
     }
 
@@ -397,8 +397,8 @@ public class LanceSparkWriteOptions implements Serializable {
       if (options.containsKey(CONFIG_MAX_BYTES_PER_FILE)) {
         this.maxBytesPerFile = Long.parseLong(options.get(CONFIG_MAX_BYTES_PER_FILE));
       }
-      if (options.containsKey(CONFIG_DATA_STORAGE_VERSION)) {
-        this.dataStorageVersion = options.get(CONFIG_DATA_STORAGE_VERSION);
+      if (options.containsKey(CONFIG_FILE_FORMAT_VERSION)) {
+        this.fileFormatVersion = options.get(CONFIG_FILE_FORMAT_VERSION);
       }
       if (options.containsKey(CONFIG_USE_QUEUED_WRITE_BUFFER)) {
         this.useQueuedWriteBuffer =

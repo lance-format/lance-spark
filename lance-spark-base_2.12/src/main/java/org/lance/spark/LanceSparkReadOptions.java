@@ -22,6 +22,9 @@ import org.lance.spark.utils.QueryUtils;
 
 import com.google.common.base.Preconditions;
 
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.io.Serializable;
 import java.util.HashMap;
 import java.util.List;
@@ -74,7 +77,7 @@ public class LanceSparkReadOptions implements Serializable {
   private final Integer indexCacheSize;
   private final Integer metadataCacheSize;
   private final int batchSize;
-  private final Query nearest;
+  private transient Query nearest;
   private final boolean topNPushDown;
   private final Map<String, String> storageOptions;
 
@@ -319,6 +322,17 @@ public class LanceSparkReadOptions implements Serializable {
     return builder.build();
   }
 
+  private void writeObject(ObjectOutputStream out) throws IOException {
+    out.defaultWriteObject();
+    out.writeObject(QueryUtils.queryToString(nearest));
+  }
+
+  private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
+    in.defaultReadObject();
+    String json = (String) in.readObject();
+    this.nearest = QueryUtils.stringToQuery(json);
+  }
+
   @Override
   public boolean equals(Object o) {
     if (o == null || getClass() != o.getClass()) {
@@ -328,6 +342,7 @@ public class LanceSparkReadOptions implements Serializable {
     return pushDownFilters == that.pushDownFilters
         && batchSize == that.batchSize
         && topNPushDown == that.topNPushDown
+        && Objects.equals(nearest, that.nearest)
         && Objects.equals(datasetUri, that.datasetUri)
         && Objects.equals(blockSize, that.blockSize)
         && Objects.equals(version, that.version)
@@ -347,6 +362,7 @@ public class LanceSparkReadOptions implements Serializable {
         indexCacheSize,
         metadataCacheSize,
         batchSize,
+        nearest,
         topNPushDown,
         storageOptions,
         tableId);
