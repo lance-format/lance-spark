@@ -13,15 +13,20 @@
  */
 package org.lance.spark;
 
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.File;
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Test for BaseLanceNamespaceSparkCatalog using DirectoryNamespace implementation. */
@@ -91,5 +96,96 @@ public abstract class BaseTestSparkDirectoryNamespace extends SparkLanceNamespac
     assertTrue(
         foundHashPrefixedDir,
         "Should find a hash-prefixed directory ending with " + expectedSuffix);
+  }
+
+  @Test
+  public void testCreateExternalTableWithLocation() throws Exception {
+    // existing data
+    String tableName = generateTableName("external_table");
+    String fullTableName = catalogName + ".default." + tableName;
+    String externalDatasetPath =
+        TestUtils.getDatasetUri(
+            TestUtils.TestTable1Config.dbPath, TestUtils.TestTable1Config.datasetName);
+    spark.sql(
+        "CREATE TABLE " + fullTableName + " USING lance LOCATION '" + externalDatasetPath + "'");
+    // schema are provided by the lance table in location, other than definition statement
+    assertTrue(
+        catalog.tableExists(
+            org.apache.spark.sql.connector.catalog.Identifier.of(
+                new String[] {"default"}, tableName)));
+
+    Dataset<Row> result = spark.sql("SELECT * FROM " + fullTableName);
+    assertEquals(4, result.count());
+    // Verify the data is correct (from the original dataset)
+    List<Row> rows = result.collectAsList();
+    List<List<Long>> expected = TestUtils.TestTable1Config.expectedValues;
+    assertEquals(expected.get(0).get(0), rows.get(0).getLong(0));
+    assertEquals(expected.get(1).get(0), rows.get(1).getLong(0));
+    assertEquals(expected.get(1).get(1), rows.get(1).getLong(1));
+
+    // none existing
+    String tableNameWithoutExisting = generateTableName("external_table");
+    String fullTableNameWithoutExisting = catalogName + ".default." + tableNameWithoutExisting;
+    assertThrows(
+        Exception.class,
+        () ->
+            spark.sql(
+                "CREATE TABLE "
+                    + fullTableNameWithoutExisting
+                    + " USING lance  LOCATION '"
+                    + TestUtils.TestTable1Config.dbPath
+                    + "/"
+                    + generateTableName("never_exist")
+                    + "'"));
+  }
+
+  @Test
+  public void testDuplicateRegistrationAtSameLocation() throws Exception {
+    String externalDatasetPath =
+        TestUtils.getDatasetUri(
+            TestUtils.TestTable1Config.dbPath, TestUtils.TestTable1Config.datasetName);
+
+    // Register first table at the location
+    String tableName1 = generateTableName("dup_reg1");
+    String fullTableName1 = catalogName + ".default." + tableName1;
+    spark.sql(
+        "CREATE TABLE " + fullTableName1 + " USING lance LOCATION '" + externalDatasetPath + "'");
+    assertEquals(4, spark.sql("SELECT * FROM " + fullTableName1).count());
+
+    // Register a second table pointing at the exact same location
+    String tableName2 = generateTableName("dup_reg2");
+    String fullTableName2 = catalogName + ".default." + tableName2;
+    spark.sql(
+        "CREATE TABLE " + fullTableName2 + " USING lance LOCATION '" + externalDatasetPath + "'");
+    assertEquals(4, spark.sql("SELECT * FROM " + fullTableName2).count());
+
+    // Both tables should be visible
+    assertTrue(
+        catalog.tableExists(
+            org.apache.spark.sql.connector.catalog.Identifier.of(
+                new String[] {"default"}, tableName1)));
+    assertTrue(
+        catalog.tableExists(
+            org.apache.spark.sql.connector.catalog.Identifier.of(
+                new String[] {"default"}, tableName2)));
+
+    // Dropping one should not affect the other
+    spark.sql("DROP TABLE " + fullTableName1);
+    assertFalse(
+        catalog.tableExists(
+            org.apache.spark.sql.connector.catalog.Identifier.of(
+                new String[] {"default"}, tableName1)));
+    assertEquals(4, spark.sql("SELECT * FROM " + fullTableName2).count());
+
+    // duplicate name should fail
+    assertThrows(
+        Exception.class,
+        () ->
+            spark.sql(
+                "CREATE TABLE "
+                    + fullTableName2
+                    + " USING lance LOCATION '"
+                    + externalDatasetPath
+                    + "'"));
   }
 }

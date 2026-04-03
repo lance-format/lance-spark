@@ -29,6 +29,7 @@ import org.lance.namespace.model.DropNamespaceRequest;
 import org.lance.namespace.model.DropTableRequest;
 import org.lance.namespace.model.ListTablesRequest;
 import org.lance.namespace.model.ListTablesResponse;
+import org.lance.namespace.model.RegisterTableRequest;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.SchemaConverter;
@@ -568,10 +569,45 @@ public abstract class BaseLanceNamespaceSparkCatalog
     // Build the table ID for credential vending
     List<String> tableIdList = buildTableId(actualIdent);
 
-    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+    String location = properties.get(CREATE_TABLE_PROPERTY_LOCATION);
+    boolean isExternalTable = location != null && !location.isEmpty();
 
-    // Create dataset using namespace - WriteDatasetBuilder handles declareTable internally
-    // and properly leverages namespace client for credential vending
+    if (isExternalTable) {
+      // verify external lance table exists
+      Map<String, String> merged = new HashMap<>(catalogConfig.getStorageOptions());
+      merged.putAll(properties);
+      try (Dataset dataset = openDataset(LanceSparkReadOptions.from(merged, location))) {
+        registerExternalTable(location, merged, tableIdList);
+      } catch (Exception e) {
+        throw new RuntimeException("Fail to create table on location: " + location, e);
+      }
+      try {
+        return loadTableInternal(ident, Optional.empty(), Optional.empty());
+      } catch (NoSuchTableException e) {
+        // ideally this should not happen
+        dropTable(ident);
+        throw new RuntimeException("Fail to load table on location: " + location, e);
+      }
+    } else {
+      // Managed table: create new dataset using namespace
+      StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+      return createManagedTable(processedSchema, properties, tableIdList);
+    }
+  }
+
+  /** Registers an external table in the namespace pointing to an existing dataset location. */
+  private void registerExternalTable(
+      String location, Map<String, String> properties, List<String> tableIdList) {
+    RegisterTableRequest request = new RegisterTableRequest();
+    tableIdList.forEach(request::addIdItem);
+    request.properties(properties);
+    request.location(location);
+    namespace.registerTable(request);
+  }
+
+  /** Creates a managed table by creating a new dataset in the namespace. */
+  private Table createManagedTable(
+      StructType processedSchema, Map<String, String> properties, List<String> tableIdList) {
     String location;
     WriteDatasetBuilder writeBuilder =
         Dataset.write()
