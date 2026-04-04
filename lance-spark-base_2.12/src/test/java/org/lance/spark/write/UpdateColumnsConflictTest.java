@@ -49,33 +49,18 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
- * Tests demonstrating the readVersion conflict bug in UpdateColumnsBackfillBatchWrite.
+ * JNI-level demonstrations of optimistic concurrency for column updates when a concurrent DELETE
+ * lands between executor work and driver commit.
  *
- * <p>These tests do not invoke Spark or UpdateColumnsBackfillBatchWrite; they only model the
- * transaction/OCC behavior.
+ * <p>These tests do not invoke Spark or UpdateColumnsBackfillBatchWrite. But is constructs the same
+ * behavior with Transaction.Builder.readVersion and direct update.
  *
- * <p>Root cause: commit() opens the dataset and calls dataset.version() at commit time (the current
- * head) to obtain readVersion for the Transaction. Because readVersion equals the current head,
- * Rust OCC (TransactionRebase via load_new_transactions) finds zero intermediate commits and always
- * succeeds without conflict detection.
- *
- * <p>This is a general inconsistency: any concurrent writer that commits between executor scan time
- * and driver commit time is silently overwritten. The stale FragmentMetadata produced by the
- * executor — column files computed from an old snapshot, deletion file absent or outdated — is
- * committed unconditionally. This affects concurrent DELETEs, concurrent UPDATE COLUMNS from
- * another job, and any other write that modifies the same fragments in that window.
- *
- * <p>The tests below use a concurrent DELETE as an observable instance of this problem. The
- * deletion file written by the concurrent DELETE is absent in the final manifest, proving that OCC
- * never saw the intermediate commit.
- *
- * <p>testConcurrentDeleteLostByWrongReadVersion: preserving the concurrent DELETE currently fails
- * because commit-time Transaction readVersion is the table head, so the committed fragment has no
- * deletion file; the test asserts that outcome.
+ * <p>testConcurrentDeleteLostByWrongReadVersion exercises the intentional incorrect pattern:
+ * readVersion = head after the DELETE, so the concurrent DELETE is not reflected (no deletion
+ * file).
  */
 public class UpdateColumnsConflictTest {
   @TempDir Path tempDir;
@@ -165,8 +150,8 @@ public class UpdateColumnsConflictTest {
   }
 
   /**
-   * Simulates the UpdateColumnsBackfillBatchWrite.commit(): readVersion is obtained from
-   * dataset.version() at commit time (current head), not at executor scan time.
+   * Simulates a driver commit with readVersion taken from a fresh open at commit time (current
+   * head), not the scan-time version, which is incorrect behavior.
    */
   private void simulateDriverCommit(
       String datasetUri, BufferAllocator allocator, List<FragmentMetadata> updatedFragments)
@@ -180,11 +165,11 @@ public class UpdateColumnsConflictTest {
           .forEach(updatedFragments::add);
     }
 
-    // Wrong: readVersion is dataset.version() at commit time (current head), not scan time.
+    // readVersion is dataset.version() at commit time (current head), not scan time.
     // Any concurrent writer that committed between executor scan and now is absorbed into
     // readVersion, so Rust OCC finds no intermediate transactions and always succeeds.
     try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
-      long wrongReadVersion = dataset.version(); // current head — wrong
+      long wrongReadVersion = dataset.version();
       Update update =
           Update.builder()
               .updatedFragments(updatedFragments)
@@ -199,16 +184,12 @@ public class UpdateColumnsConflictTest {
   }
 
   /**
-   * Shows incorrect commit-time readVersion with a concurrent DELETE as an example.
+   * Demonstrates silent data inconsistency when readVersion is the post-DELETE head: OCC does not
+   * reconcile the executor's stale fragment with the intermediate DELETE.
    *
-   * <p>Any concurrent writer (DELETE, UPDATE COLUMNS from another job, etc.) that commits between
-   * executor scan time and driver commit time is silently overwritten. Here the concurrent write is
-   * a DELETE: the executor's stale FragmentMetadata carries no deletion file (none existed at scan
-   * time), and the driver commits it unconditionally, losing the deletion file added by the DELETE.
-   *
-   * <p>Preserving the concurrent DELETE currently fails here because commit-time Transaction
-   * readVersion is dataset.version() (current head). The test asserts no deletion file on the
-   * fragment.
+   * <p>The concurrent writer is a DELETE. Executor metadata has no deletion file (correct for scan
+   * time). Driver update commit still goes through and the committed fragment lacks the deletion
+   * file from the DELETE.
    */
   @Test
   public void testConcurrentDeleteLostByWrongReadVersion() throws IOException {
@@ -233,104 +214,18 @@ public class UpdateColumnsConflictTest {
         dataset.delete("id = 2");
       }
 
-      // Driver commit with wrong readVersion = current head (V2) — Rust OCC sees no intermediate
-      // commits and the commit succeeds without detecting the conflict with the DELETE.
+      // Driver commit with wrong readVersion = current head (V2)
+      // OCC sees no intermediate work to rebase against
+      // that readVersion, so the commit succeeds and the DELETE can be lost.
       List<FragmentMetadata> updatedFragments = new ArrayList<>();
       updatedFragments.add(updatedFrag);
       simulateDriverCommit(datasetUri, allocator, updatedFragments);
 
-      // V3 is committed. Wrong readVersion path: concurrent DELETE is not preserved (no deletion
-      // file).
+      // After wrong readVersion commit: concurrent DELETE is not preserved (no deletion file).
       try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
         FragmentMetadata frag = dataset.getFragments().get(0).metadata();
-        assertNull(
-            frag.getDeletionFile(),
-            "Expected null: with commit-time Transaction readVersion = table head after the "
-                + "concurrent DELETE, the committed fragment has no deletion file (DELETE not "
-                + "preserved in this modeled scenario).");
+        assertNull(frag.getDeletionFile(), "committed fragment should miss the deletion file.");
       }
-    }
-  }
-
-  /**
-   * Shows the correct behavior when readVersion is set to the scan-time version.
-   *
-   * <p>With the correct readVersion, Rust OCC sees all commits that happened between the scan and
-   * the current head — including the intermediate DELETE used as the example here. OCC either
-   * rebases the update (preserving the deletion file) or raises a conflict exception. Both outcomes
-   * prevent the silent overwrite that the bug causes for any concurrent writer.
-   */
-  @Test
-  public void testConcurrentDeletePreservedWithCorrectReadVersion() throws IOException {
-    String datasetUri = tempDir.resolve("correct_commit_test.lance").toString();
-
-    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
-      // V1: dataset with 3 rows
-      FragmentMetadata initialFrag = createInitialDataset(datasetUri, allocator);
-      int fragmentId = initialFrag.getId();
-
-      // Capture scan-time version on the driver (the fix: pin version before executors start).
-      long scanVersion;
-      try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
-        scanVersion = dataset.version();
-      }
-
-      // Executor scans at V1 and computes updated value for row at index 1 (id=2).
-      FragmentMetadata updatedFrag =
-          simulateExecutorUpdateColumns(datasetUri, allocator, fragmentId, 1, 200);
-
-      // Concurrent DELETE creates V2 between executor scan and driver commit.
-      try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
-        dataset.delete("id = 2");
-      }
-
-      // Fixed driver commit: use scanVersion (V1) as readVersion.
-      // Rust OCC now sees the intermediate DELETE commit (V2) and either rebases or fails.
-      List<FragmentMetadata> updatedFragments = new ArrayList<>();
-      updatedFragments.add(updatedFrag);
-
-      Set<Integer> updatedIds = Collections.singleton(fragmentId);
-      try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
-        dataset.getFragments().stream()
-            .filter(f -> !updatedIds.contains(f.getId()))
-            .map(Fragment::metadata)
-            .forEach(updatedFragments::add);
-      }
-
-      boolean conflictDetected = false;
-      try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
-        Update update =
-            Update.builder()
-                .updatedFragments(updatedFragments)
-                .updateMode(Optional.of(Update.UpdateMode.RewriteColumns))
-                .build();
-        try (Transaction txn =
-                new Transaction.Builder()
-                    .readVersion(scanVersion) // correct: scan-time version
-                    .operation(update)
-                    .build();
-            Dataset committed = new CommitBuilder(dataset).execute(txn)) {
-          // OCC rebase succeeded: verify deletion file is present
-        }
-      } catch (Exception e) {
-        // OCC raised a conflict exception: the bug is not present for this mode
-        System.out.println("Conflict detected: " + e.getMessage());
-        conflictDetected = true;
-      }
-
-      if (!conflictDetected) {
-        // If rebase succeeded, the deletion file must be preserved
-        System.out.println("Conflict detected = " + conflictDetected);
-        try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
-          FragmentMetadata frag = dataset.getFragments().get(0).metadata();
-          assertNotNull(
-              frag.getDeletionFile(),
-              "After OCC rebase with correct readVersion, the concurrent DELETE (id=2) must be "
-                  + "preserved in the committed fragment.");
-        }
-      }
-      // Either the conflict was detected (exception raised) or rebase preserved the deletion.
-      // Both outcomes are acceptable; both prevent the silent overwrite.
     }
   }
 }

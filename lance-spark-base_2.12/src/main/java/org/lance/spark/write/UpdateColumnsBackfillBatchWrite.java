@@ -144,6 +144,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
           .map(Fragment::metadata)
           .forEach(updatedFragments::add);
 
+      // Commit update operation using CommitBuilder
       Update update =
           Update.builder()
               .updatedFragments(updatedFragments)

@@ -13,22 +13,47 @@
  */
 package org.lance.spark.update;
 
+import org.lance.WriteParams;
+import org.lance.spark.LanceConstant;
+import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.TestUtils;
+import org.lance.spark.write.AddColumnsBackfillBatchWrite;
+import org.lance.spark.write.LanceBatchWrite;
+
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
+import org.apache.spark.sql.connector.write.DataWriter;
+import org.apache.spark.sql.connector.write.DataWriterFactory;
+import org.apache.spark.sql.connector.write.WriterCommitMessage;
 import org.apache.spark.sql.functions;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Collections;
+import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public abstract class BaseAddColumnsBackfillTest {
   protected String catalogName = "lance_test";
@@ -175,6 +200,73 @@ public abstract class BaseAddColumnsBackfillTest {
       Row structCol = row.getStruct(1);
       Assertions.assertEquals(id, structCol.getInt(0));
       Assertions.assertEquals("name_" + id, structCol.getString(1));
+    }
+  }
+
+  /**
+   * Pins a read version in AddColumnsBackfillBatchWrite's constructor, then advances the table with
+   * an overwrite before the backfill driver commit. The stale commit must fail (OCC).
+   */
+  @Test
+  public void testConcurrentAddColumnsConflict(TestInfo testInfo) throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Field field = new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null);
+      Schema schema = new Schema(Collections.singletonList(field));
+      org.lance.Dataset.create(allocator, datasetUri, schema, new WriteParams.Builder().build())
+          .close();
+
+      LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
+      StructType idSchema = LanceArrowUtils.fromArrowSchema(schema);
+
+      LanceBatchWrite initialWrite =
+          new LanceBatchWrite(idSchema, writeOptions, false, null, null, null, null, false, null);
+      DataWriterFactory initFactory = initialWrite.createBatchWriterFactory(() -> 1);
+      WriterCommitMessage initialMsg;
+      try (DataWriter<InternalRow> writer = initFactory.createWriter(0, 0)) {
+        for (int i = 0; i < 5; i++) {
+          writer.write(new GenericInternalRow(new Object[] {i}));
+        }
+        initialMsg = writer.commit();
+      }
+      initialWrite.commit(new WriterCommitMessage[] {initialMsg});
+
+      List<String> newColumns = Collections.singletonList("new_col");
+      StructType backfillSchema =
+          new StructType()
+              .add(LanceConstant.ROW_ADDRESS, DataTypes.LongType, false)
+              .add(LanceConstant.FRAGMENT_ID, DataTypes.IntegerType, false)
+              .add("new_col", DataTypes.IntegerType, true);
+
+      AddColumnsBackfillBatchWrite backfillWrite =
+          new AddColumnsBackfillBatchWrite(
+              backfillSchema, writeOptions, newColumns, null, null, null, null);
+
+      DataWriterFactory factory = backfillWrite.createBatchWriterFactory(() -> 1);
+      WriterCommitMessage backfillMsg;
+      try (DataWriter<InternalRow> writer = factory.createWriter(0, 0)) {
+        for (int i = 0; i < 5; i++) {
+          long rowAddr = i;
+          writer.write(new GenericInternalRow(new Object[] {rowAddr, 0, i * 100}));
+        }
+        backfillMsg = writer.commit();
+      }
+
+      LanceBatchWrite bumpWrite =
+          new LanceBatchWrite(idSchema, writeOptions, true, null, null, null, null, false, null);
+      DataWriterFactory bumpFactory = bumpWrite.createBatchWriterFactory(() -> 1);
+      WriterCommitMessage bumpMsg;
+      try (DataWriter<InternalRow> writer = bumpFactory.createWriter(0, 0)) {
+        for (int i = 0; i < 5; i++) {
+          writer.write(new GenericInternalRow(new Object[] {i + 100}));
+        }
+        bumpMsg = writer.commit();
+      }
+      bumpWrite.commit(new WriterCommitMessage[] {bumpMsg});
+
+      assertThrows(
+          Exception.class, () -> backfillWrite.commit(new WriterCommitMessage[] {backfillMsg}));
     }
   }
 }

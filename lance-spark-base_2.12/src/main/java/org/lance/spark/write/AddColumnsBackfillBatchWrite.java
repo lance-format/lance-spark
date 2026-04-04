@@ -140,11 +140,13 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
             "version must be set (resolved in AddColumnsBackfillBatchWrite constructor)");
 
     try (Dataset dataset = Utils.openDataset(writeOptions)) {
+      // Get existing fragments
       dataset.getFragments().stream()
           .filter(f -> !mergedFragmentIds.contains(f.getId()))
           .map(Fragment::metadata)
           .forEach(fragments::add);
 
+      // Commit merge operation using CommitBuilder
       Merge merge = Merge.builder().fragments(fragments).schema(arrowSchema).build();
       try (Transaction txn =
               new Transaction.Builder().readVersion(version).operation(merge).build();
