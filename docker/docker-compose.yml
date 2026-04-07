@@ -4,8 +4,8 @@ services:
     image: spark-lance:latest
     container_name: spark-lance
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: docker/Dockerfile
     networks:
       lance_net:
     depends_on:

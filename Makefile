@@ -119,9 +119,7 @@ clean:
 docker-build:
 	@ls $(BUNDLE_MODULE)/target/$(BUNDLE_MODULE)-*.jar >/dev/null 2>&1 || \
 		(echo "Error: Bundle jar not found. Run 'make bundle' first." && exit 1)
-	rm -f docker/lance-spark-bundle-*.jar
-	cp $(BUNDLE_MODULE)/target/$(BUNDLE_MODULE)-*.jar docker/
-	cd docker && $(DOCKER_COMPOSE) build --no-cache \
+	$(DOCKER_COMPOSE) -f docker/docker-compose.yml build --no-cache \
 		--build-arg SPARK_DOWNLOAD_VERSION=$(SPARK_DOWNLOAD_VERSION) \
 		--build-arg SPARK_MAJOR_VERSION=$(SPARK_VERSION) \
 		--build-arg SCALA_VERSION=$(SCALA_VERSION) \
@@ -130,7 +128,7 @@ docker-build:
 
 .PHONY: docker-up
 docker-up: check-docker-compose
-	cd docker && ${DOCKER_COMPOSE} up -d
+	${DOCKER_COMPOSE} -f docker/docker-compose.yml up -d
 
 .PHONY: docker-shell
 docker-shell:
@@ -138,7 +136,7 @@ docker-shell:
 
 .PHONY: docker-down
 docker-down: check-docker-compose
-	cd docker && ${DOCKER_COMPOSE} down
+	${DOCKER_COMPOSE} -f docker/docker-compose.yml down
 
 # Print resolved Docker build args for use in CI (e.g. GitHub Actions step outputs).
 # This keeps versions.mk as the single source of truth for version mappings.
@@ -167,30 +165,13 @@ docker-build-test-base:
 docker-build-test:
 	@ls $(BUNDLE_MODULE)/target/$(BUNDLE_MODULE)-*.jar >/dev/null 2>&1 || \
 		(echo "Error: Bundle jar not found. Run 'make bundle' first." && exit 1)
-	rm -f docker/lance-spark-bundle-*.jar
-	cp $(BUNDLE_MODULE)/target/$(BUNDLE_MODULE)-*.jar docker/
-	cd docker && docker build --no-cache \
+	docker build --no-cache \
 		--build-arg SPARK_MAJOR_VERSION=$(SPARK_VERSION) \
 		--build-arg SCALA_VERSION=$(SCALA_VERSION) \
-		-f Dockerfile.test \
+		-f docker/Dockerfile.test \
 		-t lance-spark-test:$(SPARK_VERSION)_$(SCALA_VERSION) \
 		.
 
-.PHONY: docker-build-test-full
-docker-build-test-full:
-	@ls $(BUNDLE_MODULE)/target/$(BUNDLE_MODULE)-*.jar >/dev/null 2>&1 || \
-		(echo "Error: Bundle jar not found. Run 'make bundle' first." && exit 1)
-	rm -f docker/lance-spark-bundle-*.jar
-	cp $(BUNDLE_MODULE)/target/$(BUNDLE_MODULE)-*.jar docker/
-	cd docker && docker build \
-		--build-arg SPARK_DOWNLOAD_VERSION=$(SPARK_DOWNLOAD_VERSION) \
-		--build-arg SPARK_MAJOR_VERSION=$(SPARK_VERSION) \
-		--build-arg SCALA_VERSION=$(SCALA_VERSION) \
-		--build-arg PY4J_VERSION=$(PY4J_VERSION) \
-		--build-arg SPARK_SCALA_SUFFIX=$(SPARK_SCALA_SUFFIX) \
-		-f Dockerfile.test-full \
-		-t lance-spark-test:$(SPARK_VERSION)_$(SCALA_VERSION) \
-		.
 
 .PHONY: docker-test
 docker-test:
@@ -278,7 +259,6 @@ help:
 	@echo "  docker-down            - Stop docker containers"
 	@echo "  docker-build-test-base - Build test base image (system deps + Spark)"
 	@echo "  docker-build-test      - Build test image (base + bundle JAR)"
-	@echo "  docker-build-test-full - Build test image (single-stage, with Spark and bundle)"
 	@echo "  docker-test            - Run integration tests in lance-spark-test container"
 	@echo ""
 	@echo "Benchmark:"
