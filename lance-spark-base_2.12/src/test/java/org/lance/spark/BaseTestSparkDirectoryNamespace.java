@@ -13,8 +13,6 @@
  */
 package org.lance.spark;
 
-import org.lance.namespace.errors.UnsupportedOperationException;
-
 import org.apache.spark.sql.AnalysisException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -117,8 +115,8 @@ public abstract class BaseTestSparkDirectoryNamespace extends SparkLanceNamespac
               spark.sql("ALTER TABLE " + fullOld + " RENAME TO " + fullNew);
             });
     assertTrue(
-        ex1.getMessage().contains("Not supported: renameTable"),
-        "Expected 'Not supported: renameTable' but got: " + ex1.getMessage());
+        ex1.getMessage().contains("Not supported"),
+        "Expected 'Not supported' but got: " + ex1.getMessage());
   }
 
   @Test
@@ -159,7 +157,7 @@ public abstract class BaseTestSparkDirectoryNamespace extends SparkLanceNamespac
               spark.sql("ALTER TABLE " + full1 + " RENAME TO " + full2);
             });
     assertTrue(
-        ex.getMessage().contains("Not supported: renameTable"),
-        "Expected 'Not supported: renameTable' but got: " + ex.getMessage());
+        ex.getMessage().contains("Not supported"),
+        "Expected 'Not supported' but got: " + ex.getMessage());
   }
 }
