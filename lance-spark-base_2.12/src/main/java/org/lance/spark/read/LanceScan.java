@@ -13,12 +13,16 @@
  */
 package org.lance.spark.read;
 
+import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
+import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Optional;
 
 import org.apache.arrow.util.Preconditions;
 import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.connector.expressions.Expression;
+import org.apache.spark.sql.connector.expressions.FieldReference;
 import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
 import org.apache.spark.sql.connector.expressions.aggregate.CountStar;
@@ -28,7 +32,11 @@ import org.apache.spark.sql.connector.read.PartitionReader;
 import org.apache.spark.sql.connector.read.PartitionReaderFactory;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.read.Statistics;
+import org.apache.spark.sql.connector.read.SupportsReportPartitioning;
 import org.apache.spark.sql.connector.read.SupportsReportStatistics;
+import org.apache.spark.sql.connector.read.partitioning.KeyGroupedPartitioning;
+import org.apache.spark.sql.connector.read.partitioning.Partitioning;
+import org.apache.spark.sql.connector.read.partitioning.UnknownPartitioning;
 import org.apache.spark.sql.internal.connector.SupportsMetadata;
 import org.apache.spark.sql.sources.Filter;
 import org.apache.spark.sql.types.StructType;
@@ -39,6 +47,7 @@ import scala.collection.immutable.Map;
 
 import java.io.Serializable;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -46,7 +55,12 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 public class LanceScan
-    implements Batch, Scan, SupportsMetadata, SupportsReportStatistics, Serializable {
+    implements Batch,
+        Scan,
+        SupportsMetadata,
+        SupportsReportStatistics,
+        SupportsReportPartitioning,
+        Serializable {
   private static final long serialVersionUID = 947284762748623947L;
   private static final Logger LOG = LoggerFactory.getLogger(LanceScan.class);
 
@@ -60,6 +74,18 @@ public class LanceScan
   private final Filter[] pushedFilters;
   private final LanceStatistics statistics;
   private final String scanId = UUID.randomUUID().toString();
+
+  /**
+   * Per-column zonemap statistics loaded on the driver during scan building. Used for
+   * fragment-level pruning in {@link #planInputPartitions()}.
+   *
+   * <p>Map key is the column name, value is the list of zone statistics for that column across all
+   * fragments. Empty map if no zonemap indexes are available or no filtered columns are indexed.
+   */
+  private final java.util.Map<String, List<ZoneStats>> zonemapStats;
+
+  /** Number of partitions after pruning, set during {@link #planInputPartitions()}. */
+  private transient int numPartitions = -1;
 
   /**
    * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
@@ -82,6 +108,7 @@ public class LanceScan
       Optional<Aggregation> pushedAggregation,
       Filter[] pushedFilters,
       LanceStatistics statistics,
+      java.util.Map<String, List<ZoneStats>> zonemapStats,
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
       java.util.Map<String, String> namespaceProperties) {
@@ -95,6 +122,7 @@ public class LanceScan
     this.pushedFilters =
         pushedFilters != null ? Arrays.copyOf(pushedFilters, pushedFilters.length) : new Filter[0];
     this.statistics = statistics;
+    this.zonemapStats = zonemapStats != null ? zonemapStats : Collections.emptyMap();
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
@@ -108,30 +136,47 @@ public class LanceScan
   @Override
   public InputPartition[] planInputPartitions() {
     LanceSplit.ScanPlanResult planResult = LanceSplit.planScan(readOptions);
-    List<LanceSplit> splits = pruneByRowAddrFilters(planResult.getSplits());
+    List<LanceSplit> prunedSplits = pruneByRowAddrFilters(planResult.getSplits());
+
+    // Zonemap-based fragment pruning: uses per-column min/max/null_count
+    // statistics to eliminate fragments that provably cannot match pushed filters.
+    prunedSplits = pruneByZonemapStats(prunedSplits);
+
+    // Limit-based split pruning: when a LIMIT is pushed down without filters or TopN sort,
+    // use per-fragment row counts to plan only enough splits to satisfy the limit.
+    // This avoids scheduling hundreds of unnecessary tasks. Correctness is guaranteed
+    // because Spark still keeps a global CollectLimit on top (isPartiallyPushed = true).
+    prunedSplits = pruneByLimit(prunedSplits, planResult.getFragmentRowCounts());
+
+    // Capture as effectively final for use in lambda
+    final List<LanceSplit> finalSplits = prunedSplits;
 
     // Use resolved version for snapshot isolation - ensures all workers read the same version
     LanceSparkReadOptions resolvedReadOptions =
         readOptions.withVersion((int) planResult.getResolvedVersion());
 
-    return IntStream.range(0, splits.size())
-        .mapToObj(
-            i ->
-                new LanceInputPartition(
-                    schema,
-                    i,
-                    splits.get(i),
-                    resolvedReadOptions,
-                    whereConditions,
-                    limit,
-                    offset,
-                    topNSortOrders,
-                    pushedAggregation,
-                    scanId,
-                    initialStorageOptions,
-                    namespaceImpl,
-                    namespaceProperties))
-        .toArray(InputPartition[]::new);
+    InputPartition[] result =
+        IntStream.range(0, finalSplits.size())
+            .mapToObj(
+                i ->
+                    new LanceInputPartition(
+                        schema,
+                        i,
+                        finalSplits.get(i),
+                        resolvedReadOptions,
+                        whereConditions,
+                        limit,
+                        offset,
+                        topNSortOrders,
+                        pushedAggregation,
+                        scanId,
+                        initialStorageOptions,
+                        namespaceImpl,
+                        namespaceProperties))
+            .toArray(InputPartition[]::new);
+
+    this.numPartitions = result.length;
+    return result;
   }
 
   /**
@@ -183,6 +228,142 @@ public class LanceScan
           allowedIds);
     }
     return pruned;
+  }
+
+  /**
+   * Prunes splits based on zonemap index statistics — using per-column min/max/null_count to
+   * eliminate fragments that provably cannot match the pushed filters.
+   *
+   * <p>This is analogous to partition pruning in Hive/Iceberg: fragments whose zones all fail the
+   * predicate are skipped entirely, avoiding fragment opens, scan setup, and task scheduling.
+   *
+   * <p>Zonemap pruning composes with {@link #pruneByRowAddrFilters}: both are applied in sequence,
+   * and their results are intersected implicitly (the zonemap pruner only sees the already-pruned
+   * split list).
+   */
+  private List<LanceSplit> pruneByZonemapStats(List<LanceSplit> allSplits) {
+    if (zonemapStats.isEmpty()) {
+      return allSplits;
+    }
+
+    java.util.Optional<Set<Integer>> targetFragmentIds =
+        ZonemapFragmentPruner.pruneFragments(pushedFilters, zonemapStats);
+    if (!targetFragmentIds.isPresent()) {
+      return allSplits;
+    }
+
+    Set<Integer> allowedIds = targetFragmentIds.get();
+    List<LanceSplit> pruned =
+        allSplits.stream()
+            .filter(split -> split.getFragments().stream().anyMatch(allowedIds::contains))
+            .collect(Collectors.toList());
+
+    if (pruned.size() < allSplits.size()) {
+      LOG.info(
+          "Zonemap pruning: {} of {} splits retained, allowed fragment IDs: {}",
+          pruned.size(),
+          allSplits.size(),
+          allowedIds);
+    } else {
+      LOG.debug("No fragments pruned by zonemap stats: all {} splits retained", allSplits.size());
+    }
+
+    return pruned;
+  }
+
+  /**
+   * Prunes splits based on pushed LIMIT using per-fragment row counts from the manifest.
+   *
+   * <p>When a LIMIT is pushed down without filters or TopN sort orders, we can use the per-fragment
+   * logical row counts (which account for deletions) to determine how many fragments are needed to
+   * satisfy the limit. This avoids scheduling hundreds of unnecessary tasks for large tables.
+   *
+   * <p>This optimization is skipped when:
+   *
+   * <ul>
+   *   <li>No limit is pushed
+   *   <li>Filters are present (unknown selectivity makes row count estimation unreliable)
+   *   <li>TopN sort orders are present (all fragments needed for global sort)
+   *   <li>Fragment row counts are unavailable
+   * </ul>
+   *
+   * <p>Correctness is guaranteed because Spark keeps a global {@code CollectLimit} on top (since
+   * {@code isPartiallyPushed()} returns {@code true}). If we under-estimate due to concurrent
+   * deletions, the query simply returns fewer rows than the limit — which is valid LIMIT semantics.
+   *
+   * <p>This is analogous to Iceberg's {@code minRowsRequested} optimization in Trino, adapted for
+   * Spark's eager partition planning model.
+   */
+  private List<LanceSplit> pruneByLimit(
+      List<LanceSplit> allSplits, java.util.Map<Integer, Long> fragmentRowCounts) {
+    if (!limit.isPresent()
+        || whereConditions.isPresent()
+        || topNSortOrders.isPresent()
+        || fragmentRowCounts.isEmpty()) {
+      return allSplits;
+    }
+
+    int requestedLimit = limit.get();
+    long rowsAccumulated = 0;
+    List<LanceSplit> pruned = new java.util.ArrayList<>();
+
+    for (LanceSplit split : allSplits) {
+      pruned.add(split);
+      for (int fragmentId : split.getFragments()) {
+        Long rowCount = fragmentRowCounts.get(fragmentId);
+        if (rowCount != null) {
+          rowsAccumulated += rowCount;
+        }
+      }
+      if (rowsAccumulated >= requestedLimit) {
+        break;
+      }
+    }
+
+    if (pruned.size() < allSplits.size()) {
+      LOG.info(
+          "Limit-based pruning: {} of {} splits retained for LIMIT {} "
+              + "(accumulated {} rows from selected fragments)",
+          pruned.size(),
+          allSplits.size(),
+          requestedLimit,
+          rowsAccumulated);
+    }
+
+    return pruned;
+  }
+
+  /**
+   * Reports the output partitioning to Spark's optimizer.
+   *
+   * <p>When no LIMIT is pushed, each {@link LanceSplit} maps to exactly one fragment and data
+   * within a fragment is physically grouped, so we tell Spark that the output is partitioned by the
+   * fragment ID column ({@code _fragid}). This enables Spark to:
+   *
+   * <ul>
+   *   <li>Skip unnecessary shuffles when the downstream operation is partition-aware
+   *   <li>Perform storage-partitioned joins (Spark 3.4+)
+   *   <li>Align partition boundaries with fragment-aware operations
+   * </ul>
+   *
+   * <p>When a LIMIT is pushed, we report {@link UnknownPartitioning} instead. This is consistent
+   * with how Iceberg's Spark connector handles partitioning for non-grouped scans, and avoids Spark
+   * inserting an unnecessary shuffle (exchange) before {@code CollectLimit}. The partitioning hint
+   * is only valuable for joins and aggregations, not for simple LIMIT queries.
+   */
+  @Override
+  public Partitioning outputPartitioning() {
+    if (numPartitions < 0) {
+      // Before planInputPartitions is called, report unknown
+      return new UnknownPartitioning(0);
+    }
+    if (limit.isPresent()) {
+      // With LIMIT, report unknown partitioning to avoid unnecessary shuffle.
+      // Spark's CollectLimit will efficiently short-circuit across partitions.
+      return new UnknownPartitioning(numPartitions);
+    }
+    Expression[] keys = new Expression[] {FieldReference.apply(LanceConstant.FRAGMENT_ID)};
+    return new KeyGroupedPartitioning(keys, numPartitions);
   }
 
   @Override

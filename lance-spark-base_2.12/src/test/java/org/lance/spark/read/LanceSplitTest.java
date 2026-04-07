@@ -38,6 +38,23 @@ public class LanceSplitTest {
     }
   }
 
+  @Test
+  public void testPlanScanReturnsFragmentRowCounts() {
+    LanceSplit.ScanPlanResult result = LanceSplit.planScan(TestUtils.TestTable1Config.readOptions);
+    assertFalse(result.getFragmentRowCounts().isEmpty());
+    // Every fragment in splits should have a row count entry
+    for (LanceSplit split : result.getSplits()) {
+      for (int fragmentId : split.getFragments()) {
+        assertTrue(
+            result.getFragmentRowCounts().containsKey(fragmentId),
+            "Missing row count for fragment " + fragmentId);
+        assertTrue(
+            result.getFragmentRowCounts().get(fragmentId) >= 0,
+            "Row count should be non-negative for fragment " + fragmentId);
+      }
+    }
+  }
+
   @SuppressWarnings("deprecation")
   @Test
   public void testGenerateLanceSplitsDeprecated() {
