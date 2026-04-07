@@ -121,6 +121,86 @@ class TestDDLTable:
         assert "test_table" not in table_names
 
 
+@pytest.mark.requires_rest
+class TestDDLRenameTable:
+    """Test ALTER TABLE ... RENAME TO operations.
+
+    Rename is only supported on REST-based backends (e.g. LanceDB Cloud).
+    Tests are auto-skipped on directory-based backends via the ``requires_rest`` marker.
+    """
+
+    def test_rename_table(self, spark):
+        """Rename succeeds and data is preserved under the new name."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING
+            )
+        """)
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'Alice'), (2, 'Bob')")
+
+        spark.sql(
+            "ALTER TABLE default.test_table RENAME TO default.test_table_renamed"
+        )
+        result = spark.table("default.test_table_renamed").orderBy("id").collect()
+        assert len(result) == 2
+        assert result[0].id == 1
+        assert result[0].name == "Alice"
+        assert result[1].id == 2
+        assert result[1].name == "Bob"
+        # Old name no longer accessible
+        with pytest.raises(Exception, match="TABLE_OR_VIEW_NOT_FOUND"):
+            spark.sql("SELECT * FROM default.test_table")
+
+    def test_rename_nonexistent_table_fails(self, spark):
+        """Renaming a non-existent table should fail with AnalysisException."""
+        with pytest.raises(Exception, match="TABLE_OR_VIEW_NOT_FOUND"):
+            spark.sql(
+                "ALTER TABLE default.nonexistent_table RENAME TO default.new_table"
+            )
+
+    def test_rename_to_existing_name_fails(self, spark):
+        """Renaming to an already-existing table name should fail."""
+        spark.sql("CREATE TABLE default.test_table (id INT)")
+        spark.sql("CREATE TABLE default.test_table_renamed (id INT)")
+
+        with pytest.raises(Exception, match="TABLE_ALREADY_EXISTS"):
+            spark.sql(
+                "ALTER TABLE default.test_table RENAME TO default.test_table_renamed"
+            )
+
+    def test_rename_preserves_schema_and_data(self, spark):
+        """After rename, schema and all data rows are intact."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING,
+                value DOUBLE
+            )
+        """)
+        data = [(1, "Alice", 10.5), (2, "Bob", 20.3), (3, "Charlie", 30.1)]
+        df = spark.createDataFrame(data, ["id", "name", "value"])
+        df.writeTo("default.test_table").append()
+
+        spark.sql("ALTER TABLE default.test_table RENAME TO default.test_table_renamed")
+
+        # Verify schema
+        schema = spark.sql("DESCRIBE TABLE default.test_table_renamed").collect()
+        col_names = [
+            row.col_name for row in schema
+            if row.col_name and not row.col_name.startswith("#")
+        ]
+        assert "id" in col_names
+        assert "name" in col_names
+        assert "value" in col_names
+
+        # Verify data
+        result = spark.table("default.test_table_renamed").orderBy("id").collect()
+        assert len(result) == 3
+        assert result[0].name == "Alice"
+        assert result[2].value == 30.1
+
+
 class TestDDLStagingTable:
     """Test DDL staging table operations: CREATE TABLE AS SELECT, REPLACE TABLE, CREATE OR REPLACE TABLE."""
 

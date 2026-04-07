@@ -29,6 +29,7 @@ import org.lance.namespace.model.DropNamespaceRequest;
 import org.lance.namespace.model.DropTableRequest;
 import org.lance.namespace.model.ListTablesRequest;
 import org.lance.namespace.model.ListTablesResponse;
+import org.lance.namespace.model.RenameTableRequest;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.SchemaConverter;
@@ -764,7 +765,42 @@ public abstract class BaseLanceNamespaceSparkCatalog
   @Override
   public void renameTable(Identifier oldIdent, Identifier newIdent)
       throws NoSuchTableException, TableAlreadyExistsException {
-    throw new UnsupportedOperationException("Table renaming is not supported");
+    // Path-based rename not supported
+    if (isPathBasedIdentifier(oldIdent) || isPathBasedIdentifier(newIdent)) {
+      throw new UnsupportedOperationException(
+          "Table renaming is not supported for path-based tables");
+    }
+
+    // Require namespace to be configured for namespace-based access
+    if (pathBasedOnly || namespace == null) {
+      throw new UnsupportedOperationException(
+          "Namespace not configured. Use 'impl' config for namespace-based access.");
+    }
+
+    Identifier oldTableId = transformIdentifierForApi(oldIdent);
+    Identifier newTableId = transformIdentifierForApi(newIdent);
+
+    RenameTableRequest request = new RenameTableRequest();
+    for (String part : oldTableId.namespace()) {
+      request.addIdItem(part);
+    }
+    request.addIdItem(oldTableId.name());
+    request.setNewTableName(newTableId.name());
+    for (String part : newTableId.namespace()) {
+      request.addNewNamespaceIdItem(part);
+    }
+
+    try {
+      namespace.renameTable(request);
+    } catch (LanceNamespaceException e) {
+      if (e.getErrorCode() == ErrorCode.TABLE_NOT_FOUND) {
+        throw new NoSuchTableException(oldIdent);
+      }
+      if (e.getErrorCode() == ErrorCode.TABLE_ALREADY_EXISTS) {
+        throw new TableAlreadyExistsException(newIdent);
+      }
+      throw e;
+    }
   }
 
   @Override

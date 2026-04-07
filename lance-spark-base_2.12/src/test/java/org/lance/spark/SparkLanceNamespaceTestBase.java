@@ -227,14 +227,19 @@ public abstract class SparkLanceNamespaceTestBase {
     // Drop table using Spark SQL
     spark.sql("DROP TABLE " + catalogName + ".default." + tableName);
 
-    // Verify table no longer exists
-    assertThrows(
-        Exception.class,
-        () -> {
-          spark
-              .sql("SELECT COUNT(*) FROM " + catalogName + ".default." + tableName)
-              .collectAsList();
-        });
+    // Verify table no longer exists.
+    // Spark's analyzer catches the NoSuchTableException from the catalog and creates a new
+    // ExtendedAnalysisException with error code TABLE_OR_VIEW_NOT_FOUND — the original
+    // catalog exception is not preserved as a cause.
+    AnalysisException ex =
+        assertThrows(
+            AnalysisException.class,
+            () -> {
+              spark
+                  .sql("SELECT COUNT(*) FROM " + catalogName + ".default." + tableName)
+                  .collectAsList();
+            });
+    assertEquals("TABLE_OR_VIEW_NOT_FOUND", ex.getErrorClass());
   }
 
   @Test
@@ -262,12 +267,15 @@ public abstract class SparkLanceNamespaceTestBase {
     // Test failure case - try to load non-existent table
     String nonExistentTableName = generateTableName("non_existent");
 
-    // Verify loading non-existent table throws exception
-    assertThrows(
-        Exception.class,
-        () -> {
-          spark.table(catalogName + ".default." + nonExistentTableName);
-        });
+    // Spark's analyzer intercepts the catalog's NoSuchTableException and re-throws
+    // as ExtendedAnalysisException(TABLE_OR_VIEW_NOT_FOUND) without preserving the cause.
+    AnalysisException ex =
+        assertThrows(
+            AnalysisException.class,
+            () -> {
+              spark.table(catalogName + ".default." + nonExistentTableName);
+            });
+    assertEquals("TABLE_OR_VIEW_NOT_FOUND", ex.getErrorClass());
   }
 
   @Test
@@ -543,12 +551,18 @@ public abstract class SparkLanceNamespaceTestBase {
             + tableName
             + " (id BIGINT NOT NULL)");
 
-    // Try to drop namespace without CASCADE (should fail)
-    assertThrows(
-        Exception.class,
-        () -> {
-          spark.sql("DROP NAMESPACE " + catalogName + "." + namespaceName);
-        });
+    // The Lance namespace layer rejects dropping a non-empty namespace with Restrict behavior.
+    // This propagates as a RuntimeException (not wrapped by Spark) with the Rust-level error
+    // message indicating the namespace is not empty.
+    RuntimeException ex =
+        assertThrows(
+            RuntimeException.class,
+            () -> {
+              spark.sql("DROP NAMESPACE " + catalogName + "." + namespaceName);
+            });
+    assertTrue(
+        ex.getMessage().contains("is not empty"),
+        "Expected 'is not empty' error but got: " + ex.getMessage());
 
     // Drop namespace with CASCADE (should succeed)
     spark.sql("DROP NAMESPACE " + catalogName + "." + namespaceName + " CASCADE");
@@ -919,6 +933,80 @@ public abstract class SparkLanceNamespaceTestBase {
               spark.sql("SHOW TBLPROPERTIES " + fullName);
             });
     assertEquals("TABLE_OR_VIEW_NOT_FOUND", ex.getErrorClass());
+  }
+
+  @Test
+  public void testRenameTable() throws Exception {
+    String oldName = generateTableName("rename_old");
+    String newName = generateTableName("rename_new");
+    String fullOld = catalogName + ".default." + oldName;
+    String fullNew = catalogName + ".default." + newName;
+
+    // Create and populate table
+    spark.sql("CREATE TABLE " + fullOld + " (id BIGINT NOT NULL, name STRING)");
+    spark.sql("INSERT INTO " + fullOld + " VALUES (1, 'test')");
+
+    // Rename
+    spark.sql("ALTER TABLE " + fullOld + " RENAME TO " + fullNew);
+
+    // Verify new table exists and has data
+    Dataset<Row> result = spark.sql("SELECT * FROM " + fullNew);
+    List<Row> rows = result.collectAsList();
+    assertEquals(1, rows.size());
+    assertEquals(1L, rows.get(0).getLong(0));
+    assertEquals("test", rows.get(0).getString(1));
+
+    // Verify old table no longer exists.
+    // Spark's analyzer catches NoSuchTableException from the catalog and re-throws as
+    // ExtendedAnalysisException(TABLE_OR_VIEW_NOT_FOUND) — the original exception is discarded.
+    AnalysisException ex =
+        assertThrows(
+            AnalysisException.class,
+            () -> {
+              spark.sql("SELECT * FROM " + fullOld).collectAsList();
+            });
+    assertEquals("TABLE_OR_VIEW_NOT_FOUND", ex.getErrorClass());
+  }
+
+  @Test
+  public void testRenameNonExistentTableFails() throws Exception {
+    String oldName = generateTableName("nonexistent");
+    String newName = generateTableName("new_target");
+    String fullOld = catalogName + ".default." + oldName;
+    String fullNew = catalogName + ".default." + newName;
+
+    // Spark's analyzer resolves the source table before executing the rename plan.
+    // When the table doesn't exist, it throws ExtendedAnalysisException with
+    // TABLE_OR_VIEW_NOT_FOUND — the catalog's renameTable() is never reached.
+    AnalysisException ex =
+        assertThrows(
+            AnalysisException.class,
+            () -> {
+              spark.sql("ALTER TABLE " + fullOld + " RENAME TO " + fullNew);
+            });
+    assertEquals("TABLE_OR_VIEW_NOT_FOUND", ex.getErrorClass());
+  }
+
+  @Test
+  public void testRenameTableToExistingNameFails() throws Exception {
+    String name1 = generateTableName("rename_src");
+    String name2 = generateTableName("rename_dst");
+    String full1 = catalogName + ".default." + name1;
+    String full2 = catalogName + ".default." + name2;
+
+    spark.sql("CREATE TABLE " + full1 + " (id BIGINT NOT NULL)");
+    spark.sql("CREATE TABLE " + full2 + " (id BIGINT NOT NULL)");
+
+    // The catalog's renameTable() translates the Lance TABLE_ALREADY_EXISTS error into Spark's
+    // TableAlreadyExistsException. Spark then re-throws as AnalysisException — the original
+    // catalog exception is not preserved as a cause.
+    AnalysisException ex =
+        assertThrows(
+            AnalysisException.class,
+            () -> {
+              spark.sql("ALTER TABLE " + full1 + " RENAME TO " + full2);
+            });
+    assertEquals("TABLE_ALREADY_EXISTS", ex.getErrorClass());
   }
 
   private boolean checkDataset(int expectedSize, String tableName) {
