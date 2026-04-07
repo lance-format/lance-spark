@@ -29,8 +29,6 @@ import org.apache.spark.sql.connector.read.PartitionReaderFactory;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.read.Statistics;
 import org.apache.spark.sql.connector.read.SupportsReportStatistics;
-import org.apache.spark.sql.connector.read.partitioning.Partitioning;
-import org.apache.spark.sql.connector.read.partitioning.UnknownPartitioning;
 import org.apache.spark.sql.internal.connector.SupportsMetadata;
 import org.apache.spark.sql.sources.Filter;
 import org.apache.spark.sql.types.StructType;
@@ -62,9 +60,6 @@ public class LanceScan
   private final Filter[] pushedFilters;
   private final LanceStatistics statistics;
   private final String scanId = UUID.randomUUID().toString();
-
-  /** Number of partitions after pruning, set during {@link #planInputPartitions()}. */
-  private transient int numPartitions = -1;
 
   /**
    * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
@@ -148,7 +143,6 @@ public class LanceScan
                         namespaceProperties))
             .toArray(InputPartition[]::new);
 
-    this.numPartitions = result.length;
     return result;
   }
 
@@ -216,6 +210,8 @@ public class LanceScan
    *   <li>No limit is pushed
    *   <li>Filters are present (unknown selectivity makes row count estimation unreliable)
    *   <li>TopN sort orders are present (all fragments needed for global sort)
+   *   <li>Aggregation is pushed (e.g., COUNT(*) LIMIT — row counts don't apply)
+   *   <li>Vector search (nearest) is active (needs global search across all fragments)
    *   <li>Fragment row counts are unavailable
    * </ul>
    *
@@ -228,6 +224,8 @@ public class LanceScan
     if (!limit.isPresent()
         || whereConditions.isPresent()
         || topNSortOrders.isPresent()
+        || pushedAggregation.isPresent()
+        || readOptions.getNearest() != null
         || fragmentRowCounts.isEmpty()) {
       return allSplits;
     }
@@ -250,7 +248,7 @@ public class LanceScan
     }
 
     if (pruned.size() < allSplits.size()) {
-      LOG.info(
+      LOG.debug(
           "Limit-based pruning: {} of {} splits retained for LIMIT {} "
               + "(accumulated {} rows from selected fragments)",
           pruned.size(),
@@ -260,17 +258,6 @@ public class LanceScan
     }
 
     return pruned;
-  }
-
-  /**
-   * Reports the output partitioning to Spark's optimizer.
-   *
-   * <p>Returns {@link UnknownPartitioning} to avoid Spark inserting unnecessary shuffles before
-   * {@code CollectLimit}. This is consistent with how Iceberg's Spark connector handles
-   * partitioning for non-grouped scans.
-   */
-  public Partitioning outputPartitioning() {
-    return new UnknownPartitioning(Math.max(numPartitions, 0));
   }
 
   @Override
