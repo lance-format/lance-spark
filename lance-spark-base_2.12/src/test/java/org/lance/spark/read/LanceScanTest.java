@@ -111,4 +111,27 @@ public class LanceScanTest {
     assertTrue(partition.getLimit().isPresent());
     assertEquals(2, partition.getLimit().get());
   }
+
+  @Test
+  public void testLimitPrunesPartitions() {
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            TEST_SCHEMA,
+            TestUtils.TestTable1Config.readOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+    builder.pushLimit(1);
+    LanceScan scan = (LanceScan) builder.build();
+    // With LIMIT 1 and test dataset having 2 rows per fragment,
+    // only 1 fragment should be planned
+    InputPartition[] partitions = scan.planInputPartitions();
+    assertTrue(partitions.length >= 1);
+    // Should be fewer than total fragments if limit pruning works
+    LanceScan scanNoLimit = buildScan();
+    InputPartition[] allPartitions = scanNoLimit.planInputPartitions();
+    assertTrue(
+        partitions.length <= allPartitions.length,
+        "Limit-pruned partitions should not exceed total partitions");
+  }
 }

@@ -29,6 +29,8 @@ import org.apache.spark.sql.connector.read.PartitionReaderFactory;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.read.Statistics;
 import org.apache.spark.sql.connector.read.SupportsReportStatistics;
+import org.apache.spark.sql.connector.read.partitioning.Partitioning;
+import org.apache.spark.sql.connector.read.partitioning.UnknownPartitioning;
 import org.apache.spark.sql.internal.connector.SupportsMetadata;
 import org.apache.spark.sql.sources.Filter;
 import org.apache.spark.sql.types.StructType;
@@ -60,6 +62,9 @@ public class LanceScan
   private final Filter[] pushedFilters;
   private final LanceStatistics statistics;
   private final String scanId = UUID.randomUUID().toString();
+
+  /** Number of partitions after pruning, set during {@link #planInputPartitions()}. */
+  private transient int numPartitions = -1;
 
   /**
    * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
@@ -108,30 +113,43 @@ public class LanceScan
   @Override
   public InputPartition[] planInputPartitions() {
     LanceSplit.ScanPlanResult planResult = LanceSplit.planScan(readOptions);
-    List<LanceSplit> splits = pruneByRowAddrFilters(planResult.getSplits());
+    List<LanceSplit> prunedSplits = pruneByRowAddrFilters(planResult.getSplits());
+
+    // Limit-based split pruning: when a LIMIT is pushed down without filters or TopN sort,
+    // use per-fragment row counts to plan only enough splits to satisfy the limit.
+    // This avoids scheduling hundreds of unnecessary tasks. Correctness is guaranteed
+    // because Spark still keeps a global CollectLimit on top (isPartiallyPushed = true).
+    prunedSplits = pruneByLimit(prunedSplits, planResult.getFragmentRowCounts());
+
+    // Capture as effectively final for use in lambda
+    final List<LanceSplit> finalSplits = prunedSplits;
 
     // Use resolved version for snapshot isolation - ensures all workers read the same version
     LanceSparkReadOptions resolvedReadOptions =
         readOptions.withVersion((int) planResult.getResolvedVersion());
 
-    return IntStream.range(0, splits.size())
-        .mapToObj(
-            i ->
-                new LanceInputPartition(
-                    schema,
-                    i,
-                    splits.get(i),
-                    resolvedReadOptions,
-                    whereConditions,
-                    limit,
-                    offset,
-                    topNSortOrders,
-                    pushedAggregation,
-                    scanId,
-                    initialStorageOptions,
-                    namespaceImpl,
-                    namespaceProperties))
-        .toArray(InputPartition[]::new);
+    InputPartition[] result =
+        IntStream.range(0, finalSplits.size())
+            .mapToObj(
+                i ->
+                    new LanceInputPartition(
+                        schema,
+                        i,
+                        finalSplits.get(i),
+                        resolvedReadOptions,
+                        whereConditions,
+                        limit,
+                        offset,
+                        topNSortOrders,
+                        pushedAggregation,
+                        scanId,
+                        initialStorageOptions,
+                        namespaceImpl,
+                        namespaceProperties))
+            .toArray(InputPartition[]::new);
+
+    this.numPartitions = result.length;
+    return result;
   }
 
   /**
@@ -183,6 +201,76 @@ public class LanceScan
           allowedIds);
     }
     return pruned;
+  }
+
+  /**
+   * Prunes splits based on pushed LIMIT using per-fragment row counts from the manifest.
+   *
+   * <p>When a LIMIT is pushed down without filters or TopN sort orders, we can use the per-fragment
+   * logical row counts (which account for deletions) to determine how many fragments are needed to
+   * satisfy the limit. This avoids scheduling hundreds of unnecessary tasks for large tables.
+   *
+   * <p>This optimization is skipped when:
+   *
+   * <ul>
+   *   <li>No limit is pushed
+   *   <li>Filters are present (unknown selectivity makes row count estimation unreliable)
+   *   <li>TopN sort orders are present (all fragments needed for global sort)
+   *   <li>Fragment row counts are unavailable
+   * </ul>
+   *
+   * <p>Correctness is guaranteed because Spark keeps a global {@code CollectLimit} on top (since
+   * {@code isPartiallyPushed()} returns {@code true}). If we under-estimate due to concurrent
+   * deletions, the query simply returns fewer rows than the limit — which is valid LIMIT semantics.
+   */
+  private List<LanceSplit> pruneByLimit(
+      List<LanceSplit> allSplits, java.util.Map<Integer, Long> fragmentRowCounts) {
+    if (!limit.isPresent()
+        || whereConditions.isPresent()
+        || topNSortOrders.isPresent()
+        || fragmentRowCounts.isEmpty()) {
+      return allSplits;
+    }
+
+    int requestedLimit = limit.get();
+    long rowsAccumulated = 0;
+    List<LanceSplit> pruned = new java.util.ArrayList<>();
+
+    for (LanceSplit split : allSplits) {
+      pruned.add(split);
+      for (int fragmentId : split.getFragments()) {
+        Long rowCount = fragmentRowCounts.get(fragmentId);
+        if (rowCount != null) {
+          rowsAccumulated += rowCount;
+        }
+      }
+      if (rowsAccumulated >= requestedLimit) {
+        break;
+      }
+    }
+
+    if (pruned.size() < allSplits.size()) {
+      LOG.info(
+          "Limit-based pruning: {} of {} splits retained for LIMIT {} "
+              + "(accumulated {} rows from selected fragments)",
+          pruned.size(),
+          allSplits.size(),
+          requestedLimit,
+          rowsAccumulated);
+    }
+
+    return pruned;
+  }
+
+  /**
+   * Reports the output partitioning to Spark's optimizer.
+   *
+   * <p>Returns {@link UnknownPartitioning} to avoid Spark inserting unnecessary shuffles before
+   * {@code CollectLimit}. This is consistent with how Iceberg's Spark connector handles
+   * partitioning for non-grouped scans.
+   */
+  public Partitioning outputPartitioning() {
+    return new UnknownPartitioning(Math.max(numPartitions, 0));
   }
 
   @Override
