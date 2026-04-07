@@ -114,13 +114,14 @@ public class LanceBatchWrite implements BatchWrite {
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", true);
     boolean isOverwrite = overwrite || writeOptions.isOverwrite();
 
+    // Boxed: null means unset (inherit in lance-core); see LanceSparkWriteOptions.
+    final Boolean enableStableRowIds = writeOptions.getEnableStableRowIds();
+
     if (stagedCommit != null) {
       // For staged tables, update the eagerly-created StagedCommit with fragments and schema.
       // commitStagedChanges() will perform the actual commit.
       stagedCommit.setFragments(fragments);
       stagedCommit.setSchema(arrowSchema);
-      // Sync write-time enableStableRowIds into staged commit
-      final Boolean enableStableRowIds = writeOptions.getEnableStableRowIds();
       if (enableStableRowIds != null) {
         stagedCommit.setEnableStableRowIds(enableStableRowIds);
       }
@@ -128,7 +129,6 @@ public class LanceBatchWrite implements BatchWrite {
       // For non-staged tables, commit immediately
       Dataset ds = dataset.get();
       try {
-        final Boolean enableStableRowIds = writeOptions.getEnableStableRowIds();
         Operation operation;
         if (isOverwrite) {
           operation = Overwrite.builder().fragments(fragments).schema(arrowSchema).build();

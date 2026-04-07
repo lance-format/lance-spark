@@ -58,7 +58,7 @@ public class StagedCommitTest {
         TestUtils.getDatasetUri(tempDir.toString(), testInfo.getTestMethod().get().getName());
     StagedCommit commit =
         StagedCommit.forNewTable(
-            ARROW_SCHEMA, datasetUri, Collections.emptyMap(), null, null, false);
+            ARROW_SCHEMA, datasetUri, StagedCommitOptions.pathBased(Collections.emptyMap(), false));
     commit.commit();
     try (Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator())) {
       assertEquals(0, dataset.countRows());
@@ -71,7 +71,7 @@ public class StagedCommitTest {
     Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator());
     StagedCommit commit =
         StagedCommit.forExistingTable(
-            dataset, ARROW_SCHEMA, Collections.emptyMap(), null, null, false);
+            dataset, ARROW_SCHEMA, StagedCommitOptions.pathBased(Collections.emptyMap(), false));
     commit.commit();
     try (Dataset reopened = Dataset.open(datasetUri, LanceRuntime.allocator())) {
       assertEquals(0, reopened.countRows());
@@ -84,7 +84,7 @@ public class StagedCommitTest {
         TestUtils.getDatasetUri(tempDir.toString(), testInfo.getTestMethod().get().getName());
     StagedCommit commit =
         StagedCommit.forNewTable(
-            ARROW_SCHEMA, datasetUri, Collections.emptyMap(), null, null, false);
+            ARROW_SCHEMA, datasetUri, StagedCommitOptions.pathBased(Collections.emptyMap(), false));
     commit.abort();
   }
 
@@ -94,7 +94,7 @@ public class StagedCommitTest {
     Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator());
     StagedCommit commit =
         StagedCommit.forExistingTable(
-            dataset, ARROW_SCHEMA, Collections.emptyMap(), null, null, false);
+            dataset, ARROW_SCHEMA, StagedCommitOptions.pathBased(Collections.emptyMap(), false));
     commit.abort();
   }
 }

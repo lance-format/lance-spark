@@ -45,7 +45,11 @@ public class StagedCommit {
   private static final String NO_DATASET_URI = null;
   private static final List<FragmentMetadata> NO_INITIAL_FRAGMENTS = Collections.emptyList();
 
-  private Boolean enableStableRowIds;
+  // The catalog always resolves a concrete true/false before constructing
+  // StagedCommitOptions, so there is no null/unset state in the staged path.
+  // The non-staged path (LanceBatchWrite) uses boxed Boolean because null means
+  // "user didn't specify" and lets lance-core inherit the flag from the manifest.
+  private boolean enableStableRowIds;
   private List<FragmentMetadata> fragments;
   private Schema schema;
 
@@ -100,7 +104,7 @@ public class StagedCommit {
     this.schema = schema;
   }
 
-  public void setEnableStableRowIds(Boolean enableStableRowIds) {
+  public void setEnableStableRowIds(boolean enableStableRowIds) {
     this.enableStableRowIds = enableStableRowIds;
   }
 
@@ -117,7 +121,7 @@ public class StagedCommit {
     final Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
     final CommitBuilder builder =
         new CommitBuilder(datasetUri, LanceRuntime.allocator()).writeParams(storageOptions);
-    if (Boolean.TRUE.equals(enableStableRowIds)) {
+    if (enableStableRowIds) {
       builder.useStableRowIds(true);
     }
     applyManagedVersioning(builder);
@@ -136,11 +140,7 @@ public class StagedCommit {
     final Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
     final CommitBuilder builder =
         new CommitBuilder(uri, LanceRuntime.allocator()).writeParams(storageOptions);
-    // When enableStableRowIds is null, lance-core auto-inherits
-    // the flag from the existing manifest.
-    if (enableStableRowIds != null) {
-      builder.useStableRowIds(enableStableRowIds);
-    }
+    builder.useStableRowIds(enableStableRowIds);
     applyManagedVersioning(builder);
     commitOperation(builder, version, operation);
   }

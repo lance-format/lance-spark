@@ -73,6 +73,8 @@ public class LanceSparkWriteOptions implements Serializable {
   private final boolean useQueuedWriteBuffer;
   private final int queueDepth;
   private final int batchSize;
+  // Boxed so we can represent "unset" (null): when null, callers omit the flag and lance-core
+  // inherits from the manifest (e.g. append without re-specifying). Staged commit uses primitives.
   private final Boolean enableStableRowIds;
   private final Map<String, String> storageOptions;
 
@@ -162,6 +164,7 @@ public class LanceSparkWriteOptions implements Serializable {
     return batchSize;
   }
 
+  /** Nullable when the write option was not specified (see field comment above). */
   public Boolean getEnableStableRowIds() {
     return enableStableRowIds;
   }

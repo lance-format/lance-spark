@@ -55,7 +55,7 @@ public class StagedCommitOptions {
   }
 
   public static StagedCommitOptions pathBased(
-      final Map<String, String> storageOptions, final Boolean enableStableRowIds) {
+      final Map<String, String> storageOptions, final boolean enableStableRowIds) {
     return new StagedCommitOptions(
         storageOptions, enableStableRowIds, NO_NAMESPACE, NO_TABLE_ID, NO_MANAGED_VERSIONING);
   }
