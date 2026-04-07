@@ -11,8 +11,6 @@
     <description>TPC-DS benchmark for Lance Spark connector</description>
 
     <properties>
-        <lance-spark.version>0.3.0-beta.1</lance-spark.version>
-        <spark.version>3.5.5</spark.version>
         <spark.compat.version>3.5</spark.compat.version>
         <scala.compat.version>2.12</scala.compat.version>
         <kyuubi.version>1.11.0</kyuubi.version>
@@ -23,14 +21,9 @@
 
     <dependencies>
         <dependency>
-            <groupId>org.lance</groupId>
-            <artifactId>lance-spark-bundle-${spark.compat.version}_${scala.compat.version}</artifactId>
-            <version>${lance-spark.version}</version>
-        </dependency>
-        <dependency>
             <groupId>org.apache.spark</groupId>
             <artifactId>spark-sql_${scala.compat.version}</artifactId>
-            <version>${spark.version}</version>
+            <version>${spark.compat.version}.0</version>
             <scope>provided</scope>
         </dependency>
         <!-- Kyuubi TPC-DS connector: pure-Spark data source for parallel TPC-DS
@@ -43,6 +36,7 @@
     </dependencies>
 
     <build>
+        <finalName>${project.artifactId}</finalName>
         <plugins>
             <plugin>
                 <artifactId>maven-compiler-plugin</artifactId>

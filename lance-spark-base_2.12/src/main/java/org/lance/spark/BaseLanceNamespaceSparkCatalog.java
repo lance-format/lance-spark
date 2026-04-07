@@ -29,6 +29,7 @@ import org.lance.namespace.model.DropNamespaceRequest;
 import org.lance.namespace.model.DropTableRequest;
 import org.lance.namespace.model.ListTablesRequest;
 import org.lance.namespace.model.ListTablesResponse;
+import org.lance.namespace.model.RenameTableRequest;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.SchemaConverter;
@@ -62,8 +63,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -614,7 +617,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
         namespaceImpl,
         namespaceProperties,
         managedVersioning,
-        fileFormatVersion);
+        fileFormatVersion,
+        Collections.emptyMap());
   }
 
   /**
@@ -648,12 +652,54 @@ public abstract class BaseLanceNamespaceSparkCatalog
     } catch (IllegalArgumentException e) {
       throw new TableAlreadyExistsException(ident);
     }
-    return createDataset(readOptions, processedSchema, null, null, null, false, fileFormatVersion);
+    return createDataset(
+        readOptions,
+        processedSchema,
+        null,
+        null,
+        null,
+        false,
+        fileFormatVersion,
+        Collections.emptyMap());
   }
 
   @Override
   public Table alterTable(Identifier ident, TableChange... changes) throws NoSuchTableException {
-    throw new UnsupportedOperationException("Table alteration is not supported");
+    Map<String, String> propsToSet = new HashMap<>();
+    Set<String> keysToRemove = new HashSet<>();
+
+    for (TableChange change : changes) {
+      if (change instanceof TableChange.SetProperty) {
+        TableChange.SetProperty setProp = (TableChange.SetProperty) change;
+        propsToSet.put(setProp.property(), setProp.value());
+      } else if (change instanceof TableChange.RemoveProperty) {
+        TableChange.RemoveProperty removeProp = (TableChange.RemoveProperty) change;
+        keysToRemove.add(removeProp.property());
+      } else {
+        throw new UnsupportedOperationException(
+            "Unsupported table change type: "
+                + change.getClass().getSimpleName()
+                + ". Only SET/UNSET TBLPROPERTIES is supported.");
+      }
+    }
+
+    if (propsToSet.isEmpty() && keysToRemove.isEmpty()) {
+      // No changes to apply, just return the current table
+      return loadTable(ident);
+    }
+
+    ResolvedTable resolved = resolveIdentifier(ident);
+
+    try (Dataset dataset = openDataset(resolved.readOptions)) {
+      // Dataset.updateConfig uses replace semantics (overwrites entire config),
+      // so we must read-merge-write to preserve existing properties.
+      Map<String, String> merged = new HashMap<>(dataset.getConfig());
+      merged.putAll(propsToSet);
+      keysToRemove.forEach(merged::remove);
+      dataset.updateConfig(merged);
+    }
+
+    return loadTable(ident);
   }
 
   @Override
@@ -720,7 +766,42 @@ public abstract class BaseLanceNamespaceSparkCatalog
   @Override
   public void renameTable(Identifier oldIdent, Identifier newIdent)
       throws NoSuchTableException, TableAlreadyExistsException {
-    throw new UnsupportedOperationException("Table renaming is not supported");
+    // Path-based rename not supported
+    if (isPathBasedIdentifier(oldIdent) || isPathBasedIdentifier(newIdent)) {
+      throw new UnsupportedOperationException(
+          "Table renaming is not supported for path-based tables");
+    }
+
+    // Require namespace to be configured for namespace-based access
+    if (pathBasedOnly || namespace == null) {
+      throw new UnsupportedOperationException(
+          "Namespace not configured. Use 'impl' config for namespace-based access.");
+    }
+
+    Identifier oldTableId = transformIdentifierForApi(oldIdent);
+    Identifier newTableId = transformIdentifierForApi(newIdent);
+
+    RenameTableRequest request = new RenameTableRequest();
+    for (String part : oldTableId.namespace()) {
+      request.addIdItem(part);
+    }
+    request.addIdItem(oldTableId.name());
+    request.setNewTableName(newTableId.name());
+    for (String part : newTableId.namespace()) {
+      request.addNewNamespaceIdItem(part);
+    }
+
+    try {
+      namespace.renameTable(request);
+    } catch (LanceNamespaceException e) {
+      if (e.getErrorCode() == ErrorCode.TABLE_NOT_FOUND) {
+        throw new NoSuchTableException(oldIdent);
+      }
+      if (e.getErrorCode() == ErrorCode.TABLE_ALREADY_EXISTS) {
+        throw new TableAlreadyExistsException(newIdent);
+      }
+      throw e;
+    }
   }
 
   @Override
@@ -779,7 +860,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
         namespaceProperties,
         managedVersioning,
         stagedCommit,
-        fileFormatVersion);
+        fileFormatVersion,
+        Collections.emptyMap());
   }
 
   /** Stage create a table at a direct path. */
@@ -799,7 +881,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
     StagedCommit stagedCommit = StagedCommit.forNewTable(arrowSchema, datasetUri, commitOptions);
     String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
     return createStagedDataset(
-        readOptions, processedSchema, null, null, null, false, stagedCommit, fileFormatVersion);
+        readOptions,
+        processedSchema,
+        null,
+        null,
+        null,
+        false,
+        stagedCommit,
+        fileFormatVersion,
+        Collections.emptyMap());
   }
 
   @Override
@@ -812,34 +902,14 @@ public abstract class BaseLanceNamespaceSparkCatalog
       return stageReplaceAtPath(ident, schema, properties);
     }
 
-    // Require namespace to be configured for namespace-based access
-    if (pathBasedOnly || namespace == null) {
-      throw new IllegalStateException(
-          "Namespace not configured. Use 'impl' config for namespace-based access.");
-    }
-
-    Identifier actualIdent = transformIdentifierForApi(ident);
-    List<String> tableIdList = buildTableId(actualIdent);
+    ResolvedTable resolved = resolveIdentifier(ident);
+    DescribeTableResponse describeResponse = resolved.describeResponse;
     StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
-
-    DescribeTableRequest describeRequest = new DescribeTableRequest();
-    tableIdList.forEach(describeRequest::addIdItem);
-    DescribeTableResponse describeResponse = describeTableOrThrow(describeRequest, ident);
-    String location = describeResponse.getLocation();
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
     boolean managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
 
-    LanceSparkReadOptions readOptions =
-        createReadOptions(
-            location,
-            catalogConfig,
-            Optional.empty(),
-            Optional.of(namespace),
-            Optional.of(tableIdList),
-            name);
-
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
-    Dataset ds = openDataset(readOptions);
+    Dataset ds = openDataset(resolved.readOptions);
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
     final StagedCommitOptions commitOptions =
@@ -847,7 +917,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
             merged,
             catalogConfig.isEnableStableRowIds(properties),
             namespace,
-            tableIdList,
+            resolved.tableIdList,
             managedVersioning);
     StagedCommit stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
     // Use specified file format version, or fall back to existing table's version
@@ -856,14 +926,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
       fileFormatVersion = ds.getLanceFileFormatVersion();
     }
     return createStagedDataset(
-        readOptions,
+        resolved.readOptions,
         processedSchema,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
         managedVersioning,
         stagedCommit,
-        fileFormatVersion);
+        fileFormatVersion,
+        Collections.emptyMap());
   }
 
   /** Stage replace a table at a direct path. */
@@ -895,7 +966,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
       fileFormatVersion = ds.getLanceFileFormatVersion();
     }
     return createStagedDataset(
-        readOptions, processedSchema, null, null, null, false, stagedCommit, fileFormatVersion);
+        readOptions,
+        processedSchema,
+        null,
+        null,
+        null,
+        false,
+        stagedCommit,
+        fileFormatVersion,
+        Collections.emptyMap());
   }
 
   @Override
@@ -978,7 +1057,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
         namespaceProperties,
         managedVersioning,
         stagedCommit,
-        fileFormatVersion);
+        fileFormatVersion,
+        Collections.emptyMap());
   }
 
   /** Stage create or replace a table at a direct path. */
@@ -1009,7 +1089,80 @@ public abstract class BaseLanceNamespaceSparkCatalog
       stagedCommit = StagedCommit.forNewTable(arrowSchema, datasetUri, commitOptions);
     }
     return createStagedDataset(
-        readOptions, processedSchema, null, null, null, false, stagedCommit, fileFormatVersion);
+        readOptions,
+        processedSchema,
+        null,
+        null,
+        null,
+        false,
+        stagedCommit,
+        fileFormatVersion,
+        Collections.emptyMap());
+  }
+
+  /**
+   * Result of resolving an {@link Identifier} to read options. Bundles the read options with the
+   * optional {@link DescribeTableResponse} (present only for namespace-based identifiers).
+   */
+  private static class ResolvedTable {
+    final LanceSparkReadOptions readOptions;
+
+    /** Non-null only for namespace-based tables. */
+    final DescribeTableResponse describeResponse;
+
+    /** Non-null only for namespace-based tables. */
+    final List<String> tableIdList;
+
+    ResolvedTable(
+        LanceSparkReadOptions readOptions,
+        DescribeTableResponse describeResponse,
+        List<String> tableIdList) {
+      this.readOptions = readOptions;
+      this.describeResponse = describeResponse;
+      this.tableIdList = tableIdList;
+    }
+  }
+
+  /**
+   * Resolves an identifier into {@link LanceSparkReadOptions} by handling both path-based and
+   * namespace-based access patterns. For namespace-based identifiers the {@link
+   * DescribeTableResponse} is also returned so callers can access additional metadata such as
+   * storage options and managed-versioning flags.
+   */
+  private ResolvedTable resolveIdentifier(Identifier ident) throws NoSuchTableException {
+    if (isPathBasedIdentifier(ident)) {
+      String datasetUri = getDatasetUri(ident);
+      LanceSparkReadOptions readOptions =
+          createReadOptions(
+              datasetUri,
+              catalogConfig,
+              Optional.empty(),
+              Optional.empty(),
+              Optional.empty(),
+              name);
+      return new ResolvedTable(readOptions, null, null);
+    }
+
+    if (pathBasedOnly || namespace == null) {
+      throw new IllegalStateException(
+          "Namespace not configured. Use 'impl' config for namespace-based access.");
+    }
+
+    Identifier actualIdent = transformIdentifierForApi(ident);
+    List<String> tableIdList = buildTableId(actualIdent);
+    DescribeTableRequest describeRequest = new DescribeTableRequest();
+    tableIdList.forEach(describeRequest::addIdItem);
+    DescribeTableResponse describeResponse = describeTableOrThrow(describeRequest, ident);
+    String location = describeResponse.getLocation();
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            location,
+            catalogConfig,
+            Optional.empty(),
+            Optional.of(namespace),
+            Optional.of(tableIdList),
+            name);
+    return new ResolvedTable(readOptions, describeResponse, tableIdList);
   }
 
   /**
@@ -1140,36 +1293,13 @@ public abstract class BaseLanceNamespaceSparkCatalog
       return loadTableFromPath(ident, timestamp, version);
     }
 
-    // Require namespace to be configured for namespace-based access
-    if (pathBasedOnly || namespace == null) {
-      throw new IllegalStateException(
-          "Namespace not configured. Use 'impl' config for namespace-based access.");
-    }
-
-    // Transform identifier for API call
-    Identifier actualIdent = transformIdentifierForApi(ident);
-
-    // Build the table ID for credential vending
-    List<String> tableId = buildTableId(actualIdent);
-
-    // Call describeTable to get location and initial storage options
-    DescribeTableRequest describeRequest = new DescribeTableRequest();
-    tableId.forEach(describeRequest::addIdItem);
-    DescribeTableResponse describeResponse = describeTableOrThrow(describeRequest, ident);
-    String location = describeResponse.getLocation();
+    ResolvedTable resolved = resolveIdentifier(ident);
+    DescribeTableResponse describeResponse = resolved.describeResponse;
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
 
     Optional<Long> versionId = Optional.empty();
     if (timestamp.isPresent()) {
-      LanceSparkReadOptions readOptions =
-          createReadOptions(
-              location,
-              catalogConfig,
-              Optional.empty(),
-              Optional.of(namespace),
-              Optional.of(tableId),
-              name);
-      try (Dataset dataset = openDataset(readOptions)) {
+      try (Dataset dataset = openDataset(resolved.readOptions)) {
         versionId = Optional.of(Utils.findVersion(dataset.listVersions(), timestamp.get()));
       } catch (TableNotFoundException e) {
         throw new NoSuchTableException(ident);
@@ -1178,16 +1308,29 @@ public abstract class BaseLanceNamespaceSparkCatalog
       versionId = Optional.of(Utils.parseVersion(version.get()));
     }
 
-    LanceSparkReadOptions readOptions =
-        createReadOptions(
-            location, catalogConfig, versionId, Optional.of(namespace), Optional.of(tableId), name);
+    // If time travel requested, rebuild readOptions with the resolved version
+    LanceSparkReadOptions readOptions;
+    if (versionId.isPresent()) {
+      readOptions =
+          createReadOptions(
+              describeResponse.getLocation(),
+              catalogConfig,
+              versionId,
+              Optional.of(namespace),
+              Optional.of(resolved.tableIdList),
+              name);
+    } else {
+      readOptions = resolved.readOptions;
+    }
 
-    // Read schema and file format version from the dataset
+    // Read schema, file format version, and config from the dataset
     String fileFormatVersion;
     StructType schema;
+    Map<String, String> tableProperties;
     try (Dataset dataset = openDataset(readOptions)) {
       schema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
       fileFormatVersion = dataset.getLanceFileFormatVersion();
+      tableProperties = dataset.getConfig();
     }
 
     // Create read options with namespace support
@@ -1199,29 +1342,16 @@ public abstract class BaseLanceNamespaceSparkCatalog
         namespaceImpl,
         namespaceProperties,
         managedVersioning,
-        fileFormatVersion);
+        fileFormatVersion,
+        tableProperties);
   }
 
   /**
    * Calls namespace.describeTable and translates table-not-found errors into Spark's {@link
    * NoSuchTableException}.
    *
-   * <p>Two catch blocks handle the error:
-   *
-   * <ol>
-   *   <li>{@link LanceNamespaceException} with {@link ErrorCode#TABLE_NOT_FOUND} — catches the
-   *       exception that the JNI bridge creates once the upstream lance-namespace-impls uses typed
-   *       {@code NamespaceError::TableNotFound} (see lance PR #6267 / #6275). This also covers
-   *       {@link TableNotFoundException} (a subclass of {@link LanceNamespaceException}).
-   *   <li>{@link RuntimeException} with message matching — workaround for the current state where
-   *       dir.rs and dir/manifest.rs use {@code Error::namespace_source(String)}, causing the JNI
-   *       downcast to {@code NamespaceError} to fail and fall back to a raw RuntimeException. Two
-   *       known message patterns: "Table does not exist: {name}" (dir.rs) and "Table '{name}' not
-   *       found" (manifest.rs).
-   * </ol>
-   *
-   * <p>TODO: Remove the RuntimeException catch block once lance fixes dir.rs and manifest.rs to use
-   * {@code NamespaceError::TableNotFound}.
+   * <p>Catches {@link LanceNamespaceException} with {@link ErrorCode#TABLE_NOT_FOUND}, which covers
+   * {@link TableNotFoundException} (a subclass of {@link LanceNamespaceException}).
    *
    * <p>This helper should be used at call sites where {@code NoSuchTableException} is the expected
    * outcome for missing tables (e.g. {@code loadTableInternal}, {@code stageReplace}). Call sites
@@ -1234,14 +1364,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
       return namespace.describeTable(request);
     } catch (LanceNamespaceException e) {
       if (e.getErrorCode() == ErrorCode.TABLE_NOT_FOUND) {
-        throw new NoSuchTableException(ident);
-      }
-      throw e;
-    } catch (RuntimeException e) {
-      String msg = e.getMessage();
-      if (msg != null
-          && (msg.contains("Table does not exist")
-              || (msg.contains("Table") && msg.contains("not found")))) {
         throw new NoSuchTableException(ident);
       }
       throw e;
@@ -1280,17 +1402,20 @@ public abstract class BaseLanceNamespaceSparkCatalog
         createReadOptions(
             datasetUri, catalogConfig, versionId, Optional.empty(), Optional.empty(), name);
 
-    // Read schema and file format version from the dataset
+    // Read schema, file format version, and config from the dataset
     String fileFormatVersion;
     StructType schema;
+    Map<String, String> tableProperties;
     try (Dataset dataset = openDataset(readOptions)) {
       schema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
       fileFormatVersion = dataset.getLanceFileFormatVersion();
+      tableProperties = dataset.getConfig();
     } catch (IllegalArgumentException e) {
       throw new NoSuchTableException(ident);
     }
 
-    return createDataset(readOptions, schema, null, null, null, false, fileFormatVersion);
+    return createDataset(
+        readOptions, schema, null, null, null, false, fileFormatVersion, tableProperties);
   }
 
   public abstract LanceDataset createDataset(
@@ -1300,7 +1425,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
       String namespaceImpl,
       Map<String, String> namespaceProperties,
       boolean managedVersioning,
-      String fileFormatVersion);
+      String fileFormatVersion,
+      Map<String, String> tableProperties);
 
   public abstract LanceDataset createStagedDataset(
       LanceSparkReadOptions readOptions,
@@ -1310,5 +1436,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Map<String, String> namespaceProperties,
       boolean managedVersioning,
       StagedCommit stagedCommit,
-      String fileFormatVersion);
+      String fileFormatVersion,
+      Map<String, String> tableProperties);
 }

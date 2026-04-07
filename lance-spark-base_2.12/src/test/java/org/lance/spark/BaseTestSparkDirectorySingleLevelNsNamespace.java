@@ -27,11 +27,7 @@ import java.nio.file.Path;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-/**
- * Tests for DirectoryNamespace in single-level namespace mode (no manifest). This exercises the
- * dir.rs "Table does not exist" error path, which is different from the manifest.rs "Table '...'
- * not found" path tested in {@link BaseTestSparkDirectoryNamespace}.
- */
+/** Tests for DirectoryNamespace in single-level namespace mode (no manifest). */
 public abstract class BaseTestSparkDirectorySingleLevelNsNamespace {
   private SparkSession spark;
   private TableCatalog catalog;
@@ -66,14 +62,12 @@ public abstract class BaseTestSparkDirectorySingleLevelNsNamespace {
   @Test
   public void testTableExistsReturnsFalseForNonExistentTable() {
     // In single-level mode, this goes through dir.rs check_table_status
-    // which produces "Table does not exist: {table_name}"
     assertFalse(catalog.tableExists(Identifier.of(new String[] {"default"}, "non_existent_table")));
   }
 
   @Test
   public void testLoadNonExistentTableThrowsNoSuchTableException() {
-    // Verifies that the "Table does not exist" message from dir.rs
-    // is correctly translated to NoSuchTableException
+    // Verifies that a missing table is correctly translated to NoSuchTableException
     assertThrows(
         NoSuchTableException.class,
         () -> catalog.loadTable(Identifier.of(new String[] {"default"}, "non_existent_table")));

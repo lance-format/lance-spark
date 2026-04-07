@@ -15,7 +15,7 @@ package org.apache.spark.sql.execution.datasources.v2
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
-import org.apache.spark.sql.catalyst.plans.logical.{NamedArgument, VacuumOutputType}
+import org.apache.spark.sql.catalyst.plans.logical.{LanceNamedArgument, VacuumOutputType}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.lance.Dataset
 import org.lance.cleanup.CleanupPolicy
@@ -26,7 +26,7 @@ import scala.collection.JavaConverters._
 case class VacuumExec(
     catalog: TableCatalog,
     ident: Identifier,
-    args: Seq[NamedArgument]) extends LeafV2CommandExec {
+    args: Seq[LanceNamedArgument]) extends LeafV2CommandExec {
 
   override def output: Seq[Attribute] = VacuumOutputType.SCHEMA
 

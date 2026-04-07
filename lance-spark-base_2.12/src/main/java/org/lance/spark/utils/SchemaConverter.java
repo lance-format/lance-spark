@@ -49,6 +49,8 @@ import java.util.Map;
 
 import static org.lance.spark.utils.BlobUtils.LANCE_ENCODING_BLOB_KEY;
 import static org.lance.spark.utils.BlobUtils.LANCE_ENCODING_BLOB_VALUE;
+import static org.lance.spark.utils.Float16Utils.ARROW_FLOAT16_KEY;
+import static org.lance.spark.utils.Float16Utils.ARROW_FLOAT16_VALUE;
 import static org.lance.spark.utils.LargeVarCharUtils.ARROW_LARGE_VAR_CHAR_KEY;
 import static org.lance.spark.utils.LargeVarCharUtils.ARROW_LARGE_VAR_CHAR_VALUE;
 import static org.lance.spark.utils.VectorUtils.ARROW_FIXED_SIZE_LIST_SIZE_KEY;
@@ -91,7 +93,8 @@ public class SchemaConverter {
   public static StructType processSchemaWithProperties(
       StructType sparkSchema, Map<String, String> properties) {
     StructType schemaWithVectors = addVectorMetadata(sparkSchema, properties);
-    StructType schemaWithBlobs = addBlobMetadata(schemaWithVectors, properties);
+    StructType schemaWithFloat16 = addFloat16Metadata(schemaWithVectors, properties);
+    StructType schemaWithBlobs = addBlobMetadata(schemaWithFloat16, properties);
     return addLargeVarCharMetadata(schemaWithBlobs, properties);
   }
 
@@ -147,6 +150,71 @@ public class SchemaConverter {
         }
       } else {
         // Keep field as-is
+        newFields[i] = field;
+      }
+    }
+
+    return new StructType(newFields);
+  }
+
+  /**
+   * Adds float16 metadata to vector fields based on table properties. Properties with pattern
+   * "<column_name>.arrow.float16" = "true" are applied to matching columns. The field must already
+   * have fixed-size-list metadata and be ArrayType(FloatType).
+   *
+   * @param sparkSchema the Spark StructType (already processed by addVectorMetadata)
+   * @param properties table properties that may contain float16 column metadata
+   * @return StructType with float16 metadata added
+   */
+  private static StructType addFloat16Metadata(
+      StructType sparkSchema, Map<String, String> properties) {
+    if (properties == null || properties.isEmpty()) {
+      return sparkSchema;
+    }
+
+    StructField[] newFields = new StructField[sparkSchema.fields().length];
+    for (int i = 0; i < sparkSchema.fields().length; i++) {
+      StructField field = sparkSchema.fields()[i];
+      String float16Property = Float16Utils.createPropertyKey(field.name());
+
+      if (properties.containsKey(float16Property)) {
+        String value = properties.get(float16Property);
+        if ("true".equalsIgnoreCase(value)) {
+          // Validate: must be ArrayType(FloatType) with fixed-size-list metadata
+          if (!(field.dataType() instanceof ArrayType)) {
+            throw new IllegalArgumentException(
+                "Float16 column '"
+                    + field.name()
+                    + "' must be an ARRAY type, found: "
+                    + field.dataType());
+          }
+          ArrayType arrayType = (ArrayType) field.dataType();
+          if (!(arrayType.elementType() instanceof FloatType)) {
+            throw new IllegalArgumentException(
+                "Float16 column '"
+                    + field.name()
+                    + "' must have element type FLOAT, found: "
+                    + arrayType.elementType());
+          }
+          if (!field.metadata().contains(ARROW_FIXED_SIZE_LIST_SIZE_KEY)) {
+            throw new IllegalArgumentException(
+                "Float16 column '"
+                    + field.name()
+                    + "' must also have '"
+                    + ARROW_FIXED_SIZE_LIST_SIZE_KEY
+                    + "' property set");
+          }
+          Metadata newMetadata =
+              new MetadataBuilder()
+                  .withMetadata(field.metadata())
+                  .putString(ARROW_FLOAT16_KEY, ARROW_FLOAT16_VALUE)
+                  .build();
+          newFields[i] =
+              new StructField(field.name(), field.dataType(), field.nullable(), newMetadata);
+        } else {
+          newFields[i] = field;
+        }
+      } else {
         newFields[i] = field;
       }
     }
@@ -361,7 +429,15 @@ public class SchemaConverter {
       JsonArrowField itemField = new JsonArrowField();
       itemField.setName("item");
       itemField.setNullable(arrayType.containsNull());
-      itemField.setType(toJsonArrowDataType(arrayType.elementType(), "item", null));
+      // Check if this is a float16 vector column
+      boolean isFloat16 = isFixedSizeList && Float16Utils.hasFloat16Metadata(metadata);
+      if (isFloat16) {
+        JsonArrowDataType float16Type = new JsonArrowDataType();
+        float16Type.setType("float16");
+        itemField.setType(float16Type);
+      } else {
+        itemField.setType(toJsonArrowDataType(arrayType.elementType(), "item", null));
+      }
       List<JsonArrowField> fields = new ArrayList<>();
       fields.add(itemField);
       dataType.setFields(fields);

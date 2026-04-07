@@ -7,6 +7,8 @@ nav:
   - create-table.md
   - show-tables.md
   - describe-table.md
+  - alter-table.md
+  - show-tblproperties.md
   - drop-table.md
   - create-index.md
   - show-indexes.md

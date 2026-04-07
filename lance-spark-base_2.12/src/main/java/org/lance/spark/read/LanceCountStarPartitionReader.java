@@ -126,18 +126,22 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
     VectorSchemaRoot root =
         VectorSchemaRoot.create(
             LanceArrowUtils.toArrowSchema(resultSchema, "UTC", false), allocator);
+    try {
+      root.allocateNew();
+      BigIntVector countVector = (BigIntVector) root.getVector("count");
+      countVector.setSafe(0, count);
+      root.setRowCount(1);
 
-    root.allocateNew();
-    BigIntVector countVector = (BigIntVector) root.getVector("count");
-    countVector.setSafe(0, count);
-    root.setRowCount(1);
+      LanceArrowColumnVector[] columns =
+          root.getFieldVectors().stream()
+              .map(LanceArrowColumnVector::new)
+              .toArray(LanceArrowColumnVector[]::new);
 
-    LanceArrowColumnVector[] columns =
-        root.getFieldVectors().stream()
-            .map(LanceArrowColumnVector::new)
-            .toArray(LanceArrowColumnVector[]::new);
-
-    return new ColumnarBatch(columns, 1);
+      return new ColumnarBatch(columns, 1);
+    } catch (Exception e) {
+      root.close();
+      throw e;
+    }
   }
 
   @Override

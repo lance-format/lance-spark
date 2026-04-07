@@ -22,9 +22,11 @@ statement
     : ALTER TABLE multipartIdentifier ADD COLUMNS columnList FROM identifier                    #addColumnsBackfill
     | ALTER TABLE multipartIdentifier UPDATE COLUMNS columnList FROM identifier                 #updateColumnsBackfill
     | ALTER TABLE multipartIdentifier CREATE INDEX indexName=identifier USING method=identifier '(' columnList ')' (WITH '(' (namedArgument (',' namedArgument)*)? ')')? #createIndex
+    | ALTER TABLE multipartIdentifier DROP INDEX indexName=identifier                             #dropIndex
     | SHOW (INDEXES | INDEX) (FROM | IN) multipartIdentifier                                    #showIndexes
     | OPTIMIZE multipartIdentifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')?        #optimize
     | VACUUM multipartIdentifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')?          #vacuum
+    | ALTER TABLE multipartIdentifier SET UNENFORCED PRIMARY KEY '(' columnList ')'             #setUnenforcedPrimaryKey
     ;
 
 multipartIdentifier
@@ -68,13 +70,18 @@ ADD: 'ADD';
 ALTER: 'ALTER';
 COLUMNS: 'COLUMNS';
 CREATE: 'CREATE';
+DROP: 'DROP';
 FROM: 'FROM';
 IN: 'IN';
 INDEX: 'INDEX';
 INDEXES: 'INDEXES';
+KEY: 'KEY';
 OPTIMIZE: 'OPTIMIZE';
+PRIMARY: 'PRIMARY';
+SET: 'SET';
 SHOW: 'SHOW';
 TABLE: 'TABLE';
+UNENFORCED: 'UNENFORCED';
 UPDATE: 'UPDATE';
 USING: 'USING';
 VACUUM: 'VACUUM';

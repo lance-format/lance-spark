@@ -88,11 +88,17 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
 
   @Override
   public void close() throws IOException {
-    if (currentColumnarBatch != null) {
-      currentColumnarBatch.close();
+    try {
+      if (currentColumnarBatch != null) {
+        currentColumnarBatch.close();
+      }
+    } finally {
+      try {
+        arrowReader.close();
+      } finally {
+        fragmentScanner.close();
+      }
     }
-    arrowReader.close();
-    fragmentScanner.close();
   }
 
   private void addBlobVirtualColumns(

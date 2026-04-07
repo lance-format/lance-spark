@@ -40,6 +40,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -164,6 +165,9 @@ public class LanceDataset
    */
   private final String fileFormatVersion;
 
+  /** Table properties from the Lance dataset config, exposed via {@link #properties()}. */
+  private final Map<String, String> tableProperties;
+
   /**
    * Creates a Lance dataset.
    *
@@ -191,7 +195,8 @@ public class LanceDataset
         namespaceProperties,
         managedVersioning,
         null,
-        fileFormatVersion);
+        fileFormatVersion,
+        Collections.emptyMap());
   }
 
   /**
@@ -205,6 +210,7 @@ public class LanceDataset
    * @param managedVersioning whether namespace manages versioning (commits go through namespace)
    * @param stagedCommit the eagerly created staged commit, or null for non-staged tables
    * @param fileFormatVersion the file format version for writes, or null to use default
+   * @param tableProperties table properties from Lance dataset config
    */
   public LanceDataset(
       LanceSparkReadOptions readOptions,
@@ -214,7 +220,8 @@ public class LanceDataset
       Map<String, String> namespaceProperties,
       boolean managedVersioning,
       StagedCommit stagedCommit,
-      String fileFormatVersion) {
+      String fileFormatVersion,
+      Map<String, String> tableProperties) {
     this.readOptions = readOptions;
     this.sparkSchema = sparkSchema;
     this.initialStorageOptions = initialStorageOptions;
@@ -223,6 +230,7 @@ public class LanceDataset
     this.managedVersioning = managedVersioning;
     this.stagedCommit = stagedCommit;
     this.fileFormatVersion = fileFormatVersion;
+    this.tableProperties = Collections.unmodifiableMap(new HashMap<>(tableProperties));
   }
 
   public LanceSparkReadOptions readOptions() {
@@ -272,6 +280,11 @@ public class LanceDataset
   @Override
   public StructType schema() {
     return sparkSchema;
+  }
+
+  @Override
+  public Map<String, String> properties() {
+    return tableProperties;
   }
 
   @Override

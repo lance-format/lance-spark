@@ -19,7 +19,10 @@ import org.lance.spark.TestUtils;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -359,6 +362,42 @@ public abstract class BaseSparkConnectorReadTest {
     assertFalse(
         physicalPlan.contains("c#"),
         "Column 'c' should not be projected for COUNT(x): " + physicalPlan);
+  }
+
+  /**
+   * Regression test: filtering on string values containing single quotes (e.g., O'Brien) produced
+   * malformed pushed-down SQL: {@code name == 'O'Brien'} — the unescaped quote broke the string
+   * literal. Without the fix, lance-core's DataFusion tokenizer throws {@code
+   * IllegalArgumentException: Unterminated string literal}, crashing the query. The fix escapes
+   * single quotes as {@code ''} per SQL standard.
+   */
+  @Test
+  public void testFilterWithSingleQuoteInStringValue() {
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("name", DataTypes.StringType, true);
+    List<Row> testData =
+        Arrays.asList(
+            RowFactory.create(1, "O'Brien"),
+            RowFactory.create(2, "Smith"),
+            RowFactory.create(3, "D'Angelo"));
+    Dataset<Row> df = spark.createDataFrame(testData, schema);
+
+    String datasetPath = tempDir.toString() + "/quote_filter_test";
+    df.write().format(LanceDataSource.name).save(datasetPath);
+
+    Dataset<Row> lanceData = spark.read().format(LanceDataSource.name).load(datasetPath);
+
+    Dataset<Row> result = lanceData.filter("name = \"O'Brien\"");
+
+    // Without the fix, this crashes with:
+    //   IllegalArgumentException: Unterminated string literal
+    // because the pushed SQL contains unescaped quotes: name == 'O'Brien'
+    List<Row> rows = result.collectAsList();
+    assertEquals(1, rows.size());
+    assertEquals(1, rows.get(0).getInt(0));
+    assertEquals("O'Brien", rows.get(0).getString(1));
   }
 
   @Test

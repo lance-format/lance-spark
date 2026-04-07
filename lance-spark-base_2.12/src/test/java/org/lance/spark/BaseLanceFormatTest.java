@@ -30,7 +30,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -392,5 +394,119 @@ public abstract class BaseLanceFormatTest {
     assertEquals("Diana", result.get(4).getStruct(1).getString(0));
     assertEquals("Tokyo", result.get(4).getStruct(1).getStruct(1).getString(0));
     assertEquals("Japan", result.get(4).getStruct(1).getStruct(1).getString(1));
+  }
+
+  /**
+   * Tests that a table with a Map column can be created, written to, and read back correctly.
+   * Covers non-null maps, null maps, empty maps, and multiple rows.
+   */
+  @Test
+  public void testMapColumnWriteAndRead() {
+    String outputPath = tempDir.resolve("test_map_column.lance").toString();
+
+    // Schema: id + map<string, string>
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add(
+                "props",
+                DataTypes.createMapType(DataTypes.StringType, DataTypes.StringType, true),
+                true);
+
+    // Row 0: normal map
+    Map<String, String> map0 = new HashMap<>();
+    map0.put("color", "red");
+    map0.put("size", "large");
+
+    // Row 1: null map
+    // Row 2: empty map
+    Map<String, String> map2 = new HashMap<>();
+
+    // Row 3: single-entry map
+    Map<String, String> map3 = new HashMap<>();
+    map3.put("key", "value");
+
+    List<Row> data =
+        Arrays.asList(
+            RowFactory.create(0, map0),
+            RowFactory.create(1, null),
+            RowFactory.create(2, map2),
+            RowFactory.create(3, map3));
+    Dataset<Row> df = spark.createDataFrame(data, schema);
+
+    // Write
+    df.write()
+        .format("lance")
+        .option("file_format_version", "2.2")
+        .mode(SaveMode.ErrorIfExists)
+        .save(outputPath);
+
+    // Read back and sort by id to get deterministic order
+    Dataset<Row> readDf = spark.read().format("lance").load(outputPath);
+    List<Row> result = readDf.sort("id").collectAsList();
+
+    assertEquals(4, result.size());
+
+    // Row 0: {"color" -> "red", "size" -> "large"}
+    assertFalse(result.get(0).isNullAt(1));
+    @SuppressWarnings("unchecked")
+    Map<String, String> readMap0 = result.get(0).getJavaMap(1);
+    assertEquals(2, readMap0.size());
+    assertEquals("red", readMap0.get("color"));
+    assertEquals("large", readMap0.get("size"));
+
+    // Row 1: null
+    assertTrue(result.get(1).isNullAt(1));
+
+    // Row 2: empty map
+    assertFalse(result.get(2).isNullAt(1));
+    @SuppressWarnings("unchecked")
+    Map<String, String> readMap2 = result.get(2).getJavaMap(1);
+    assertEquals(0, readMap2.size());
+
+    // Row 3: {"key" -> "value"}
+    assertFalse(result.get(3).isNullAt(1));
+    @SuppressWarnings("unchecked")
+    Map<String, String> readMap3 = result.get(3).getJavaMap(1);
+    assertEquals(1, readMap3.size());
+    assertEquals("value", readMap3.get("key"));
+  }
+
+  /** Tests Map with non-string value type: Map(StringType, IntegerType). */
+  @Test
+  public void testMapColumnWithIntValues() {
+    String outputPath = tempDir.resolve("test_map_int_values.lance").toString();
+
+    StructType schema =
+        new StructType()
+            .add(
+                "scores",
+                DataTypes.createMapType(DataTypes.StringType, DataTypes.IntegerType, true),
+                true);
+
+    Map<String, Integer> mapValue = new HashMap<>();
+    mapValue.put("math", 95);
+    mapValue.put("science", 88);
+
+    List<Row> data = Arrays.asList(RowFactory.create(mapValue));
+    Dataset<Row> df = spark.createDataFrame(data, schema);
+
+    df.write()
+        .format("lance")
+        .option("file_format_version", "2.2")
+        .mode(SaveMode.ErrorIfExists)
+        .save(outputPath);
+
+    Dataset<Row> readDf = spark.read().format("lance").load(outputPath);
+    List<Row> result = readDf.collectAsList();
+
+    assertEquals(1, result.size());
+    assertFalse(result.get(0).isNullAt(0));
+
+    @SuppressWarnings("unchecked")
+    Map<String, Integer> readMap = result.get(0).getJavaMap(0);
+    assertEquals(2, readMap.size());
+    assertEquals(95, readMap.get("math"));
+    assertEquals(88, readMap.get("science"));
   }
 }

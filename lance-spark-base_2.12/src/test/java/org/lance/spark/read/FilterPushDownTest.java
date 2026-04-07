@@ -109,6 +109,23 @@ public class FilterPushDownTest {
   }
 
   @Test
+  public void testStringValueWithSingleQuoteEscaping() {
+    Filter[] filters = new Filter[] {new EqualTo("name", "O'Brien")};
+    Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
+    assertTrue(whereClause.isPresent());
+    assertEquals("(name == 'O''Brien')", whereClause.get());
+  }
+
+  @Test
+  public void testStringInFilterWithSingleQuoteEscaping() {
+    Object[] values = new Object[] {"O'Brien", "D'Angelo"};
+    Filter[] filters = new Filter[] {new In("name", values)};
+    Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
+    assertTrue(whereClause.isPresent());
+    assertEquals("(name IN ('O''Brien','D''Angelo'))", whereClause.get());
+  }
+
+  @Test
   public void testDecimalFilterPushDown() {
     // Decimal comparisons must use CAST so Lance's DataFusion parser produces Decimal128,
     // not Float64, which would fail type resolution against Decimal columns.

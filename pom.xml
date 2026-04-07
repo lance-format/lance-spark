@@ -4,7 +4,7 @@
 
     <groupId>org.lance</groupId>
     <artifactId>lance-spark-root</artifactId>
-    <version>0.3.0-beta.3</version>
+    <version>0.4.0-beta.1</version>
     <packaging>pom</packaging>
 
     <name>${project.artifactId}</name>
@@ -50,8 +50,8 @@
     </distributionManagement>
 
     <properties>
-        <lance-spark.version>0.3.0-beta.3</lance-spark.version>
-        <lance.version>4.1.0-beta.3</lance.version>
+        <lance-spark.version>0.4.0-beta.1</lance-spark.version>
+        <lance.version>5.0.0-beta.2</lance.version>
         <lance-namespace-impl.version>0.1.3</lance-namespace-impl.version>
 
         <arrow14.version>14.0.2</arrow14.version>
@@ -108,7 +108,7 @@
         <junit.version>5.10.1</junit.version>
         <scalatest.version>3.2.10</scalatest.version>
 
-        <scala-maven-plugin.version>3.2.1</scala-maven-plugin.version>
+        <scala-maven-plugin.version>4.9.10</scala-maven-plugin.version>
         <maven-dependency-plugin.version>3.6.1</maven-dependency-plugin.version>
         <maven-enforcer-plugin.version>1.4.1</maven-enforcer-plugin.version>
         <maven-jar-plugin.version>3.4.2</maven-jar-plugin.version>
