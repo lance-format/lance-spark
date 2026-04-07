@@ -143,7 +143,7 @@ case class AddIndexExec(
     if (readOptions.hasNamespace) {
       Dataset.open()
         .allocator(LanceRuntime.allocator())
-        .namespace(readOptions.getNamespace)
+        .namespaceClient(readOptions.getNamespace)
         .readOptions(readOptions.toReadOptions)
         .tableId(readOptions.getTableId)
         .build()
@@ -599,20 +599,12 @@ object IndexUtils {
       namespaceImpl: Option[String],
       namespaceProperties: Option[Map[String, String]],
       tableId: Option[List[String]]): Dataset = {
-    // Build ReadOptions with merged storage options and credential refresh provider
+    // Build ReadOptions with merged storage options
     val merged = LanceRuntime.mergeStorageOptions(
       readOptions.getStorageOptions,
       initialStorageOptions.map(_.asJava).orNull)
 
-    val provider = LanceRuntime.getOrCreateStorageOptionsProvider(
-      namespaceImpl.orNull,
-      namespaceProperties.map(_.asJava).orNull,
-      tableId.map(_.asJava).orNull)
-
     val builder = new ReadOptions.Builder().setStorageOptions(merged)
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider)
-    }
 
     Dataset.open()
       .allocator(LanceRuntime.allocator())

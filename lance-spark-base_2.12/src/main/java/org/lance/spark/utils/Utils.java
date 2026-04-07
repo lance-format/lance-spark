@@ -55,7 +55,7 @@ public class Utils {
       LanceNamespace namespace, List<String> tableId, ReadOptions readOptions) {
     return Dataset.open()
         .allocator(LanceRuntime.allocator())
-        .namespace(namespace)
+        .namespaceClient(namespace)
         .tableId(tableId)
         .readOptions(readOptions)
         .build();

@@ -1038,7 +1038,7 @@ public abstract class SparkLanceNamespaceTestBase {
     if (readOptions.hasNamespace()) {
       return org.lance.Dataset.open()
           .allocator(LanceRuntime.allocator())
-          .namespace(readOptions.getNamespace())
+          .namespaceClient(readOptions.getNamespace())
           .tableId(readOptions.getTableId())
           .readOptions(readOptions.toReadOptions())
           .build();

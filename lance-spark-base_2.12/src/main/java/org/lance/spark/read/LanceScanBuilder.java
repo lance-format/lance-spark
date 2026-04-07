@@ -101,7 +101,7 @@ public class LanceScanBuilder
         lazyDataset =
             Dataset.open()
                 .allocator(LanceRuntime.allocator())
-                .namespace(readOptions.getNamespace())
+                .namespaceClient(readOptions.getNamespace())
                 .tableId(readOptions.getTableId())
                 .readOptions(readOptions.toReadOptions())
                 .build();

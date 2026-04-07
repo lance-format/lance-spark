@@ -131,19 +131,12 @@ case class OptimizeExec(
       nsProps: Option[Map[String, String]],
       tableId: Option[List[String]],
       initialStorageOpts: Option[Map[String, String]]): Dataset = {
-    // Build ReadOptions with merged storage options and credential refresh provider
+    // Build ReadOptions with merged storage options
     val merged = LanceRuntime.mergeStorageOptions(
       readOptions.getStorageOptions,
       initialStorageOpts.map(_.asJava).orNull)
-    val provider = LanceRuntime.getOrCreateStorageOptionsProvider(
-      nsImpl.orNull,
-      nsProps.map(_.asJava).orNull,
-      tableId.map(_.asJava).orNull)
 
     val builder = new ReadOptions.Builder().setStorageOptions(merged)
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider)
-    }
 
     Dataset.open()
       .allocator(LanceRuntime.allocator())
@@ -165,19 +158,12 @@ case class OptimizeTaskExecutor(
     val readOptions = decode[LanceSparkReadOptions](lanceConf)
     val compactionTask = decode[CompactionTask](task)
 
-    // Build ReadOptions with merged storage options and credential refresh provider
+    // Build ReadOptions with merged storage options
     val merged = LanceRuntime.mergeStorageOptions(
       readOptions.getStorageOptions,
       initialStorageOptions.map(_.asJava).orNull)
-    val provider = LanceRuntime.getOrCreateStorageOptionsProvider(
-      namespaceImpl.orNull,
-      namespaceProperties.map(_.asJava).orNull,
-      tableId.map(_.asJava).orNull)
 
     val builder = new ReadOptions.Builder().setStorageOptions(merged)
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider)
-    }
 
     val dataset = Dataset.open()
       .allocator(LanceRuntime.allocator())

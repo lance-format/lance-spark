@@ -15,13 +15,11 @@ package org.lance.spark;
 
 import org.lance.Session;
 import org.lance.namespace.LanceNamespace;
-import org.lance.namespace.LanceNamespaceStorageOptionsProvider;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -200,34 +198,6 @@ public final class LanceRuntime {
       }
       CATALOG_SESSIONS.clear();
     }
-  }
-
-  /**
-   * Checks if namespace configuration is available for credential refresh.
-   *
-   * @param namespaceImpl the namespace implementation type
-   * @param tableId the table identifier
-   * @return true if namespace config is available (namespaceImpl and tableId are non-null)
-   */
-  public static boolean hasNamespaceConfig(String namespaceImpl, List<String> tableId) {
-    return namespaceImpl != null && tableId != null;
-  }
-
-  /**
-   * Creates a storage options provider for credential refresh if namespace config is available.
-   *
-   * @param namespaceImpl the namespace implementation type
-   * @param namespaceProperties the namespace connection properties (can be null)
-   * @param tableId the table identifier
-   * @return a LanceNamespaceStorageOptionsProvider, or null if namespace config not available
-   */
-  public static LanceNamespaceStorageOptionsProvider getOrCreateStorageOptionsProvider(
-      String namespaceImpl, Map<String, String> namespaceProperties, List<String> tableId) {
-    if (!hasNamespaceConfig(namespaceImpl, tableId)) {
-      return null;
-    }
-    LanceNamespace ns = LanceNamespace.connect(namespaceImpl, namespaceProperties, allocator());
-    return new LanceNamespaceStorageOptionsProvider(ns, tableId);
   }
 
   /**

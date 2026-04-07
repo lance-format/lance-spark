@@ -17,7 +17,6 @@ import org.lance.Dataset;
 import org.lance.ReadOptions;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
-import org.lance.namespace.LanceNamespaceStorageOptionsProvider;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.vectorized.LanceArrowColumnVector;
@@ -97,20 +96,11 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(
             readOptions.getStorageOptions(), inputPartition.getInitialStorageOptions());
-    LanceNamespaceStorageOptionsProvider provider =
-        LanceRuntime.getOrCreateStorageOptionsProvider(
-            inputPartition.getNamespaceImpl(),
-            inputPartition.getNamespaceProperties(),
-            readOptions.getTableId());
 
     ReadOptions.Builder builder =
         new ReadOptions.Builder()
             .setStorageOptions(merged)
             .setSession(LanceRuntime.session(readOptions.getCatalogName()));
-
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider);
-    }
     if (readOptions.getVersion() != null) {
       builder.setVersion(readOptions.getVersion());
     }

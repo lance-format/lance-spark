@@ -145,7 +145,7 @@ case class SetUnenforcedPrimaryKeyExec(
     if (readOptions.hasNamespace) {
       Dataset.open()
         .allocator(LanceRuntime.allocator())
-        .namespace(readOptions.getNamespace)
+        .namespaceClient(readOptions.getNamespace)
         .readOptions(readOptions.toReadOptions())
         .tableId(readOptions.getTableId)
         .build()

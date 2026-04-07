@@ -121,9 +121,7 @@ public class StagedCommit {
     final Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
     final CommitBuilder builder =
         new CommitBuilder(datasetUri, LanceRuntime.allocator()).writeParams(storageOptions);
-    if (enableStableRowIds) {
-      builder.useStableRowIds(true);
-    }
+    builder.useStableRowIds(enableStableRowIds);
     applyManagedVersioning(builder);
     try (Transaction txn = new Transaction.Builder().operation(operation).build();
         Dataset committed = builder.execute(txn)) {
@@ -147,7 +145,7 @@ public class StagedCommit {
 
   private void applyManagedVersioning(final CommitBuilder builder) {
     if (managedVersioning) {
-      builder.namespace(namespace).tableId(tableId);
+      builder.namespaceClient(namespace).tableId(tableId);
     }
   }
 

@@ -16,7 +16,6 @@ package org.lance.spark;
 import org.lance.ReadOptions;
 import org.lance.WriteParams;
 import org.lance.WriteParams.WriteMode;
-import org.lance.io.StorageOptionsProvider;
 import org.lance.namespace.LanceNamespace;
 
 import com.google.common.base.Preconditions;
@@ -195,18 +194,6 @@ public class LanceSparkWriteOptions implements Serializable {
   }
 
   /**
-   * Creates a StorageOptionsProvider for dynamic credential refresh.
-   *
-   * @return a StorageOptionsProvider if namespace is configured, null otherwise
-   */
-  public org.lance.io.StorageOptionsProvider getStorageOptionsProvider() {
-    if (namespace != null && tableId != null) {
-      return new org.lance.namespace.LanceNamespaceStorageOptionsProvider(namespace, tableId);
-    }
-    return null;
-  }
-
-  /**
    * Returns whether the write mode is overwrite.
    *
    * @return true if write mode is OVERWRITE
@@ -225,29 +212,20 @@ public class LanceSparkWriteOptions implements Serializable {
         new ReadOptions.Builder()
             .setStorageOptions(storageOptions)
             .setSession(LanceRuntime.session());
-    StorageOptionsProvider provider = getStorageOptionsProvider();
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider);
-    }
     return builder.build();
   }
 
   /**
-   * Converts this to Lance ReadOptions for worker-side operations with credential refresh.
+   * Converts this to Lance ReadOptions for worker-side operations.
    *
    * @param initialStorageOptions initial storage options from describeTable on the driver
-   * @param provider a StorageOptionsProvider for dynamic credential refresh, or null
-   * @return ReadOptions with merged storage options, session, and credential provider
+   * @return ReadOptions with merged storage options and session
    */
-  public ReadOptions toReadOptions(
-      Map<String, String> initialStorageOptions, StorageOptionsProvider provider) {
+  public ReadOptions toReadOptions(Map<String, String> initialStorageOptions) {
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(storageOptions, initialStorageOptions);
     ReadOptions.Builder builder =
         new ReadOptions.Builder().setStorageOptions(merged).setSession(LanceRuntime.session());
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider);
-    }
     return builder.build();
   }
 
