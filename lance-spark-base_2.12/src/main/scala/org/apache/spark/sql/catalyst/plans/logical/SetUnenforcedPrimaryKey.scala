@@ -16,29 +16,29 @@ package org.apache.spark.sql.catalyst.plans.logical
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference}
 import org.apache.spark.sql.types.{DataTypes, StructField, StructType}
 
-case class Optimize(
+case class SetUnenforcedPrimaryKey(
     table: LogicalPlan,
-    args: Seq[LanceNamedArgument]) extends Command {
+    columns: Seq[String]) extends Command {
 
   override def children: Seq[LogicalPlan] = Seq(table)
 
-  override def output: Seq[Attribute] = OptimizeOutputType.SCHEMA
+  override def output: Seq[Attribute] = SetUnenforcedPrimaryKeyOutputType.SCHEMA
 
   override def simpleString(maxFields: Int): String = {
-    "OptimizeLanceDataset"
+    s"SetUnenforcedPrimaryKey(${columns.mkString(", ")})"
   }
 
-  override protected def withNewChildrenInternal(newChildren: IndexedSeq[LogicalPlan]): Optimize = {
-    copy(newChildren(0), this.args)
+  override protected def withNewChildrenInternal(
+      newChildren: IndexedSeq[LogicalPlan]): SetUnenforcedPrimaryKey = {
+    copy(newChildren(0), this.columns)
   }
 }
 
-object OptimizeOutputType {
+object SetUnenforcedPrimaryKeyOutputType {
   val SCHEMA = StructType(
     Array(
-      StructField("fragments_removed", DataTypes.LongType, nullable = true),
-      StructField("fragments_added", DataTypes.LongType, nullable = true),
-      StructField("files_removed", DataTypes.LongType, nullable = true),
-      StructField("files_added", DataTypes.LongType, nullable = true)))
-    .map(field => AttributeReference(field.name, field.dataType, field.nullable, field.metadata)())
+      StructField("status", DataTypes.StringType, nullable = false),
+      StructField("primary_key_columns", DataTypes.StringType, nullable = false)))
+    .map(field =>
+      AttributeReference(field.name, field.dataType, field.nullable, field.metadata)())
 }

@@ -18,7 +18,7 @@ import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.arrow.vector.ipc.{ArrowStreamReader, ArrowStreamWriter}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
-import org.apache.spark.sql.catalyst.plans.logical.{AddIndexOutputType, NamedArgument}
+import org.apache.spark.sql.catalyst.plans.logical.{AddIndexOutputType, LanceNamedArgument}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.LanceArrowUtils
@@ -54,7 +54,7 @@ case class AddIndexExec(
     indexName: String,
     method: String,
     columns: Seq[String],
-    args: Seq[NamedArgument]) extends LeafV2CommandExec {
+    args: Seq[LanceNamedArgument]) extends LeafV2CommandExec {
 
   override def output: Seq[Attribute] = AddIndexOutputType.SCHEMA
 
@@ -557,7 +557,7 @@ object IndexUtils {
     }
   }
 
-  def toJson(args: Seq[NamedArgument]): String = {
+  def toJson(args: Seq[LanceNamedArgument]): String = {
     if (args.isEmpty) {
       "{}"
     } else {

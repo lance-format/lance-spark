@@ -11,16 +11,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.lance.spark;
+package org.lance.spark.update;
 
-import org.apache.spark.sql.types.StructType;
-
-import java.util.Collections;
-
-public class LanceSparkDataSource extends LanceDataSource {
-  @Override
-  public LanceDataset createDataset(LanceSparkReadOptions readOptions, StructType sparkSchema) {
-    return new LancePositionDeltaDataset(
-        readOptions, sparkSchema, null, null, null, false, null, Collections.emptyMap());
-  }
-}
+public class SetUnenforcedPrimaryKeyTest extends BaseSetUnenforcedPrimaryKeyTest {}

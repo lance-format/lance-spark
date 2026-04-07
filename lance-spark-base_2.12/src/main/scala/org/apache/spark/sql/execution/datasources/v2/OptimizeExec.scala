@@ -15,7 +15,7 @@ package org.apache.spark.sql.execution.datasources.v2
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
-import org.apache.spark.sql.catalyst.plans.logical.{NamedArgument, OptimizeOutputType}
+import org.apache.spark.sql.catalyst.plans.logical.{LanceNamedArgument, OptimizeOutputType}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
 import org.lance.{Dataset, ReadOptions}
@@ -27,7 +27,7 @@ import scala.collection.JavaConverters._
 case class OptimizeExec(
     catalog: TableCatalog,
     ident: Identifier,
-    args: Seq[NamedArgument]) extends LeafV2CommandExec {
+    args: Seq[LanceNamedArgument]) extends LeafV2CommandExec {
 
   override def output: Seq[Attribute] = OptimizeOutputType.SCHEMA
 

@@ -15,12 +15,14 @@ package org.lance.spark;
 
 import org.lance.Version;
 
+import org.apache.spark.sql.AnalysisException;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
+import org.apache.spark.sql.connector.catalog.TableChange;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -694,6 +696,231 @@ public abstract class SparkLanceNamespaceTestBase {
         () -> catalog.loadTable(Identifier.of(new String[] {"default"}, "non_existent_table")));
   }
 
+  @Test
+  public void testSetTableProperties() throws Exception {
+    String tableName = generateTableName("set_props");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    spark.sql("ALTER TABLE " + fullName + " SET TBLPROPERTIES ('key1' = 'val1', 'key2' = 'val2')");
+
+    Map<String, String> config = getTableConfig(tableName);
+    assertEquals("val1", config.get("key1"));
+    assertEquals("val2", config.get("key2"));
+  }
+
+  @Test
+  public void testUnsetTableProperties() throws Exception {
+    String tableName = generateTableName("unset_props");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    spark.sql("ALTER TABLE " + fullName + " SET TBLPROPERTIES ('key1' = 'val1', 'key2' = 'val2')");
+    spark.sql("ALTER TABLE " + fullName + " UNSET TBLPROPERTIES ('key1')");
+
+    Map<String, String> config = getTableConfig(tableName);
+    assertFalse(config.containsKey("key1"));
+    assertEquals("val2", config.get("key2"));
+  }
+
+  @Test
+  public void testSetPropertiesOnNonExistentTableFails() {
+    String tableName = generateTableName("nonexistent_props");
+    String fullName = catalogName + ".default." + tableName;
+
+    // When the table doesn't exist, it throws ExtendedAnalysisException with
+    // TABLE_OR_VIEW_NOT_FOUND — the catalog's renameTable() is never reached.
+    AnalysisException ex =
+        assertThrows(
+            AnalysisException.class,
+            () -> {
+              spark.sql("ALTER TABLE " + fullName + " SET TBLPROPERTIES ('key1' = 'val1')");
+            });
+    assertEquals("TABLE_OR_VIEW_NOT_FOUND", ex.getErrorClass());
+  }
+
+  @Test
+  public void testOverwriteExistingProperty() throws Exception {
+    String tableName = generateTableName("overwrite_props");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    spark.sql("ALTER TABLE " + fullName + " SET TBLPROPERTIES ('key1' = 'original')");
+    spark.sql("ALTER TABLE " + fullName + " SET TBLPROPERTIES ('key1' = 'updated')");
+
+    Map<String, String> config = getTableConfig(tableName);
+    assertEquals("updated", config.get("key1"));
+  }
+
+  @Test
+  public void testAlterTableWithEmptyChanges() throws Exception {
+    String tableName = generateTableName("empty_changes");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    spark.sql("ALTER TABLE " + fullName + " SET TBLPROPERTIES ('key1' = 'val1', 'key2' = 'val2')");
+
+    // Call alterTable with no changes — should be a no-op
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    catalog.alterTable(ident);
+
+    Map<String, String> config = getTableConfig(tableName);
+    assertEquals("val1", config.get("key1"));
+    assertEquals("val2", config.get("key2"));
+  }
+
+  @Test
+  public void testUnsetNonExistentProperty() throws Exception {
+    String tableName = generateTableName("unset_missing");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    spark.sql("ALTER TABLE " + fullName + " SET TBLPROPERTIES ('key1' = 'val1')");
+
+    // Unsetting a property that was never set should not fail
+    spark.sql("ALTER TABLE " + fullName + " UNSET TBLPROPERTIES ('nonexistent_key')");
+
+    Map<String, String> config = getTableConfig(tableName);
+    assertEquals("val1", config.get("key1"));
+  }
+
+  @Test
+  public void testSetAndUnsetViaAlterTableApi() throws Exception {
+    String tableName = generateTableName("set_unset_api");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    spark.sql("ALTER TABLE " + fullName + " SET TBLPROPERTIES ('a' = '1', 'b' = '2', 'c' = '3')");
+
+    // Call alterTable with both SET and UNSET changes in one invocation
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    catalog.alterTable(ident, TableChange.setProperty("d", "4"), TableChange.removeProperty("b"));
+
+    Map<String, String> config = getTableConfig(tableName);
+    assertEquals("1", config.get("a"));
+    assertFalse(config.containsKey("b"));
+    assertEquals("3", config.get("c"));
+    assertEquals("4", config.get("d"));
+  }
+
+  @Test
+  public void testPropertiesSurviveDataOperations() throws Exception {
+    String tableName = generateTableName("props_survive");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    spark.sql("ALTER TABLE " + fullName + " SET TBLPROPERTIES ('key1' = 'val1')");
+
+    // Perform data operations
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, 'Alice')");
+    spark.sql("INSERT INTO " + fullName + " VALUES (2, 'Bob')");
+
+    // Properties should still be present after data operations
+    Map<String, String> config = getTableConfig(tableName);
+    assertEquals("val1", config.get("key1"));
+  }
+
+  @Test
+  public void testUnsupportedTableChangeThrows() throws Exception {
+    String tableName = generateTableName("unsupported_change");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    UnsupportedOperationException ex =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () -> {
+              catalog.alterTable(
+                  ident,
+                  TableChange.addColumn(
+                      new String[] {"new_col"}, org.apache.spark.sql.types.DataTypes.StringType));
+            });
+    assertTrue(ex.getMessage().contains("Only SET/UNSET TBLPROPERTIES is supported"));
+  }
+
+  @Test
+  public void testShowTablePropertiesEmpty() throws Exception {
+    String tableName = generateTableName("show_props_empty");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+
+    List<Row> rows = spark.sql("SHOW TBLPROPERTIES " + fullName).collectAsList();
+    // A fresh table has no user-set properties, but Lance may add internal
+    // config keys (e.g. lance.auto_cleanup.*).  Verify no user keys are present.
+    for (Row row : rows) {
+      assertTrue(
+          row.getString(0).startsWith("lance."),
+          "Unexpected non-internal property on fresh table: " + row.getString(0));
+    }
+  }
+
+  @Test
+  public void testShowTableProperties() throws Exception {
+    String tableName = generateTableName("show_props");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    spark.sql(
+        "ALTER TABLE " + fullName + " SET TBLPROPERTIES ('team' = 'data-eng', 'version' = '2.0')");
+
+    List<Row> rows = spark.sql("SHOW TBLPROPERTIES " + fullName).collectAsList();
+    Map<String, String> props = new HashMap<>();
+    for (Row row : rows) {
+      props.put(row.getString(0), row.getString(1));
+    }
+    assertEquals("data-eng", props.get("team"));
+    assertEquals("2.0", props.get("version"));
+  }
+
+  @Test
+  public void testShowTablePropertiesByKey() throws Exception {
+    String tableName = generateTableName("show_props_key");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    spark.sql(
+        "ALTER TABLE " + fullName + " SET TBLPROPERTIES ('team' = 'data-eng', 'version' = '2.0')");
+
+    List<Row> rows = spark.sql("SHOW TBLPROPERTIES " + fullName + " ('team')").collectAsList();
+    assertEquals(1, rows.size());
+    assertEquals("team", rows.get(0).getString(0));
+    assertEquals("data-eng", rows.get(0).getString(1));
+  }
+
+  @Test
+  public void testShowTablePropertiesByNonExistentKey() throws Exception {
+    String tableName = generateTableName("show_props_missing_key");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    spark.sql("ALTER TABLE " + fullName + " SET TBLPROPERTIES ('team' = 'data-eng')");
+
+    List<Row> rows =
+        spark.sql("SHOW TBLPROPERTIES " + fullName + " ('nonexistent')").collectAsList();
+    assertEquals(1, rows.size());
+    // Spark returns the key with a message like "does not have property"
+    String value = rows.get(0).getString(1);
+    assertTrue(
+        value.contains("does not have property"), "Expected informational message, got: " + value);
+  }
+
+  @Test
+  public void testShowTablePropertiesOnNonExistentTableFails() {
+    String tableName = generateTableName("show_props_nonexistent");
+    String fullName = catalogName + ".default." + tableName;
+
+    AnalysisException ex =
+        assertThrows(
+            AnalysisException.class,
+            () -> {
+              spark.sql("SHOW TBLPROPERTIES " + fullName);
+            });
+    assertEquals("TABLE_OR_VIEW_NOT_FOUND", ex.getErrorClass());
+  }
+
   private boolean checkDataset(int expectedSize, String tableName) {
     Dataset<Row> actual = spark.sql("SELECT * FROM " + tableName);
     List<Row> res = actual.collectAsList();
@@ -707,6 +934,15 @@ public abstract class SparkLanceNamespaceTestBase {
     LanceSparkReadOptions readOptions = lanceTable.readOptions();
     try (org.lance.Dataset dataset = openLatestDataset(readOptions)) {
       return dataset.getVersion();
+    }
+  }
+
+  private Map<String, String> getTableConfig(String tableName) throws Exception {
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    LanceDataset lanceTable = (LanceDataset) catalog.loadTable(ident);
+    LanceSparkReadOptions readOptions = lanceTable.readOptions();
+    try (org.lance.Dataset dataset = openLatestDataset(readOptions)) {
+      return dataset.getConfig();
     }
   }
 

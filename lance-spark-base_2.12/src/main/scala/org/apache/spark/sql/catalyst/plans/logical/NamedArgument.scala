@@ -13,4 +13,4 @@
  */
 package org.apache.spark.sql.catalyst.plans.logical
 
-case class NamedArgument(name: String, value: Any)
+case class LanceNamedArgument(name: String, value: Any)

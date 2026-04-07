@@ -20,7 +20,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.SpecializedGetters
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.LanceArrowUtils
-import org.lance.spark.utils.VectorUtils
+import org.lance.spark.utils.Float16Utils
 
 import scala.collection.JavaConverters._
 
@@ -79,6 +79,9 @@ object LanceArrowWriter {
       case (IntegerType, vector: IntVector) => new IntegerWriter(vector)
       case (LongType, vector: BigIntVector) => new LongWriter(vector)
       case (LongType, vector: UInt8Vector) => new UnsignedLongWriter(vector)
+      case (FloatType, vector)
+          if vector.getClass.getName == "org.apache.arrow.vector.Float2Vector" =>
+        new Float2Writer(vector)
       case (FloatType, vector: Float4Vector) => new FloatWriter(vector)
       case (DoubleType, vector: Float8Vector) => new DoubleWriter(vector)
       case (dt: DecimalType, vector: DecimalVector) =>
@@ -116,14 +119,6 @@ object LanceArrowWriter {
     }
   }
 
-  private def shouldBeFixedSizeList(
-      metadata: org.apache.spark.sql.types.Metadata,
-      elementType: DataType): Boolean = {
-    metadata != null &&
-    metadata.contains(VectorUtils.ARROW_FIXED_SIZE_LIST_SIZE_KEY) &&
-    metadata.getLong(VectorUtils.ARROW_FIXED_SIZE_LIST_SIZE_KEY) > 0 &&
-    (elementType == FloatType || elementType == DoubleType)
-  }
 }
 
 /**
@@ -245,6 +240,27 @@ private[arrow] class FloatWriter(val valueVector: Float4Vector) extends LanceArr
   override def setNull(): Unit = {}
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
     valueVector.setSafe(count, input.getFloat(ordinal))
+  }
+}
+
+/**
+ * Writer for float16 (half-precision) vectors. Narrows float32 from Spark to float16 in Arrow.
+ * Uses cached reflection to call Float2Vector.setSafe(int, short) since Float2Vector
+ * is only available in Arrow 18+ (Spark 4.0+) and cannot be referenced at compile time.
+ */
+private[arrow] class Float2Writer(val valueVector: ValueVector) extends LanceArrowFieldWriter {
+  // Cache the setSafe(int, short) method once to avoid repeated reflection lookups.
+  private val setSafeMethod: java.lang.reflect.Method =
+    valueVector.getClass.getMethod("setSafe", classOf[Int], classOf[Short])
+
+  override def setNull(): Unit = {}
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    val floatValue = input.getFloat(ordinal)
+    val halfBits = Float16Utils.floatToHalf(floatValue)
+    setSafeMethod.invoke(
+      valueVector,
+      count: java.lang.Integer,
+      halfBits: java.lang.Short)
   }
 }
 

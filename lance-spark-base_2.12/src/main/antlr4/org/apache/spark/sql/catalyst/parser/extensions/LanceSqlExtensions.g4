@@ -26,6 +26,7 @@ statement
     | SHOW (INDEXES | INDEX) (FROM | IN) multipartIdentifier                                    #showIndexes
     | OPTIMIZE multipartIdentifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')?        #optimize
     | VACUUM multipartIdentifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')?          #vacuum
+    | ALTER TABLE multipartIdentifier SET UNENFORCED PRIMARY KEY '(' columnList ')'             #setUnenforcedPrimaryKey
     ;
 
 multipartIdentifier
@@ -74,9 +75,13 @@ FROM: 'FROM';
 IN: 'IN';
 INDEX: 'INDEX';
 INDEXES: 'INDEXES';
+KEY: 'KEY';
 OPTIMIZE: 'OPTIMIZE';
+PRIMARY: 'PRIMARY';
+SET: 'SET';
 SHOW: 'SHOW';
 TABLE: 'TABLE';
+UNENFORCED: 'UNENFORCED';
 UPDATE: 'UPDATE';
 USING: 'USING';
 VACUUM: 'VACUUM';

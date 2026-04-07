@@ -48,6 +48,7 @@ public class LanceArrowColumnVector extends ColumnVector {
   private LanceMapAccessor mapAccessor;
   private LanceLargeArrayAccessor largeArrayAccessor;
   private LargeVarCharAccessor largeVarCharAccessor;
+  private Float2Accessor float2Accessor;
   private DateMilliAccessor dateMilliAccessor;
   private LanceStructAccessor structAccessor;
   private ArrowColumnVector arrowColumnVector;
@@ -81,6 +82,10 @@ public class LanceArrowColumnVector extends ColumnVector {
       largeVarCharAccessor = new LargeVarCharAccessor((LargeVarCharVector) vector);
     } else if (vector instanceof DateMilliVector) {
       dateMilliAccessor = new DateMilliAccessor((DateMilliVector) vector);
+    } else if (vector.getClass().getName().equals("org.apache.arrow.vector.Float2Vector")) {
+      // Float2Vector is only available in Arrow 18+ (Spark 4.0+).
+      // Use class name check to avoid compile-time dependency.
+      float2Accessor = new Float2Accessor(vector);
     } else {
       arrowColumnVector = new ArrowColumnVector(vector);
     }
@@ -120,6 +125,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (largeVarCharAccessor != null) {
       largeVarCharAccessor.close();
+    }
+    if (float2Accessor != null) {
+      float2Accessor.close();
     }
     if (dateMilliAccessor != null) {
       dateMilliAccessor.close();
@@ -166,6 +174,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (largeVarCharAccessor != null) {
       return largeVarCharAccessor.getNullCount() > 0;
+    }
+    if (float2Accessor != null) {
+      return float2Accessor.getNullCount() > 0;
     }
     if (dateMilliAccessor != null) {
       return dateMilliAccessor.getNullCount() > 0;
@@ -214,6 +225,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     if (largeVarCharAccessor != null) {
       return largeVarCharAccessor.getNullCount();
     }
+    if (float2Accessor != null) {
+      return float2Accessor.getNullCount();
+    }
     if (dateMilliAccessor != null) {
       return dateMilliAccessor.getNullCount();
     }
@@ -260,6 +274,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (largeVarCharAccessor != null) {
       return largeVarCharAccessor.isNullAt(rowId);
+    }
+    if (float2Accessor != null) {
+      return float2Accessor.isNullAt(rowId);
     }
     if (dateMilliAccessor != null) {
       return dateMilliAccessor.isNullAt(rowId);
@@ -330,6 +347,9 @@ public class LanceArrowColumnVector extends ColumnVector {
 
   @Override
   public float getFloat(int rowId) {
+    if (float2Accessor != null) {
+      return float2Accessor.getFloat(rowId);
+    }
     if (arrowColumnVector != null) {
       return arrowColumnVector.getFloat(rowId);
     }

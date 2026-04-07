@@ -26,7 +26,7 @@ case class AddIndex(
     indexName: String,
     method: String,
     columns: Seq[String],
-    args: Seq[NamedArgument]) extends Command {
+    args: Seq[LanceNamedArgument]) extends Command {
 
   override def children: Seq[LogicalPlan] = Seq(table)
 
