@@ -18,6 +18,7 @@ import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.read.FragmentRowRange;
 import org.lance.spark.read.LanceInputPartition;
 
 import org.apache.arrow.vector.ipc.ArrowReader;
@@ -46,8 +47,10 @@ public class LanceFragmentScanner implements AutoCloseable {
     this.inputPartition = inputPartition;
   }
 
-  public static LanceFragmentScanner create(int fragmentId, LanceInputPartition inputPartition) {
+  public static LanceFragmentScanner create(
+      FragmentRowRange range, LanceInputPartition inputPartition) {
     try {
+      int fragmentId = range.getFragmentId();
       LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
       Fragment fragment =
           LanceDatasetCache.getFragment(
@@ -82,12 +85,31 @@ public class LanceFragmentScanner implements AutoCloseable {
         // we need to revisit this.
         scanOptions.prefilter(true);
       }
-      if (inputPartition.getLimit().isPresent()) {
-        scanOptions.limit(inputPartition.getLimit().get());
+
+      // Apply row-range offset/limit. For full-fragment ranges, fall through to Spark's
+      // pushed offset/limit for backward compatibility.
+      if (range.isFullFragment()) {
+        if (inputPartition.getLimit().isPresent()) {
+          scanOptions.limit(inputPartition.getLimit().get());
+        }
+        if (inputPartition.getOffset().isPresent()) {
+          scanOptions.offset(inputPartition.getOffset().get());
+        }
+      } else {
+        if (range.getOffset() > 0) {
+          scanOptions.offset(range.getOffset());
+        }
+        if (range.getNumRows() >= 0) {
+          long limit = range.getNumRows();
+          if (inputPartition.getLimit().isPresent()) {
+            limit = Math.min(limit, inputPartition.getLimit().get());
+          }
+          scanOptions.limit(limit);
+        } else if (inputPartition.getLimit().isPresent()) {
+          scanOptions.limit(inputPartition.getLimit().get());
+        }
       }
-      if (inputPartition.getOffset().isPresent()) {
-        scanOptions.offset(inputPartition.getOffset().get());
-      }
+
       if (inputPartition.getTopNSortOrders().isPresent()) {
         scanOptions.setColumnOrderings(inputPartition.getTopNSortOrders().get());
       }

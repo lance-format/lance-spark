@@ -21,6 +21,7 @@ import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
 import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.types.StructType;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -29,7 +30,7 @@ public class LanceInputPartition implements InputPartition {
 
   private final StructType schema;
   private final int partitionId;
-  private final LanceSplit lanceSplit;
+  private final List<FragmentRowRange> ranges;
   private final LanceSparkReadOptions readOptions;
   private final Optional<String> whereCondition;
   private final Optional<Integer> limit;
@@ -52,7 +53,7 @@ public class LanceInputPartition implements InputPartition {
   public LanceInputPartition(
       StructType schema,
       int partitionId,
-      LanceSplit lanceSplit,
+      List<FragmentRowRange> ranges,
       LanceSparkReadOptions readOptions,
       Optional<String> whereCondition,
       Optional<Integer> limit,
@@ -65,7 +66,7 @@ public class LanceInputPartition implements InputPartition {
       Map<String, String> namespaceProperties) {
     this.schema = schema;
     this.partitionId = partitionId;
-    this.lanceSplit = lanceSplit;
+    this.ranges = Collections.unmodifiableList(ranges);
     this.readOptions = readOptions;
     this.whereCondition = whereCondition;
     this.limit = limit;
@@ -86,8 +87,8 @@ public class LanceInputPartition implements InputPartition {
     return partitionId;
   }
 
-  public LanceSplit getLanceSplit() {
-    return lanceSplit;
+  public List<FragmentRowRange> getRanges() {
+    return ranges;
   }
 
   public LanceSparkReadOptions getReadOptions() {

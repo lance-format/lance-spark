@@ -37,7 +37,7 @@ public class LanceFragmentColumnarBatchScannerTest {
     while (fragmentId <= 1) {
       try (LanceFragmentColumnarBatchScanner scanner =
           LanceFragmentColumnarBatchScanner.create(
-              fragmentId, TestUtils.TestTable1Config.inputPartition)) {
+              FragmentRowRange.allRows(fragmentId), TestUtils.TestTable1Config.inputPartition)) {
         while (scanner.loadNextBatch()) {
           try (ColumnarBatch batch = scanner.getCurrentBatch()) {
             Iterator<InternalRow> rows = batch.rowIterator();

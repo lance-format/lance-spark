@@ -66,7 +66,10 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
     long totalCount = 0;
 
     try (Dataset dataset = openDataset(readOptions)) {
-      List<Integer> fragmentIds = inputPartition.getLanceSplit().getFragments();
+      List<Integer> fragmentIds =
+          inputPartition.getRanges().stream()
+              .map(FragmentRowRange::getFragmentId)
+              .collect(java.util.stream.Collectors.toList());
       if (fragmentIds.isEmpty()) {
         return 0;
       }

@@ -157,9 +157,9 @@ public abstract class BaseDeleteTableTest {
    * <p>Without fragment pruning, lance-core's {@code Fragment.newScan()} incorrectly returns rows
    * from non-matching fragments, causing a {@code DELETE WHERE _rowaddr = X} to delete the entire
    * dataset. This test validates both the correctness fix and the fragment ID mapping CONTRACT used
-   * by {@code RowAddressFilterAnalyzer}: {@code LanceSplit.getFragments()} returns Integer values
-   * that match {@code (int)(rowAddr >>> 32)}. If lance-core ever changes the {@code _rowaddr}
-   * encoding or fragment ID assignment, this test will fail.
+   * by {@code RowAddressFilterAnalyzer}: fragment IDs in {@code FragmentRowRange} match {@code
+   * (int)(rowAddr >>> 32)}. If lance-core ever changes the {@code _rowaddr} encoding or fragment ID
+   * assignment, this test will fail.
    *
    * <p>Setup: 3 separate INSERTs create 3 fragments. We read back all rows with {@code _rowaddr},
    * pick the {@code _rowaddr} of a specific row, delete by that address, and verify only that row

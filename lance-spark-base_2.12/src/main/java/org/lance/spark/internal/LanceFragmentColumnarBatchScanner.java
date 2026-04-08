@@ -14,6 +14,7 @@
 package org.lance.spark.internal;
 
 import org.lance.spark.LanceConstant;
+import org.lance.spark.read.FragmentRowRange;
 import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.vectorized.BlobStructAccessor;
 import org.lance.spark.vectorized.LanceArrowColumnVector;
@@ -49,8 +50,8 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
   }
 
   public static LanceFragmentColumnarBatchScanner create(
-      int fragmentId, LanceInputPartition inputPartition) {
-    LanceFragmentScanner fragmentScanner = LanceFragmentScanner.create(fragmentId, inputPartition);
+      FragmentRowRange range, LanceInputPartition inputPartition) {
+    LanceFragmentScanner fragmentScanner = LanceFragmentScanner.create(range, inputPartition);
     return new LanceFragmentColumnarBatchScanner(fragmentScanner, fragmentScanner.getArrowReader());
   }
 

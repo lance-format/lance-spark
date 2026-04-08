@@ -57,6 +57,7 @@ public class LanceSparkReadOptions implements Serializable {
   public static final String CONFIG_METADATA_CACHE_SIZE = "metadata_cache_size";
   public static final String CONFIG_BATCH_SIZE = "batch_size";
   public static final String CONFIG_TOP_N_PUSH_DOWN = "topN_push_down";
+  public static final String CONFIG_MAX_ROWS_PER_PARTITION = "max_rows_per_partition";
 
   public static final String CONFIG_NEAREST = "nearest";
   public static final String LANCE_FILE_SUFFIX = ".lance";
@@ -65,6 +66,7 @@ public class LanceSparkReadOptions implements Serializable {
   // Changed from 512 to 8192 for better OLAP scan performance (33x improvement)
   private static final int DEFAULT_BATCH_SIZE = 8192;
   private static final boolean DEFAULT_TOP_N_PUSH_DOWN = true;
+  private static final int DEFAULT_MAX_ROWS_PER_PARTITION = 0;
 
   private final String datasetUri;
   private final String dbPath;
@@ -77,6 +79,7 @@ public class LanceSparkReadOptions implements Serializable {
   private final int batchSize;
   private transient Query nearest;
   private final boolean topNPushDown;
+  private final int maxRowsPerPartition;
   private final Map<String, String> storageOptions;
 
   /** The namespace for credential vending. Transient as LanceNamespace is not serializable. */
@@ -101,6 +104,7 @@ public class LanceSparkReadOptions implements Serializable {
     this.batchSize = builder.batchSize;
     this.nearest = builder.nearest;
     this.topNPushDown = builder.topNPushDown;
+    this.maxRowsPerPartition = builder.maxRowsPerPartition;
     this.storageOptions = new HashMap<>(builder.storageOptions);
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
@@ -219,6 +223,10 @@ public class LanceSparkReadOptions implements Serializable {
     return topNPushDown;
   }
 
+  public int getMaxRowsPerPartition() {
+    return maxRowsPerPartition;
+  }
+
   public Map<String, String> getStorageOptions() {
     return storageOptions;
   }
@@ -271,6 +279,7 @@ public class LanceSparkReadOptions implements Serializable {
         .batchSize(this.batchSize)
         .nearest(this.nearest)
         .topNPushDown(this.topNPushDown)
+        .maxRowsPerPartition(this.maxRowsPerPartition)
         .storageOptions(this.storageOptions)
         .namespace(this.namespace)
         .tableId(this.tableId)
@@ -324,6 +333,7 @@ public class LanceSparkReadOptions implements Serializable {
     return pushDownFilters == that.pushDownFilters
         && batchSize == that.batchSize
         && topNPushDown == that.topNPushDown
+        && maxRowsPerPartition == that.maxRowsPerPartition
         && Objects.equals(nearest, that.nearest)
         && Objects.equals(datasetUri, that.datasetUri)
         && Objects.equals(blockSize, that.blockSize)
@@ -346,6 +356,7 @@ public class LanceSparkReadOptions implements Serializable {
         batchSize,
         nearest,
         topNPushDown,
+        maxRowsPerPartition,
         storageOptions,
         tableId);
   }
@@ -361,6 +372,7 @@ public class LanceSparkReadOptions implements Serializable {
     private Integer metadataCacheSize;
     private int batchSize = DEFAULT_BATCH_SIZE;
     private boolean topNPushDown = DEFAULT_TOP_N_PUSH_DOWN;
+    private int maxRowsPerPartition = DEFAULT_MAX_ROWS_PER_PARTITION;
     private Map<String, String> storageOptions = new HashMap<>();
     private LanceNamespace namespace;
     private List<String> tableId;
@@ -422,6 +434,13 @@ public class LanceSparkReadOptions implements Serializable {
       return this;
     }
 
+    public Builder maxRowsPerPartition(int maxRowsPerPartition) {
+      Preconditions.checkArgument(
+          maxRowsPerPartition >= 0, "max_rows_per_partition must be non-negative");
+      this.maxRowsPerPartition = maxRowsPerPartition;
+      return this;
+    }
+
     public Builder storageOptions(Map<String, String> storageOptions) {
       this.storageOptions = new HashMap<>(storageOptions);
       return this;
@@ -472,6 +491,11 @@ public class LanceSparkReadOptions implements Serializable {
       }
       if (options.containsKey(CONFIG_TOP_N_PUSH_DOWN)) {
         this.topNPushDown = Boolean.parseBoolean(options.get(CONFIG_TOP_N_PUSH_DOWN));
+      }
+      if (options.containsKey(CONFIG_MAX_ROWS_PER_PARTITION)) {
+        int parsed = Integer.parseInt(options.get(CONFIG_MAX_ROWS_PER_PARTITION));
+        Preconditions.checkArgument(parsed >= 0, "max_rows_per_partition must be non-negative");
+        this.maxRowsPerPartition = parsed;
       }
       if (options.containsKey(CONFIG_NEAREST)) {
         String json = options.get(CONFIG_NEAREST);

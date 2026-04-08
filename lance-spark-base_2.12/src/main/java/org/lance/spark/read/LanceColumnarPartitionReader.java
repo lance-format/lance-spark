@@ -22,13 +22,13 @@ import java.io.IOException;
 
 public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBatch> {
   private final LanceInputPartition inputPartition;
-  private int fragmentIndex;
+  private int rangeIndex;
   private LanceFragmentColumnarBatchScanner fragmentReader;
   private ColumnarBatch currentBatch;
 
   public LanceColumnarPartitionReader(LanceInputPartition inputPartition) {
     this.inputPartition = inputPartition;
-    this.fragmentIndex = 0;
+    this.rangeIndex = 0;
   }
 
   @Override
@@ -36,14 +36,14 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
     if (loadNextBatchFromCurrentReader()) {
       return true;
     }
-    while (fragmentIndex < inputPartition.getLanceSplit().getFragments().size()) {
+    while (rangeIndex < inputPartition.getRanges().size()) {
       if (fragmentReader != null) {
         fragmentReader.close();
       }
       fragmentReader =
           LanceFragmentColumnarBatchScanner.create(
-              inputPartition.getLanceSplit().getFragments().get(fragmentIndex), inputPartition);
-      fragmentIndex++;
+              inputPartition.getRanges().get(rangeIndex), inputPartition);
+      rangeIndex++;
       if (loadNextBatchFromCurrentReader()) {
         return true;
       }

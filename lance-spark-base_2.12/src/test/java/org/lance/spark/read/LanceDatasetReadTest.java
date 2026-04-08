@@ -31,6 +31,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -113,11 +114,11 @@ public class LanceDatasetReadTest {
       throws IOException {
     try (LanceFragmentScanner scanner =
         LanceFragmentScanner.create(
-            fragment,
+            FragmentRowRange.allRows(fragment),
             new LanceInputPartition(
                 schema,
                 0 /* partitionId */,
-                new LanceSplit(Arrays.asList(fragment)),
+                Collections.singletonList(FragmentRowRange.allRows(fragment)),
                 TestUtils.TestTable1Config.readOptions,
                 Optional.empty() /* whereCondition */,
                 Optional.empty() /* limit */,

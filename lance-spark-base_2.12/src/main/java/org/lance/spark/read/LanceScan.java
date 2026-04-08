@@ -13,7 +13,10 @@
  */
 package org.lance.spark.read;
 
+import org.lance.Dataset;
+import org.lance.Fragment;
 import org.lance.ipc.ColumnOrdering;
+import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Optional;
 
@@ -38,7 +41,10 @@ import org.slf4j.LoggerFactory;
 import scala.collection.immutable.Map;
 
 import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -107,157 +113,217 @@ public class LanceScan
 
   @Override
   public InputPartition[] planInputPartitions() {
-    LanceSplit.ScanPlanResult planResult = LanceSplit.planScan(readOptions);
-    List<LanceSplit> prunedSplits = pruneByRowAddrFilters(planResult.getSplits());
+    List<FragmentRowRange> ranges;
+    java.util.Map<Integer, Long> fragmentRowCounts;
+    LanceSparkReadOptions resolvedReadOptions;
+    try (Dataset dataset = openDataset(readOptions)) {
+      List<Fragment> fragments = dataset.getFragments();
+      ranges = new ArrayList<>(fragments.size());
+      fragmentRowCounts = new HashMap<>(fragments.size());
+      for (Fragment fragment : fragments) {
+        int id = fragment.getId();
+        ranges.add(FragmentRowRange.allRows(id));
+        fragmentRowCounts.put(id, fragment.metadata().getNumRows());
+      }
+      // Pin the version for snapshot isolation — all workers read the same version
+      resolvedReadOptions = readOptions.withVersion((int) dataset.getVersion().getId());
+    }
 
-    // Limit-based split pruning: when a LIMIT is pushed down without filters or TopN sort,
-    // use per-fragment row counts to plan only enough splits to satisfy the limit.
-    // This avoids scheduling hundreds of unnecessary tasks. Correctness is guaranteed
-    // because Spark still keeps a global CollectLimit on top (isPartiallyPushed = true).
-    prunedSplits = pruneByLimit(prunedSplits, planResult.getFragmentRowCounts());
+    int maxRows = resolvedReadOptions.getMaxRowsPerPartition();
+    ranges = splitRanges(ranges, fragmentRowCounts, maxRows);
+    ranges = pruneByRowAddrFilters(ranges);
+    ranges = pruneByLimit(ranges, fragmentRowCounts);
 
-    // Capture as effectively final for use in lambda
-    final List<LanceSplit> finalSplits = prunedSplits;
+    List<List<FragmentRowRange>> partitions = binPackRanges(ranges, fragmentRowCounts, maxRows);
 
-    // Use resolved version for snapshot isolation - ensures all workers read the same version
-    LanceSparkReadOptions resolvedReadOptions =
-        readOptions.withVersion((int) planResult.getResolvedVersion());
-
-    InputPartition[] result =
-        IntStream.range(0, finalSplits.size())
-            .mapToObj(
-                i ->
-                    new LanceInputPartition(
-                        schema,
-                        i,
-                        finalSplits.get(i),
-                        resolvedReadOptions,
-                        whereConditions,
-                        limit,
-                        offset,
-                        topNSortOrders,
-                        pushedAggregation,
-                        scanId,
-                        initialStorageOptions,
-                        namespaceImpl,
-                        namespaceProperties))
-            .toArray(InputPartition[]::new);
-
-    return result;
+    return IntStream.range(0, partitions.size())
+        .mapToObj(
+            i ->
+                new LanceInputPartition(
+                    schema,
+                    i,
+                    partitions.get(i),
+                    resolvedReadOptions,
+                    whereConditions,
+                    limit,
+                    offset,
+                    topNSortOrders,
+                    pushedAggregation,
+                    scanId,
+                    initialStorageOptions,
+                    namespaceImpl,
+                    namespaceProperties))
+        .toArray(InputPartition[]::new);
   }
 
   /**
-   * Prunes splits based on {@code _rowaddr} filters — skipping fragment opens, scan setup, and task
-   * scheduling for fragments that provably cannot match the query predicate.
+   * Prunes ranges based on {@code _rowaddr} filters — dropping ranges whose fragment ID cannot
+   * match the query predicate.
    *
-   * <p>CONTRACT: {@link LanceSplit#getFragments()} returns Lance fragment IDs as Integer values
-   * that match {@code (int)(rowAddr >>> 32)} — the same encoding used by {@link
-   * org.lance.spark.join.FragmentAwareJoinUtils}. This is verified by {@link
-   * LanceSplit#planScan(LanceSparkReadOptions)} which maps {@code Fragment.getId()} directly.
-   *
-   * <p>Note: an empty allowedIds set is valid — it means the filter is unsatisfiable (e.g. {@code
-   * _rowaddr = 0 AND _rowaddr = 4294967296L}) and no fragments can match, resulting in zero rows
-   * returned.
+   * <p>Fragment IDs match {@code (int)(rowAddr >>> 32)} — the same encoding used by {@link
+   * org.lance.spark.join.FragmentAwareJoinUtils}.
    */
-  private List<LanceSplit> pruneByRowAddrFilters(List<LanceSplit> allSplits) {
+  private List<FragmentRowRange> pruneByRowAddrFilters(List<FragmentRowRange> allRanges) {
     java.util.Optional<Set<Integer>> targetFragmentIds =
         RowAddressFilterAnalyzer.extractTargetFragmentIds(pushedFilters);
     if (!targetFragmentIds.isPresent()) {
-      return allSplits;
+      return allRanges;
     }
     Set<Integer> allowedIds = targetFragmentIds.get();
-    // Assumes each LanceSplit maps to a single fragment. If splits ever
-    // bundle multiple fragments, consider sub-split level pruning.
-    List<LanceSplit> pruned =
-        allSplits.stream()
-            .filter(
-                split -> {
-                  if (split.getFragments().size() > 1) {
-                    LOG.warn(
-                        "Split contains {} fragments;" + " sub-split pruning not implemented",
-                        split.getFragments().size());
-                  }
-                  return split.getFragments().stream().anyMatch(allowedIds::contains);
-                })
+    List<FragmentRowRange> pruned =
+        allRanges.stream()
+            .filter(range -> allowedIds.contains(range.getFragmentId()))
             .collect(Collectors.toList());
-    if (pruned.size() < allSplits.size()) {
+    if (pruned.size() < allRanges.size()) {
       LOG.debug(
-          "Pruned fragments by _rowaddr filters: {} of {} splits retained,"
-              + " allowed fragment IDs: {}",
+          "Pruned by _rowaddr filters: {} of {} ranges retained, allowed fragment IDs: {}",
           pruned.size(),
-          allSplits.size(),
-          allowedIds);
-    } else {
-      LOG.debug(
-          "No fragments pruned by _rowaddr filters: all {} splits retained,"
-              + " allowed fragment IDs: {}",
-          allSplits.size(),
+          allRanges.size(),
           allowedIds);
     }
     return pruned;
   }
 
   /**
-   * Prunes splits based on pushed LIMIT using per-fragment row counts from the manifest.
+   * Prunes ranges based on pushed LIMIT using per-fragment row counts from the manifest.
    *
    * <p>When a LIMIT is pushed down without filters or TopN sort orders, we can use the per-fragment
-   * logical row counts (which account for deletions) to determine how many fragments are needed to
+   * logical row counts (which account for deletions) to determine how many ranges are needed to
    * satisfy the limit. This avoids scheduling hundreds of unnecessary tasks for large tables.
    *
-   * <p>This optimization is skipped when:
-   *
-   * <ul>
-   *   <li>No limit is pushed
-   *   <li>Filters are present (unknown selectivity makes row count estimation unreliable)
-   *   <li>TopN sort orders are present (all fragments needed for global sort)
-   *   <li>Aggregation is pushed (e.g., COUNT(*) LIMIT — row counts don't apply)
-   *   <li>Vector search (nearest) is active (needs global search across all fragments)
-   *   <li>Fragment row counts are unavailable
-   * </ul>
-   *
    * <p>Correctness is guaranteed because Spark keeps a global {@code CollectLimit} on top (since
-   * {@code isPartiallyPushed()} returns {@code true}). If we under-estimate due to concurrent
-   * deletions, the query simply returns fewer rows than the limit — which is valid LIMIT semantics.
+   * {@code isPartiallyPushed()} returns {@code true}).
    */
-  private List<LanceSplit> pruneByLimit(
-      List<LanceSplit> allSplits, java.util.Map<Integer, Long> fragmentRowCounts) {
+  private List<FragmentRowRange> pruneByLimit(
+      List<FragmentRowRange> allRanges, java.util.Map<Integer, Long> fragmentRowCounts) {
     if (!limit.isPresent()
         || whereConditions.isPresent()
         || topNSortOrders.isPresent()
         || pushedAggregation.isPresent()
         || readOptions.getNearest() != null
         || fragmentRowCounts.isEmpty()) {
-      return allSplits;
+      return allRanges;
     }
 
     int requestedLimit = limit.get();
     long rowsAccumulated = 0;
-    List<LanceSplit> pruned = new java.util.ArrayList<>();
+    List<FragmentRowRange> pruned = new ArrayList<>();
 
-    for (LanceSplit split : allSplits) {
-      pruned.add(split);
-      for (int fragmentId : split.getFragments()) {
-        Long rowCount = fragmentRowCounts.get(fragmentId);
-        if (rowCount != null) {
-          rowsAccumulated += rowCount;
-        }
-      }
+    for (FragmentRowRange range : allRanges) {
+      pruned.add(range);
+      rowsAccumulated += getRowCount(range, fragmentRowCounts);
       if (rowsAccumulated >= requestedLimit) {
         break;
       }
     }
 
-    if (pruned.size() < allSplits.size()) {
+    if (pruned.size() < allRanges.size()) {
       LOG.debug(
-          "Limit-based pruning: {} of {} splits retained for LIMIT {} "
-              + "(accumulated {} rows from selected fragments)",
+          "Limit-based pruning: {} of {} ranges retained for LIMIT {} "
+              + "(accumulated {} rows from selected ranges)",
           pruned.size(),
-          allSplits.size(),
+          allRanges.size(),
           requestedLimit,
           rowsAccumulated);
     }
 
     return pruned;
+  }
+
+  /**
+   * Splits ranges whose row count exceeds {@code maxRows} into sub-ranges. Also materializes {@link
+   * FragmentRowRange#ALL_ROWS} sentinels into concrete counts so bin-packing can size them.
+   */
+  private List<FragmentRowRange> splitRanges(
+      List<FragmentRowRange> ranges, java.util.Map<Integer, Long> fragmentRowCounts, int maxRows) {
+    if (maxRows <= 0) {
+      return ranges;
+    }
+    List<FragmentRowRange> result = new ArrayList<>();
+    for (FragmentRowRange range : ranges) {
+      long total = getRowCount(range, fragmentRowCounts);
+      if (total <= maxRows || total <= 0) {
+        if (range.isFullFragment() && total > 0) {
+          result.add(new FragmentRowRange(range.getFragmentId(), 0, total));
+        } else {
+          result.add(range);
+        }
+      } else {
+        long offset = range.getOffset();
+        long remaining = total;
+        while (remaining > 0) {
+          long chunk = Math.min(remaining, maxRows);
+          result.add(new FragmentRowRange(range.getFragmentId(), offset, chunk));
+          offset += chunk;
+          remaining -= chunk;
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Packs ranges into partitions using first-fit decreasing bin packing. When {@code maxRows} is
+   * disabled (≤ 0), falls back to one range per partition.
+   */
+  private List<List<FragmentRowRange>> binPackRanges(
+      List<FragmentRowRange> ranges, java.util.Map<Integer, Long> fragmentRowCounts, int maxRows) {
+    if (maxRows <= 0) {
+      return ranges.stream().map(Collections::singletonList).collect(Collectors.toList());
+    }
+
+    List<FragmentRowRange> sorted = new ArrayList<>(ranges);
+    sorted.sort(
+        (a, b) ->
+            Long.compare(getRowCount(b, fragmentRowCounts), getRowCount(a, fragmentRowCounts)));
+
+    List<List<FragmentRowRange>> bins = new ArrayList<>();
+    List<Long> binSizes = new ArrayList<>();
+    for (FragmentRowRange range : sorted) {
+      long size = getRowCount(range, fragmentRowCounts);
+      int target = -1;
+      for (int i = 0; i < bins.size(); i++) {
+        if (binSizes.get(i) + size <= maxRows) {
+          target = i;
+          break;
+        }
+      }
+      if (target >= 0) {
+        bins.get(target).add(range);
+        binSizes.set(target, binSizes.get(target) + size);
+      } else {
+        List<FragmentRowRange> bin = new ArrayList<>();
+        bin.add(range);
+        bins.add(bin);
+        binSizes.add(size);
+      }
+    }
+    return bins;
+  }
+
+  private long getRowCount(FragmentRowRange range, java.util.Map<Integer, Long> fragmentRowCounts) {
+    if (!range.isFullFragment() && range.getNumRows() > 0) {
+      return range.getNumRows();
+    }
+    Long count = fragmentRowCounts.get(range.getFragmentId());
+    return count != null ? count : 0;
+  }
+
+  private static Dataset openDataset(LanceSparkReadOptions readOptions) {
+    if (readOptions.hasNamespace()) {
+      return Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .namespaceClient(readOptions.getNamespace())
+          .tableId(readOptions.getTableId())
+          .readOptions(readOptions.toReadOptions())
+          .build();
+    } else {
+      return Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .uri(readOptions.getDatasetUri())
+          .readOptions(readOptions.toReadOptions())
+          .build();
+    }
   }
 
   @Override

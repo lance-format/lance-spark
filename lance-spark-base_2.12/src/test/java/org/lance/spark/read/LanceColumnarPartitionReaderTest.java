@@ -30,12 +30,11 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 public class LanceColumnarPartitionReaderTest {
   @Test
   public void test() throws Exception {
-    LanceSplit split = new LanceSplit(Arrays.asList(0, 1));
     LanceInputPartition partition =
         new LanceInputPartition(
             TestUtils.TestTable1Config.schema,
             0 /* partitionId */,
-            split,
+            Arrays.asList(FragmentRowRange.allRows(0), FragmentRowRange.allRows(1)),
             TestUtils.TestTable1Config.readOptions,
             Optional.empty() /* whereCondition */,
             Optional.empty() /* limit */,
@@ -72,12 +71,11 @@ public class LanceColumnarPartitionReaderTest {
 
   @Test
   public void testOffsetAndLimit() throws Exception {
-    LanceSplit split = new LanceSplit(Collections.singletonList(0));
     LanceInputPartition partition =
         new LanceInputPartition(
             TestUtils.TestTable1Config.schema,
             0 /* partitionId */,
-            split,
+            Collections.singletonList(FragmentRowRange.allRows(0)),
             TestUtils.TestTable1Config.readOptions,
             Optional.empty() /* whereCondition */,
             Optional.of(1) /* limit */,
@@ -112,7 +110,6 @@ public class LanceColumnarPartitionReaderTest {
 
   @Test
   public void testTopN() throws Exception {
-    LanceSplit split = new LanceSplit(Collections.singletonList(1));
     ColumnOrdering.Builder builder = new ColumnOrdering.Builder();
     builder.setNullFirst(true);
     builder.setAscending(false);
@@ -121,7 +118,7 @@ public class LanceColumnarPartitionReaderTest {
         new LanceInputPartition(
             TestUtils.TestTable1Config.schema,
             0 /* partitionId */,
-            split,
+            Collections.singletonList(FragmentRowRange.allRows(1)),
             TestUtils.TestTable1Config.readOptions,
             Optional.empty() /* whereCondition */,
             Optional.of(1) /* limit */,
