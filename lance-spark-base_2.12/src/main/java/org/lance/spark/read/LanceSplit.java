@@ -15,8 +15,16 @@ package org.lance.spark.read;
 
 import org.lance.Dataset;
 import org.lance.Fragment;
+import org.lance.ipc.ColumnOrdering;
+import org.lance.ipc.FilteredRead;
+import org.lance.ipc.LanceScanner;
+import org.lance.ipc.ScanOptions;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.internal.LanceFragmentScanner;
+import org.lance.spark.utils.Optional;
+
+import org.apache.spark.sql.types.StructType;
 
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -94,6 +102,99 @@ public class LanceSplit implements Serializable {
   @Deprecated
   public static List<LanceSplit> generateLanceSplits(LanceSparkReadOptions readOptions) {
     return planScan(readOptions).getSplits();
+  }
+
+  /** Result of distributed scan planning containing per-fragment tasks and resolved version. */
+  public static class DistributedScanPlanResult {
+    private final List<byte[]> tasks;
+    private final long resolvedVersion;
+    private final int[] fragmentIds;
+
+    public DistributedScanPlanResult(List<byte[]> tasks, long resolvedVersion, int[] fragmentIds) {
+      this.tasks = tasks;
+      this.resolvedVersion = resolvedVersion;
+      this.fragmentIds = fragmentIds;
+    }
+
+    public List<byte[]> getTasks() {
+      return tasks;
+    }
+
+    public long getResolvedVersion() {
+      return resolvedVersion;
+    }
+
+    public int[] getFragmentIds() {
+      return fragmentIds;
+    }
+  }
+
+  /**
+   * Plans a distributed scan using Lance's FilteredRead API.
+   *
+   * <p>This method opens the dataset, builds a scanner with the given options (columns, filter,
+   * limit, offset, topN, batchSize), and calls {@link FilteredRead#planFilteredRead} to produce a
+   * {@link FilteredRead}. The plan is split into per-fragment tasks (serialized as {@code byte[]})
+   * that can be sent to workers for execution.
+   *
+   * @param readOptions dataset read options
+   * @param schema the projected schema (column names are extracted from it)
+   * @param whereCondition optional SQL filter expression
+   * @param limit optional row limit
+   * @param offset optional row offset
+   * @param topNSortOrders optional topN sort orderings
+   * @return a {@link DistributedScanPlanResult} containing tasks, resolved version, and fragment
+   *     IDs
+   */
+  public static DistributedScanPlanResult planDistributedScan(
+      LanceSparkReadOptions readOptions,
+      StructType schema,
+      Optional<String> whereCondition,
+      Optional<Integer> limit,
+      Optional<Integer> offset,
+      Optional<List<ColumnOrdering>> topNSortOrders) {
+    try (Dataset dataset = openDataset(readOptions)) {
+      long resolvedVersion = dataset.getVersion().getId();
+
+      ScanOptions.Builder scanOptionsBuilder = new ScanOptions.Builder();
+      // Set projected columns from schema (reuse legacy path's filtering logic)
+      List<String> columns = LanceFragmentScanner.getColumnNames(schema);
+      scanOptionsBuilder.columns(columns);
+
+      // Set filter
+      if (whereCondition.isPresent()) {
+        scanOptionsBuilder.filter(whereCondition.get());
+      }
+
+      // Set batch size
+      scanOptionsBuilder.batchSize(readOptions.getBatchSize());
+
+      // Set limit
+      if (limit.isPresent()) {
+        scanOptionsBuilder.limit(limit.get());
+      }
+
+      // Set offset
+      if (offset.isPresent()) {
+        scanOptionsBuilder.offset(offset.get());
+      }
+
+      // Set topN sort orderings
+      if (topNSortOrders.isPresent()) {
+        scanOptionsBuilder.setColumnOrderings(topNSortOrders.get());
+      }
+
+      ScanOptions scanOptions = scanOptionsBuilder.build();
+      try (LanceScanner scanner =
+          LanceScanner.create(dataset, scanOptions, LanceRuntime.allocator())) {
+        FilteredRead plan = FilteredRead.planFilteredRead(scanner);
+        List<byte[]> tasks = plan.getTasks();
+        int[] fragmentIds = plan.getFragmentIds();
+        return new DistributedScanPlanResult(tasks, resolvedVersion, fragmentIds);
+      } catch (Exception e) {
+        throw new RuntimeException("Failed to plan distributed scan", e);
+      }
+    }
   }
 
   private static Dataset openDataset(LanceSparkReadOptions readOptions) {

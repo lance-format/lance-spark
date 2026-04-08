@@ -39,6 +39,7 @@ import scala.collection.immutable.Map;
 
 import java.io.Serializable;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -107,6 +108,90 @@ public class LanceScan
 
   @Override
   public InputPartition[] planInputPartitions() {
+    // For CountStar aggregation, keep the existing non-distributed path since it only
+    // needs fragment metadata, not actual data scanning.
+    if (pushedAggregation.isPresent()) {
+      return planInputPartitionsLegacy();
+    }
+
+    LanceSplit.DistributedScanPlanResult planResult;
+    try {
+      planResult =
+          LanceSplit.planDistributedScan(
+              readOptions, schema, whereConditions, limit, offset, topNSortOrders);
+    } catch (Exception e) {
+      // Fall back to legacy path for v1 datasets or other unsupported scenarios
+      LOG.debug(
+          "Distributed scan planning failed, falling back to legacy path: {}", e.getMessage());
+      return planInputPartitionsLegacy();
+    }
+    List<byte[]> tasks = planResult.getTasks();
+    int[] fragmentIds = planResult.getFragmentIds();
+
+    // Use resolved version for snapshot isolation - ensures all workers read the same version
+    LanceSparkReadOptions resolvedReadOptions =
+        readOptions.withVersion((int) planResult.getResolvedVersion());
+
+    // Build parallel lists of (task, fragmentId) for potential pruning
+    List<byte[]> pairedTasks = new java.util.ArrayList<>(tasks);
+    List<Integer> pairedFragmentIds = new java.util.ArrayList<>();
+    for (int fid : fragmentIds) {
+      pairedFragmentIds.add(fid);
+    }
+
+    // Apply _rowaddr pruning using the plan's fragment IDs
+    java.util.Optional<Set<Integer>> targetFragmentIds =
+        RowAddressFilterAnalyzer.extractTargetFragmentIds(pushedFilters);
+    if (targetFragmentIds.isPresent()) {
+      Set<Integer> allowedIds = targetFragmentIds.get();
+      List<byte[]> prunedTasks = new java.util.ArrayList<>();
+      List<Integer> prunedFragmentIds = new java.util.ArrayList<>();
+      for (int idx = 0; idx < pairedTasks.size(); idx++) {
+        if (allowedIds.contains(pairedFragmentIds.get(idx))) {
+          prunedTasks.add(pairedTasks.get(idx));
+          prunedFragmentIds.add(pairedFragmentIds.get(idx));
+        }
+      }
+      if (prunedTasks.size() < pairedTasks.size()) {
+        LOG.debug(
+            "Pruned fragments by _rowaddr filters: {} of {} tasks retained,"
+                + " allowed fragment IDs: {}",
+            prunedTasks.size(),
+            pairedTasks.size(),
+            allowedIds);
+      }
+      pairedTasks = prunedTasks;
+      pairedFragmentIds = prunedFragmentIds;
+    }
+
+    List<byte[]> finalTasks = pairedTasks;
+    List<Integer> finalFragmentIds = pairedFragmentIds;
+    return IntStream.range(0, finalTasks.size())
+        .mapToObj(
+            i ->
+                new LanceInputPartition(
+                    schema,
+                    i,
+                    new LanceSplit(Collections.singletonList(finalFragmentIds.get(i))),
+                    resolvedReadOptions,
+                    whereConditions,
+                    limit,
+                    offset,
+                    topNSortOrders,
+                    pushedAggregation,
+                    scanId,
+                    initialStorageOptions,
+                    namespaceImpl,
+                    namespaceProperties,
+                    finalTasks.get(i)))
+        .toArray(InputPartition[]::new);
+  }
+
+  /**
+   * Legacy partition planning path used for CountStar aggregation pushdown. Uses the original
+   * split-based planning without FilteredRead.
+   */
+  private InputPartition[] planInputPartitionsLegacy() {
     LanceSplit.ScanPlanResult planResult = LanceSplit.planScan(readOptions);
     List<LanceSplit> prunedSplits = pruneByRowAddrFilters(planResult.getSplits());
 

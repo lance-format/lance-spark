@@ -49,6 +49,12 @@ public class LanceInputPartition implements InputPartition {
 
   private final Map<String, String> namespaceProperties;
 
+  /**
+   * Optional serialized task proto for distributed read mode. When present, the worker executes
+   * this pre-planned task instead of building a scanner from scratch.
+   */
+  private final byte[] filteredReadTask;
+
   public LanceInputPartition(
       StructType schema,
       int partitionId,
@@ -63,6 +69,38 @@ public class LanceInputPartition implements InputPartition {
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties) {
+    this(
+        schema,
+        partitionId,
+        lanceSplit,
+        readOptions,
+        whereCondition,
+        limit,
+        offset,
+        topNSortOrders,
+        pushedAggregation,
+        scanId,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        null);
+  }
+
+  public LanceInputPartition(
+      StructType schema,
+      int partitionId,
+      LanceSplit lanceSplit,
+      LanceSparkReadOptions readOptions,
+      Optional<String> whereCondition,
+      Optional<Integer> limit,
+      Optional<Integer> offset,
+      Optional<List<ColumnOrdering>> topNSortOrders,
+      Optional<Aggregation> pushedAggregation,
+      String scanId,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      byte[] filteredReadTask) {
     this.schema = schema;
     this.partitionId = partitionId;
     this.lanceSplit = lanceSplit;
@@ -76,6 +114,7 @@ public class LanceInputPartition implements InputPartition {
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
+    this.filteredReadTask = filteredReadTask;
   }
 
   public StructType getSchema() {
@@ -128,5 +167,18 @@ public class LanceInputPartition implements InputPartition {
 
   public Map<String, String> getNamespaceProperties() {
     return namespaceProperties;
+  }
+
+  public byte[] getFilteredReadTask() {
+    return filteredReadTask;
+  }
+
+  /**
+   * Returns whether this partition uses distributed read mode. In distributed mode, the worker
+   * executes a pre-planned task (serialized as {@code byte[]}) instead of building a scanner from
+   * scratch.
+   */
+  public boolean isDistributedMode() {
+    return filteredReadTask != null;
   }
 }

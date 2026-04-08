@@ -136,7 +136,7 @@ public class LanceFragmentScanner implements AutoCloseable {
    * org.lance.spark.LanceDataset#METADATA_COLUMNS}. All special columns (_rowid, _rowaddr, version
    * columns) go through scanner.project() for consistent output ordering.
    */
-  private static List<String> getColumnNames(StructType schema) {
+  public static List<String> getColumnNames(StructType schema) {
     // Collect all field names in the schema for quick lookup
     java.util.Set<String> schemaFields = new java.util.HashSet<>();
     for (StructField field : schema.fields()) {

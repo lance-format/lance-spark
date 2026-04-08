@@ -33,9 +33,7 @@ import org.apache.spark.sql.vectorized.ColumnarMap;
 
 import java.io.IOException;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
   private final LanceFragmentScanner fragmentScanner;
@@ -57,23 +55,55 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
   public boolean loadNextBatch() throws IOException {
     if (arrowReader.loadNextBatch()) {
       VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
-      List<ColumnVector> fieldVectors =
-          root.getFieldVectors().stream()
-              .map(LanceArrowColumnVector::new)
-              .collect(Collectors.toList());
+      int rowCount = root.getRowCount();
+      LanceInputPartition inputPartition = fragmentScanner.getInputPartition();
+      StructType schema = inputPartition.getSchema();
 
-      // Add virtual columns for blob metadata
-      addBlobVirtualColumns(fieldVectors, root, fragmentScanner.getInputPartition());
-
-      if (fragmentScanner.withFragemtId()) {
-        ConstantColumnVector fragmentVector =
-            new ConstantColumnVector(root.getRowCount(), DataTypes.IntegerType);
-        fragmentVector.setInt(fragmentScanner.fragmentId());
-        fieldVectors.add(fragmentVector);
+      // Build name-based lookup for Arrow vectors
+      Map<String, ColumnVector> vectorsByName = new HashMap<>();
+      for (FieldVector fv : root.getFieldVectors()) {
+        vectorsByName.put(fv.getField().getName(), new LanceArrowColumnVector(fv));
       }
 
-      currentColumnarBatch =
-          new ColumnarBatch(fieldVectors.toArray(new ColumnVector[] {}), root.getRowCount());
+      // Build blob virtual columns keyed by name
+      Map<String, FieldVector> arrowFieldsByName = new HashMap<>();
+      for (FieldVector fv : root.getFieldVectors()) {
+        arrowFieldsByName.put(fv.getField().getName(), fv);
+      }
+      for (StructField field : schema.fields()) {
+        String name = field.name();
+        if (name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)) {
+          String baseName =
+              name.substring(0, name.length() - LanceConstant.BLOB_POSITION_SUFFIX.length());
+          FieldVector blobVector = arrowFieldsByName.get(baseName);
+          if (blobVector instanceof StructVector) {
+            vectorsByName.put(name, new BlobPositionColumnVector((StructVector) blobVector));
+          }
+        } else if (name.endsWith(LanceConstant.BLOB_SIZE_SUFFIX)) {
+          String baseName =
+              name.substring(0, name.length() - LanceConstant.BLOB_SIZE_SUFFIX.length());
+          FieldVector blobVector = arrowFieldsByName.get(baseName);
+          if (blobVector instanceof StructVector) {
+            vectorsByName.put(name, new BlobSizeColumnVector((StructVector) blobVector));
+          }
+        }
+      }
+
+      // Add _fragid constant column if needed
+      if (fragmentScanner.withFragemtId()) {
+        ConstantColumnVector fragmentVector =
+            new ConstantColumnVector(rowCount, DataTypes.IntegerType);
+        fragmentVector.setInt(fragmentScanner.fragmentId());
+        vectorsByName.put(LanceConstant.FRAGMENT_ID, fragmentVector);
+      }
+
+      // Assemble columns in exact schema order
+      ColumnVector[] columns = new ColumnVector[schema.fields().length];
+      for (int i = 0; i < schema.fields().length; i++) {
+        columns[i] = vectorsByName.get(schema.fields()[i].name());
+      }
+
+      currentColumnarBatch = new ColumnarBatch(columns, rowCount);
       return true;
     }
     return false;
@@ -97,41 +127,6 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
         arrowReader.close();
       } finally {
         fragmentScanner.close();
-      }
-    }
-  }
-
-  private void addBlobVirtualColumns(
-      List<ColumnVector> fieldVectors, VectorSchemaRoot root, LanceInputPartition inputPartition) {
-    StructType schema = inputPartition.getSchema();
-
-    Map<String, FieldVector> actualFields = new HashMap<>();
-    List<FieldVector> rootVectors = root.getFieldVectors();
-    for (int i = 0; i < rootVectors.size(); i++) {
-      actualFields.put(rootVectors.get(i).getField().getName(), rootVectors.get(i));
-    }
-
-    StructField[] fields = schema.fields();
-    for (StructField field : fields) {
-      String fieldName = field.name();
-      if (fieldName.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)) {
-        String baseName =
-            fieldName.substring(
-                0, fieldName.length() - LanceConstant.BLOB_POSITION_SUFFIX.length());
-        FieldVector blobVector = actualFields.get(baseName);
-        if (blobVector instanceof StructVector) {
-          BlobPositionColumnVector posVector =
-              new BlobPositionColumnVector((StructVector) blobVector);
-          fieldVectors.add(posVector);
-        }
-      } else if (fieldName.endsWith(LanceConstant.BLOB_SIZE_SUFFIX)) {
-        String baseName =
-            fieldName.substring(0, fieldName.length() - LanceConstant.BLOB_SIZE_SUFFIX.length());
-        FieldVector blobVector = actualFields.get(baseName);
-        if (blobVector instanceof StructVector) {
-          BlobSizeColumnVector sizeVector = new BlobSizeColumnVector((StructVector) blobVector);
-          fieldVectors.add(sizeVector);
-        }
       }
     }
   }
