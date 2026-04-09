@@ -54,6 +54,7 @@ EXECUTOR_CORES=""
 BENCHMARK_JAR=""
 APP_NAME=""
 USE_DOUBLE_FOR_DECIMAL=""
+FILE_FORMAT_VERSION=""
 EXTRA_CONF=()
 
 # Configurable Spark/Scala versions (override via environment)
@@ -106,6 +107,7 @@ Options:
     --benchmark-jar JAR         Path to pre-built benchmark jar (auto-built if absent)
     --app-name NAME             Spark application name
     --use-double-for-decimal    Convert TPC-DS decimal columns to double
+    --file-format-version VER   Lance file format version for writes (e.g. LEGACY, STABLE, 2.2)
     --conf KEY=VALUE            Extra Spark conf (repeatable)
     -h, --help                  Show this help message
 
@@ -126,6 +128,9 @@ Examples:
 
     # Build for Spark 4.0 / Scala 2.13
     SPARK_VERSION=4.0 SCALA_VERSION=2.13 ./submit-datagen.sh -d /tmp/tpcds/sf1
+
+    # Generate Lance tables with a specific file format version
+    ./submit-datagen.sh -d /tmp/tpcds/sf1 --file-format-version LEGACY
 EOF
 }
 
@@ -154,6 +159,8 @@ while [[ $# -gt 0 ]]; do
             APP_NAME="$2"; shift 2 ;;
         --use-double-for-decimal)
             USE_DOUBLE_FOR_DECIMAL="true"; shift ;;
+        --file-format-version)
+            FILE_FORMAT_VERSION="$2"; shift 2 ;;
         --conf)
             EXTRA_CONF+=("--conf" "$2"); shift 2 ;;
         -h|--help)
@@ -299,6 +306,10 @@ if [[ -n "${USE_DOUBLE_FOR_DECIMAL}" ]]; then
     SUBMIT_ARGS+=("--use-double-for-decimal")
 fi
 
+if [[ -n "${FILE_FORMAT_VERSION}" ]]; then
+    SUBMIT_ARGS+=("--file-format-version" "${FILE_FORMAT_VERSION}")
+fi
+
 # ---------------------------------------------------------------------------
 # Print summary and submit
 # ---------------------------------------------------------------------------
@@ -315,6 +326,9 @@ echo "Spark home:      ${SPARK_HOME}"
 echo "Benchmark jar:   ${BENCHMARK_JAR}"
 if [[ -n "${BUNDLE_JAR}" ]]; then
     echo "Bundle jar:      ${BUNDLE_JAR}"
+fi
+if [[ -n "${FILE_FORMAT_VERSION}" ]]; then
+    echo "File format ver: ${FILE_FORMAT_VERSION}"
 fi
 echo "App name:        ${APP_NAME}"
 echo "============================================="
