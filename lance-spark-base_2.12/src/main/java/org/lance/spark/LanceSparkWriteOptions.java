@@ -16,7 +16,6 @@ package org.lance.spark;
 import org.lance.ReadOptions;
 import org.lance.WriteParams;
 import org.lance.WriteParams.WriteMode;
-import org.lance.io.StorageOptionsProvider;
 import org.lance.namespace.LanceNamespace;
 
 import com.google.common.base.Preconditions;
@@ -56,6 +55,7 @@ public class LanceSparkWriteOptions implements Serializable {
   public static final String CONFIG_USE_QUEUED_WRITE_BUFFER = "use_queued_write_buffer";
   public static final String CONFIG_QUEUE_DEPTH = "queue_depth";
   public static final String CONFIG_BATCH_SIZE = "batch_size";
+  public static final String CONFIG_ENABLE_STABLE_ROW_IDS = "enable_stable_row_ids";
 
   private static final WriteMode DEFAULT_WRITE_MODE = WriteMode.APPEND;
   private static final boolean DEFAULT_USE_QUEUED_WRITE_BUFFER = false;
@@ -72,6 +72,9 @@ public class LanceSparkWriteOptions implements Serializable {
   private final boolean useQueuedWriteBuffer;
   private final int queueDepth;
   private final int batchSize;
+  // Boxed so we can represent "unset" (null): when null, callers omit the flag and lance-core
+  // inherits from the manifest (e.g. append without re-specifying). Staged commit uses primitives.
+  private final Boolean enableStableRowIds;
   private final Map<String, String> storageOptions;
 
   /** The namespace for credential vending. Transient as LanceNamespace is not serializable. */
@@ -93,6 +96,7 @@ public class LanceSparkWriteOptions implements Serializable {
     this.useQueuedWriteBuffer = builder.useQueuedWriteBuffer;
     this.queueDepth = builder.queueDepth;
     this.batchSize = builder.batchSize;
+    this.enableStableRowIds = builder.enableStableRowIds;
     this.storageOptions = new HashMap<>(builder.storageOptions);
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
@@ -163,6 +167,11 @@ public class LanceSparkWriteOptions implements Serializable {
     return batchSize;
   }
 
+  /** Nullable when the write option was not specified (see field comment above). */
+  public Boolean getEnableStableRowIds() {
+    return enableStableRowIds;
+  }
+
   public Map<String, String> getStorageOptions() {
     return storageOptions;
   }
@@ -216,18 +225,6 @@ public class LanceSparkWriteOptions implements Serializable {
   }
 
   /**
-   * Creates a StorageOptionsProvider for dynamic credential refresh.
-   *
-   * @return a StorageOptionsProvider if namespace is configured, null otherwise
-   */
-  public org.lance.io.StorageOptionsProvider getStorageOptionsProvider() {
-    if (namespace != null && tableId != null) {
-      return new org.lance.namespace.LanceNamespaceStorageOptionsProvider(namespace, tableId);
-    }
-    return null;
-  }
-
-  /**
    * Returns whether the write mode is overwrite.
    *
    * @return true if write mode is OVERWRITE
@@ -246,10 +243,6 @@ public class LanceSparkWriteOptions implements Serializable {
         new ReadOptions.Builder()
             .setStorageOptions(storageOptions)
             .setSession(LanceRuntime.session());
-    StorageOptionsProvider provider = getStorageOptionsProvider();
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider);
-    }
     if (version != null) {
       builder.setVersion(version);
     }
@@ -257,21 +250,16 @@ public class LanceSparkWriteOptions implements Serializable {
   }
 
   /**
-   * Converts this to Lance ReadOptions for worker-side operations with credential refresh.
+   * Converts this to Lance ReadOptions for worker-side operations.
    *
    * @param initialStorageOptions initial storage options from describeTable on the driver
-   * @param provider a StorageOptionsProvider for dynamic credential refresh, or null
-   * @return ReadOptions with merged storage options, session, and credential provider
+   * @return ReadOptions with merged storage options and session
    */
-  public ReadOptions toReadOptions(
-      Map<String, String> initialStorageOptions, StorageOptionsProvider provider) {
+  public ReadOptions toReadOptions(Map<String, String> initialStorageOptions) {
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(storageOptions, initialStorageOptions);
     ReadOptions.Builder builder =
         new ReadOptions.Builder().setStorageOptions(merged).setSession(LanceRuntime.session());
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider);
-    }
     if (version != null) {
       builder.setVersion(version);
     }
@@ -298,6 +286,9 @@ public class LanceSparkWriteOptions implements Serializable {
     if (fileFormatVersion != null) {
       builder.withDataStorageVersion(fileFormatVersion);
     }
+    if (enableStableRowIds != null) {
+      builder.withEnableStableRowIds(enableStableRowIds);
+    }
     if (!storageOptions.isEmpty()) {
       builder.withStorageOptions(storageOptions);
     }
@@ -317,6 +308,7 @@ public class LanceSparkWriteOptions implements Serializable {
         && Objects.equals(maxRowsPerGroup, that.maxRowsPerGroup)
         && Objects.equals(maxBytesPerFile, that.maxBytesPerFile)
         && Objects.equals(fileFormatVersion, that.fileFormatVersion)
+        && Objects.equals(enableStableRowIds, that.enableStableRowIds)
         && Objects.equals(storageOptions, that.storageOptions)
         && Objects.equals(tableId, that.tableId)
         && Objects.equals(version, that.version);
@@ -334,6 +326,7 @@ public class LanceSparkWriteOptions implements Serializable {
         useQueuedWriteBuffer,
         queueDepth,
         batchSize,
+        enableStableRowIds,
         storageOptions,
         tableId,
         version);
@@ -350,6 +343,7 @@ public class LanceSparkWriteOptions implements Serializable {
     private boolean useQueuedWriteBuffer = DEFAULT_USE_QUEUED_WRITE_BUFFER;
     private int queueDepth = DEFAULT_QUEUE_DEPTH;
     private int batchSize = DEFAULT_BATCH_SIZE;
+    private Boolean enableStableRowIds;
     private Map<String, String> storageOptions = new HashMap<>();
     private LanceNamespace namespace;
     private List<String> tableId;
@@ -399,6 +393,11 @@ public class LanceSparkWriteOptions implements Serializable {
 
     public Builder batchSize(int batchSize) {
       this.batchSize = batchSize;
+      return this;
+    }
+
+    public Builder enableStableRowIds(Boolean enableStableRowIds) {
+      this.enableStableRowIds = enableStableRowIds;
       return this;
     }
 
@@ -460,6 +459,9 @@ public class LanceSparkWriteOptions implements Serializable {
         int parsedBatchSize = Integer.parseInt(options.get(CONFIG_BATCH_SIZE));
         Preconditions.checkArgument(parsedBatchSize > 0, "batch_size must be positive");
         this.batchSize = parsedBatchSize;
+      }
+      if (options.containsKey(CONFIG_ENABLE_STABLE_ROW_IDS)) {
+        this.enableStableRowIds = Boolean.parseBoolean(options.get(CONFIG_ENABLE_STABLE_ROW_IDS));
       }
       return this;
     }

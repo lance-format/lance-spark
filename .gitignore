@@ -69,7 +69,6 @@ venv.bak/
 
 # notebook
 **/.ipynb_checkpoints
-docker/*.jar
 
 # Python
 __pycache__/

@@ -14,10 +14,8 @@
 package org.lance.spark;
 
 import org.lance.ReadOptions;
-import org.lance.io.StorageOptionsProvider;
 import org.lance.ipc.Query;
 import org.lance.namespace.LanceNamespace;
-import org.lance.namespace.LanceNamespaceStorageOptionsProvider;
 import org.lance.spark.utils.QueryUtils;
 
 import com.google.common.base.Preconditions;
@@ -281,18 +279,6 @@ public class LanceSparkReadOptions implements Serializable {
   }
 
   /**
-   * Creates a StorageOptionsProvider for dynamic credential refresh.
-   *
-   * @return a StorageOptionsProvider if namespace is configured, null otherwise
-   */
-  public StorageOptionsProvider getStorageOptionsProvider() {
-    if (namespace != null && tableId != null) {
-      return new LanceNamespaceStorageOptionsProvider(namespace, tableId);
-    }
-    return null;
-  }
-
-  /**
    * Converts this to Lance ReadOptions for the native library.
    *
    * @return ReadOptions for the Lance native library
@@ -314,10 +300,6 @@ public class LanceSparkReadOptions implements Serializable {
     }
     if (!storageOptions.isEmpty()) {
       builder.setStorageOptions(storageOptions);
-    }
-    StorageOptionsProvider provider = getStorageOptionsProvider();
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider);
     }
     return builder.build();
   }

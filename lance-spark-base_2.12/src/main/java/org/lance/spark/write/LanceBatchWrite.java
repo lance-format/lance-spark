@@ -118,11 +118,17 @@ public class LanceBatchWrite implements BatchWrite {
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", true);
     boolean isOverwrite = overwrite || writeOptions.isOverwrite();
 
+    // Boxed: null means unset (inherit in lance-core); see LanceSparkWriteOptions.
+    final Boolean enableStableRowIds = writeOptions.getEnableStableRowIds();
+
     if (stagedCommit != null) {
       // For staged tables, update the eagerly-created StagedCommit with fragments and schema.
       // commitStagedChanges() will perform the actual commit.
       stagedCommit.setFragments(fragments);
       stagedCommit.setSchema(arrowSchema);
+      if (enableStableRowIds != null) {
+        stagedCommit.setEnableStableRowIds(enableStableRowIds);
+      }
     } else {
       // For non-staged tables, commit immediately
       long version =
@@ -138,10 +144,17 @@ public class LanceBatchWrite implements BatchWrite {
         }
         CommitBuilder commitBuilder =
             new CommitBuilder(ds).writeParams(writeOptions.getStorageOptions());
+        // When enableStableRowIds is null (user didn't pass the option),
+        // lance-core auto-inherits the flag from the existing manifest.
+        // Appending to a table with stable row IDs works without
+        // re-specifying the option.
+        if (enableStableRowIds != null) {
+          commitBuilder.useStableRowIds(enableStableRowIds);
+        }
         if (managedVersioning) {
           LanceNamespace namespace =
               LanceRuntime.getOrCreateNamespace(namespaceImpl, namespaceProperties);
-          commitBuilder.namespace(namespace).tableId(tableId);
+          commitBuilder.namespaceClient(namespace).tableId(tableId);
         }
         try (Transaction txn =
                 new Transaction.Builder().readVersion(version).operation(operation).build();

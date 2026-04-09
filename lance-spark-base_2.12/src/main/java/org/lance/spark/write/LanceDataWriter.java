@@ -16,7 +16,6 @@ package org.lance.spark.write;
 import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.WriteParams;
-import org.lance.io.StorageOptionsProvider;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 
@@ -146,17 +145,13 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
         writeBuffer = new SemaphoreArrowBatchWriteBuffer(schema, batchSize);
       }
 
-      // Get storage options provider for credential refresh
-      StorageOptionsProvider storageOptionsProvider = getStorageOptionsProvider();
-
       // Create fragment in background thread
       Callable<List<FragmentMetadata>> fragmentCreator =
           () -> {
             try (ArrowArrayStream arrowStream =
                 ArrowArrayStream.allocateNew(LanceRuntime.allocator())) {
               Data.exportArrayStream(LanceRuntime.allocator(), writeBuffer, arrowStream);
-              return Fragment.create(
-                  writeOptions.getDatasetUri(), arrowStream, params, storageOptionsProvider);
+              return Fragment.create(writeOptions.getDatasetUri(), arrowStream, params);
             }
           };
       FutureTask<List<FragmentMetadata>> fragmentCreationTask =
@@ -187,11 +182,6 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       }
       builder.withStorageOptions(merged);
       return builder.build();
-    }
-
-    private StorageOptionsProvider getStorageOptionsProvider() {
-      return LanceRuntime.getOrCreateStorageOptionsProvider(
-          namespaceImpl, namespaceProperties, tableId);
     }
   }
 }

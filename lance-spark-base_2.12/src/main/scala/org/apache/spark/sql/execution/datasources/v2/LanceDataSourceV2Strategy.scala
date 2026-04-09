@@ -48,6 +48,12 @@ case class LanceDataSourceV2Strategy(session: SparkSession) extends SparkStrateg
     case ShowIndexes(ResolvedIdentifier(catalog, ident)) =>
       ShowIndexesExec(asTableCatalog(catalog), ident) :: Nil
 
+    case LanceDropIndex(ResolvedIdentifier(catalog, ident), indexName) =>
+      LanceDropIndexExec(asTableCatalog(catalog), ident, indexName.toLowerCase) :: Nil
+
+    case SetUnenforcedPrimaryKey(ResolvedIdentifier(catalog, ident), columns) =>
+      SetUnenforcedPrimaryKeyExec(asTableCatalog(catalog), ident, columns) :: Nil
+
     case _ => Nil
   }
 

@@ -18,7 +18,7 @@ import org.apache.spark.sql.types.{DataTypes, StructField, StructType}
 
 case class Optimize(
     table: LogicalPlan,
-    args: Seq[NamedArgument]) extends Command {
+    args: Seq[LanceNamedArgument]) extends Command {
 
   override def children: Seq[LogicalPlan] = Seq(table)
 

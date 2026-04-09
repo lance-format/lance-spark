@@ -40,7 +40,7 @@ import static org.junit.jupiter.api.Assertions.*;
  *   <li>Stable rowid: Requires RowIdIndex lookup (TODO: not yet implemented)
  * </ol>
  */
-public class FragmentAwareJoinTest {
+public abstract class BaseFragmentAwareJoinTest {
   private static SparkSession spark;
   private static String dbPath;
 

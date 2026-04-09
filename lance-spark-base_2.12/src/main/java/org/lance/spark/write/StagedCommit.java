@@ -19,6 +19,7 @@ import org.lance.FragmentMetadata;
 import org.lance.Transaction;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.DeregisterTableRequest;
+import org.lance.operation.Operation;
 import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
 
@@ -41,6 +42,14 @@ import java.util.Optional;
 public class StagedCommit {
   private static final Logger LOG = LoggerFactory.getLogger(StagedCommit.class);
 
+  private static final String NO_DATASET_URI = null;
+  private static final List<FragmentMetadata> NO_INITIAL_FRAGMENTS = Collections.emptyList();
+
+  // The catalog always resolves a concrete true/false before constructing
+  // StagedCommitOptions, so there is no null/unset state in the staged path.
+  // The non-staged path (LanceBatchWrite) uses boxed Boolean because null means
+  // "user didn't specify" and lets lance-core inherit the flag from the manifest.
+  private boolean enableStableRowIds;
   private List<FragmentMetadata> fragments;
   private Schema schema;
 
@@ -58,63 +67,33 @@ public class StagedCommit {
 
   /** Creates a StagedCommit for an existing table (REPLACE or CREATE_OR_REPLACE on existing). */
   public static StagedCommit forExistingTable(
-      Dataset dataset,
-      Schema schema,
-      Map<String, String> storageOptions,
-      LanceNamespace namespace,
-      List<String> tableId,
-      boolean managedVersioning) {
+      final Dataset dataset, final Schema schema, final StagedCommitOptions options) {
     return new StagedCommit(
-        Optional.of(dataset),
-        Collections.emptyList(),
-        schema,
-        null,
-        storageOptions,
-        false,
-        namespace,
-        tableId,
-        managedVersioning);
+        Optional.of(dataset), NO_INITIAL_FRAGMENTS, schema, NO_DATASET_URI, options);
   }
 
   /** Creates a StagedCommit for a new table (CREATE or CREATE_OR_REPLACE on non-existing). */
   public static StagedCommit forNewTable(
-      Schema schema,
-      String datasetUri,
-      Map<String, String> storageOptions,
-      LanceNamespace namespace,
-      List<String> tableId,
-      boolean managedVersioning) {
-    return new StagedCommit(
-        Optional.empty(),
-        Collections.emptyList(),
-        schema,
-        datasetUri,
-        storageOptions,
-        true,
-        namespace,
-        tableId,
-        managedVersioning);
+      final Schema schema, final String datasetUri, final StagedCommitOptions options) {
+    return new StagedCommit(Optional.empty(), NO_INITIAL_FRAGMENTS, schema, datasetUri, options);
   }
 
   private StagedCommit(
-      Optional<Dataset> dataset,
-      List<FragmentMetadata> fragments,
-      Schema schema,
-      String datasetUri,
-      Map<String, String> storageOptions,
-      boolean isNewTable,
-      LanceNamespace namespace,
-      List<String> tableId,
-      boolean managedVersioning) {
+      final Optional<Dataset> dataset,
+      final List<FragmentMetadata> fragments,
+      final Schema schema,
+      final String datasetUri,
+      final StagedCommitOptions options) {
     this.dataset = dataset;
     this.fragments = new ArrayList<>(fragments);
     this.schema = schema;
     this.datasetUri = datasetUri;
-    this.storageOptions = storageOptions;
-    this.isNewTable = isNewTable;
-    this.namespace = namespace;
-    this.tableId = tableId;
-    this.managedVersioning = managedVersioning;
+    this.storageOptions = options.getStorageOptions();
+    this.isNewTable = datasetUri != null;
+    this.enableStableRowIds = options.isEnableStableRowIds();
+    this.namespace = options.getNamespace();
+    this.tableId = options.getTableId();
+    this.managedVersioning = options.isManagedVersioning();
   }
 
   public void setFragments(List<FragmentMetadata> fragments) {
@@ -123,6 +102,10 @@ public class StagedCommit {
 
   public void setSchema(Schema schema) {
     this.schema = schema;
+  }
+
+  public void setEnableStableRowIds(boolean enableStableRowIds) {
+    this.enableStableRowIds = enableStableRowIds;
   }
 
   /** Performs the actual commit using the stored dataset and fragments. */
@@ -135,12 +118,13 @@ public class StagedCommit {
   }
 
   private void commitNewTable() {
-    Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
-    CommitBuilder builder =
+    final Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
+    final CommitBuilder builder =
         new CommitBuilder(datasetUri, LanceRuntime.allocator()).writeParams(storageOptions);
-    if (managedVersioning) {
-      builder.namespace(namespace).tableId(tableId);
+    if (enableStableRowIds) {
+      builder.useStableRowIds(true);
     }
+    applyManagedVersioning(builder);
     try (Transaction txn = new Transaction.Builder().operation(operation).build();
         Dataset committed = builder.execute(txn)) {
       // auto-close txn and committed dataset
@@ -148,19 +132,29 @@ public class StagedCommit {
   }
 
   private void commitExistingTable() {
-    Dataset ds = dataset.get();
-    String uri = ds.uri();
-    long version = ds.version();
+    final Dataset ds = dataset.get();
+    final String uri = ds.uri();
+    final long version = ds.version();
     ds.close();
 
-    Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
-    CommitBuilder builder =
+    final Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
+    final CommitBuilder builder =
         new CommitBuilder(uri, LanceRuntime.allocator()).writeParams(storageOptions);
+    builder.useStableRowIds(enableStableRowIds);
+    applyManagedVersioning(builder);
+    commitOperation(builder, version, operation);
+  }
+
+  private void applyManagedVersioning(final CommitBuilder builder) {
     if (managedVersioning) {
-      builder.namespace(namespace).tableId(tableId);
+      builder.namespaceClient(namespace).tableId(tableId);
     }
+  }
+
+  private static void commitOperation(
+      final CommitBuilder builder, final long readVersion, final Operation operation) {
     try (Transaction txn =
-            new Transaction.Builder().readVersion(version).operation(operation).build();
+            new Transaction.Builder().readVersion(readVersion).operation(operation).build();
         Dataset committed = builder.execute(txn)) {
       // auto-close txn and committed dataset
     }

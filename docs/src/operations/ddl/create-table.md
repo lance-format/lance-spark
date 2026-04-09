@@ -93,7 +93,7 @@ Lance supports vector (embedding) columns for AI workloads. These columns are st
 
 ### Supported Types
 
-- **Element Types**: `FLOAT` (float32), `DOUBLE` (float64)
+- **Element Types**: `FLOAT` (float32), `DOUBLE` (float64), `FLOAT` with float16 flag (half-precision)
 - **Requirements**:
     - Vectors must be non-nullable
     - All vectors in a column must have the same dimension
@@ -169,6 +169,88 @@ To create a table with vector columns, use the table property pattern `<column_n
     // Write to Lance table with tableProperty
     df.writeTo("embeddings_table")
         .tableProperty("embeddings.arrow.fixed-size-list.size", "128")
+        .createOrReplace();
+    ```
+
+### Float16 (Half-Precision) Vector Columns
+
+For memory-efficient vector storage, Lance supports float16 (half-precision) vectors. Float16 vectors use 2 bytes per element instead of 4 bytes (float32), cutting storage in half. This is useful for large-scale similarity search where the precision loss is acceptable.
+
+Since Spark has no native float16 type, float16 vectors are declared as `ARRAY<FLOAT>` with an additional table property `<column_name>.arrow.float16 = 'true'`. The connector automatically narrows float32 values to float16 during writes and widens back to float32 during reads.
+
+!!! note
+    Float16 requires Arrow 18+ (Spark 4.0+). The `arrow.fixed-size-list.size` property must also be set on the same column.
+
+=== "SQL"
+    ```sql
+    CREATE TABLE embeddings_f16 (
+        id INT NOT NULL,
+        text STRING,
+        embeddings ARRAY<FLOAT> NOT NULL
+    ) USING lance
+    TBLPROPERTIES (
+        'embeddings.arrow.fixed-size-list.size' = '128',
+        'embeddings.arrow.float16' = 'true'
+    );
+    ```
+
+=== "Python"
+    ```python
+    import numpy as np
+
+    # Create DataFrame with vector data (float32 values will be narrowed to float16)
+    data = [(i, np.random.rand(128).astype(np.float32).tolist()) for i in range(100)]
+    df = spark.createDataFrame(data, ["id", "embeddings"])
+
+    # Write to Lance table with float16 encoding
+    df.writeTo("embeddings_f16") \
+        .tableProperty("embeddings.arrow.fixed-size-list.size", "128") \
+        .tableProperty("embeddings.arrow.float16", "true") \
+        .createOrReplace()
+    ```
+
+=== "Scala"
+    ```scala
+    import scala.util.Random
+
+    // Create DataFrame with vector data
+    val data = (0 until 100).map { i =>
+      (i, Array.fill(128)(Random.nextFloat()))
+    }
+    val df = data.toDF("id", "embeddings")
+
+    // Write to Lance table with float16 encoding
+    df.writeTo("embeddings_f16")
+      .tableProperty("embeddings.arrow.fixed-size-list.size", "128")
+      .tableProperty("embeddings.arrow.float16", "true")
+      .createOrReplace()
+    ```
+
+=== "Java"
+    ```java
+    // Create DataFrame with vector data
+    List<Row> rows = new ArrayList<>();
+    Random random = new Random();
+    for (int i = 0; i < 100; i++) {
+        float[] vector = new float[128];
+        for (int j = 0; j < 128; j++) {
+            vector[j] = random.nextFloat();
+        }
+        rows.add(RowFactory.create(i, vector));
+    }
+
+    StructType schema = new StructType(new StructField[] {
+        DataTypes.createStructField("id", DataTypes.IntegerType, false),
+        DataTypes.createStructField("embeddings",
+            DataTypes.createArrayType(DataTypes.FloatType, false), false)
+    });
+
+    Dataset<Row> df = spark.createDataFrame(rows, schema);
+
+    // Write to Lance table with float16 encoding
+    df.writeTo("embeddings_f16")
+        .tableProperty("embeddings.arrow.fixed-size-list.size", "128")
+        .tableProperty("embeddings.arrow.float16", "true")
         .createOrReplace();
     ```
 

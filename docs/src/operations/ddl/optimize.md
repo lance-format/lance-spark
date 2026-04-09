@@ -30,6 +30,7 @@ The `OPTIMIZE` command supports several options to control compaction behavior:
 | `num_threads` | Long | Number of threads for compaction |
 | `batch_size` | Long | Batch size for processing |
 | `defer_index_remap` | Boolean | Whether to defer index remapping |
+| `max_source_fragments` | Long | Maximum number of source fragments to compact in a single task |
 
 ### Examples
 

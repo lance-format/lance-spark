@@ -82,6 +82,7 @@ See [Configuration](config.md) for more details.
 
 | Spark Version       | Support Status  | Notes                                                        |
 |---------------------|-----------------|--------------------------------------------------------------|
+| Spark 4.1           | ✅ Supported     | Scala 2.13 only                                             |
 | Spark 4.0           | ✅ Supported     | Scala 2.13 only (Spark 4.0 dropped Scala 2.12 support)     |
 | Spark 3.5           | ✅ Supported     | Scala 2.12 and 2.13                                         |
 | Spark 3.4           | ✅ Supported     | Scala 2.12 and 2.13                                         |

@@ -15,7 +15,7 @@ package org.apache.spark.sql.execution.datasources.v2
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
-import org.apache.spark.sql.catalyst.plans.logical.{NamedArgument, OptimizeOutputType}
+import org.apache.spark.sql.catalyst.plans.logical.{LanceNamedArgument, OptimizeOutputType}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
 import org.lance.{Dataset, ReadOptions}
@@ -27,7 +27,7 @@ import scala.collection.JavaConverters._
 case class OptimizeExec(
     catalog: TableCatalog,
     ident: Identifier,
-    args: Seq[NamedArgument]) extends LeafV2CommandExec {
+    args: Seq[LanceNamedArgument]) extends LeafV2CommandExec {
 
   override def output: Seq[Attribute] = OptimizeOutputType.SCHEMA
 
@@ -49,6 +49,8 @@ case class OptimizeExec(
     argsMap.get("batch_size").map(t => builder.withBatchSize(t.value.asInstanceOf[Long]))
     argsMap.get("defer_index_remap").map(t =>
       builder.withDeferIndexRemap(t.value.asInstanceOf[Boolean]))
+    argsMap.get("max_source_fragments").map(t =>
+      builder.withMaxSourceFragments(t.value.asInstanceOf[Long]))
 
     builder.build()
   }
@@ -129,19 +131,12 @@ case class OptimizeExec(
       nsProps: Option[Map[String, String]],
       tableId: Option[List[String]],
       initialStorageOpts: Option[Map[String, String]]): Dataset = {
-    // Build ReadOptions with merged storage options and credential refresh provider
+    // Build ReadOptions with merged storage options
     val merged = LanceRuntime.mergeStorageOptions(
       readOptions.getStorageOptions,
       initialStorageOpts.map(_.asJava).orNull)
-    val provider = LanceRuntime.getOrCreateStorageOptionsProvider(
-      nsImpl.orNull,
-      nsProps.map(_.asJava).orNull,
-      tableId.map(_.asJava).orNull)
 
     val builder = new ReadOptions.Builder().setStorageOptions(merged)
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider)
-    }
 
     Dataset.open()
       .allocator(LanceRuntime.allocator())
@@ -163,19 +158,12 @@ case class OptimizeTaskExecutor(
     val readOptions = decode[LanceSparkReadOptions](lanceConf)
     val compactionTask = decode[CompactionTask](task)
 
-    // Build ReadOptions with merged storage options and credential refresh provider
+    // Build ReadOptions with merged storage options
     val merged = LanceRuntime.mergeStorageOptions(
       readOptions.getStorageOptions,
       initialStorageOptions.map(_.asJava).orNull)
-    val provider = LanceRuntime.getOrCreateStorageOptionsProvider(
-      namespaceImpl.orNull,
-      namespaceProperties.map(_.asJava).orNull,
-      tableId.map(_.asJava).orNull)
 
     val builder = new ReadOptions.Builder().setStorageOptions(merged)
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider)
-    }
 
     val dataset = Dataset.open()
       .allocator(LanceRuntime.allocator())

@@ -45,10 +45,12 @@ echo ""
 
 # Step 1: Build benchmark jar if needed
 echo "--- Step 1: Build benchmark jar ---"
-BENCHMARK_JAR="${BENCHMARK_DIR}/target/lance-spark-benchmark-0.3.0-beta.1.jar"
+BENCHMARK_JAR="${BENCHMARK_DIR}/target/lance-spark-benchmark.jar"
 if [ ! -f "${BENCHMARK_JAR}" ]; then
   cd "${BENCHMARK_DIR}"
-  mvn package -DskipTests -q
+  ../mvnw package -DskipTests -q \
+    -Dspark.compat.version="${SPARK_VERSION}" \
+    -Dscala.compat.version="${SCALA_VERSION}"
   cd "${SCRIPT_DIR}"
 fi
 

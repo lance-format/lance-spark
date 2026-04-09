@@ -137,4 +137,25 @@ public abstract class BaseTestSparkLanceDbRestNamespace extends SparkLanceNamesp
     skipIfNotConfigured();
     super.testLoadSparkTable();
   }
+
+  @Test
+  @Override
+  public void testRenameTable() throws Exception {
+    skipIfNotConfigured();
+    super.testRenameTable();
+  }
+
+  @Test
+  @Override
+  public void testRenameNonExistentTableFails() throws Exception {
+    skipIfNotConfigured();
+    super.testRenameNonExistentTableFails();
+  }
+
+  @Test
+  @Override
+  public void testRenameTableToExistingNameFails() throws Exception {
+    skipIfNotConfigured();
+    super.testRenameTableToExistingNameFails();
+  }
 }

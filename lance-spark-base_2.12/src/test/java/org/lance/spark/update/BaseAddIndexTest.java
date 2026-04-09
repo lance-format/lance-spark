@@ -396,6 +396,59 @@ public abstract class BaseAddIndexTest {
     checkIndex("test_fts_repeat");
   }
 
+  @Test
+  public void testDropIndex() {
+    prepareDataset();
+
+    // Create an index first
+    spark.sql(
+        String.format("alter table %s create index test_drop_idx using btree (id)", fullTable));
+    checkIndex("test_drop_idx");
+
+    // Drop the index
+    Dataset<Row> result =
+        spark.sql(String.format("alter table %s drop index test_drop_idx", fullTable));
+
+    Assertions.assertEquals(
+        "StructType(StructField(index_name,StringType,true),StructField(status,StringType,true))",
+        result.schema().toString());
+
+    Row row = result.collectAsList().get(0);
+    Assertions.assertEquals("test_drop_idx", row.getString(0));
+    Assertions.assertEquals("dropped", row.getString(1));
+
+    // Verify index no longer exists
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      List<Index> indexList = lanceDataset.getIndexes();
+      Set<String> indexNames = indexList.stream().map(Index::name).collect(Collectors.toSet());
+      Assertions.assertFalse(
+          indexNames.contains("test_drop_idx"), "Index should have been dropped");
+    } finally {
+      lanceDataset.close();
+    }
+  }
+
+  @Test
+  public void testDropIndexThenRecreate() {
+    prepareDataset();
+
+    // Create, drop, then recreate
+    spark.sql(
+        String.format("alter table %s create index test_recreate_idx using btree (id)", fullTable));
+    checkIndex("test_recreate_idx");
+
+    spark.sql(String.format("alter table %s drop index test_recreate_idx", fullTable));
+
+    spark.sql(
+        String.format("alter table %s create index test_recreate_idx using btree (id)", fullTable));
+    checkIndex("test_recreate_idx");
+
+    // Verify query still works
+    Dataset<Row> query = spark.sql(String.format("select * from %s where id=5", fullTable));
+    Assertions.assertEquals(1L, query.count());
+  }
+
   private void checkIndex(String indexName) {
     // Check index is created successfully
     org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();

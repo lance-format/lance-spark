@@ -18,7 +18,7 @@ import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.arrow.vector.ipc.{ArrowStreamReader, ArrowStreamWriter}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
-import org.apache.spark.sql.catalyst.plans.logical.{AddIndexOutputType, NamedArgument}
+import org.apache.spark.sql.catalyst.plans.logical.{AddIndexOutputType, LanceNamedArgument}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.LanceArrowUtils
@@ -54,7 +54,7 @@ case class AddIndexExec(
     indexName: String,
     method: String,
     columns: Seq[String],
-    args: Seq[NamedArgument]) extends LeafV2CommandExec {
+    args: Seq[LanceNamedArgument]) extends LeafV2CommandExec {
 
   override def output: Seq[Attribute] = AddIndexOutputType.SCHEMA
 
@@ -143,7 +143,7 @@ case class AddIndexExec(
     if (readOptions.hasNamespace) {
       Dataset.open()
         .allocator(LanceRuntime.allocator())
-        .namespace(readOptions.getNamespace)
+        .namespaceClient(readOptions.getNamespace)
         .readOptions(readOptions.toReadOptions)
         .tableId(readOptions.getTableId)
         .build()
@@ -557,7 +557,7 @@ object IndexUtils {
     }
   }
 
-  def toJson(args: Seq[NamedArgument]): String = {
+  def toJson(args: Seq[LanceNamedArgument]): String = {
     if (args.isEmpty) {
       "{}"
     } else {
@@ -599,20 +599,12 @@ object IndexUtils {
       namespaceImpl: Option[String],
       namespaceProperties: Option[Map[String, String]],
       tableId: Option[List[String]]): Dataset = {
-    // Build ReadOptions with merged storage options and credential refresh provider
+    // Build ReadOptions with merged storage options
     val merged = LanceRuntime.mergeStorageOptions(
       readOptions.getStorageOptions,
       initialStorageOptions.map(_.asJava).orNull)
 
-    val provider = LanceRuntime.getOrCreateStorageOptionsProvider(
-      namespaceImpl.orNull,
-      namespaceProperties.map(_.asJava).orNull,
-      tableId.map(_.asJava).orNull)
-
     val builder = new ReadOptions.Builder().setStorageOptions(merged)
-    if (provider != null) {
-      builder.setStorageOptionsProvider(provider)
-    }
 
     Dataset.open()
       .allocator(LanceRuntime.allocator())

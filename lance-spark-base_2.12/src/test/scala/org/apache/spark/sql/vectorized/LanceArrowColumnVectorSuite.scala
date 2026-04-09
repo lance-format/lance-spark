@@ -691,4 +691,72 @@ class LanceArrowColumnVectorSuite extends AnyFunSuite {
     columnVector.close()
     allocator.close()
   }
+
+  test("map") {
+    val allocator = ArrowUtils.rootAllocator.newChildAllocator("map", 0, Long.MaxValue)
+    val mapType = MapType(StringType, IntegerType, valueContainsNull = true)
+    val vector = LanceArrowUtils.toArrowField("map", mapType, nullable = true, null)
+      .createVector(allocator).asInstanceOf[MapVector]
+    vector.allocateNew()
+
+    val structVector = vector.getDataVector.asInstanceOf[StructVector]
+    val keyVector = structVector.getChildByOrdinal(0).asInstanceOf[VarCharVector]
+    val valueVector = structVector.getChildByOrdinal(1).asInstanceOf[IntVector]
+
+    // Row 0: {"a" -> 1, "b" -> 2}
+    vector.startNewValue(0)
+    keyVector.setSafe(0, "a".getBytes("utf8"), 0, 1)
+    valueVector.setSafe(0, 1)
+    structVector.setIndexDefined(0)
+    keyVector.setSafe(1, "b".getBytes("utf8"), 0, 1)
+    valueVector.setSafe(1, 2)
+    structVector.setIndexDefined(1)
+    vector.endValue(0, 2)
+
+    // Row 1: {"c" -> 3}
+    vector.startNewValue(1)
+    keyVector.setSafe(2, "c".getBytes("utf8"), 0, 1)
+    valueVector.setSafe(2, 3)
+    structVector.setIndexDefined(2)
+    vector.endValue(1, 1)
+
+    // Row 2: null
+    vector.setNull(2)
+
+    // Row 3: {} (empty map)
+    vector.startNewValue(3)
+    vector.endValue(3, 0)
+
+    structVector.setValueCount(3)
+    vector.setValueCount(4)
+
+    val columnVector = new LanceArrowColumnVector(vector)
+    assert(columnVector.dataType === mapType)
+    assert(columnVector.hasNull)
+    assert(columnVector.numNulls === 1)
+
+    // Row 0: {"a" -> 1, "b" -> 2}
+    val map0 = columnVector.getMap(0)
+    assert(map0.numElements() === 2)
+    assert(map0.keyArray().getUTF8String(0) === UTF8String.fromString("a"))
+    assert(map0.valueArray().getInt(0) === 1)
+    assert(map0.keyArray().getUTF8String(1) === UTF8String.fromString("b"))
+    assert(map0.valueArray().getInt(1) === 2)
+
+    // Row 1: {"c" -> 3}
+    val map1 = columnVector.getMap(1)
+    assert(map1.numElements() === 1)
+    assert(map1.keyArray().getUTF8String(0) === UTF8String.fromString("c"))
+    assert(map1.valueArray().getInt(0) === 3)
+
+    // Row 2: null
+    assert(columnVector.isNullAt(2))
+
+    // Row 3: empty map
+    val map3 = columnVector.getMap(3)
+    assert(map3.numElements() === 0)
+
+    columnVector.close()
+    allocator.close()
+  }
 }
