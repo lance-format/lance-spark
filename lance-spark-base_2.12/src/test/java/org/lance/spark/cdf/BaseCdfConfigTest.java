@@ -74,19 +74,19 @@ public abstract class BaseCdfConfigTest {
 
       assertEquals(2, rows.size());
 
-      // Alice: updated in v3
+      // Alice: updated in v3 — created tracks original insert version via RowIdMeta
       Row alice = rows.get(0);
       assertEquals(1, alice.getInt(0));
       assertEquals(110, alice.getInt(2));
-      assertEquals(1L, alice.getLong(3)); // created
+      assertEquals(2L, alice.getLong(3)); // created
       assertEquals(3L, alice.getLong(4)); // updated
 
-      // Bob: untouched after fragment rewrite
+      // Bob: untouched — retains original insert version from RowDatasetVersionMeta
       Row bob = rows.get(1);
       assertEquals(2, bob.getInt(0));
       assertEquals(200, bob.getInt(2));
-      assertEquals(1L, bob.getLong(3)); // created
-      assertEquals(1L, bob.getLong(4)); // updated
+      assertEquals(2L, bob.getLong(3)); // created
+      assertEquals(2L, bob.getLong(4)); // updated
     } finally {
       spark.stop();
     }
@@ -135,19 +135,19 @@ public abstract class BaseCdfConfigTest {
 
       assertEquals(2, rows.size());
 
-      // Alice: updated in v3
+      // Alice: updated in v3 — created tracks original insert version via RowIdMeta
       Row alice = rows.get(0);
       assertEquals(1, alice.getInt(0));
       assertEquals(110, alice.getInt(2));
-      assertEquals(1L, alice.getLong(3)); // created
+      assertEquals(2L, alice.getLong(3)); // created
       assertEquals(3L, alice.getLong(4)); // updated
 
-      // Bob: untouched after fragment rewrite
+      // Bob: untouched — retains original insert version from RowDatasetVersionMeta
       Row bob = rows.get(1);
       assertEquals(2, bob.getInt(0));
       assertEquals(200, bob.getInt(2));
-      assertEquals(1L, bob.getLong(3)); // created
-      assertEquals(1L, bob.getLong(4)); // updated
+      assertEquals(2L, bob.getLong(3)); // created
+      assertEquals(2L, bob.getLong(4)); // updated
     } finally {
       spark.stop();
     }

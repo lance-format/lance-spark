@@ -92,8 +92,8 @@ public abstract class BaseCdfVersionTrackingTest {
 
     helper.checkWithVersions(
         Arrays.asList(
-            CdfRow.ofWithVersions(1, "Alice", 110, 1L, 3L),
-            CdfRow.ofWithVersions(2, "Bob", 200, 1L, 1L)));
+            CdfRow.ofWithVersions(1, "Alice", 110, 2L, 3L),
+            CdfRow.ofWithVersions(2, "Bob", 200, 2L, 2L)));
   }
 
   @Test
@@ -107,17 +107,17 @@ public abstract class BaseCdfVersionTrackingTest {
     // v3: First update
     helper.update("value = value + 10", "id = 1");
     helper.checkWithVersions(
-        Collections.singletonList(CdfRow.ofWithVersions(1, "Alice", 110, 1L, 3L)));
+        Collections.singletonList(CdfRow.ofWithVersions(1, "Alice", 110, 2L, 3L)));
 
     // v4: Second update on same row
     helper.update("value = value + 10", "id = 1");
     helper.checkWithVersions(
-        Collections.singletonList(CdfRow.ofWithVersions(1, "Alice", 120, 1L, 4L)));
+        Collections.singletonList(CdfRow.ofWithVersions(1, "Alice", 120, 2L, 4L)));
 
     // v5: Third update on same row
     helper.update("value = value + 10", "id = 1");
     helper.checkWithVersions(
-        Collections.singletonList(CdfRow.ofWithVersions(1, "Alice", 130, 1L, 5L)));
+        Collections.singletonList(CdfRow.ofWithVersions(1, "Alice", 130, 2L, 5L)));
   }
 
   @Test
@@ -135,9 +135,9 @@ public abstract class BaseCdfVersionTrackingTest {
 
     helper.checkWithVersions(
         Arrays.asList(
-            CdfRow.ofWithVersions(1, "Alice", 100, 1L, 1L),
-            CdfRow.ofWithVersions(2, "Bob", 201, 1L, 3L),
-            CdfRow.ofWithVersions(3, "Charlie", 301, 1L, 3L)));
+            CdfRow.ofWithVersions(1, "Alice", 100, 2L, 2L),
+            CdfRow.ofWithVersions(2, "Bob", 201, 2L, 3L),
+            CdfRow.ofWithVersions(3, "Charlie", 301, 2L, 3L)));
   }
 
   @Test
@@ -173,8 +173,8 @@ public abstract class BaseCdfVersionTrackingTest {
 
     helper.checkWithVersions(
         Arrays.asList(
-            CdfRow.ofWithVersions(1, "Alice", 100, 1L, 1L),
-            CdfRow.ofWithVersions(3, "Charlie", 300, 1L, 1L)));
+            CdfRow.ofWithVersions(1, "Alice", 100, 2L, 2L),
+            CdfRow.ofWithVersions(3, "Charlie", 300, 2L, 2L)));
   }
 
   @Test
@@ -202,8 +202,8 @@ public abstract class BaseCdfVersionTrackingTest {
 
     helper.checkWithVersions(
         Arrays.asList(
-            CdfRow.ofWithVersions(1, "Alice", 151, 1L, 7L),
-            CdfRow.ofWithVersions(3, "Charlie", 401, 1L, 7L)));
+            CdfRow.ofWithVersions(1, "Alice", 151, 2L, 7L),
+            CdfRow.ofWithVersions(3, "Charlie", 401, 4L, 7L)));
   }
 
   @Test
@@ -224,8 +224,8 @@ public abstract class BaseCdfVersionTrackingTest {
 
     helper.checkWithVersions(
         Arrays.asList(
-            CdfRow.ofWithVersions(1, "Alice", 200, 1L, 4L),
-            CdfRow.ofWithVersions(3, "Charlie", 600, 1L, 4L)));
+            CdfRow.ofWithVersions(1, "Alice", 200, 2L, 4L),
+            CdfRow.ofWithVersions(3, "Charlie", 600, 2L, 4L)));
   }
 
   @Test

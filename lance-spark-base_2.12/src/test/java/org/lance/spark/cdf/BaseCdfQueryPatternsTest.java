@@ -128,9 +128,9 @@ public abstract class BaseCdfQueryPatternsTest {
 
     // Alice (updated v3), Bob (updated v5), Charlie (updated v5)
     assertEquals(3, changes.size());
-    assertEquals(CdfRow.ofWithVersions(1, "Alice", 150, 1L, 3L), changes.get(0));
-    assertEquals(CdfRow.ofWithVersions(2, "Bob", 250, 1L, 5L), changes.get(1));
-    assertEquals(CdfRow.ofWithVersions(3, "Charlie", 350, 1L, 5L), changes.get(2));
+    assertEquals(CdfRow.ofWithVersions(1, "Alice", 150, 2L, 3L), changes.get(0));
+    assertEquals(CdfRow.ofWithVersions(2, "Bob", 250, 2L, 5L), changes.get(1));
+    assertEquals(CdfRow.ofWithVersions(3, "Charlie", 350, 4L, 5L), changes.get(2));
   }
 
   @Test
@@ -165,8 +165,8 @@ public abstract class BaseCdfQueryPatternsTest {
     List<CdfRow> modifiedRows = helper.query(sql);
 
     assertEquals(2, modifiedRows.size());
-    assertEquals(CdfRow.ofWithVersions(1, "Alice", 102, 1L, 4L), modifiedRows.get(0));
-    assertEquals(CdfRow.ofWithVersions(2, "Bob", 201, 1L, 5L), modifiedRows.get(1));
+    assertEquals(CdfRow.ofWithVersions(1, "Alice", 102, 2L, 4L), modifiedRows.get(0));
+    assertEquals(CdfRow.ofWithVersions(2, "Bob", 201, 2L, 5L), modifiedRows.get(1));
 
     // Query: Find rows modified more recently than version 2
     sql =
@@ -180,8 +180,8 @@ public abstract class BaseCdfQueryPatternsTest {
     List<CdfRow> recentlyModified = helper.query(sql);
 
     assertEquals(2, recentlyModified.size());
-    assertEquals(CdfRow.ofWithVersions(1, "Alice", 102, 1L, 4L), recentlyModified.get(0));
-    assertEquals(CdfRow.ofWithVersions(2, "Bob", 201, 1L, 5L), recentlyModified.get(1));
+    assertEquals(CdfRow.ofWithVersions(1, "Alice", 102, 2L, 4L), recentlyModified.get(0));
+    assertEquals(CdfRow.ofWithVersions(2, "Bob", 201, 2L, 5L), recentlyModified.get(1));
   }
 
   @Test
@@ -263,7 +263,7 @@ public abstract class BaseCdfQueryPatternsTest {
 
     List<CdfRow> updatedRows = helper.query(sqlUpdatedRows);
     assertEquals(1, updatedRows.size());
-    assertEquals(CdfRow.ofWithVersions(1, "Alice", 110, 1L, 3L), updatedRows.get(0));
+    assertEquals(CdfRow.ofWithVersions(1, "Alice", 110, 2L, 3L), updatedRows.get(0));
   }
 
   @Test

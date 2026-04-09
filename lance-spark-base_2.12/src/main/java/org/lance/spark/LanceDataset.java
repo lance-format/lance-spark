@@ -86,6 +86,11 @@ public class LanceDataset
         public DataType dataType() {
           return DataTypes.LongType;
         }
+
+        @Override
+        public boolean isNullable() {
+          return false;
+        }
       };
 
   public static final MetadataColumn ROW_ADDRESS_COLUMN =

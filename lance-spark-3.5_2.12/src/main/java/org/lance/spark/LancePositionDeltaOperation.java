@@ -99,7 +99,8 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
   @Override
   public NamedReference[] rowId() {
     NamedReference rowAddr = Expressions.column(LanceConstant.ROW_ADDRESS);
-    return new NamedReference[] {rowAddr};
+    NamedReference rowId = Expressions.column(LanceConstant.ROW_ID);
+    return new NamedReference[] {rowAddr, rowId};
   }
 
   @Override
@@ -110,6 +111,6 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
 
   @Override
   public boolean representUpdateAsDeleteAndInsert() {
-    return true;
+    return command != Command.UPDATE;
   }
 }

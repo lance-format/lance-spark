@@ -17,8 +17,6 @@ import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.FragmentMetadata;
-import org.lance.ReadOptions;
-import org.lance.RowAddress;
 import org.lance.Transaction;
 import org.lance.WriteParams;
 import org.lance.operation.Update;
@@ -48,11 +46,11 @@ import org.apache.spark.sql.connector.write.PhysicalWriteInfo;
 import org.apache.spark.sql.connector.write.RequiresDistributionAndOrdering;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
 import org.apache.spark.sql.types.StructType;
+import org.roaringbitmap.IntIterator;
 import org.roaringbitmap.RoaringBitmap;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -129,21 +127,47 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
     @Override
     public void commit(WriterCommitMessage[] messages) {
+      List<FragmentMetadata> newFragments = new ArrayList<>();
+      Map<Integer, RoaringBitmap> aggregatedDeletions = new HashMap<>();
+
+      for (WriterCommitMessage msg : messages) {
+        DeltaWriteTaskCommit m = (DeltaWriteTaskCommit) msg;
+        newFragments.addAll(m.newFragments());
+        m.deletionMap()
+            .forEach(
+                (fragId, bitmap) ->
+                    aggregatedDeletions.merge(
+                        fragId,
+                        bitmap,
+                        (existing, incoming) -> {
+                          existing.or(incoming);
+                          return existing;
+                        }));
+      }
+
       List<Long> removedFragmentIds = new ArrayList<>();
       List<FragmentMetadata> updatedFragments = new ArrayList<>();
-      List<FragmentMetadata> newFragments = new ArrayList<>();
-
-      Arrays.stream(messages)
-          .map(m -> (DeltaWriteTaskCommit) m)
-          .forEach(
-              m -> {
-                removedFragmentIds.addAll(m.removedFragmentIds());
-                updatedFragments.addAll(m.updatedFragments());
-                newFragments.addAll(m.newFragments());
-              });
-
-      // Use SDK directly to update fragments
       try (Dataset dataset = Utils.openDataset(writeOptions)) {
+        aggregatedDeletions.forEach(
+            (fragmentId, bitmap) -> {
+              List<Integer> rowIndexes = new ArrayList<>();
+              IntIterator it = bitmap.getIntIterator();
+              while (it.hasNext()) {
+                rowIndexes.add(it.next());
+              }
+              if (rowIndexes.isEmpty()) {
+                return;
+              }
+              rowIndexes.sort(Integer::compareTo);
+              FragmentMetadata updatedFragment =
+                  dataset.getFragment(fragmentId).deleteRows(ImmutableList.copyOf(rowIndexes));
+              if (updatedFragment != null) {
+                updatedFragments.add(updatedFragment);
+              } else {
+                removedFragmentIds.add(Long.valueOf(fragmentId));
+              }
+            });
+
         Update update =
             Update.builder()
                 .removedFragmentIds(removedFragmentIds)
@@ -151,12 +175,14 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
                 .newFragments(newFragments)
                 .build();
 
+        CommitBuilder commitBuilder =
+            new CommitBuilder(dataset).writeParams(writeOptions.getStorageOptions());
+        if (dataset.hasStableRowIds()) {
+          commitBuilder.useStableRowIds(true);
+        }
         try (Transaction txn =
                 new Transaction.Builder().readVersion(dataset.version()).operation(update).build();
-            Dataset committed =
-                new CommitBuilder(dataset)
-                    .writeParams(writeOptions.getStorageOptions())
-                    .execute(txn)) {
+            Dataset committed = commitBuilder.execute(txn)) {
           // auto-close txn and committed dataset
         }
       }
@@ -267,8 +293,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
      */
     private final Map<String, String> initialStorageOptions;
 
-    // Key is fragmentId, Value is fragment's deleted row indexes
-    private final Map<Integer, RoaringBitmap> deletedRows;
+    private final Map<Integer, RoaringBitmap> deletionMap;
 
     private LanceDeltaWriter(
         LanceSparkWriteOptions writeOptions,
@@ -277,24 +302,15 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       this.writeOptions = writeOptions;
       this.writer = writer;
       this.initialStorageOptions = initialStorageOptions;
-      this.deletedRows = new HashMap<>();
+      this.deletionMap = new HashMap<>();
     }
 
     @Override
     public void delete(InternalRow metadata, InternalRow id) throws IOException {
-      int fragmentId = metadata.getInt(0);
-      deletedRows.compute(
-          fragmentId,
-          (k, v) -> {
-            if (v == null) {
-              v = new RoaringBitmap();
-            }
-            // Get the row index which is low 32 bits of row address.
-            // See
-            // https://github.com/lance-format/lance/blob/main/rust/lance-core/src/utils/address.rs#L36
-            v.add(RowAddress.rowIndex(id.getLong(0)));
-            return v;
-          });
+      long rowAddr = id.getLong(0);
+      deletionMap
+          .computeIfAbsent(fragmentIdFromRowAddr(rowAddr), k -> new RoaringBitmap())
+          .add(rowOffsetFromRowAddr(rowAddr));
     }
 
     @Override
@@ -309,44 +325,9 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
     @Override
     public WriterCommitMessage commit() throws IOException {
-      // Write new fragments to store new updated rows.
       LanceBatchWrite.TaskCommit append = (LanceBatchWrite.TaskCommit) writer.commit();
       List<FragmentMetadata> newFragments = append.getFragments();
-
-      List<Long> removedFragmentIds = new ArrayList<>();
-      List<FragmentMetadata> updatedFragments = new ArrayList<>();
-
-      // Deleting updated rows from old fragments using SDK directly.
-      try (Dataset dataset = openDataset(writeOptions)) {
-        this.deletedRows.forEach(
-            (fragmentId, rowIndexes) -> {
-              FragmentMetadata updatedFragment =
-                  dataset.getFragment(fragmentId).deleteRows(ImmutableList.copyOf(rowIndexes));
-              if (updatedFragment != null) {
-                updatedFragments.add(updatedFragment);
-              } else {
-                removedFragmentIds.add(Long.valueOf(fragmentId));
-              }
-            });
-      }
-
-      return new DeltaWriteTaskCommit(removedFragmentIds, updatedFragments, newFragments);
-    }
-
-    private Dataset openDataset(LanceSparkWriteOptions options) {
-      // Note: options.hasNamespace() is false on workers (namespace is transient)
-      Map<String, String> merged =
-          LanceRuntime.mergeStorageOptions(options.getStorageOptions(), initialStorageOptions);
-      ReadOptions readOptions =
-          new ReadOptions.Builder()
-              .setStorageOptions(merged)
-              .setSession(LanceRuntime.session())
-              .build();
-      return Dataset.open()
-          .allocator(LanceRuntime.allocator())
-          .uri(options.getDatasetUri())
-          .readOptions(readOptions)
-          .build();
+      return new DeltaWriteTaskCommit(newFragments, deletionMap);
     }
 
     @Override
@@ -360,30 +341,32 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     }
   }
 
+  private static int fragmentIdFromRowAddr(long rowAddr) {
+    return (int) (rowAddr >>> 32);
+  }
+
+  private static int rowOffsetFromRowAddr(long rowAddr) {
+    return (int) (rowAddr & 0xFFFFFFFFL);
+  }
+
   private static class DeltaWriteTaskCommit implements WriterCommitMessage {
-    private List<Long> removedFragmentIds;
-    private List<FragmentMetadata> updatedFragments;
-    private List<FragmentMetadata> newFragments;
+    private static final long serialVersionUID = 1L;
+
+    private final List<FragmentMetadata> newFragments;
+    private final Map<Integer, RoaringBitmap> deletionMap;
 
     DeltaWriteTaskCommit(
-        List<Long> removedFragmentIds,
-        List<FragmentMetadata> updatedFragments,
-        List<FragmentMetadata> newFragments) {
-      this.removedFragmentIds = removedFragmentIds;
-      this.updatedFragments = updatedFragments;
+        List<FragmentMetadata> newFragments, Map<Integer, RoaringBitmap> deletionMap) {
       this.newFragments = newFragments;
-    }
-
-    public List<Long> removedFragmentIds() {
-      return removedFragmentIds == null ? Collections.emptyList() : removedFragmentIds;
-    }
-
-    public List<FragmentMetadata> updatedFragments() {
-      return updatedFragments == null ? Collections.emptyList() : updatedFragments;
+      this.deletionMap = deletionMap;
     }
 
     public List<FragmentMetadata> newFragments() {
       return newFragments == null ? Collections.emptyList() : newFragments;
+    }
+
+    public Map<Integer, RoaringBitmap> deletionMap() {
+      return deletionMap == null ? Collections.emptyMap() : deletionMap;
     }
   }
 }
