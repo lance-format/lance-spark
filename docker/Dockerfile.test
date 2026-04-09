@@ -17,10 +17,10 @@ ARG SCALA_VERSION=2.13
 # Add a random query as a cache buster
 ADD "https://www.random.org/cgi-bin/randbyte?nbytes=10&format=h" skipcache
 
-COPY lance-spark-bundle-${SPARK_MAJOR_VERSION}_${SCALA_VERSION}-*.jar ${SPARK_HOME}/jars/
+COPY lance-spark-bundle-${SPARK_MAJOR_VERSION}_${SCALA_VERSION}/target/lance-spark-bundle-${SPARK_MAJOR_VERSION}_${SCALA_VERSION}-*.jar ${SPARK_HOME}/jars/
 
 # Spark configuration and entrypoint
-COPY spark-defaults.conf ${SPARK_HOME}/conf/
+COPY docker/spark-defaults.conf ${SPARK_HOME}/conf/
 RUN chmod u+x ${SPARK_HOME}/sbin/* && \
     chmod u+x ${SPARK_HOME}/bin/*
 
@@ -29,10 +29,10 @@ RUN mkdir -p /home/lance/warehouse /home/lance/spark-events /home/lance/data
 
 # Copy tests
 RUN mkdir -p /home/lance/tests
-COPY tests/ /home/lance/tests/
+COPY integration-tests/ /home/lance/tests/
 
 WORKDIR ${SPARK_HOME}
-COPY entrypoint.sh .
+COPY docker/entrypoint.sh .
 
 ENTRYPOINT ["./entrypoint.sh"]
 CMD ["tail", "-f", "/dev/null"]

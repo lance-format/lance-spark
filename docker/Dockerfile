@@ -19,7 +19,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Create virtual environment and install Python dependencies
-COPY requirements.txt .
+COPY docker/requirements.txt .
 RUN python3 -m venv /opt/venv && \
     . /opt/venv/bin/activate && \
     pip install --upgrade pip setuptools wheel && \
@@ -60,7 +60,7 @@ RUN curl -L https://repo1.maven.org/maven2/com/lancedb/lance-namespace-glue/${LA
  -o /opt/spark/jars/lance-namespace-glue-${LANCE_NS_VERSION}.jar
 
 # For local testing, uncomment the lines below and comment out the Maven downloads above:
-#COPY lance-spark-bundle-${SPARK_MAJOR_VERSION}_${SCALA_VERSION}-${LANCE_SPARK_VERSION}.jar /opt/spark/jars/
+#COPY lance-spark-bundle-${SPARK_MAJOR_VERSION}_${SCALA_VERSION}/target/lance-spark-bundle-${SPARK_MAJOR_VERSION}_${SCALA_VERSION}-${LANCE_SPARK_VERSION}.jar /opt/spark/jars/
 #COPY lance-namespace-glue-${LANCE_NS_VERSION}.jar /opt/spark/jars/
 
 # Download OpenDAL native libraries for Linux architectures
@@ -87,10 +87,10 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2
 RUN mkdir -p /home/lance/warehouse /home/lance/notebooks /home/lance/spark-events /home/lance/data
 
 # Copy notebooks if available
-COPY notebooks/ /home/lance/notebooks/
+COPY docker/notebooks/ /home/lance/notebooks/
 
 # Copy tests
-COPY tests/ /home/lance/tests/
+COPY integration-tests/ /home/lance/tests/
 
 # Add a notebook command
 RUN echo '#! /bin/sh' >> /bin/notebook \
@@ -106,13 +106,13 @@ RUN echo '#! /bin/sh' >> /bin/pyspark-notebook \
  && echo "pyspark" >> /bin/pyspark-notebook \
  && chmod u+x /bin/pyspark-notebook
 
-COPY spark-defaults.conf /opt/spark/conf
+COPY docker/spark-defaults.conf /opt/spark/conf
 ENV PATH="/opt/spark/sbin:/opt/spark/bin:${PATH}"
 
 RUN chmod u+x /opt/spark/sbin/* && \
     chmod u+x /opt/spark/bin/*
 
-COPY entrypoint.sh .
+COPY docker/entrypoint.sh .
 
 ENTRYPOINT ["./entrypoint.sh"]
 CMD ["notebook"]
