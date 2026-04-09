@@ -374,7 +374,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     }
   }
 
-  private static class DeltaWriteTaskCommit implements WriterCommitMessage {
+  static class DeltaWriteTaskCommit implements WriterCommitMessage {
     private List<Long> removedFragmentIds;
     private List<FragmentMetadata> updatedFragments;
     private List<FragmentMetadata> newFragments;

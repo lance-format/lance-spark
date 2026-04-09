@@ -13,219 +13,117 @@
  */
 package org.lance.spark.write;
 
-import org.lance.CommitBuilder;
 import org.lance.Dataset;
-import org.lance.Fragment;
-import org.lance.FragmentMetadata;
-import org.lance.Transaction;
-import org.lance.fragment.FragmentUpdateResult;
-import org.lance.operation.Overwrite;
-import org.lance.operation.Update;
+import org.lance.WriteParams;
+import org.lance.spark.LanceConstant;
+import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.TestUtils;
 
-import org.apache.arrow.c.ArrowArrayStream;
-import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
-import org.apache.arrow.vector.IntVector;
-import org.apache.arrow.vector.UInt8Vector;
-import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.arrow.vector.ipc.ArrowStreamReader;
-import org.apache.arrow.vector.ipc.ArrowStreamWriter;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
+import org.apache.spark.sql.connector.write.DataWriter;
+import org.apache.spark.sql.connector.write.DataWriterFactory;
+import org.apache.spark.sql.connector.write.WriterCommitMessage;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.Optional;
-import java.util.Set;
 
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * JNI-level demonstrations of optimistic concurrency for column updates when a concurrent DELETE
- * lands between executor work and driver commit.
+ * Tests that UpdateColumnsBackfillBatchWrite detects concurrent DELETEs via version pinning. The
+ * writer pins the dataset version at construction time; a concurrent DELETE advances the version,
+ * and the stale commit must fail.
  *
- * <p>These tests do not invoke Spark or UpdateColumnsBackfillBatchWrite. But is constructs the same
- * behavior with Transaction.Builder.readVersion and direct update.
- *
- * <p>testConcurrentDeleteLostByWrongReadVersion exercises the intentional incorrect pattern:
- * readVersion = head after the DELETE, so the concurrent DELETE is not reflected (no deletion
- * file).
+ * <p>This exercises the specific bug that motivated OCC: a concurrent DELETE between executor scan
+ * and driver commit was silently lost when readVersion used the head version instead of the pinned
+ * scan-time version.
  */
 public class UpdateColumnsConflictTest {
-  @TempDir Path tempDir;
+  @TempDir static Path tempDir;
 
-  private static final Schema DATASET_SCHEMA =
+  private static final Schema ARROW_SCHEMA =
       new Schema(
           Arrays.asList(
               new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
               new Field("value", FieldType.nullable(new ArrowType.Int(32, true)), null)));
 
   /**
-   * Creates a Lance dataset at the given URI with 3 rows: (id=1,value=10), (id=2,value=20),
-   * (id=3,value=30). Returns the FragmentMetadata of the single fragment created.
-   */
-  private FragmentMetadata createInitialDataset(String datasetUri, BufferAllocator allocator)
-      throws IOException {
-    List<FragmentMetadata> fragments;
-    try (VectorSchemaRoot root = VectorSchemaRoot.create(DATASET_SCHEMA, allocator)) {
-      root.allocateNew();
-      IntVector idVec = (IntVector) root.getVector("id");
-      IntVector valueVec = (IntVector) root.getVector("value");
-      idVec.setSafe(0, 1);
-      valueVec.setSafe(0, 10);
-      idVec.setSafe(1, 2);
-      valueVec.setSafe(1, 20);
-      idVec.setSafe(2, 3);
-      valueVec.setSafe(2, 30);
-      root.setRowCount(3);
-
-      fragments = Fragment.write().datasetUri(datasetUri).allocator(allocator).data(root).execute();
-    }
-
-    Overwrite createOp = Overwrite.builder().fragments(fragments).schema(DATASET_SCHEMA).build();
-    try (Transaction txn = new Transaction.Builder().operation(createOp).build();
-        Dataset committed = new CommitBuilder(datasetUri, allocator).execute(txn)) {
-      // Dataset created at V1 with one fragment.
-    }
-
-    return fragments.get(0);
-  }
-
-  /**
-   * Simulates what UpdateColumnsWriter.updateFragment() does on an executor: opens the dataset,
-   * builds an Arrow stream with updated value for row at the given rowIndex in the given fragment,
-   * and calls fragment.updateColumns(). Returns the updated FragmentMetadata.
-   *
-   * <p>At scan time (V1, no deletions) the returned FragmentMetadata has no deletion file.
-   */
-  private FragmentMetadata simulateExecutorUpdateColumns(
-      String datasetUri, BufferAllocator allocator, int fragmentId, int rowIndex, int newValue)
-      throws IOException {
-    // _rowaddr encoding: upper 32 bits = fragment id, lower 32 bits = row index within fragment.
-    long rowAddr = ((long) fragmentId << 32) | (long) rowIndex;
-
-    Schema updateSchema =
-        new Schema(
-            Arrays.asList(
-                // _rowaddr is stored as UInt64 in Lance; use unsigned Int64 to match.
-                new Field("_rowaddr", FieldType.notNullable(new ArrowType.Int(64, false)), null),
-                new Field("value", FieldType.nullable(new ArrowType.Int(32, true)), null)));
-
-    byte[] arrowData;
-    try (VectorSchemaRoot updateRoot = VectorSchemaRoot.create(updateSchema, allocator)) {
-      updateRoot.allocateNew();
-      ((UInt8Vector) updateRoot.getVector("_rowaddr")).setSafe(0, rowAddr);
-      ((IntVector) updateRoot.getVector("value")).setSafe(0, newValue);
-      updateRoot.setRowCount(1);
-
-      ByteArrayOutputStream out = new ByteArrayOutputStream();
-      try (ArrowStreamWriter writer = new ArrowStreamWriter(updateRoot, null, out)) {
-        writer.start();
-        writer.writeBatch();
-        writer.end();
-      }
-      arrowData = out.toByteArray();
-    }
-
-    try (Dataset dataset = Dataset.open(datasetUri, allocator);
-        ArrowStreamReader reader =
-            new ArrowStreamReader(new ByteArrayInputStream(arrowData), allocator);
-        ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator)) {
-      Data.exportArrayStream(allocator, reader, stream);
-      Fragment frag = new Fragment(dataset, fragmentId);
-      FragmentUpdateResult result = frag.updateColumns(stream, "_rowaddr", "_rowaddr");
-      return result.getUpdatedFragment();
-    }
-  }
-
-  /**
-   * Simulates a driver commit with readVersion taken from a fresh open at commit time (current
-   * head), not the scan-time version, which is incorrect behavior.
-   */
-  private void simulateDriverCommit(
-      String datasetUri, BufferAllocator allocator, List<FragmentMetadata> updatedFragments)
-      throws IOException {
-    // Collect unmodified fragments (those not in the updated set), as the real commit() does.
-    Set<Integer> updatedIds = Collections.singleton(updatedFragments.get(0).getId());
-    try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
-      dataset.getFragments().stream()
-          .filter(f -> !updatedIds.contains(f.getId()))
-          .map(Fragment::metadata)
-          .forEach(updatedFragments::add);
-    }
-
-    // readVersion is dataset.version() at commit time (current head), not scan time.
-    // Any concurrent writer that committed between executor scan and now is absorbed into
-    // readVersion, so Rust OCC finds no intermediate transactions and always succeeds.
-    try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
-      long wrongReadVersion = dataset.version();
-      Update update =
-          Update.builder()
-              .updatedFragments(updatedFragments)
-              .updateMode(Optional.of(Update.UpdateMode.RewriteColumns))
-              .build();
-      try (Transaction txn =
-              new Transaction.Builder().readVersion(wrongReadVersion).operation(update).build();
-          Dataset committed = new CommitBuilder(dataset).execute(txn)) {
-        // committed dataset auto-closed
-      }
-    }
-  }
-
-  /**
-   * Demonstrates silent data inconsistency when readVersion is the post-DELETE head: OCC does not
-   * reconcile the executor's stale fragment with the intermediate DELETE.
-   *
-   * <p>The concurrent writer is a DELETE. Executor metadata has no deletion file (correct for scan
-   * time). Driver update commit still goes through and the committed fragment lacks the deletion
-   * file from the DELETE.
+   * An UpdateColumnsBackfillBatchWrite pins version at construction. A concurrent DELETE advances
+   * the dataset version. The backfill commit must fail because the pinned readVersion is stale.
    */
   @Test
-  public void testConcurrentDeleteLostByWrongReadVersion() throws IOException {
-    String datasetUri = tempDir.resolve("wrong_read_version_commit_test.lance").toString();
+  public void testConcurrentDeleteDetectedByVersionPinning(TestInfo testInfo) throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
 
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
-      // V1: dataset with 3 rows (id=1,value=10), (id=2,value=20), (id=3,value=30)
-      FragmentMetadata initialFrag = createInitialDataset(datasetUri, allocator);
-      int fragmentId = initialFrag.getId();
+      // Create dataset with (id, value) rows
+      Dataset.create(allocator, datasetUri, ARROW_SCHEMA, new WriteParams.Builder().build())
+          .close();
 
-      // Executor scans at V1, computes new value=200 for row at index 1 (id=2).
-      // The returned FragmentMetadata has no deletion file (none at scan time).
-      FragmentMetadata updatedFrag =
-          simulateExecutorUpdateColumns(datasetUri, allocator, fragmentId, 1, 200);
+      LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
+      StructType dataSchema = LanceArrowUtils.fromArrowSchema(ARROW_SCHEMA);
 
-      assertNull(
-          updatedFrag.getDeletionFile(),
-          "No deletion existed at scan time (V1); executor fragment must carry no deletion file");
+      // Append initial data: 5 rows
+      LanceBatchWrite initialWrite =
+          new LanceBatchWrite(dataSchema, writeOptions, false, null, null, null, null, false, null);
+      DataWriterFactory initFactory = initialWrite.createBatchWriterFactory(() -> 1);
+      WriterCommitMessage initialMsg;
+      try (DataWriter<InternalRow> writer = initFactory.createWriter(0, 0)) {
+        for (int i = 0; i < 5; i++) {
+          writer.write(new GenericInternalRow(new Object[] {i, i * 10}));
+        }
+        initialMsg = writer.commit();
+      }
+      initialWrite.commit(new WriterCommitMessage[] {initialMsg});
+      // Dataset now at V2
 
-      // Concurrent DELETE creates V2 between executor scan and driver commit.
-      try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
-        dataset.delete("id = 2");
+      // Create UpdateColumnsBackfillBatchWrite — pins version at V2
+      List<String> updateColumns = Collections.singletonList("value");
+      StructType updateSchema =
+          new StructType()
+              .add(LanceConstant.ROW_ADDRESS, DataTypes.LongType, false)
+              .add(LanceConstant.FRAGMENT_ID, DataTypes.IntegerType, false)
+              .add("value", DataTypes.IntegerType, true);
+
+      UpdateColumnsBackfillBatchWrite updateWrite =
+          new UpdateColumnsBackfillBatchWrite(
+              updateSchema, writeOptions, updateColumns, null, null, null, null);
+
+      // Simulate executor work: write updated column values
+      DataWriterFactory factory = updateWrite.createBatchWriterFactory(() -> 1);
+      WriterCommitMessage updateMsg;
+      try (DataWriter<InternalRow> writer = factory.createWriter(0, 0)) {
+        for (int i = 0; i < 5; i++) {
+          long rowAddr = i;
+          writer.write(new GenericInternalRow(new Object[] {rowAddr, 0, i * 999}));
+        }
+        updateMsg = writer.commit();
       }
 
-      // Driver commit with wrong readVersion = current head (V2)
-      // OCC sees no intermediate work to rebase against
-      // that readVersion, so the commit succeeds and the DELETE can be lost.
-      List<FragmentMetadata> updatedFragments = new ArrayList<>();
-      updatedFragments.add(updatedFrag);
-      simulateDriverCommit(datasetUri, allocator, updatedFragments);
-
-      // After wrong readVersion commit: concurrent DELETE is not preserved (no deletion file).
-      try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
-        FragmentMetadata frag = dataset.getFragments().get(0).metadata();
-        assertNull(frag.getDeletionFile(), "committed fragment should miss the deletion file.");
+      // Concurrent DELETE advances dataset to V3
+      try (Dataset ds = Dataset.open(datasetUri, allocator)) {
+        ds.delete("id = 2");
       }
+
+      // Backfill commit with pinned readVersion=V2 must fail — V3 exists
+      assertThrows(
+          Exception.class, () -> updateWrite.commit(new WriterCommitMessage[] {updateMsg}));
     }
   }
 }
