@@ -405,9 +405,20 @@ public class SchemaConverter {
       dataType.setType("timestamp");
     } else if (sparkType instanceof DecimalType) {
       DecimalType decimalType = (DecimalType) sparkType;
-      dataType.setType("decimal128");
-      // This is the convention set in lance-namespace/src/schema.rs
-      dataType.setLength((long) decimalType.precision() * 1000 + decimalType.scale());
+      int precision = decimalType.precision();
+      if (precision <= 9) {
+        dataType.setType("decimal32");
+      } else if (precision <= 18) {
+        dataType.setType("decimal64");
+      } else if (precision <= 38) {
+        dataType.setType("decimal128");
+      } else {
+        dataType.setType("decimal256");
+      }
+      // Encodes precision and scale into a single length field using the convention
+      // set in lance-namespace/src/schema.rs:
+      // https://github.com/lance-format/lance/blob/5f4bf81a3624865de411cf0e154b55bedbaee564/rust/lance-namespace/src/schema.rs#L76-L80
+      dataType.setLength((long) precision * 1000 + decimalType.scale());
     } else if (sparkType instanceof NullType) {
       dataType.setType("null");
     } else if (sparkType instanceof YearMonthIntervalType) {
