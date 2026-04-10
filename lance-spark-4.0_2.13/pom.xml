@@ -117,6 +117,7 @@
                             <sources>
                                 <source>../lance-spark-base_2.12/src/test/java</source>
                                 <source>../lance-spark-3.5_2.12/src/test/java</source>
+                                <source>src/test/java</source>
                             </sources>
                         </configuration>
                     </execution>

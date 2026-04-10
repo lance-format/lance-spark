@@ -94,6 +94,21 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
     AddIndex(table, indexName, method, columns, args)
   }
 
+  override def visitCreateIndexStandard(
+      ctx: LanceSqlExtensionsParser.CreateIndexStandardContext): AddIndex = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val indexName = cleanIdentifier(ctx.indexName.getText)
+    val method = cleanIdentifier(ctx.method.getText)
+    val columns = visitColumnList(ctx.columnList())
+    val args = ctx.namedArgument().asScala.map(a =>
+      LanceNamedArgument(
+        cleanIdentifier(a.identifier().getText),
+        a.constant().accept(this)))
+      .toSeq
+
+    AddIndex(table, indexName, method, columns, args)
+  }
+
   override def visitShowIndexes(ctx: LanceSqlExtensionsParser.ShowIndexesContext): LogicalPlan = {
     val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
     ShowIndexes(table)

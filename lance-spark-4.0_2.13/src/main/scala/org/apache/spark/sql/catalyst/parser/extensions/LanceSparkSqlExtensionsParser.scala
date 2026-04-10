@@ -19,7 +19,7 @@ import org.antlr.v4.runtime.misc.{Interval, ParseCancellationException}
 import org.apache.spark.sql.catalyst.{FunctionIdentifier, TableIdentifier}
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.parser.{ParseException, ParserInterface}
-import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.catalyst.plans.logical.{AddIndex, CreateIndex, LanceNamedArgument, LogicalPlan}
 import org.apache.spark.sql.types.{DataType, StructType}
 
 class LanceSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserInterface {
@@ -78,10 +78,21 @@ class LanceSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserInt
    * Parse a string to a LogicalPlan.
    */
   override def parsePlan(sqlText: String): LogicalPlan = {
-    try {
-      delegate.parsePlan(sqlText)
-    } catch {
-      case _: ParseException => parse(sqlText)
+    val plan =
+      try {
+        delegate.parsePlan(sqlText)
+      } catch {
+        case _: ParseException => parse(sqlText)
+      }
+
+    plan match {
+      case ci: CreateIndex =>
+        val columnNames = ci.columns.map(_._1.name.head)
+        val args = ci.properties.map { case (k, v) =>
+          LanceNamedArgument(k, v)
+        }.toSeq
+        AddIndex(ci.table, ci.indexName, ci.indexType, columnNames, args)
+      case _ => plan
     }
   }
 
