@@ -26,7 +26,6 @@ import org.apache.spark.sql.connector.write.SupportsDelta;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
-import java.util.Collections;
 import java.util.Map;
 
 public class LancePositionDeltaOperation implements RowLevelOperation, SupportsDelta {
@@ -47,6 +46,8 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
 
   private final String fileFormatVersion;
 
+  private final Map<String, String> tableProperties;
+
   public LancePositionDeltaOperation(
       Command command,
       StructType sparkSchema,
@@ -54,7 +55,8 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
-      String fileFormatVersion) {
+      String fileFormatVersion,
+      Map<String, String> tableProperties) {
     this.command = command;
     this.sparkSchema = sparkSchema;
     this.readOptions = readOptions;
@@ -62,6 +64,7 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.fileFormatVersion = fileFormatVersion;
+    this.tableProperties = tableProperties;
   }
 
   @Override
@@ -77,7 +80,7 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
-        Collections.emptyMap());
+        tableProperties);
   }
 
   @Override

@@ -76,6 +76,7 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
         getInitialStorageOptions(),
         getNamespaceImpl(),
         getNamespaceProperties(),
-        getFileFormatVersion());
+        getFileFormatVersion(),
+        properties());
   }
 }
