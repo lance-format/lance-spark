@@ -92,7 +92,7 @@ public class LanceScanBuilder
 
   private final java.util.Map<String, String> tableProperties;
 
-  static final String TABLE_OPT_SPJ_COLUMNS = "lance.spj.columns";
+  static final String TABLE_OPT_PARTITION_COLUMNS = "lance.partition.columns";
 
   public LanceScanBuilder(
       StructType schema,
@@ -155,23 +155,35 @@ public class LanceScanBuilder
     ManifestSummary summary = getOrOpenDataset().getVersion().getManifestSummary();
     LanceStatistics statistics = new LanceStatistics(summary);
 
-    // Load zonemap stats for columns that appear in pushed filters.
-    // This is done on the driver only — zonemap files are small
-    // metadata.
-    Map<String, List<ZoneStats>> zonemapStats =
-        loadZonemapStatsForFilteredColumns(getOrOpenDataset(), pushedFilters);
+    // Collect all columns that need zonemap stats: filter columns + partition column (if declared).
+    Set<String> columnsToLoad = extractReferencedColumns(pushedFilters);
+    String partitionColumn = tableProperties.get(TABLE_OPT_PARTITION_COLUMNS);
+    if (partitionColumn != null && !partitionColumn.trim().isEmpty()) {
+      partitionColumn = partitionColumn.trim();
+      columnsToLoad.add(partitionColumn);
+    } else {
+      partitionColumn = null;
+    }
 
-    // Detect partition-compatible columns for SPJ, gated on lance.spj.columns table property.
-    // Only loads zonemap stats for the declared column to avoid unnecessary I/O on every query.
+    // Load zonemap stats for all requested columns in one pass.
+    Map<String, List<ZoneStats>> zonemapStats = loadZonemapStats(getOrOpenDataset(), columnsToLoad);
+
+    // Detect partition-compatible columns, gated on lance.partition.columns table property.
+    // Currently a partitioned column is only valid if each fragment contains only a single
+    // value for that column (i.e., all zonemap zones have min == max with the same value).
     ZonemapPartitionDetector.PartitionInfo partitionInfo = null;
-    String spjColumn = tableProperties.get(TABLE_OPT_SPJ_COLUMNS);
-    if (spjColumn != null && !spjColumn.trim().isEmpty()) {
-      spjColumn = spjColumn.trim();
-      Map<String, List<ZoneStats>> spjStats =
-          loadZonemapStatsForSpjColumn(getOrOpenDataset(), spjColumn, zonemapStats);
-      if (!spjStats.isEmpty()) {
+    if (partitionColumn != null) {
+      if (!zonemapStats.containsKey(partitionColumn)) {
+        LOG.warn(
+            "Partition column '{}' declared in {} has no zonemap index or stats;"
+                + " partition detection disabled",
+            partitionColumn,
+            TABLE_OPT_PARTITION_COLUMNS);
+      } else {
+        Map<String, List<ZoneStats>> partitionStats =
+            Collections.singletonMap(partitionColumn, zonemapStats.get(partitionColumn));
         java.util.Optional<ZonemapPartitionDetector.PartitionInfo> detected =
-            ZonemapPartitionDetector.detect(spjStats);
+            ZonemapPartitionDetector.detect(partitionStats);
         if (detected.isPresent()) {
           partitionInfo = detected.get();
         }
@@ -320,17 +332,11 @@ public class LanceScanBuilder
   }
 
   /**
-   * Loads zonemap statistics for columns that appear in pushed filters. Only loads stats for
-   * columns that have a zonemap index.
+   * Loads zonemap statistics for the requested columns. Only loads stats for columns that have a
+   * zonemap index.
    */
-  private Map<String, List<ZoneStats>> loadZonemapStatsForFilteredColumns(
-      Dataset dataset, Filter[] filters) {
-    if (filters == null || filters.length == 0) {
-      return Collections.emptyMap();
-    }
-
-    Set<String> filteredColumns = extractReferencedColumns(filters);
-    if (filteredColumns.isEmpty()) {
+  private Map<String, List<ZoneStats>> loadZonemapStats(Dataset dataset, Set<String> columns) {
+    if (columns.isEmpty()) {
       return Collections.emptyMap();
     }
 
@@ -340,7 +346,7 @@ public class LanceScanBuilder
     }
 
     Map<String, List<ZoneStats>> result = new HashMap<>();
-    for (String col : filteredColumns) {
+    for (String col : columns) {
       if (zonemapColumns.contains(col)) {
         try {
           List<ZoneStats> stats = dataset.getZonemapStats(col);
@@ -359,41 +365,6 @@ public class LanceScanBuilder
     }
 
     return result;
-  }
-
-  /**
-   * Loads zonemap stats for the declared SPJ column. Reuses already-loaded stats if the column was
-   * part of pushed filters. Returns a single-entry map for the SPJ column, or empty if the column
-   * has no zonemap index or stats loading fails.
-   */
-  private Map<String, List<ZoneStats>> loadZonemapStatsForSpjColumn(
-      Dataset dataset, String spjColumn, Map<String, List<ZoneStats>> alreadyLoaded) {
-
-    // Reuse stats if already loaded for this column (e.g., it appeared in a pushed filter)
-    if (alreadyLoaded.containsKey(spjColumn)) {
-      return Collections.singletonMap(spjColumn, alreadyLoaded.get(spjColumn));
-    }
-
-    Set<String> zonemapColumns = findZonemapIndexedColumns(dataset);
-    if (!zonemapColumns.contains(spjColumn)) {
-      LOG.warn(
-          "SPJ column '{}' declared in {} does not have a zonemap index; SPJ disabled",
-          spjColumn,
-          TABLE_OPT_SPJ_COLUMNS);
-      return Collections.emptyMap();
-    }
-
-    try {
-      List<ZoneStats> stats = dataset.getZonemapStats(spjColumn);
-      if (!stats.isEmpty()) {
-        LOG.debug("Loaded {} zonemap zones for SPJ column '{}'", stats.size(), spjColumn);
-        return Collections.singletonMap(spjColumn, stats);
-      }
-    } catch (Exception e) {
-      LOG.warn("Failed to load zonemap stats for SPJ column '{}': {}", spjColumn, e.getMessage());
-    }
-
-    return Collections.emptyMap();
   }
 
   private Set<String> findZonemapIndexedColumns(Dataset dataset) {
