@@ -267,7 +267,8 @@ object LanceArrowUtils {
               field.dataType,
               field.nullable,
               timeZoneId,
-              largeVarTypes = largeVarTypes)
+              field.metadata,
+              largeVarTypes)
           }.toSeq.asJava)
       case MapType(keyType, valueType, valueContainsNull) =>
         val mapType = new FieldType(nullable, new ArrowType.Map(false), null, meta.asJava)
@@ -284,7 +285,7 @@ object LanceArrowUtils {
             timeZoneId,
             largeVarTypes = largeVarTypes)).asJava)
       case udt: UserDefinedType[_] =>
-        toArrowField(name, udt.sqlType, nullable, timeZoneId)
+        toArrowField(name, udt.sqlType, nullable, timeZoneId, largeVarTypes = largeVarTypes)
       case dataType =>
         val fieldType =
           new FieldType(nullable, toArrowType(dataType, timeZoneId, large, name), null, meta.asJava)
