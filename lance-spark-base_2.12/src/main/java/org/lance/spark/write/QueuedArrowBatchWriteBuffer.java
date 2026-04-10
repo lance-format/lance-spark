@@ -91,9 +91,15 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
 
   /** Simplified constructor that uses LanceRuntime allocator and converts Spark schema to Arrow. */
   public QueuedArrowBatchWriteBuffer(StructType sparkSchema, int batchSize, int queueDepth) {
+    this(sparkSchema, batchSize, queueDepth, false);
+  }
+
+  /** Simplified constructor with large var types support. */
+  public QueuedArrowBatchWriteBuffer(
+      StructType sparkSchema, int batchSize, int queueDepth, boolean useLargeVarTypes) {
     this(
         LanceRuntime.allocator(),
-        LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false),
+        LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false, useLargeVarTypes),
         sparkSchema,
         batchSize,
         queueDepth);

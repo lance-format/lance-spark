@@ -69,9 +69,15 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
 
   /** Simplified constructor that uses LanceRuntime allocator and converts Spark schema to Arrow. */
   public SemaphoreArrowBatchWriteBuffer(StructType sparkSchema, int batchSize) {
+    this(sparkSchema, batchSize, false);
+  }
+
+  /** Simplified constructor with large var types support. */
+  public SemaphoreArrowBatchWriteBuffer(
+      StructType sparkSchema, int batchSize, boolean useLargeVarTypes) {
     this(
         LanceRuntime.allocator(),
-        LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false),
+        LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false, useLargeVarTypes),
         sparkSchema,
         batchSize);
   }
