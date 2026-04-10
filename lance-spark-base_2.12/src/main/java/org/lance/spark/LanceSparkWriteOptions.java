@@ -393,10 +393,7 @@ public class LanceSparkWriteOptions implements Serializable {
       return this;
     }
 
-    /**
-     * Pin opens to this dataset manifest version (see {@link
-     * ReadOptions.Builder#setVersion(long)}).
-     */
+    /** Pin opens to this dataset manifest version. */
     public Builder version(Long version) {
       this.version = version;
       return this;
