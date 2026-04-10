@@ -15,10 +15,10 @@ package org.lance.spark.write;
 
 import org.lance.Dataset;
 import org.lance.Fragment;
-import org.lance.ReadOptions;
 import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
@@ -137,7 +137,10 @@ public abstract class AbstractBackfillWriter implements DataWriter<InternalRow> 
           ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator)) {
         Data.exportArrayStream(allocator, reader, stream);
 
-        try (Dataset dataset = openDatasetWithCredentialRefresh()) {
+        try (Dataset dataset =
+            Utils.openDatasetBuilder(writeOptions)
+                .initialStorageOptions(initialStorageOptions)
+                .build()) {
           Fragment fragment = new Fragment(dataset, fragmentId);
           processFragment(fragment, stream);
         }
@@ -176,19 +179,5 @@ public abstract class AbstractBackfillWriter implements DataWriter<InternalRow> 
       buffer.data.close();
     }
     buffers.clear();
-  }
-
-  private Dataset openDatasetWithCredentialRefresh() {
-    Map<String, String> merged =
-        LanceRuntime.mergeStorageOptions(writeOptions.getStorageOptions(), initialStorageOptions);
-
-    ReadOptions.Builder builder =
-        new ReadOptions.Builder().setStorageOptions(merged).setSession(LanceRuntime.session());
-
-    return Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .uri(writeOptions.getDatasetUri())
-        .readOptions(builder.build())
-        .build();
   }
 }

@@ -13,8 +13,10 @@
  */
 package org.lance.spark.join;
 
+import org.lance.Dataset;
+import org.lance.Fragment;
 import org.lance.spark.LanceSparkReadOptions;
-import org.lance.spark.internal.LanceDatasetAdapter;
+import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.catalyst.expressions.Expression;
 import org.apache.spark.sql.catalyst.expressions.Literal;
@@ -25,6 +27,7 @@ import java.io.Serializable;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * Utilities for fragment-aware join optimization.
@@ -84,7 +87,7 @@ public class FragmentAwareJoinUtils implements Serializable {
    */
   public static Map<Integer, Long> buildFragmentSizeMap(LanceSparkReadOptions options) {
     Map<Integer, Long> fragmentSizes = new HashMap<>();
-    List<Integer> fragmentIds = LanceDatasetAdapter.getFragmentIds(options);
+    List<Integer> fragmentIds = getFragmentIds(options);
 
     // In a full implementation, we would query the fragment metadata
     // For now, we return an empty map as a placeholder
@@ -144,7 +147,7 @@ public class FragmentAwareJoinUtils implements Serializable {
    */
   public static Map<LongRange, Integer> buildRowIdFragmentMap(LanceSparkReadOptions options) {
     Map<LongRange, Integer> rowIdMap = new HashMap<>();
-    List<Integer> fragmentIds = LanceDatasetAdapter.getFragmentIds(options);
+    List<Integer> fragmentIds = getFragmentIds(options);
 
     // TODO: Query Lance manifest to get row ID ranges for each fragment
     // For now, return an empty map as a placeholder
@@ -184,5 +187,12 @@ public class FragmentAwareJoinUtils implements Serializable {
    */
   public static boolean isRowIdColumn(String columnName) {
     return "_rowid".equalsIgnoreCase(columnName);
+  }
+
+  /** Opens the dataset and returns its fragment IDs. */
+  private static List<Integer> getFragmentIds(LanceSparkReadOptions options) {
+    try (Dataset dataset = Utils.openDatasetBuilder(options).build()) {
+      return dataset.getFragments().stream().map(Fragment::getId).collect(Collectors.toList());
+    }
   }
 }

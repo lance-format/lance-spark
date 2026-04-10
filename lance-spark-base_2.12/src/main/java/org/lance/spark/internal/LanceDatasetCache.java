@@ -15,9 +15,9 @@ package org.lance.spark.internal;
 
 import org.lance.Dataset;
 import org.lance.Fragment;
-import org.lance.ReadOptions;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.utils.Utils;
 
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
@@ -86,49 +86,30 @@ public class LanceDatasetCache {
     private final String catalogName;
     private final String uri;
     private final Long version;
-    private final Map<String, String> storageOptions;
-    private final Map<String, String> initialStorageOptions;
     private final String namespaceImpl;
     private final Map<String, String> namespaceProperties;
     private final List<String> tableId;
 
+    // Carried for the open call but not used in equals/hashCode.
+    private final LanceSparkReadOptions readOptions;
+    private final Map<String, String> initialStorageOptions;
+
     public DatasetCacheKey(
-        String catalogName,
-        String uri,
-        Long version,
-        Map<String, String> storageOptions,
+        LanceSparkReadOptions readOptions,
         Map<String, String> initialStorageOptions,
         String namespaceImpl,
-        Map<String, String> namespaceProperties,
-        List<String> tableId) {
-      this.catalogName = catalogName != null ? catalogName : LanceRuntime.DEFAULT_CATALOG;
-      this.uri = uri;
-      this.version = version;
-      this.storageOptions = storageOptions;
+        Map<String, String> namespaceProperties) {
+      this.readOptions = readOptions;
       this.initialStorageOptions = initialStorageOptions;
+      this.catalogName =
+          readOptions.getCatalogName() != null
+              ? readOptions.getCatalogName()
+              : LanceRuntime.DEFAULT_CATALOG;
+      this.uri = readOptions.getDatasetUri();
+      this.version = readOptions.getVersion() != null ? (long) readOptions.getVersion() : null;
       this.namespaceImpl = namespaceImpl;
       this.namespaceProperties = namespaceProperties;
-      this.tableId = tableId;
-    }
-
-    public String getCatalogName() {
-      return catalogName;
-    }
-
-    public String getUri() {
-      return uri;
-    }
-
-    public Long getVersion() {
-      return version;
-    }
-
-    public Map<String, String> getStorageOptions() {
-      return storageOptions;
-    }
-
-    public Map<String, String> getInitialStorageOptions() {
-      return initialStorageOptions;
+      this.tableId = readOptions.getTableId();
     }
 
     public String getNamespaceImpl() {
@@ -187,7 +168,10 @@ public class LanceDatasetCache {
                 @Override
                 public CachedDataset load(DatasetCacheKey key) {
                   LOG.debug("Opening dataset for cache: {}", key);
-                  Dataset dataset = openDataset(key);
+                  Dataset dataset =
+                      Utils.openDatasetBuilder(key.readOptions)
+                          .initialStorageOptions(key.initialStorageOptions)
+                          .build();
                   return new CachedDataset(dataset);
                 }
               });
@@ -213,15 +197,7 @@ public class LanceDatasetCache {
       String namespaceImpl,
       Map<String, String> namespaceProperties) {
     DatasetCacheKey key =
-        new DatasetCacheKey(
-            readOptions.getCatalogName(),
-            readOptions.getDatasetUri(),
-            readOptions.getVersion() != null ? (long) readOptions.getVersion() : null,
-            readOptions.getStorageOptions(),
-            initialStorageOptions,
-            namespaceImpl,
-            namespaceProperties,
-            readOptions.getTableId());
+        new DatasetCacheKey(readOptions, initialStorageOptions, namespaceImpl, namespaceProperties);
     try {
       return CACHE.get(key);
     } catch (ExecutionException e) {
@@ -258,25 +234,6 @@ public class LanceDatasetCache {
               cached.getFragments().keySet()));
     }
     return fragment;
-  }
-
-  private static Dataset openDataset(DatasetCacheKey key) {
-    Map<String, String> merged =
-        LanceRuntime.mergeStorageOptions(key.getStorageOptions(), key.getInitialStorageOptions());
-
-    ReadOptions.Builder builder =
-        new ReadOptions.Builder()
-            .setStorageOptions(merged)
-            .setSession(LanceRuntime.session(key.getCatalogName()));
-    if (key.getVersion() != null) {
-      builder.setVersion(key.getVersion());
-    }
-
-    return Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .uri(key.getUri())
-        .readOptions(builder.build())
-        .build();
   }
 
   /** Clears the cache. Primarily for testing. */

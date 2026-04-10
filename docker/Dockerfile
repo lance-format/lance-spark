@@ -47,16 +47,16 @@ ENV LANCE_NS_VERSION=0.6.1
 
 # Download spark
 RUN mkdir -p ${SPARK_HOME} \
- && curl https://dlcdn.apache.org/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop3${SPARK_SCALA_SUFFIX}.tgz -o spark.tgz \
+ && curl -fL https://dlcdn.apache.org/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop3${SPARK_SCALA_SUFFIX}.tgz -o spark.tgz \
  && tar xvzf spark.tgz --directory /opt/spark --strip-components 1 \
  && rm -rf spark.tgz
 
 # Download lance-spark bundle JAR from Maven
-RUN curl -L https://repo1.maven.org/maven2/com/lancedb/lance-spark-bundle-3.5_2.12/${LANCE_SPARK_VERSION}/lance-spark-bundle-3.5_2.12-${LANCE_SPARK_VERSION}.jar \
+RUN curl -fL https://repo1.maven.org/maven2/com/lancedb/lance-spark-bundle-3.5_2.12/${LANCE_SPARK_VERSION}/lance-spark-bundle-3.5_2.12-${LANCE_SPARK_VERSION}.jar \
  -o /opt/spark/jars/lance-spark-bundle_2.12-${LANCE_SPARK_VERSION}.jar
 
 # Download additional Lance namespace implementation jars from Maven
-RUN curl -L https://repo1.maven.org/maven2/com/lancedb/lance-namespace-glue/${LANCE_NS_VERSION}/lance-namespace-glue-${LANCE_NS_VERSION}.jar \
+RUN curl -fL https://repo1.maven.org/maven2/com/lancedb/lance-namespace-glue/${LANCE_NS_VERSION}/lance-namespace-glue-${LANCE_NS_VERSION}.jar \
  -o /opt/spark/jars/lance-namespace-glue-${LANCE_NS_VERSION}.jar
 
 # For local testing, uncomment the lines below and comment out the Maven downloads above:
@@ -66,18 +66,18 @@ RUN curl -L https://repo1.maven.org/maven2/com/lancedb/lance-namespace-glue/${LA
 # Download OpenDAL native libraries for Linux architectures
 ENV OPENDAL_VERSION=0.48.0
 RUN mkdir -p /tmp/opendal && cd /tmp/opendal \
- && curl -L https://repo1.maven.org/maven2/org/apache/opendal/opendal/${OPENDAL_VERSION}/opendal-${OPENDAL_VERSION}-linux-x86_64.jar -o opendal-linux-x86_64.jar \
- && curl -L https://repo1.maven.org/maven2/org/apache/opendal/opendal/${OPENDAL_VERSION}/opendal-${OPENDAL_VERSION}-linux-aarch_64.jar -o opendal-linux-aarch_64.jar \
+ && curl -fL https://repo1.maven.org/maven2/org/apache/opendal/opendal/${OPENDAL_VERSION}/opendal-${OPENDAL_VERSION}-linux-x86_64.jar -o opendal-linux-x86_64.jar \
+ && curl -fL https://repo1.maven.org/maven2/org/apache/opendal/opendal/${OPENDAL_VERSION}/opendal-${OPENDAL_VERSION}-linux-aarch_64.jar -o opendal-linux-aarch_64.jar \
  && mv *.jar /opt/spark/jars/ \
  && cd / && rm -rf /tmp/opendal
 
 # Download AWS SDK Bundle v2
 ENV AWS_SDK_VERSION=2.20.43
-RUN curl -L https://repo1.maven.org/maven2/software/amazon/awssdk/bundle/${AWS_SDK_VERSION}/bundle-${AWS_SDK_VERSION}.jar \
+RUN curl -fL https://repo1.maven.org/maven2/software/amazon/awssdk/bundle/${AWS_SDK_VERSION}/bundle-${AWS_SDK_VERSION}.jar \
  -o /opt/spark/jars/aws-sdk-bundle-${AWS_SDK_VERSION}.jar
 
 # Install AWS CLI (optional, for S3 support)
-RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" \
+RUN curl -fL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" \
  && unzip awscliv2.zip \
  && sudo ./aws/install \
  && rm awscliv2.zip \

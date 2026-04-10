@@ -16,10 +16,13 @@ package org.lance.spark.read;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.ManifestSummary;
+import org.lance.index.IndexDescription;
+import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
-import org.lance.spark.LanceRuntime;
+import org.lance.schema.LanceField;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Optional;
+import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
@@ -42,9 +45,16 @@ import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 public class LanceScanBuilder
@@ -54,6 +64,8 @@ public class LanceScanBuilder
         SupportsPushDownOffset,
         SupportsPushDownTopN,
         SupportsPushDownAggregates {
+  private static final Logger LOG = LoggerFactory.getLogger(LanceScanBuilder.class);
+
   private final LanceSparkReadOptions readOptions;
   private StructType schema;
 
@@ -78,17 +90,23 @@ public class LanceScanBuilder
 
   private final java.util.Map<String, String> namespaceProperties;
 
+  private final java.util.Map<String, String> tableProperties;
+
+  static final String TABLE_OPT_PARTITION_COLUMNS = "lance.partition.columns";
+
   public LanceScanBuilder(
       StructType schema,
       LanceSparkReadOptions readOptions,
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
-      java.util.Map<String, String> namespaceProperties) {
+      java.util.Map<String, String> namespaceProperties,
+      java.util.Map<String, String> tableProperties) {
     this.schema = schema;
     this.readOptions = readOptions;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
+    this.tableProperties = tableProperties != null ? tableProperties : Collections.emptyMap();
   }
 
   /**
@@ -97,22 +115,7 @@ public class LanceScanBuilder
    */
   private Dataset getOrOpenDataset() {
     if (lazyDataset == null) {
-      if (readOptions.hasNamespace()) {
-        lazyDataset =
-            Dataset.open()
-                .allocator(LanceRuntime.allocator())
-                .namespaceClient(readOptions.getNamespace())
-                .tableId(readOptions.getTableId())
-                .readOptions(readOptions.toReadOptions())
-                .build();
-      } else {
-        lazyDataset =
-            Dataset.open()
-                .allocator(LanceRuntime.allocator())
-                .uri(readOptions.getDatasetUri())
-                .readOptions(readOptions.toReadOptions())
-                .build();
-      }
+      lazyDataset = Utils.openDatasetBuilder(readOptions).build();
     }
     return lazyDataset;
   }
@@ -137,6 +140,44 @@ public class LanceScanBuilder
     ManifestSummary summary = getOrOpenDataset().getVersion().getManifestSummary();
     LanceStatistics statistics = new LanceStatistics(summary);
 
+    // Collect all columns that need zonemap stats: filter columns + partition column (if declared).
+    Set<String> columnsToLoad = extractReferencedColumns(pushedFilters);
+    String partitionColumn = tableProperties.get(TABLE_OPT_PARTITION_COLUMNS);
+    if (partitionColumn != null && !partitionColumn.trim().isEmpty()) {
+      partitionColumn = partitionColumn.trim();
+      columnsToLoad.add(partitionColumn);
+    } else {
+      partitionColumn = null;
+    }
+
+    // Load zonemap stats for all requested columns in one pass.
+    Map<String, List<ZoneStats>> zonemapStats = loadZonemapStats(getOrOpenDataset(), columnsToLoad);
+
+    // Detect partition-compatible columns, gated on lance.partition.columns table property.
+    // Currently a partitioned column is only valid if each fragment contains only a single
+    // value for that column (i.e., all zonemap zones have min == max with the same value).
+    ZonemapFragmentPruner.PartitionInfo partitionInfo = null;
+    if (partitionColumn != null) {
+      if (!zonemapStats.containsKey(partitionColumn)) {
+        LOG.warn(
+            "Partition column '{}' declared in {} has no zonemap index or stats;"
+                + " partition detection disabled",
+            partitionColumn,
+            TABLE_OPT_PARTITION_COLUMNS);
+      } else {
+        java.util.Optional<Map<Integer, Comparable<?>>> partValues =
+            ZonemapFragmentPruner.computeFragmentPartitionValues(zonemapStats.get(partitionColumn));
+        if (partValues.isPresent()) {
+          partitionInfo =
+              new ZonemapFragmentPruner.PartitionInfo(partitionColumn, partValues.get());
+          LOG.info(
+              "Detected partition-compatible column '{}' with {} fragments",
+              partitionColumn,
+              partValues.get().size());
+        }
+      }
+    }
+
     // Close the lazily opened dataset - it's no longer needed after build
     closeLazyDataset();
 
@@ -151,6 +192,8 @@ public class LanceScanBuilder
         pushedAggregation,
         pushedFilters,
         statistics,
+        zonemapStats,
+        partitionInfo,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties);
@@ -274,5 +317,75 @@ public class LanceScanBuilder
     } catch (Exception e) {
       return Optional.empty();
     }
+  }
+
+  /**
+   * Loads zonemap statistics for the requested columns. Only loads stats for columns that have a
+   * zonemap index.
+   */
+  private Map<String, List<ZoneStats>> loadZonemapStats(Dataset dataset, Set<String> columns) {
+    if (columns.isEmpty()) {
+      return Collections.emptyMap();
+    }
+
+    Set<String> zonemapColumns = findZonemapIndexedColumns(dataset);
+    if (zonemapColumns.isEmpty()) {
+      return Collections.emptyMap();
+    }
+
+    Map<String, List<ZoneStats>> result = new HashMap<>();
+    for (String col : columns) {
+      if (zonemapColumns.contains(col)) {
+        try {
+          List<ZoneStats> stats = dataset.getZonemapStats(col);
+          if (!stats.isEmpty()) {
+            result.put(col, stats);
+            LOG.debug("Loaded {} zonemap zones for column '{}'", stats.size(), col);
+          }
+        } catch (Exception e) {
+          LOG.debug("Failed to load zonemap stats for column '{}': {}", col, e.getMessage());
+        }
+      }
+    }
+
+    if (!result.isEmpty()) {
+      LOG.info("Loaded zonemap stats for {} columns: {}", result.size(), result.keySet());
+    }
+
+    return result;
+  }
+
+  private Set<String> findZonemapIndexedColumns(Dataset dataset) {
+    Set<String> columns = new HashSet<>();
+    try {
+      Map<Integer, String> fieldIdToName = new HashMap<>();
+      for (LanceField field : dataset.getLanceSchema().fields()) {
+        fieldIdToName.put(field.getId(), field.getName());
+      }
+
+      for (IndexDescription idx : dataset.describeIndices()) {
+        if ("ZONEMAP".equalsIgnoreCase(idx.getIndexType())) {
+          for (int fieldId : idx.getFieldIds()) {
+            String name = fieldIdToName.get(fieldId);
+            if (name != null) {
+              columns.add(name);
+            }
+          }
+        }
+      }
+    } catch (Exception e) {
+      LOG.warn("Failed to query zonemap indexes: {}", e.getMessage());
+    }
+    return columns;
+  }
+
+  private static Set<String> extractReferencedColumns(Filter[] filters) {
+    Set<String> columns = new HashSet<>();
+    for (Filter filter : filters) {
+      for (String attr : filter.references()) {
+        columns.add(attr);
+      }
+    }
+    return columns;
   }
 }

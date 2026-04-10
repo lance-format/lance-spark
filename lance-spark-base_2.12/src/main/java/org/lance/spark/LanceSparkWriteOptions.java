@@ -13,7 +13,6 @@
  */
 package org.lance.spark;
 
-import org.lance.ReadOptions;
 import org.lance.WriteParams;
 import org.lance.WriteParams.WriteMode;
 import org.lance.namespace.LanceNamespace;
@@ -234,44 +233,20 @@ public class LanceSparkWriteOptions implements Serializable {
   }
 
   /**
-   * Converts this to Lance ReadOptions for opening existing datasets.
-   *
-   * @return ReadOptions with storage options, session, and credential provider
-   */
-  public ReadOptions toReadOptions() {
-    ReadOptions.Builder builder =
-        new ReadOptions.Builder()
-            .setStorageOptions(storageOptions)
-            .setSession(LanceRuntime.session());
-    if (version != null) {
-      builder.setVersion(version);
-    }
-    return builder.build();
-  }
-
-  /**
-   * Converts this to Lance ReadOptions for worker-side operations.
-   *
-   * @param initialStorageOptions initial storage options from describeTable on the driver
-   * @return ReadOptions with merged storage options and session
-   */
-  public ReadOptions toReadOptions(Map<String, String> initialStorageOptions) {
-    Map<String, String> merged =
-        LanceRuntime.mergeStorageOptions(storageOptions, initialStorageOptions);
-    ReadOptions.Builder builder =
-        new ReadOptions.Builder().setStorageOptions(merged).setSession(LanceRuntime.session());
-    if (version != null) {
-      builder.setVersion(version);
-    }
-    return builder.build();
-  }
-
-  /**
    * Converts this to Lance WriteParams for the native library.
    *
    * @return WriteParams for the Lance native library
    */
   public WriteParams toWriteParams() {
+    return toWriteParams(null);
+  }
+
+  /**
+   * Converts this to Lance {@link WriteParams}, merging driver-side {@code initialStorageOptions}
+   * into the base storage options. Pass {@code null} for driver-side callers that do not have
+   * describeTable() credentials.
+   */
+  public WriteParams toWriteParams(Map<String, String> initialStorageOptions) {
     WriteParams.Builder builder = new WriteParams.Builder();
     builder.withMode(writeMode);
     if (maxRowsPerFile != null) {
@@ -289,8 +264,10 @@ public class LanceSparkWriteOptions implements Serializable {
     if (enableStableRowIds != null) {
       builder.withEnableStableRowIds(enableStableRowIds);
     }
-    if (!storageOptions.isEmpty()) {
-      builder.withStorageOptions(storageOptions);
+    Map<String, String> merged =
+        LanceRuntime.mergeStorageOptions(storageOptions, initialStorageOptions);
+    if (!merged.isEmpty()) {
+      builder.withStorageOptions(merged);
     }
     return builder.build();
   }

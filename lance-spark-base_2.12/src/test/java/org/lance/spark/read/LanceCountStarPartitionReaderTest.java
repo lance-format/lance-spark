@@ -51,6 +51,7 @@ public class LanceCountStarPartitionReaderTest {
             "testCountStarMemoryLeak",
             null,
             null,
+            null,
             null);
 
     LanceCountStarPartitionReader reader = new LanceCountStarPartitionReader(partition);

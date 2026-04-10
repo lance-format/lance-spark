@@ -19,8 +19,8 @@ import org.apache.spark.sql.catalyst.plans.logical.ShowIndexesOutputType
 import org.apache.spark.sql.catalyst.util.GenericArrayData
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.unsafe.types.UTF8String
-import org.lance.Dataset
-import org.lance.spark.{LanceDataset, LanceRuntime, LanceSparkReadOptions}
+import org.lance.spark.LanceDataset
+import org.lance.spark.utils.Utils
 
 import scala.collection.JavaConverters._
 
@@ -44,7 +44,7 @@ case class ShowIndexesExec(
 
     val readOptions = lanceDataset.readOptions()
 
-    val dataset = openDataset(readOptions)
+    val dataset = Utils.openDatasetBuilder(readOptions).build()
     try {
       val indexes = dataset.getIndexes().asScala.toSeq
       val fieldIdToName = dataset.getLanceSchema().fields().asScala
@@ -98,23 +98,6 @@ case class ShowIndexesExec(
       }
     } finally {
       dataset.close()
-    }
-  }
-
-  private def openDataset(readOptions: LanceSparkReadOptions): Dataset = {
-    if (readOptions.hasNamespace) {
-      Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .namespaceClient(readOptions.getNamespace)
-        .readOptions(readOptions.toReadOptions())
-        .tableId(readOptions.getTableId)
-        .build()
-    } else {
-      Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .uri(readOptions.getDatasetUri)
-        .readOptions(readOptions.toReadOptions())
-        .build()
     }
   }
 }

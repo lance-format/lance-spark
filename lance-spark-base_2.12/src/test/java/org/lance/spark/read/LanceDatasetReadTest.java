@@ -127,7 +127,8 @@ public class LanceDatasetReadTest {
                 "validateFragment" /* scanId */,
                 null /* initialStorageOptions */,
                 null /* namespaceImpl */,
-                null /* namespaceProperties */))) {
+                null /* namespaceProperties */,
+                null /* partitionKeyRow */))) {
       try (ArrowReader reader = scanner.getArrowReader()) {
         VectorSchemaRoot root = reader.getVectorSchemaRoot();
         assertNotNull(root);

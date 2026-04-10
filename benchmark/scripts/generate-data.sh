@@ -42,6 +42,9 @@ echo "Spark master:    ${SPARK_MASTER}"
 echo "Spark version:   ${SPARK_VERSION}"
 echo "Scala version:   ${SCALA_VERSION}"
 echo "Data dir:        ${DATA_DIR}"
+if [ -n "${FILE_FORMAT_VERSION:-}" ]; then
+  echo "File format version: ${FILE_FORMAT_VERSION}"
+fi
 echo ""
 
 # Step 1: Build benchmark jar if needed
@@ -82,7 +85,7 @@ ${SPARK_SUBMIT} \
   "${BENCHMARK_JAR}" \
   --data-dir "${DATA_DIR}" \
   --scale-factor "${SCALE_FACTOR}" \
-  --formats "${FORMATS}"
+  --formats "${FORMATS}"${FILE_FORMAT_VERSION:+ --file-format-version "${FILE_FORMAT_VERSION}"}
 
 echo ""
 echo "=== Data generation complete ==="

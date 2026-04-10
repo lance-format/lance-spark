@@ -26,13 +26,13 @@ import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
 import org.apache.spark.unsafe.types.UTF8String
 import org.json4s.JsonAST._
 import org.json4s.jackson.JsonMethods.{compact, render}
-import org.lance.{CommitBuilder, Dataset, ReadOptions, Transaction}
+import org.lance.{CommitBuilder, Dataset, Transaction}
 import org.lance.index.{Index, IndexOptions, IndexParams, IndexType}
 import org.lance.index.scalar.{BTreeIndexParams, ScalarIndexParams}
 import org.lance.operation.{CreateIndex => AddIndexOperation}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceRuntime, LanceSparkReadOptions}
 import org.lance.spark.arrow.LanceArrowWriter
-import org.lance.spark.utils.CloseableUtil
+import org.lance.spark.utils.{CloseableUtil, Utils}
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
 import java.util.{Collections, Optional, UUID}
@@ -68,7 +68,7 @@ case class AddIndexExec(
 
     // Get all fragment id list from dataset
     val fragmentIds = {
-      val ds = openDataset(readOptions)
+      val ds = Utils.openDatasetBuilder(readOptions).build()
       try {
         ds.getFragments.asScala.map(_.getId).map(Integer.valueOf).toList
       } finally {
@@ -87,7 +87,7 @@ case class AddIndexExec(
     // Create distributed index job and run it
     createIndexJob(lanceDataset, readOptions, uuid.toString, fragmentIds).run()
 
-    val dataset = openDataset(readOptions)
+    val dataset = Utils.openDatasetBuilder(readOptions).build()
     try {
       // Merge index metadata after all fragments are indexed
       dataset.mergeIndexMetadata(uuid.toString, indexType, Optional.empty())
@@ -137,23 +137,6 @@ case class AddIndexExec(
     Seq(new GenericInternalRow(Array[Any](
       fragmentIds.size.toLong,
       UTF8String.fromString(indexName))))
-  }
-
-  private def openDataset(readOptions: LanceSparkReadOptions): Dataset = {
-    if (readOptions.hasNamespace) {
-      Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .namespaceClient(readOptions.getNamespace)
-        .readOptions(readOptions.toReadOptions)
-        .tableId(readOptions.getTableId)
-        .build()
-    } else {
-      Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .uri(readOptions.getDatasetUri)
-        .readOptions(readOptions.toReadOptions)
-        .build()
-    }
   }
 
   private def createIndexJob(
@@ -323,12 +306,9 @@ case class FragmentIndexTask(
       .withFragmentIds(Collections.singletonList(fragmentId))
       .build()
 
-    val dataset = IndexUtils.openDatasetWithOptions(
-      readOptions,
-      initialStorageOptions,
-      namespaceImpl,
-      namespaceProperties,
-      tableId)
+    val dataset = Utils.openDatasetBuilder(readOptions)
+      .initialStorageOptions(initialStorageOptions.map(_.asJava).orNull)
+      .build()
 
     try {
       dataset.createIndex(indexOptions)
@@ -497,12 +477,10 @@ case class RangeBTreeIndexBuilder(
     var dataset: Dataset = null
 
     try {
-      dataset = IndexUtils.openDatasetWithOptions(
-        decode[LanceSparkReadOptions](encodedReadOptions),
-        initialStorageOptions,
-        namespaceImpl,
-        namespaceProperties,
-        tableId)
+      dataset = Utils.openDatasetBuilder(
+        decode[LanceSparkReadOptions](encodedReadOptions))
+        .initialStorageOptions(initialStorageOptions.map(_.asJava).orNull)
+        .build()
 
       Data.exportArrayStream(allocator, reader, stream)
 
@@ -583,33 +561,4 @@ object IndexUtils {
     }
   }
 
-  /**
-   * Opens a dataset with merged storage options and credential refresh provider
-   *
-   * @param readOptions             Configuration for reading the dataset
-   * @param initialStorageOptions   Initial storage options to merge
-   * @param namespaceImpl           Optional namespace implementation class
-   * @param namespaceProperties     Optional namespace properties
-   * @param tableId                 Optional table identifier
-   * @return Opened Dataset instance
-   */
-  def openDatasetWithOptions(
-      readOptions: LanceSparkReadOptions,
-      initialStorageOptions: Option[Map[String, String]],
-      namespaceImpl: Option[String],
-      namespaceProperties: Option[Map[String, String]],
-      tableId: Option[List[String]]): Dataset = {
-    // Build ReadOptions with merged storage options
-    val merged = LanceRuntime.mergeStorageOptions(
-      readOptions.getStorageOptions,
-      initialStorageOptions.map(_.asJava).orNull)
-
-    val builder = new ReadOptions.Builder().setStorageOptions(merged)
-
-    Dataset.open()
-      .allocator(LanceRuntime.allocator())
-      .uri(readOptions.getDatasetUri)
-      .readOptions(builder.build())
-      .build()
-  }
 }

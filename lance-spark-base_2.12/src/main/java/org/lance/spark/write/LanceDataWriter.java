@@ -134,7 +134,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       boolean useQueuedBuffer = writeOptions.isUseQueuedWriteBuffer();
 
       // Merge initial storage options with write options
-      WriteParams params = buildWriteParams();
+      WriteParams params = writeOptions.toWriteParams(initialStorageOptions);
 
       // Select buffer type based on configuration
       ArrowBatchWriteBuffer writeBuffer;
@@ -160,28 +160,6 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       fragmentCreationThread.start();
 
       return new LanceDataWriter(writeBuffer, fragmentCreationTask, fragmentCreationThread);
-    }
-
-    private WriteParams buildWriteParams() {
-      Map<String, String> merged =
-          LanceRuntime.mergeStorageOptions(writeOptions.getStorageOptions(), initialStorageOptions);
-
-      WriteParams.Builder builder = new WriteParams.Builder();
-      builder.withMode(writeOptions.getWriteMode());
-      if (writeOptions.getMaxRowsPerFile() != null) {
-        builder.withMaxRowsPerFile(writeOptions.getMaxRowsPerFile());
-      }
-      if (writeOptions.getMaxRowsPerGroup() != null) {
-        builder.withMaxRowsPerGroup(writeOptions.getMaxRowsPerGroup());
-      }
-      if (writeOptions.getMaxBytesPerFile() != null) {
-        builder.withMaxBytesPerFile(writeOptions.getMaxBytesPerFile());
-      }
-      if (writeOptions.getFileFormatVersion() != null) {
-        builder.withDataStorageVersion(writeOptions.getFileFormatVersion());
-      }
-      builder.withStorageOptions(merged);
-      return builder.build();
     }
   }
 }

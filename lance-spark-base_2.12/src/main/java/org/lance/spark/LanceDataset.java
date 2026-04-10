@@ -269,7 +269,12 @@ public class LanceDataset
               .build();
     }
     return new LanceScanBuilder(
-        sparkSchema, scanOptions, initialStorageOptions, namespaceImpl, namespaceProperties);
+        sparkSchema,
+        scanOptions,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        tableProperties);
   }
 
   @Override

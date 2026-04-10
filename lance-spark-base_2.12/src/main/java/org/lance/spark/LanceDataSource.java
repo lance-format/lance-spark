@@ -14,6 +14,7 @@
 package org.lance.spark;
 
 import org.lance.Dataset;
+import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.connector.catalog.Identifier;
@@ -72,12 +73,7 @@ public abstract class LanceDataSource implements SupportsCatalogOptions, DataSou
       return null;
     }
     LanceSparkReadOptions readOptions = LanceSparkReadOptions.from(options.asCaseSensitiveMap());
-    try (Dataset dataset =
-        Dataset.open()
-            .allocator(LanceRuntime.allocator())
-            .uri(readOptions.getDatasetUri())
-            .readOptions(readOptions.toReadOptions())
-            .build()) {
+    try (Dataset dataset = Utils.openDatasetBuilder(readOptions).build()) {
       return LanceArrowUtils.fromArrowSchema(dataset.getSchema());
     } catch (IllegalArgumentException e) {
       return null;

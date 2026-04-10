@@ -87,7 +87,7 @@ public class LanceBatchWrite implements BatchWrite {
     if (stagedCommit != null) {
       this.writeOptions = writeOptions;
     } else {
-      try (Dataset ds = Utils.openDataset(writeOptions)) {
+      try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
         this.writeOptions = writeOptions.withVersion(ds.version());
         logger.debug(
             "Resolved dataset version for batch write: {}", this.writeOptions.getVersion());
@@ -135,7 +135,7 @@ public class LanceBatchWrite implements BatchWrite {
           Objects.requireNonNull(
               writeOptions.getVersion(),
               "version must be set (resolved in LanceBatchWrite constructor)");
-      try (Dataset ds = Utils.openDataset(writeOptions)) {
+      try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
         Operation operation;
         if (isOverwrite) {
           operation = Overwrite.builder().fragments(fragments).schema(arrowSchema).build();

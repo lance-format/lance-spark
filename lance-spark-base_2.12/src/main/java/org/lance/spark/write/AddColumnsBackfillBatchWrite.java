@@ -73,7 +73,7 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
       Map<String, String> namespaceProperties,
       List<String> tableId) {
     this.schema = schema;
-    try (Dataset ds = Utils.openDataset(writeOptions)) {
+    try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
       this.writeOptions = writeOptions.withVersion(ds.version());
       logger.debug("Resolved dataset version for ADD COLUMNS: {}", this.writeOptions.getVersion());
     }
@@ -139,8 +139,8 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
             writeOptions.getVersion(),
             "version must be set (resolved in AddColumnsBackfillBatchWrite constructor)");
 
-    try (Dataset dataset = Utils.openDataset(writeOptions)) {
-      // Get existing fragments
+    // Get existing fragments
+    try (Dataset dataset = Utils.openDatasetBuilder(writeOptions).build()) {
       dataset.getFragments().stream()
           .filter(f -> !mergedFragmentIds.contains(f.getId()))
           .map(Fragment::metadata)

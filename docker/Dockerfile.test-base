@@ -16,7 +16,7 @@ RUN apt-get update && \
 
 RUN npm install -g azurite
 
-RUN curl -o /usr/local/bin/minio https://dl.min.io/server/minio/release/linux-amd64/minio && \
+RUN curl -fL -o /usr/local/bin/minio https://dl.min.io/server/minio/release/linux-amd64/minio && \
     chmod +x /usr/local/bin/minio
 
 RUN python3 -m venv /opt/venv && \
@@ -38,7 +38,7 @@ ARG SPARK_SCALA_SUFFIX=
 ENV PYTHONPATH="${SPARK_HOME}/python/lib/py4j-${PY4J_VERSION}-src.zip:${PYTHONPATH}"
 
 RUN mkdir -p ${SPARK_HOME} \
-    && curl https://archive.apache.org/dist/spark/spark-${SPARK_DOWNLOAD_VERSION}/spark-${SPARK_DOWNLOAD_VERSION}-bin-hadoop3${SPARK_SCALA_SUFFIX}.tgz \
+    && curl -fL https://archive.apache.org/dist/spark/spark-${SPARK_DOWNLOAD_VERSION}/spark-${SPARK_DOWNLOAD_VERSION}-bin-hadoop3${SPARK_SCALA_SUFFIX}.tgz \
        -o spark.tgz \
     && tar xzf spark.tgz --directory ${SPARK_HOME} --strip-components 1 \
     && rm spark.tgz

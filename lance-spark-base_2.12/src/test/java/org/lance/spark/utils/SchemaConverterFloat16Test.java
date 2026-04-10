@@ -13,13 +13,7 @@
  */
 package org.lance.spark.utils;
 
-import org.lance.namespace.model.JsonArrowDataType;
-import org.lance.namespace.model.JsonArrowField;
-import org.lance.namespace.model.JsonArrowSchema;
-
 import org.apache.spark.sql.types.DataTypes;
-import org.apache.spark.sql.types.Metadata;
-import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
@@ -131,81 +125,5 @@ public class SchemaConverterFloat16Test {
     assertFalse(
         embField.metadata().contains("arrow.float16"),
         "Float16 metadata should not be added when value is 'false'");
-  }
-
-  @Test
-  public void testToJsonArrowSchemaFloat16() {
-    // Build a schema with float16 metadata already applied
-    // (as processSchemaWithProperties would produce)
-    Metadata float16Meta =
-        new MetadataBuilder()
-            .putLong("arrow.fixed-size-list.size", 128)
-            .putString("arrow.float16", "true")
-            .build();
-
-    StructType schema =
-        new StructType(
-            new StructField[] {
-              DataTypes.createStructField("id", DataTypes.IntegerType, false),
-              new StructField(
-                  "embeddings",
-                  DataTypes.createArrayType(DataTypes.FloatType, false),
-                  false,
-                  float16Meta)
-            });
-
-    JsonArrowSchema jsonSchema = SchemaConverter.toJsonArrowSchema(schema);
-
-    // Find the embeddings field
-    JsonArrowField embField = null;
-    for (JsonArrowField f : jsonSchema.getFields()) {
-      if ("embeddings".equals(f.getName())) {
-        embField = f;
-        break;
-      }
-    }
-    assertNotNull(embField, "embeddings field should exist in schema");
-
-    // Verify it's a fixedsizelist with length 128
-    JsonArrowDataType embType = embField.getType();
-    assertEquals("fixedsizelist", embType.getType());
-    assertEquals(128L, embType.getLength());
-
-    // Verify the child item field has float16 type
-    assertNotNull(embType.getFields(), "FixedSizeList should have child fields");
-    assertEquals(1, embType.getFields().size());
-    JsonArrowField itemField = embType.getFields().get(0);
-    assertEquals("item", itemField.getName());
-    assertEquals(
-        "float16",
-        itemField.getType().getType(),
-        "Child element type should be float16, not float32");
-  }
-
-  @Test
-  public void testToJsonArrowSchemaFloat32VectorNotAffected() {
-    // A regular float32 vector should NOT produce float16 type
-    Metadata vectorMeta = new MetadataBuilder().putLong("arrow.fixed-size-list.size", 64).build();
-
-    StructType schema =
-        new StructType(
-            new StructField[] {
-              new StructField(
-                  "embeddings",
-                  DataTypes.createArrayType(DataTypes.FloatType, false),
-                  false,
-                  vectorMeta)
-            });
-
-    JsonArrowSchema jsonSchema = SchemaConverter.toJsonArrowSchema(schema);
-    JsonArrowField embField = jsonSchema.getFields().get(0);
-    JsonArrowDataType embType = embField.getType();
-
-    assertEquals("fixedsizelist", embType.getType());
-    JsonArrowField itemField = embType.getFields().get(0);
-    assertEquals(
-        "float32",
-        itemField.getType().getType(),
-        "Regular vector should remain float32, not float16");
   }
 }

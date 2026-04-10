@@ -17,15 +17,16 @@ import org.lance.ipc.ColumnOrdering;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Optional;
 
+import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
-import org.apache.spark.sql.connector.read.InputPartition;
+import org.apache.spark.sql.connector.read.HasPartitionKey;
 import org.apache.spark.sql.types.StructType;
 
 import java.util.List;
 import java.util.Map;
 
-public class LanceInputPartition implements InputPartition {
-  private static final long serialVersionUID = 4723894723984723984L;
+public class LanceInputPartition implements HasPartitionKey {
+  private static final long serialVersionUID = 4723894723984723985L;
 
   private final StructType schema;
   private final int partitionId;
@@ -49,6 +50,14 @@ public class LanceInputPartition implements InputPartition {
 
   private final Map<String, String> namespaceProperties;
 
+  /**
+   * Partition key row for storage-partitioned joins (SPJ). When a partition-compatible column is
+   * detected via zonemap stats, this holds the single partition value for this partition's
+   * fragment. Null when no partition column is detected (falls back to fragment-ID-based
+   * partitioning).
+   */
+  private final InternalRow partitionKeyRow;
+
   public LanceInputPartition(
       StructType schema,
       int partitionId,
@@ -62,7 +71,8 @@ public class LanceInputPartition implements InputPartition {
       String scanId,
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
-      Map<String, String> namespaceProperties) {
+      Map<String, String> namespaceProperties,
+      InternalRow partitionKeyRow) {
     this.schema = schema;
     this.partitionId = partitionId;
     this.lanceSplit = lanceSplit;
@@ -76,6 +86,7 @@ public class LanceInputPartition implements InputPartition {
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
+    this.partitionKeyRow = partitionKeyRow;
   }
 
   public StructType getSchema() {
@@ -128,5 +139,25 @@ public class LanceInputPartition implements InputPartition {
 
   public Map<String, String> getNamespaceProperties() {
     return namespaceProperties;
+  }
+
+  /**
+   * Returns the partition key for this input partition.
+   *
+   * <p>When a partition column is declared via {@code lance.partition.columns} table property and
+   * detected as partition-compatible (zonemap stats showing min==max per fragment), this returns
+   * the partition value as a single-column InternalRow. This enables Spark's storage-partitioned
+   * join (SPJ) protocol to co-locate partitions with the same value across different data sources.
+   *
+   * <p>When no partition column is configured, {@code outputPartitioning()} returns {@link
+   * org.apache.spark.sql.connector.read.partitioning.UnknownPartitioning} and Spark should not call
+   * this method. Returns an empty row as a defensive fallback.
+   */
+  @Override
+  public InternalRow partitionKey() {
+    if (partitionKeyRow != null) {
+      return partitionKeyRow;
+    }
+    return new org.apache.spark.sql.catalyst.expressions.GenericInternalRow(new Object[] {});
   }
 }

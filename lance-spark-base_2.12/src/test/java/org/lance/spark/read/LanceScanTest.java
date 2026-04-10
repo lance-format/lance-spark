@@ -15,12 +15,18 @@ package org.lance.spark.read;
 
 import org.lance.spark.TestUtils;
 
+import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.expressions.Expression;
+import org.apache.spark.sql.connector.expressions.FieldReference;
 import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
 import org.apache.spark.sql.connector.expressions.aggregate.CountStar;
+import org.apache.spark.sql.connector.read.HasPartitionKey;
 import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.Scan;
+import org.apache.spark.sql.connector.read.partitioning.KeyGroupedPartitioning;
+import org.apache.spark.sql.connector.read.partitioning.Partitioning;
+import org.apache.spark.sql.connector.read.partitioning.UnknownPartitioning;
 import org.apache.spark.sql.sources.Filter;
 import org.apache.spark.sql.sources.GreaterThan;
 import org.apache.spark.sql.types.DataTypes;
@@ -28,6 +34,8 @@ import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -42,6 +50,7 @@ public class LanceScanTest {
                 TestUtils.TestTable1Config.readOptions,
                 Collections.emptyMap(),
                 null,
+                Collections.emptyMap(),
                 Collections.emptyMap())
             .build();
   }
@@ -59,6 +68,7 @@ public class LanceScanTest {
             TestUtils.TestTable1Config.readOptions,
             Collections.emptyMap(),
             null,
+            Collections.emptyMap(),
             Collections.emptyMap());
     builder.pushFilters(new Filter[] {new GreaterThan("x", 0L)});
     builder.pushAggregation(
@@ -89,6 +99,7 @@ public class LanceScanTest {
             TestUtils.TestTable1Config.readOptions,
             Collections.emptyMap(),
             null,
+            Collections.emptyMap(),
             Collections.emptyMap());
     builder.pushFilters(new Filter[] {new GreaterThan("x", 0L)});
     LanceScan scan = (LanceScan) builder.build();
@@ -104,6 +115,7 @@ public class LanceScanTest {
             TestUtils.TestTable1Config.readOptions,
             Collections.emptyMap(),
             null,
+            Collections.emptyMap(),
             Collections.emptyMap());
     builder.pushLimit(2);
     LanceScan scan = (LanceScan) builder.build();
@@ -120,6 +132,7 @@ public class LanceScanTest {
             TestUtils.TestTable1Config.readOptions,
             Collections.emptyMap(),
             null,
+            Collections.emptyMap(),
             Collections.emptyMap());
     builder.pushLimit(1);
     LanceScan scan = (LanceScan) builder.build();
@@ -133,5 +146,99 @@ public class LanceScanTest {
     assertTrue(
         partitions.length <= allPartitions.length,
         "Limit-pruned partitions should not exceed total partitions");
+  }
+
+  // --- outputPartitioning ---
+
+  @Test
+  public void testOutputPartitioningBeforePlanIsUnknown() {
+    LanceScan scan = buildScan();
+    Partitioning partitioning = scan.outputPartitioning();
+    assertInstanceOf(UnknownPartitioning.class, partitioning);
+  }
+
+  @Test
+  public void testOutputPartitioningAfterPlanIsUnknownWithoutPartitionInfo() {
+    LanceScan scan = buildScan();
+    scan.planInputPartitions();
+    Partitioning partitioning = scan.outputPartitioning();
+    assertInstanceOf(UnknownPartitioning.class, partitioning);
+  }
+
+  // --- HasPartitionKey / SPJ ---
+
+  @Test
+  public void testInputPartitionsImplementHasPartitionKey() {
+    LanceScan scan = buildScan();
+    InputPartition[] partitions = scan.planInputPartitions();
+    assertTrue(partitions.length > 0);
+    for (InputPartition p : partitions) {
+      assertInstanceOf(HasPartitionKey.class, p);
+      HasPartitionKey hpk = (HasPartitionKey) p;
+      assertNotNull(hpk.partitionKey());
+    }
+  }
+
+  @Test
+  public void testPartitionKeyReturnsEmptyRowWithoutPartitionInfo() {
+    // Without partition info, partition key returns an empty row
+    LanceScan scan = buildScan();
+    InputPartition[] partitions = scan.planInputPartitions();
+    for (InputPartition p : partitions) {
+      HasPartitionKey hpk = (HasPartitionKey) p;
+      InternalRow key = hpk.partitionKey();
+      assertNotNull(key);
+      assertEquals(0, key.numFields());
+    }
+  }
+
+  @Test
+  public void testOutputPartitioningWithPartitionInfo() {
+    // Create a LanceScan with partition info
+    Map<Integer, Comparable<?>> fragValues = new HashMap<>();
+    fragValues.put(0, "east");
+    fragValues.put(1, "west");
+    ZonemapFragmentPruner.PartitionInfo partInfo =
+        new ZonemapFragmentPruner.PartitionInfo("region", fragValues);
+
+    LanceScan scan =
+        new LanceScan(
+            TEST_SCHEMA,
+            TestUtils.TestTable1Config.readOptions,
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            new Filter[0],
+            null,
+            Collections.emptyMap(),
+            partInfo,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+
+    // Plan partitions to set numPartitions
+    scan.planInputPartitions();
+
+    Partitioning partitioning = scan.outputPartitioning();
+    assertInstanceOf(KeyGroupedPartitioning.class, partitioning);
+
+    KeyGroupedPartitioning kgp = (KeyGroupedPartitioning) partitioning;
+    Expression[] keys = kgp.keys();
+    assertEquals(1, keys.length);
+    assertInstanceOf(FieldReference.class, keys[0]);
+    // Key should be "region", not "_fragid"
+    String[] fieldNames = ((FieldReference) keys[0]).fieldNames();
+    assertEquals("region", fieldNames[0]);
+  }
+
+  @Test
+  public void testOutputPartitioningWithoutPartitionInfoIsUnknown() {
+    // No partition info → should return UnknownPartitioning
+    LanceScan scan = buildScan();
+    scan.planInputPartitions();
+    Partitioning partitioning = scan.outputPartitioning();
+    assertInstanceOf(UnknownPartitioning.class, partitioning);
   }
 }
