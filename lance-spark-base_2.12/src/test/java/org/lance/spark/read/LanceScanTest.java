@@ -50,6 +50,7 @@ public class LanceScanTest {
                 TestUtils.TestTable1Config.readOptions,
                 Collections.emptyMap(),
                 null,
+                Collections.emptyMap(),
                 Collections.emptyMap())
             .build();
   }
@@ -67,6 +68,7 @@ public class LanceScanTest {
             TestUtils.TestTable1Config.readOptions,
             Collections.emptyMap(),
             null,
+            Collections.emptyMap(),
             Collections.emptyMap());
     builder.pushFilters(new Filter[] {new GreaterThan("x", 0L)});
     builder.pushAggregation(
@@ -97,6 +99,7 @@ public class LanceScanTest {
             TestUtils.TestTable1Config.readOptions,
             Collections.emptyMap(),
             null,
+            Collections.emptyMap(),
             Collections.emptyMap());
     builder.pushFilters(new Filter[] {new GreaterThan("x", 0L)});
     LanceScan scan = (LanceScan) builder.build();
@@ -112,6 +115,7 @@ public class LanceScanTest {
             TestUtils.TestTable1Config.readOptions,
             Collections.emptyMap(),
             null,
+            Collections.emptyMap(),
             Collections.emptyMap());
     builder.pushLimit(2);
     LanceScan scan = (LanceScan) builder.build();
@@ -128,6 +132,7 @@ public class LanceScanTest {
             TestUtils.TestTable1Config.readOptions,
             Collections.emptyMap(),
             null,
+            Collections.emptyMap(),
             Collections.emptyMap());
     builder.pushLimit(1);
     LanceScan scan = (LanceScan) builder.build();

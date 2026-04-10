@@ -26,6 +26,7 @@ import org.apache.spark.sql.connector.write.SupportsDelta;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
+import java.util.Collections;
 import java.util.Map;
 
 public class LancePositionDeltaOperation implements RowLevelOperation, SupportsDelta {
@@ -71,7 +72,12 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
   @Override
   public ScanBuilder newScanBuilder(CaseInsensitiveStringMap caseInsensitiveStringMap) {
     return new LanceScanBuilder(
-        sparkSchema, readOptions, initialStorageOptions, namespaceImpl, namespaceProperties);
+        sparkSchema,
+        readOptions,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        Collections.emptyMap());
   }
 
   @Override

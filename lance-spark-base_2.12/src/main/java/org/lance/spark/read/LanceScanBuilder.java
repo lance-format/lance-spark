@@ -90,17 +90,23 @@ public class LanceScanBuilder
 
   private final java.util.Map<String, String> namespaceProperties;
 
+  private final java.util.Map<String, String> tableProperties;
+
+  static final String TABLE_OPT_SPJ_COLUMNS = "lance.spj.columns";
+
   public LanceScanBuilder(
       StructType schema,
       LanceSparkReadOptions readOptions,
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
-      java.util.Map<String, String> namespaceProperties) {
+      java.util.Map<String, String> namespaceProperties,
+      java.util.Map<String, String> tableProperties) {
     this.schema = schema;
     this.readOptions = readOptions;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
+    this.tableProperties = tableProperties != null ? tableProperties : Collections.emptyMap();
   }
 
   /**
@@ -155,17 +161,21 @@ public class LanceScanBuilder
     Map<String, List<ZoneStats>> zonemapStats =
         loadZonemapStatsForFilteredColumns(getOrOpenDataset(), pushedFilters);
 
-    // Load zonemap stats for schema columns (potential join keys)
-    // to detect partition-compatible columns for SPJ.
-    Map<String, List<ZoneStats>> allZonemapStats =
-        loadZonemapStatsForSchemaColumns(getOrOpenDataset(), zonemapStats);
-
-    // Detect partition-compatible columns from zonemap stats
+    // Detect partition-compatible columns for SPJ, gated on lance.spj.columns table property.
+    // Only loads zonemap stats for the declared column to avoid unnecessary I/O on every query.
     ZonemapPartitionDetector.PartitionInfo partitionInfo = null;
-    java.util.Optional<ZonemapPartitionDetector.PartitionInfo> detected =
-        ZonemapPartitionDetector.detect(allZonemapStats);
-    if (detected.isPresent()) {
-      partitionInfo = detected.get();
+    String spjColumn = tableProperties.get(TABLE_OPT_SPJ_COLUMNS);
+    if (spjColumn != null && !spjColumn.trim().isEmpty()) {
+      spjColumn = spjColumn.trim();
+      Map<String, List<ZoneStats>> spjStats =
+          loadZonemapStatsForSpjColumn(getOrOpenDataset(), spjColumn, zonemapStats);
+      if (!spjStats.isEmpty()) {
+        java.util.Optional<ZonemapPartitionDetector.PartitionInfo> detected =
+            ZonemapPartitionDetector.detect(spjStats);
+        if (detected.isPresent()) {
+          partitionInfo = detected.get();
+        }
+      }
     }
 
     // Close the lazily opened dataset - it's no longer needed after build
@@ -352,51 +362,38 @@ public class LanceScanBuilder
   }
 
   /**
-   * Loads zonemap stats for schema columns that haven't been loaded yet. This enables detection of
-   * partition-compatible columns for storage-partitioned joins (SPJ). Only loads stats for columns
-   * present in the current schema (which includes join keys) that also have a zonemap index.
-   *
-   * @param dataset the open dataset
-   * @param alreadyLoaded stats already loaded for filtered columns
-   * @return merged map of all zonemap stats (filtered + schema columns)
+   * Loads zonemap stats for the declared SPJ column. Reuses already-loaded stats if the column was
+   * part of pushed filters. Returns a single-entry map for the SPJ column, or empty if the column
+   * has no zonemap index or stats loading fails.
    */
-  private Map<String, List<ZoneStats>> loadZonemapStatsForSchemaColumns(
-      Dataset dataset, Map<String, List<ZoneStats>> alreadyLoaded) {
+  private Map<String, List<ZoneStats>> loadZonemapStatsForSpjColumn(
+      Dataset dataset, String spjColumn, Map<String, List<ZoneStats>> alreadyLoaded) {
+
+    // Reuse stats if already loaded for this column (e.g., it appeared in a pushed filter)
+    if (alreadyLoaded.containsKey(spjColumn)) {
+      return Collections.singletonMap(spjColumn, alreadyLoaded.get(spjColumn));
+    }
 
     Set<String> zonemapColumns = findZonemapIndexedColumns(dataset);
-    if (zonemapColumns.isEmpty()) {
-      return alreadyLoaded;
+    if (!zonemapColumns.contains(spjColumn)) {
+      LOG.warn(
+          "SPJ column '{}' declared in {} does not have a zonemap index; SPJ disabled",
+          spjColumn,
+          TABLE_OPT_SPJ_COLUMNS);
+      return Collections.emptyMap();
     }
 
-    // Find schema columns with zonemap indexes that aren't
-    // already loaded
-    Set<String> schemaColumns = new HashSet<>();
-    for (StructField field : schema.fields()) {
-      String name = field.name();
-      if (zonemapColumns.contains(name) && !alreadyLoaded.containsKey(name)) {
-        schemaColumns.add(name);
+    try {
+      List<ZoneStats> stats = dataset.getZonemapStats(spjColumn);
+      if (!stats.isEmpty()) {
+        LOG.debug("Loaded {} zonemap zones for SPJ column '{}'", stats.size(), spjColumn);
+        return Collections.singletonMap(spjColumn, stats);
       }
+    } catch (Exception e) {
+      LOG.warn("Failed to load zonemap stats for SPJ column '{}': {}", spjColumn, e.getMessage());
     }
 
-    if (schemaColumns.isEmpty()) {
-      return alreadyLoaded;
-    }
-
-    Map<String, List<ZoneStats>> result = new HashMap<>(alreadyLoaded);
-    for (String col : schemaColumns) {
-      try {
-        List<ZoneStats> stats = dataset.getZonemapStats(col);
-        if (!stats.isEmpty()) {
-          result.put(col, stats);
-          LOG.debug("Loaded {} zonemap zones for schema column '{}'", stats.size(), col);
-        }
-      } catch (Exception e) {
-        LOG.warn(
-            "Failed to load zonemap stats for schema" + " column '{}': {}", col, e.getMessage());
-      }
-    }
-
-    return result;
+    return Collections.emptyMap();
   }
 
   private Set<String> findZonemapIndexedColumns(Dataset dataset) {
