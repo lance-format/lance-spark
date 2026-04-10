@@ -19,7 +19,7 @@ import org.antlr.v4.runtime.misc.{Interval, ParseCancellationException}
 import org.apache.spark.sql.catalyst.{FunctionIdentifier, TableIdentifier}
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.parser.{ParseException, ParserInterface}
-import org.apache.spark.sql.catalyst.plans.logical.{AddIndex, CreateIndex, DropIndex, LanceDropIndex, LogicalPlan}
+import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.types.{DataType, StructType}
 
 class LanceSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserInterface {
@@ -76,30 +76,12 @@ class LanceSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserInt
 
   /**
    * Parse a string to a LogicalPlan.
-   *
-   * Spark 4.0+ natively parses CREATE INDEX and DROP INDEX into its own
-   * logical plans. We intercept those and convert them to Lance's plans
-   * so they flow through LanceDataSourceV2Strategy → AddIndexExec.
    */
   override def parsePlan(sqlText: String): LogicalPlan = {
-    val plan =
-      try {
-        delegate.parsePlan(sqlText)
-      } catch {
-        case _: ParseException => parse(sqlText)
-      }
-
-    plan match {
-      // Spark 4.0+ CreateIndex → Lance AddIndex
-      case ci: CreateIndex =>
-        val columnNames = ci.columns.map(_._1.name.head)
-        AddIndex(ci.table, ci.indexName, ci.indexType, columnNames, Seq.empty)
-
-      // Spark 4.0+ DropIndex → Lance DropIndex
-      case di: DropIndex =>
-        LanceDropIndex(di.table, di.indexName)
-
-      case other => other
+    try {
+      delegate.parsePlan(sqlText)
+    } catch {
+      case _: ParseException => parse(sqlText)
     }
   }
 
