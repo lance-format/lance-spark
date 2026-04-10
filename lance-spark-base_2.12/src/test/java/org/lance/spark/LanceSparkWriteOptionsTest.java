@@ -31,25 +31,16 @@ public class LanceSparkWriteOptionsTest {
   private final String TEMP_URL = "file:///tmp/test";
 
   @Test
-  public void toReadOptionsOmitsVersionWhenVersionUnset() {
+  public void versionIsNullByDefault() {
     LanceSparkWriteOptions opts = LanceSparkWriteOptions.from(TEMP_URL);
     assertNull(opts.getVersion());
-    assertFalse(
-        opts.toReadOptions().getVersion().isPresent(),
-        "Unset version must not populate ReadOptions.version");
-    assertFalse(
-        opts.toReadOptions(new HashMap<>()).getVersion().isPresent(),
-        "Unset version must not populate ReadOptions.version");
   }
 
   @Test
-  public void toReadOptionsSetsVersionWhenVersionSet() {
+  public void builderSetsVersion() {
     LanceSparkWriteOptions opts =
         LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).version(7L).build();
-    assertTrue(opts.toReadOptions().getVersion().isPresent());
-    assertEquals(7L, opts.toReadOptions().getVersion().get());
-    assertTrue(opts.toReadOptions(new HashMap<>()).getVersion().isPresent());
-    assertEquals(7L, opts.toReadOptions(new HashMap<>()).getVersion().get());
+    assertEquals(7L, opts.getVersion());
   }
 
   @Test
