@@ -89,7 +89,7 @@ public class LanceScan
    * (SPJ) by reporting the partition column as the output partitioning key instead of {@code
    * _fragid}. Null when no partition-compatible column is detected.
    */
-  private final ZonemapPartitionDetector.PartitionInfo partitionInfo;
+  private final ZonemapFragmentPruner.PartitionInfo partitionInfo;
 
   /**
    * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
@@ -113,7 +113,7 @@ public class LanceScan
       Filter[] pushedFilters,
       LanceStatistics statistics,
       java.util.Map<String, List<ZoneStats>> zonemapStats,
-      ZonemapPartitionDetector.PartitionInfo partitionInfo,
+      ZonemapFragmentPruner.PartitionInfo partitionInfo,
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
       java.util.Map<String, String> namespaceProperties) {

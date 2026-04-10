@@ -30,174 +30,138 @@ import static org.junit.jupiter.api.Assertions.*;
 
 public class ZonemapPartitionDetectorTest {
 
-  // --- detect() ---
+  // --- computeFragmentPartitionValues() ---
 
   @Test
-  public void testDetectNullInput() {
-    assertEquals(Optional.empty(), ZonemapPartitionDetector.detect(null));
+  public void testAreZonesPartitionableNullInput() {
+    assertEquals(Optional.empty(), ZonemapFragmentPruner.computeFragmentPartitionValues(null));
   }
 
   @Test
-  public void testDetectEmptyInput() {
-    assertEquals(Optional.empty(), ZonemapPartitionDetector.detect(Collections.emptyMap()));
+  public void testAreZonesPartitionableEmptyInput() {
+    assertEquals(
+        Optional.empty(),
+        ZonemapFragmentPruner.computeFragmentPartitionValues(Collections.emptyList()));
   }
 
   @Test
-  public void testDetectSingleFragmentSingleZone() {
-    Map<String, List<ZoneStats>> stats = new HashMap<>();
-    stats.put("region", Arrays.asList(new ZoneStats(0, 0, 100, "east", "east", 0)));
+  public void testAreZonesPartitionableSingleFragmentSingleZone() {
+    List<ZoneStats> zones = Arrays.asList(new ZoneStats(0, 0, 100, "east", "east", 0));
 
-    Optional<ZonemapPartitionDetector.PartitionInfo> result =
-        ZonemapPartitionDetector.detect(stats);
+    Optional<Map<Integer, Comparable<?>>> result =
+        ZonemapFragmentPruner.computeFragmentPartitionValues(zones);
     assertTrue(result.isPresent());
-    assertEquals("region", result.get().getColumnName());
-    assertEquals(1, result.get().getFragmentPartitionValues().size());
-    assertEquals("east", result.get().getFragmentPartitionValues().get(0));
+    assertEquals(1, result.get().size());
+    assertEquals("east", result.get().get(0));
   }
 
   @Test
-  public void testDetectMultipleFragments() {
-    Map<String, List<ZoneStats>> stats = new HashMap<>();
-    stats.put(
-        "region",
+  public void testAreZonesPartitionableMultipleFragments() {
+    List<ZoneStats> zones =
         Arrays.asList(
             new ZoneStats(0, 0, 100, "east", "east", 0),
             new ZoneStats(1, 0, 100, "west", "west", 0),
-            new ZoneStats(2, 0, 100, "north", "north", 0)));
+            new ZoneStats(2, 0, 100, "north", "north", 0));
 
-    Optional<ZonemapPartitionDetector.PartitionInfo> result =
-        ZonemapPartitionDetector.detect(stats);
+    Optional<Map<Integer, Comparable<?>>> result =
+        ZonemapFragmentPruner.computeFragmentPartitionValues(zones);
     assertTrue(result.isPresent());
-    assertEquals("region", result.get().getColumnName());
-    assertEquals(3, result.get().getFragmentPartitionValues().size());
-    assertEquals("east", result.get().getFragmentPartitionValues().get(0));
-    assertEquals("west", result.get().getFragmentPartitionValues().get(1));
-    assertEquals("north", result.get().getFragmentPartitionValues().get(2));
+    assertEquals(3, result.get().size());
+    assertEquals("east", result.get().get(0));
+    assertEquals("west", result.get().get(1));
+    assertEquals("north", result.get().get(2));
   }
 
   @Test
-  public void testDetectMultipleZonesPerFragmentSameValue() {
+  public void testAreZonesPartitionableMultipleZonesPerFragmentSameValue() {
     // Fragment 0 has two zones, both with region="east"
-    Map<String, List<ZoneStats>> stats = new HashMap<>();
-    stats.put(
-        "region",
+    List<ZoneStats> zones =
         Arrays.asList(
             new ZoneStats(0, 0, 50, "east", "east", 0),
             new ZoneStats(0, 50, 50, "east", "east", 0),
-            new ZoneStats(1, 0, 100, "west", "west", 0)));
+            new ZoneStats(1, 0, 100, "west", "west", 0));
 
-    Optional<ZonemapPartitionDetector.PartitionInfo> result =
-        ZonemapPartitionDetector.detect(stats);
+    Optional<Map<Integer, Comparable<?>>> result =
+        ZonemapFragmentPruner.computeFragmentPartitionValues(zones);
     assertTrue(result.isPresent());
-    assertEquals("region", result.get().getColumnName());
-    assertEquals(2, result.get().getFragmentPartitionValues().size());
-    assertEquals("east", result.get().getFragmentPartitionValues().get(0));
-    assertEquals("west", result.get().getFragmentPartitionValues().get(1));
+    assertEquals(2, result.get().size());
+    assertEquals("east", result.get().get(0));
+    assertEquals("west", result.get().get(1));
   }
 
   @Test
-  public void testDetectFailsWhenMinNotEqualsMax() {
-    Map<String, List<ZoneStats>> stats = new HashMap<>();
-    stats.put(
-        "region",
-        Arrays.asList(new ZoneStats(0, 0, 100, "east", "west", 0))); // range, not partition
+  public void testAreZonesPartitionableFailsWhenMinNotEqualsMax() {
+    List<ZoneStats> zones =
+        Arrays.asList(new ZoneStats(0, 0, 100, "east", "west", 0)); // range, not partition
 
-    Optional<ZonemapPartitionDetector.PartitionInfo> result =
-        ZonemapPartitionDetector.detect(stats);
+    Optional<Map<Integer, Comparable<?>>> result =
+        ZonemapFragmentPruner.computeFragmentPartitionValues(zones);
     assertFalse(result.isPresent());
   }
 
   @Test
-  public void testDetectFailsWhenNullMinMax() {
-    Map<String, List<ZoneStats>> stats = new HashMap<>();
-    stats.put("region", Arrays.asList(new ZoneStats(0, 0, 100, null, null, 100))); // all-null zone
+  public void testAreZonesPartitionableFailsWhenNullMinMax() {
+    List<ZoneStats> zones =
+        Arrays.asList(new ZoneStats(0, 0, 100, null, null, 100)); // all-null zone
 
-    Optional<ZonemapPartitionDetector.PartitionInfo> result =
-        ZonemapPartitionDetector.detect(stats);
+    Optional<Map<Integer, Comparable<?>>> result =
+        ZonemapFragmentPruner.computeFragmentPartitionValues(zones);
     assertFalse(result.isPresent());
   }
 
   @Test
-  public void testDetectFailsWhenMultipleValuesInSameFragment() {
+  public void testAreZonesPartitionableFailsWhenMultipleValuesInSameFragment() {
     // Fragment 0, zone1: region="east", zone2: region="west"
-    Map<String, List<ZoneStats>> stats = new HashMap<>();
-    stats.put(
-        "region",
+    List<ZoneStats> zones =
         Arrays.asList(
             new ZoneStats(0, 0, 50, "east", "east", 0),
-            new ZoneStats(0, 50, 50, "west", "west", 0)));
+            new ZoneStats(0, 50, 50, "west", "west", 0));
 
-    Optional<ZonemapPartitionDetector.PartitionInfo> result =
-        ZonemapPartitionDetector.detect(stats);
+    Optional<Map<Integer, Comparable<?>>> result =
+        ZonemapFragmentPruner.computeFragmentPartitionValues(zones);
     assertFalse(result.isPresent());
   }
 
   @Test
-  public void testDetectWithLongValues() {
-    Map<String, List<ZoneStats>> stats = new HashMap<>();
-    stats.put(
-        "year",
+  public void testAreZonesPartitionableWithLongValues() {
+    List<ZoneStats> zones =
         Arrays.asList(
-            new ZoneStats(0, 0, 100, 2023L, 2023L, 0), new ZoneStats(1, 0, 100, 2024L, 2024L, 0)));
+            new ZoneStats(0, 0, 100, 2023L, 2023L, 0), new ZoneStats(1, 0, 100, 2024L, 2024L, 0));
 
-    Optional<ZonemapPartitionDetector.PartitionInfo> result =
-        ZonemapPartitionDetector.detect(stats);
+    Optional<Map<Integer, Comparable<?>>> result =
+        ZonemapFragmentPruner.computeFragmentPartitionValues(zones);
     assertTrue(result.isPresent());
-    assertEquals("year", result.get().getColumnName());
-    assertEquals(2023L, result.get().getFragmentPartitionValues().get(0));
-    assertEquals(2024L, result.get().getFragmentPartitionValues().get(1));
+    assertEquals(2023L, result.get().get(0));
+    assertEquals(2024L, result.get().get(1));
   }
 
   @Test
-  public void testDetectSkipsNonPartitionColumnFindsPartitionColumn() {
-    // First column has range values (not partition-compatible),
-    // second column has single values (partition-compatible)
-    Map<String, List<ZoneStats>> stats = new HashMap<>();
-    stats.put(
-        "value",
-        Arrays.asList(
-            new ZoneStats(0, 0, 100, 1L, 50L, 0), new ZoneStats(1, 0, 100, 51L, 100L, 0)));
-    stats.put(
-        "region",
-        Arrays.asList(
-            new ZoneStats(0, 0, 100, "east", "east", 0),
-            new ZoneStats(1, 0, 100, "west", "west", 0)));
-
-    Optional<ZonemapPartitionDetector.PartitionInfo> result =
-        ZonemapPartitionDetector.detect(stats);
-    assertTrue(result.isPresent());
-    // Should have found "region" since "value" doesn't qualify
-    assertEquals("region", result.get().getColumnName());
-  }
-
-  @Test
-  public void testDetectNoPartitionableColumns() {
-    // Both columns have ranges
-    Map<String, List<ZoneStats>> stats = new HashMap<>();
-    stats.put("x", Arrays.asList(new ZoneStats(0, 0, 100, 1L, 50L, 0)));
-    stats.put("y", Arrays.asList(new ZoneStats(0, 0, 100, 100L, 200L, 0)));
-
-    assertFalse(ZonemapPartitionDetector.detect(stats).isPresent());
-  }
-
-  @Test
-  public void testDetectSameValueAcrossAllFragments() {
+  public void testAreZonesPartitionableSameValueAcrossAllFragments() {
     // All fragments have the same partition value — still valid
-    Map<String, List<ZoneStats>> stats = new HashMap<>();
-    stats.put(
-        "tenant",
+    List<ZoneStats> zones =
         Arrays.asList(
             new ZoneStats(0, 0, 100, "acme", "acme", 0),
             new ZoneStats(1, 0, 100, "acme", "acme", 0),
-            new ZoneStats(2, 0, 100, "acme", "acme", 0)));
+            new ZoneStats(2, 0, 100, "acme", "acme", 0));
 
-    Optional<ZonemapPartitionDetector.PartitionInfo> result =
-        ZonemapPartitionDetector.detect(stats);
+    Optional<Map<Integer, Comparable<?>>> result =
+        ZonemapFragmentPruner.computeFragmentPartitionValues(zones);
     assertTrue(result.isPresent());
-    assertEquals("tenant", result.get().getColumnName());
-    assertEquals("acme", result.get().getFragmentPartitionValues().get(0));
-    assertEquals("acme", result.get().getFragmentPartitionValues().get(1));
-    assertEquals("acme", result.get().getFragmentPartitionValues().get(2));
+    assertEquals("acme", result.get().get(0));
+    assertEquals("acme", result.get().get(1));
+    assertEquals("acme", result.get().get(2));
+  }
+
+  @Test
+  public void testAreZonesPartitionableOneZoneNullMin() {
+    List<ZoneStats> zones = Arrays.asList(new ZoneStats(0, 0, 100, null, "east", 50));
+    assertFalse(ZonemapFragmentPruner.computeFragmentPartitionValues(zones).isPresent());
+  }
+
+  @Test
+  public void testAreZonesPartitionableOneZoneNullMax() {
+    List<ZoneStats> zones = Arrays.asList(new ZoneStats(0, 0, 100, "east", null, 50));
+    assertFalse(ZonemapFragmentPruner.computeFragmentPartitionValues(zones).isPresent());
   }
 
   // --- PartitionInfo ---
@@ -207,8 +171,8 @@ public class ZonemapPartitionDetectorTest {
     Map<Integer, Comparable<?>> values = new HashMap<>();
     values.put(0, "east");
     values.put(1, "west");
-    ZonemapPartitionDetector.PartitionInfo info =
-        new ZonemapPartitionDetector.PartitionInfo("region", values);
+    ZonemapFragmentPruner.PartitionInfo info =
+        new ZonemapFragmentPruner.PartitionInfo("region", values);
 
     InternalRow row0 = info.partitionKeyForFragment(0);
     assertNotNull(row0);
@@ -227,8 +191,8 @@ public class ZonemapPartitionDetectorTest {
     Map<Integer, Comparable<?>> values = new HashMap<>();
     values.put(0, 2023L);
     values.put(1, 2024L);
-    ZonemapPartitionDetector.PartitionInfo info =
-        new ZonemapPartitionDetector.PartitionInfo("year", values);
+    ZonemapFragmentPruner.PartitionInfo info =
+        new ZonemapFragmentPruner.PartitionInfo("year", values);
 
     InternalRow row0 = info.partitionKeyForFragment(0);
     assertEquals(2023L, row0.getLong(0));
@@ -241,8 +205,8 @@ public class ZonemapPartitionDetectorTest {
   public void testPartitionKeyForMissingFragment() {
     Map<Integer, Comparable<?>> values = new HashMap<>();
     values.put(0, "east");
-    ZonemapPartitionDetector.PartitionInfo info =
-        new ZonemapPartitionDetector.PartitionInfo("region", values);
+    ZonemapFragmentPruner.PartitionInfo info =
+        new ZonemapFragmentPruner.PartitionInfo("region", values);
 
     // Fragment 99 doesn't exist — returns null value
     InternalRow row = info.partitionKeyForFragment(99);
@@ -255,8 +219,8 @@ public class ZonemapPartitionDetectorTest {
     Map<Integer, Comparable<?>> values = new HashMap<>();
     values.put(0, "east");
     values.put(1, "west");
-    ZonemapPartitionDetector.PartitionInfo info =
-        new ZonemapPartitionDetector.PartitionInfo("region", values);
+    ZonemapFragmentPruner.PartitionInfo info =
+        new ZonemapFragmentPruner.PartitionInfo("region", values);
 
     java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
     java.io.ObjectOutputStream oos = new java.io.ObjectOutputStream(baos);
@@ -265,8 +229,8 @@ public class ZonemapPartitionDetectorTest {
 
     java.io.ByteArrayInputStream bais = new java.io.ByteArrayInputStream(baos.toByteArray());
     java.io.ObjectInputStream ois = new java.io.ObjectInputStream(bais);
-    ZonemapPartitionDetector.PartitionInfo deserialized =
-        (ZonemapPartitionDetector.PartitionInfo) ois.readObject();
+    ZonemapFragmentPruner.PartitionInfo deserialized =
+        (ZonemapFragmentPruner.PartitionInfo) ois.readObject();
 
     assertEquals("region", deserialized.getColumnName());
     assertEquals("east", deserialized.getFragmentPartitionValues().get(0));
@@ -277,37 +241,11 @@ public class ZonemapPartitionDetectorTest {
   public void testPartitionInfoImmutableMap() {
     Map<Integer, Comparable<?>> values = new HashMap<>();
     values.put(0, "east");
-    ZonemapPartitionDetector.PartitionInfo info =
-        new ZonemapPartitionDetector.PartitionInfo("region", values);
+    ZonemapFragmentPruner.PartitionInfo info =
+        new ZonemapFragmentPruner.PartitionInfo("region", values);
 
     assertThrows(
         UnsupportedOperationException.class,
         () -> info.getFragmentPartitionValues().put(1, "west"));
-  }
-
-  // --- extractPartitionValues (package-private) ---
-
-  @Test
-  public void testExtractPartitionValuesNullZones() {
-    assertFalse(ZonemapPartitionDetector.extractPartitionValues("col", null).isPresent());
-  }
-
-  @Test
-  public void testExtractPartitionValuesEmptyZones() {
-    assertFalse(
-        ZonemapPartitionDetector.extractPartitionValues("col", Collections.emptyList())
-            .isPresent());
-  }
-
-  @Test
-  public void testExtractPartitionValuesOneZoneNullMin() {
-    List<ZoneStats> zones = Arrays.asList(new ZoneStats(0, 0, 100, null, "east", 50));
-    assertFalse(ZonemapPartitionDetector.extractPartitionValues("region", zones).isPresent());
-  }
-
-  @Test
-  public void testExtractPartitionValuesOneZoneNullMax() {
-    List<ZoneStats> zones = Arrays.asList(new ZoneStats(0, 0, 100, "east", null, 50));
-    assertFalse(ZonemapPartitionDetector.extractPartitionValues("region", zones).isPresent());
   }
 }

@@ -210,8 +210,8 @@ public class LanceScanTest {
     Map<Integer, Comparable<?>> fragValues = new HashMap<>();
     fragValues.put(0, "east");
     fragValues.put(1, "west");
-    ZonemapPartitionDetector.PartitionInfo partInfo =
-        new ZonemapPartitionDetector.PartitionInfo("region", fragValues);
+    ZonemapFragmentPruner.PartitionInfo partInfo =
+        new ZonemapFragmentPruner.PartitionInfo("region", fragValues);
 
     LanceScan scan =
         new LanceScan(

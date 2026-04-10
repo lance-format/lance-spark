@@ -171,7 +171,7 @@ public class LanceScanBuilder
     // Detect partition-compatible columns, gated on lance.partition.columns table property.
     // Currently a partitioned column is only valid if each fragment contains only a single
     // value for that column (i.e., all zonemap zones have min == max with the same value).
-    ZonemapPartitionDetector.PartitionInfo partitionInfo = null;
+    ZonemapFragmentPruner.PartitionInfo partitionInfo = null;
     if (partitionColumn != null) {
       if (!zonemapStats.containsKey(partitionColumn)) {
         LOG.warn(
@@ -180,12 +180,15 @@ public class LanceScanBuilder
             partitionColumn,
             TABLE_OPT_PARTITION_COLUMNS);
       } else {
-        Map<String, List<ZoneStats>> partitionStats =
-            Collections.singletonMap(partitionColumn, zonemapStats.get(partitionColumn));
-        java.util.Optional<ZonemapPartitionDetector.PartitionInfo> detected =
-            ZonemapPartitionDetector.detect(partitionStats);
-        if (detected.isPresent()) {
-          partitionInfo = detected.get();
+        java.util.Optional<Map<Integer, Comparable<?>>> partValues =
+            ZonemapFragmentPruner.computeFragmentPartitionValues(zonemapStats.get(partitionColumn));
+        if (partValues.isPresent()) {
+          partitionInfo =
+              new ZonemapFragmentPruner.PartitionInfo(partitionColumn, partValues.get());
+          LOG.info(
+              "Detected partition-compatible column '{}' with {} fragments",
+              partitionColumn,
+              partValues.get().size());
         }
       }
     }
@@ -355,7 +358,7 @@ public class LanceScanBuilder
             LOG.debug("Loaded {} zonemap zones for column '{}'", stats.size(), col);
           }
         } catch (Exception e) {
-          LOG.warn("Failed to load zonemap stats for column '{}': {}", col, e.getMessage());
+          LOG.debug("Failed to load zonemap stats for column '{}': {}", col, e.getMessage());
         }
       }
     }
