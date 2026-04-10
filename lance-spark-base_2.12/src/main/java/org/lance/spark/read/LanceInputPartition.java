@@ -144,21 +144,20 @@ public class LanceInputPartition implements HasPartitionKey {
   /**
    * Returns the partition key for this input partition.
    *
-   * <p>When a partition-compatible column is detected (via zonemap stats showing min==max per
-   * fragment), this returns the partition value as a single-column InternalRow. This enables
-   * Spark's storage-partitioned join (SPJ) protocol to co-locate partitions with the same value
-   * across different data sources (e.g., Lance ↔ Iceberg).
+   * <p>When a partition column is declared via {@code lance.partition.columns} table property and
+   * detected as partition-compatible (zonemap stats showing min==max per fragment), this returns
+   * the partition value as a single-column InternalRow. This enables Spark's storage-partitioned
+   * join (SPJ) protocol to co-locate partitions with the same value across different data sources.
    *
-   * <p>When no partition column is detected, returns a row containing the fragment ID.
+   * <p>When no partition column is configured, {@code outputPartitioning()} returns {@link
+   * org.apache.spark.sql.connector.read.partitioning.UnknownPartitioning} and Spark should not call
+   * this method. Returns an empty row as a defensive fallback.
    */
   @Override
   public InternalRow partitionKey() {
     if (partitionKeyRow != null) {
       return partitionKeyRow;
     }
-    // Fallback: use fragment ID as partition key
-    int fragmentId = lanceSplit.getFragments().get(0);
-    return new org.apache.spark.sql.catalyst.expressions.GenericInternalRow(
-        new Object[] {fragmentId});
+    return new org.apache.spark.sql.catalyst.expressions.GenericInternalRow(new Object[] {});
   }
 }

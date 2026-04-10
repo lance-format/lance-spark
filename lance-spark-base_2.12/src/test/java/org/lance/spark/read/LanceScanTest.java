@@ -13,9 +13,9 @@
  */
 package org.lance.spark.read;
 
-import org.lance.spark.LanceConstant;
 import org.lance.spark.TestUtils;
 
+import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.FieldReference;
 import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
@@ -158,23 +158,11 @@ public class LanceScanTest {
   }
 
   @Test
-  public void testOutputPartitioningAfterPlanIsKeyGrouped() {
+  public void testOutputPartitioningAfterPlanIsUnknownWithoutPartitionInfo() {
     LanceScan scan = buildScan();
-    InputPartition[] partitions = scan.planInputPartitions();
-    assertTrue(partitions.length > 0);
-
+    scan.planInputPartitions();
     Partitioning partitioning = scan.outputPartitioning();
-    assertInstanceOf(KeyGroupedPartitioning.class, partitioning);
-
-    KeyGroupedPartitioning kgp = (KeyGroupedPartitioning) partitioning;
-    assertEquals(partitions.length, kgp.numPartitions());
-
-    Expression[] keys = kgp.keys();
-    assertEquals(1, keys.length);
-    assertInstanceOf(FieldReference.class, keys[0]);
-    String[] fieldNames = ((FieldReference) keys[0]).fieldNames();
-    assertEquals(1, fieldNames.length);
-    assertEquals(LanceConstant.FRAGMENT_ID, fieldNames[0]);
+    assertInstanceOf(UnknownPartitioning.class, partitioning);
   }
 
   // --- HasPartitionKey / SPJ ---
@@ -192,15 +180,15 @@ public class LanceScanTest {
   }
 
   @Test
-  public void testPartitionKeyFallsBackToFragmentId() {
-    // Without partition info, partition key should be fragment ID
+  public void testPartitionKeyReturnsEmptyRowWithoutPartitionInfo() {
+    // Without partition info, partition key returns an empty row
     LanceScan scan = buildScan();
     InputPartition[] partitions = scan.planInputPartitions();
     for (InputPartition p : partitions) {
-      LanceInputPartition lip = (LanceInputPartition) p;
       HasPartitionKey hpk = (HasPartitionKey) p;
-      int expectedFragId = lip.getLanceSplit().getFragments().get(0);
-      assertEquals(expectedFragId, hpk.partitionKey().getInt(0));
+      InternalRow key = hpk.partitionKey();
+      assertNotNull(key);
+      assertEquals(0, key.numFields());
     }
   }
 
@@ -246,14 +234,11 @@ public class LanceScanTest {
   }
 
   @Test
-  public void testOutputPartitioningWithoutPartitionInfoFallsBackToFragId() {
-    // No partition info → should use _fragid
+  public void testOutputPartitioningWithoutPartitionInfoIsUnknown() {
+    // No partition info → should return UnknownPartitioning
     LanceScan scan = buildScan();
     scan.planInputPartitions();
     Partitioning partitioning = scan.outputPartitioning();
-    assertInstanceOf(KeyGroupedPartitioning.class, partitioning);
-    KeyGroupedPartitioning kgp = (KeyGroupedPartitioning) partitioning;
-    String[] fieldNames = ((FieldReference) kgp.keys()[0]).fieldNames();
-    assertEquals(LanceConstant.FRAGMENT_ID, fieldNames[0]);
+    assertInstanceOf(UnknownPartitioning.class, partitioning);
   }
 }

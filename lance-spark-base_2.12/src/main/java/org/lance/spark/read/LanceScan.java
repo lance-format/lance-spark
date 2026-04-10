@@ -15,7 +15,6 @@ package org.lance.spark.read;
 
 import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
-import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Optional;
 
@@ -352,8 +351,7 @@ public class LanceScan
    * Lance tables or between Lance and other data sources (e.g., Iceberg) that share the same
    * partition column.
    *
-   * <p>When no partition column is detected, we fall back to reporting partitioning by fragment ID
-   * ({@code _fragid}).
+   * <p>When no partition column is detected, returns {@link UnknownPartitioning}.
    */
   @Override
   public Partitioning outputPartitioning() {
@@ -367,11 +365,7 @@ public class LanceScan
       Expression[] keys = new Expression[] {FieldReference.apply(partitionInfo.getColumnName())};
       return new KeyGroupedPartitioning(keys, partCount);
     }
-    if (numPartitions < 0) {
-      return new UnknownPartitioning(0);
-    }
-    Expression[] keys = new Expression[] {FieldReference.apply(LanceConstant.FRAGMENT_ID)};
-    return new KeyGroupedPartitioning(keys, numPartitions);
+    return new UnknownPartitioning(numPartitions >= 0 ? numPartitions : 0);
   }
 
   @Override
