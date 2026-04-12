@@ -265,6 +265,7 @@ These options control how data is written to Lance datasets. They can be set usi
 | `batch_size`             | Integer | `512`    | Number of rows per batch during writing.                                             |
 | `use_queued_write_buffer`| Boolean | `false`  | Use pipelined write buffer for improved throughput.                                  |
 | `queue_depth`            | Integer | `8`      | Queue depth for pipelined writes (only used when `use_queued_write_buffer=true`).    |
+| `use_large_var_types`    | Boolean | `false`  | Use 64-bit offset vectors for all string/binary columns to avoid 2GB batch limit. See [Large Var Types](#large-var-types).   |
 
 ### Example: Controlling File Size
 
@@ -332,5 +333,30 @@ These options control how data is written to Lance datasets. They can be set usi
         .format("lance")
         .option("use_queued_write_buffer", "true")
         .option("queue_depth", "4")
+        .save("/path/to/output.lance")
+    ```
+
+### Large Var Types
+
+By default, Arrow uses 32-bit offset vectors (`VarCharVector` / `VarBinaryVector`) for string and binary columns, which limits the total data buffer to 2GB per batch. When writing rows with very large values (e.g., documents, images, serialized objects), a single batch can exceed this limit and fail with `OversizedAllocationException`.
+
+Setting `use_large_var_types` to `true` switches all string and binary columns to 64-bit offset vectors (`LargeVarCharVector` / `LargeVarBinaryVector`), removing the 2GB-per-batch ceiling. This applies to all string and binary columns in the schema, including those nested inside structs, arrays, and maps.
+
+!!!note
+    This differs from the per-column [`arrow.large_var_char` table property](../ddl/create-table.md#large-string-columns), which is set at table creation time and applies only to specific columns. The `use_large_var_types` write option applies to all string/binary columns for a single write operation.
+
+=== "Python"
+    ```python
+    df.write \
+        .format("lance") \
+        .option("use_large_var_types", "true") \
+        .save("/path/to/output.lance")
+    ```
+
+=== "Scala"
+    ```scala
+    df.write
+        .format("lance")
+        .option("use_large_var_types", "true")
         .save("/path/to/output.lance")
     ```

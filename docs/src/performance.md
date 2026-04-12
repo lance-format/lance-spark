@@ -92,6 +92,31 @@ df.write \
     .saveAsTable("my_table")
 ```
 
+### Large Var Types
+
+Set via Spark write option `use_large_var_types` (default: false).
+
+Switches all string and binary columns to use 64-bit offset Arrow vectors
+(`LargeVarCharVector` / `LargeVarBinaryVector`) instead of the default 32-bit offset vectors.
+This removes the 2GB-per-batch data buffer limit that can cause `OversizedAllocationException`
+when writing rows with very large string or binary values.
+
+Use this when your rows contain large values (hundreds of KB or more per row) and you
+hit the 2GB overflow error. There is no meaningful performance overhead -- the only
+difference is 8 bytes per row for the offset buffer instead of 4.
+
+```python
+df.write \
+    .format("lance") \
+    .option("use_large_var_types", "true") \
+    .mode("append") \
+    .saveAsTable("my_table")
+```
+
+!!!note
+    For per-column control at table creation time, see the
+    [`arrow.large_var_char` table property](operations/ddl/create-table.md#large-string-columns).
+
 ## Read Performance
 
 ### I/O Threads
