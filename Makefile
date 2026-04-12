@@ -74,6 +74,10 @@ clean-module:
 bundle:
 	./mvnw install -pl $(BUNDLE_MODULE) -am -DskipTests
 
+.PHONY: clean-bundle
+clean-bundle:
+	./mvnw clean install -pl $(BUNDLE_MODULE) -am -DskipTests
+
 .PHONY: install-base
 install-base:
 	./mvnw install -pl $(BASE_MODULE) -am -DskipTests
@@ -241,7 +245,8 @@ help:
 	@echo "  test           - Run tests for module"
 	@echo "  build          - Lint and install module"
 	@echo "  clean-module   - Clean module"
-	@echo "  bundle         - Build bundle module"
+	@echo "  bundle         - Build bundle module (incremental)"
+	@echo "  clean-bundle   - Clean then build bundle module (use when source changes are not picked up)"
 	@echo "  install-base   - Install base module"
 	@echo ""
 	@echo "Global commands (all modules):"
