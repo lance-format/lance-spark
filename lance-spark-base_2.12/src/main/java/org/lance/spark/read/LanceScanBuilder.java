@@ -138,7 +138,6 @@ public class LanceScanBuilder
 
     // Get statistics from manifest summary before closing dataset
     ManifestSummary summary = getOrOpenDataset().getVersion().getManifestSummary();
-    LanceStatistics statistics = new LanceStatistics(summary);
 
     // Collect all columns that need zonemap stats: filter columns + partition column (if declared).
     Set<String> columnsToLoad = extractReferencedColumns(pushedFilters);
@@ -176,6 +175,37 @@ public class LanceScanBuilder
               partValues.get().size());
         }
       }
+    }
+
+    // Estimate post-pruning statistics so Spark's JoinSelection can pick BroadcastHashJoin
+    // when the pruned size is below the broadcast threshold. Without this, the full-table size
+    // causes JoinSelection to pick SortMergeJoin, which then gets locked into SPJ — preventing
+    // AQE from switching to broadcast even when one side is tiny after filter pushdown.
+    LanceStatistics statistics;
+    if (pushedFilters.length > 0 && !zonemapStats.isEmpty()) {
+      java.util.Optional<Set<Integer>> survivingIds =
+          ZonemapFragmentPruner.pruneFragments(pushedFilters, zonemapStats);
+      if (survivingIds.isPresent()) {
+        statistics =
+            LanceStatistics.estimatePostPruning(
+                summary.getTotalRows(),
+                summary.getTotalFilesSize(),
+                summary.getTotalFragments(),
+                survivingIds.get().size());
+        LOG.info(
+            "Estimated post-pruning statistics: {} of {} fragments survive,"
+                + " estimatedSize={}, estimatedRows={} (full: size={}, rows={})",
+            survivingIds.get().size(),
+            summary.getTotalFragments(),
+            statistics.sizeInBytes(),
+            statistics.numRows(),
+            summary.getTotalFilesSize(),
+            summary.getTotalRows());
+      } else {
+        statistics = new LanceStatistics(summary);
+      }
+    } else {
+      statistics = new LanceStatistics(summary);
     }
 
     // Close the lazily opened dataset - it's no longer needed after build
