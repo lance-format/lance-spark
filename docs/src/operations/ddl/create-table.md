@@ -420,3 +420,118 @@ To create a table with large string columns, use the table property pattern `<co
         .tableProperty("content.arrow.large_var_char", "true")
         .createOrReplace();
     ```
+
+## Column Compression
+
+Lance supports per-column compression and encoding tuning via table properties. These properties
+map `<column>.lance.<key>` TBLPROPERTIES to `lance-encoding:<key>` Arrow field metadata, which the
+Lance Rust encoder reads at write time.
+
+### Supported keys (Spark connector)
+
+These five `<column>.lance.*` properties are mapped to Arrow field metadata by the connector. Other
+`lance.*` keys are ignored until implemented.
+
+| TBLPROPERTIES key | Arrow field metadata key | Valid values |
+|---|---|---|
+| `<col>.lance.compression` | `lance-encoding:compression` | `zstd`, `lz4`, `fsst`, `none` |
+| `<col>.lance.compression-level` | `lance-encoding:compression-level` | integer string (codec-specific) |
+| `<col>.lance.structural-encoding` | `lance-encoding:structural-encoding` | `miniblock`, `fullzip` |
+| `<col>.lance.rle-threshold` | `lance-encoding:rle-threshold` | float string in `(0.0, 1.0]` |
+| `<col>.lance.bss` | `lance-encoding:bss` | `off`, `on`, `auto` |
+
+Invalid values produce a clear `IllegalArgumentException` at table creation time.
+
+**Scope**: only top-level columns are supported. Nested field addressing is deferred.
+
+### Deferred keys (not wired in Spark yet)
+
+The following keys are recognized by lance-core but are not mapped from Spark TBLPROPERTIES yet.
+They are silently ignored if present:
+
+- `<col>.lance.dict-divisor`
+- `<col>.lance.dict-size-ratio`
+- `<col>.lance.dict-values-compression`
+- `<col>.lance.dict-values-compression-level`
+- `<col>.lance.minichunk-size`
+
+### ALTER TABLE Limitation
+
+`ALTER TABLE ... SET TBLPROPERTIES` does **not** mutate Arrow field metadata or change the encoding
+of previously written data. Compression properties are applied only when the table is created.
+
+### Example
+
+=== "SQL"
+    ```sql
+    CREATE TABLE events (
+        id BIGINT,
+        payload STRING,
+        ts BIGINT
+    ) USING lance
+    TBLPROPERTIES (
+        'payload.lance.compression'       = 'zstd',
+        'payload.lance.compression-level' = '3',
+        'ts.lance.compression'            = 'none'
+    );
+    ```
+
+=== "Python"
+    ```python
+    from pyspark.sql.types import StructType, StructField, LongType, StringType
+
+    schema = StructType([
+        StructField("id",      LongType(),   False),
+        StructField("payload", StringType(), True),
+        StructField("ts",      LongType(),   True),
+    ])
+    data = [(1, "hello", 1000), (2, "world", 2000)]
+    df = spark.createDataFrame(data, schema)
+
+    df.writeTo("events") \
+        .tableProperty("payload.lance.compression", "zstd") \
+        .tableProperty("payload.lance.compression-level", "3") \
+        .tableProperty("ts.lance.compression", "none") \
+        .createOrReplace()
+    ```
+
+=== "Scala"
+    ```scala
+    val schema = StructType(Seq(
+      StructField("id",      LongType,   nullable = false),
+      StructField("payload", StringType, nullable = true),
+      StructField("ts",      LongType,   nullable = true),
+    ))
+    val data = Seq((1L, "hello", 1000L), (2L, "world", 2000L))
+    val df = data.toDF("id", "payload", "ts")
+
+    df.writeTo("events")
+      .tableProperty("payload.lance.compression", "zstd")
+      .tableProperty("payload.lance.compression-level", "3")
+      .tableProperty("ts.lance.compression", "none")
+      .createOrReplace()
+    ```
+
+=== "Java"
+    ```java
+    import org.apache.spark.sql.types.*;
+
+    StructType schema = new StructType(new StructField[]{
+        DataTypes.createStructField("id",      DataTypes.LongType,   false),
+        DataTypes.createStructField("payload", DataTypes.StringType, true),
+        DataTypes.createStructField("ts",      DataTypes.LongType,   true),
+    });
+
+    List<Row> data = Arrays.asList(
+        RowFactory.create(1L, "hello", 1000L),
+        RowFactory.create(2L, "world", 2000L)
+    );
+
+    Dataset<Row> df = spark.createDataFrame(data, schema);
+
+    df.writeTo("events")
+        .tableProperty("payload.lance.compression", "zstd")
+        .tableProperty("payload.lance.compression-level", "3")
+        .tableProperty("ts.lance.compression", "none")
+        .createOrReplace();
+    ```

@@ -15,6 +15,7 @@ Test organization follows the Lance documentation structure:
 import os
 import time
 import pytest
+import lance
 from packaging.version import Version
 from pyspark.sql.types import StructType, StructField, IntegerType, StringType, DoubleType, BinaryType
 
@@ -489,6 +490,148 @@ class TestDDLAlterTableProperties:
         props = {row.key: row.value for row in rows}
 
         assert props["team"] == "data-eng"
+
+
+class TestDDLColumnCompression:
+    """Test per-column compression TBLPROPERTIES → Arrow field metadata pipeline."""
+
+    def test_create_table_with_compression(self, spark):
+        """Table with compression TBLPROPERTIES can be created and written to."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id BIGINT,
+                payload STRING,
+                ts BIGINT
+            ) USING lance
+            TBLPROPERTIES (
+                'payload.lance.compression'       = 'zstd',
+                'payload.lance.compression-level' = '3',
+                'ts.lance.compression'            = 'none'
+            )
+        """)
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'hello', 1000)")
+        result = spark.sql("SELECT * FROM default.test_table").collect()
+        assert len(result) == 1
+        assert result[0].payload == "hello"
+
+    def test_all_supported_compression_tblproperties(self, spark):
+        """All five connector-supported compression TBLPROPERTIES can be set without error."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id BIGINT,
+                payload STRING,
+                ts BIGINT
+            ) USING lance
+            TBLPROPERTIES (
+                'ts.lance.compression'          = 'lz4',
+                'ts.lance.compression-level'    = '1',
+                'ts.lance.structural-encoding'  = 'miniblock',
+                'ts.lance.rle-threshold'        = '0.5',
+                'ts.lance.bss'                  = 'auto'
+            )
+        """)
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'hello', 1000)")
+        result = spark.sql("SELECT id, ts FROM default.test_table").collect()
+        assert result[0].ts == 1000
+
+    def test_fsst_compression(self, spark):
+        """FSST compression is accepted for string columns."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id BIGINT,
+                payload STRING
+            ) USING lance
+            TBLPROPERTIES (
+                'payload.lance.compression' = 'fsst'
+            )
+        """)
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'fsst-test')")
+        result = spark.sql("SELECT payload FROM default.test_table").collect()
+        assert result[0].payload == "fsst-test"
+
+    def test_invalid_compression_scheme_rejected(self, spark):
+        """Invalid compression scheme raises an error at table creation time."""
+        with pytest.raises(Exception, match=r"invalid compression scheme"):
+            spark.sql("""
+                CREATE TABLE default.test_table (
+                    id BIGINT,
+                    payload STRING
+                ) USING lance
+                TBLPROPERTIES (
+                    'payload.lance.compression' = 'gzip'
+                )
+            """)
+
+    def test_invalid_structural_encoding_rejected(self, spark):
+        """Invalid structural-encoding value raises an error at table creation time."""
+        with pytest.raises(Exception, match=r"invalid structural-encoding"):
+            spark.sql("""
+                CREATE TABLE default.test_table (
+                    id BIGINT,
+                    ts BIGINT
+                ) USING lance
+                TBLPROPERTIES (
+                    'ts.lance.structural-encoding' = 'rle'
+                )
+            """)
+
+    def test_deferred_dict_key_ignored(self, spark):
+        """Deferred dict-divisor TBLPROPERTY does not cause an error (silently ignored)."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id BIGINT,
+                payload STRING
+            ) USING lance
+            TBLPROPERTIES (
+                'payload.lance.dict-divisor' = '4'
+            )
+        """)
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'ok')")
+        result = spark.sql("SELECT payload FROM default.test_table").collect()
+        assert result[0].payload == "ok"
+
+    def test_compression_metadata_reaches_lance_file(self, spark):
+        """Arrow field metadata with lance-encoding keys is present in the written Lance file.
+
+        Opens the dataset directly with lance-python and inspects the schema to verify
+        that the connector correctly wired the TBLPROPERTIES into Arrow field metadata
+        consumed by the Rust encoder.
+        """
+        if spark._lance_backend != "local":
+            pytest.skip("lance-python file inspection only supported on local backend")
+
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id BIGINT,
+                payload STRING,
+                ts BIGINT
+            ) USING lance
+            TBLPROPERTIES (
+                'payload.lance.compression'       = 'zstd',
+                'payload.lance.compression-level' = '3',
+                'ts.lance.compression'            = 'none'
+            )
+        """)
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'hello', 1000)")
+
+        location = (
+            spark.sql("DESCRIBE EXTENDED default.test_table")
+            .filter("col_name == 'Location'")
+            .collect()[0]
+            .data_type
+        )
+        ds = lance.dataset(location)
+        schema = ds.schema
+
+        payload_meta = schema.field("payload").metadata
+        assert payload_meta.get(b"lance-encoding:compression") == b"zstd"
+        assert payload_meta.get(b"lance-encoding:compression-level") == b"3"
+
+        ts_meta = schema.field("ts").metadata
+        assert ts_meta.get(b"lance-encoding:compression") == b"none"
+
+        id_meta = schema.field("id").metadata
+        assert b"lance-encoding:compression" not in (id_meta or {})
 
 
 class TestDDLIndex:

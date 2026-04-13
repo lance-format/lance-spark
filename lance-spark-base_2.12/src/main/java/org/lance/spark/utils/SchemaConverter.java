@@ -36,7 +36,8 @@ import static org.lance.spark.utils.VectorUtils.ARROW_FIXED_SIZE_LIST_SIZE_KEY;
 
 /**
  * Utility class that augments a Spark {@link StructType} with Lance-specific column metadata
- * (vector fixed-size-list, Float16, blob, large varchar) derived from table properties.
+ * (vector fixed-size-list, Float16, blob, large varchar, compression) derived from table
+ * properties.
  */
 public class SchemaConverter {
 
@@ -45,18 +46,20 @@ public class SchemaConverter {
   }
 
   /**
-   * Processes a Spark schema with table properties to add metadata for vector and blob columns.
+   * Processes a Spark schema with table properties to add metadata for vector, blob, large varchar,
+   * and compression columns.
    *
    * @param sparkSchema the original Spark StructType
-   * @param properties table properties that may contain vector column metadata or blob encoding
-   * @return StructType with metadata added for vector and blob columns
+   * @param properties table properties that may contain column metadata
+   * @return StructType with metadata added for matching columns
    */
   public static StructType processSchemaWithProperties(
       StructType sparkSchema, Map<String, String> properties) {
     StructType schemaWithVectors = addVectorMetadata(sparkSchema, properties);
     StructType schemaWithFloat16 = addFloat16Metadata(schemaWithVectors, properties);
     StructType schemaWithBlobs = addBlobMetadata(schemaWithFloat16, properties);
-    return addLargeVarCharMetadata(schemaWithBlobs, properties);
+    StructType schemaWithLargeVarChar = addLargeVarCharMetadata(schemaWithBlobs, properties);
+    return addCompressionMetadata(schemaWithLargeVarChar, properties);
   }
 
   /**
@@ -283,6 +286,61 @@ public class SchemaConverter {
         // Keep field as-is
         newFields[i] = field;
       }
+    }
+
+    return new StructType(newFields);
+  }
+
+  /**
+   * Adds Lance compression metadata to top-level fields based on connector-supported TBLPROPERTIES.
+   * Keys matching {@code <column>.lance.<key>} are validated and written as {@code
+   * lance-encoding:<key>} Arrow field metadata. Invalid values throw {@link
+   * IllegalArgumentException} at call time.
+   *
+   * <p>Silent-ignore cases (no exception, no metadata written):
+   *
+   * <ul>
+   *   <li>TBLPROPERTIES keys whose {@code <column>} segment does not match any top-level field —
+   *       consistent with the behavior of the other {@code addX} methods in this class.
+   *   <li>Unrecognised {@code lance.*} key suffixes (e.g. deferred dict/minichunk keys).
+   *   <li>Type-incompatible combinations (e.g. {@code fsst} on a numeric column) — semantic
+   *       validation is left to the Lance Rust encoder.
+   * </ul>
+   *
+   * <p>Only top-level fields are processed; nested column paths are not supported yet.
+   *
+   * @param sparkSchema the Spark StructType (already processed by earlier steps)
+   * @param properties table properties that may contain compression metadata
+   * @return StructType with compression metadata added for matching columns
+   */
+  private static StructType addCompressionMetadata(
+      StructType sparkSchema, Map<String, String> properties) {
+    if (properties == null || properties.isEmpty()) {
+      return sparkSchema;
+    }
+
+    StructField[] newFields = new StructField[sparkSchema.fields().length];
+    for (int i = 0; i < sparkSchema.fields().length; i++) {
+      StructField field = sparkSchema.fields()[i];
+      MetadataBuilder builder = new MetadataBuilder().withMetadata(field.metadata());
+      boolean modified = false;
+
+      for (LanceEncodingUtils.EncodingPropertyRule rule :
+          LanceEncodingUtils.getSupportedEncodingPropertyRules()) {
+        String propertyKey = rule.createPropertyKey(field.name());
+        if (!properties.containsKey(propertyKey)) {
+          continue;
+        }
+        String value = properties.get(propertyKey);
+        rule.validate(field.name(), value);
+        builder.putString(rule.getArrowMetadataKey(), value);
+        modified = true;
+      }
+
+      newFields[i] =
+          modified
+              ? new StructField(field.name(), field.dataType(), field.nullable(), builder.build())
+              : field;
     }
 
     return new StructType(newFields);
