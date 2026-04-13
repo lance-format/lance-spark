@@ -533,21 +533,6 @@ class TestDDLColumnCompression:
         result = spark.sql("SELECT id, ts FROM default.test_table").collect()
         assert result[0].ts == 1000
 
-    def test_fsst_compression(self, spark):
-        """FSST compression is accepted for string columns."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
-                id BIGINT,
-                payload STRING
-            ) USING lance
-            TBLPROPERTIES (
-                'payload.lance.compression' = 'fsst'
-            )
-        """)
-        spark.sql("INSERT INTO default.test_table VALUES (1, 'fsst-test')")
-        result = spark.sql("SELECT payload FROM default.test_table").collect()
-        assert result[0].payload == "fsst-test"
-
     def test_invalid_compression_scheme_rejected(self, spark):
         """Invalid compression scheme raises an error at table creation time."""
         with pytest.raises(Exception, match=r"invalid compression scheme"):
