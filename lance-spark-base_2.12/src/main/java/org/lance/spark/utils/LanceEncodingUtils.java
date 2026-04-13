@@ -36,18 +36,15 @@ public final class LanceEncodingUtils {
 
   // TBLPROPERTIES key suffixes (after "<column>.")
   static final String COMPRESSION_SUFFIX = LANCE_PROPERTY_DOMAIN + ".compression";
-  static final String COMPRESSION_LEVEL_SUFFIX =
-      LANCE_PROPERTY_DOMAIN + ".compression-level";
-  static final String STRUCTURAL_ENCODING_SUFFIX =
-      LANCE_PROPERTY_DOMAIN + ".structural-encoding";
+  static final String COMPRESSION_LEVEL_SUFFIX = LANCE_PROPERTY_DOMAIN + ".compression-level";
+  static final String STRUCTURAL_ENCODING_SUFFIX = LANCE_PROPERTY_DOMAIN + ".structural-encoding";
   static final String RLE_THRESHOLD_SUFFIX = LANCE_PROPERTY_DOMAIN + ".rle-threshold";
   static final String BSS_SUFFIX = LANCE_PROPERTY_DOMAIN + ".bss";
 
   // Arrow field metadata keys
   static final String LANCE_ENCODING_COMPRESSION = "lance-encoding:compression";
   static final String LANCE_ENCODING_COMPRESSION_LEVEL = "lance-encoding:compression-level";
-  static final String LANCE_ENCODING_STRUCTURAL_ENCODING =
-      "lance-encoding:structural-encoding";
+  static final String LANCE_ENCODING_STRUCTURAL_ENCODING = "lance-encoding:structural-encoding";
   static final String LANCE_ENCODING_RLE_THRESHOLD = "lance-encoding:rle-threshold";
   static final String LANCE_ENCODING_BSS = "lance-encoding:bss";
 
@@ -55,24 +52,29 @@ public final class LanceEncodingUtils {
   private static final Set<String> VALID_COMPRESSION_SCHEMES =
       Set.of("zstd", "lz4", "fsst", "none");
 
-  private static final Set<String> VALID_STRUCTURAL_ENCODINGS =
-      Set.of("miniblock", "fullzip");
+  private static final Set<String> VALID_STRUCTURAL_ENCODINGS = Set.of("miniblock", "fullzip");
 
-  private static final Set<String> VALID_BSS_MODES =
-      Set.of("off", "on", "auto");
+  private static final Set<String> VALID_BSS_MODES = Set.of("off", "on", "auto");
 
   private static final List<EncodingPropertyRule> SUPPORTED_ENCODING_PROPERTY_RULES =
       List.of(
-          rule(COMPRESSION_SUFFIX, LANCE_ENCODING_COMPRESSION,
+          rule(
+              COMPRESSION_SUFFIX,
+              LANCE_ENCODING_COMPRESSION,
               LanceEncodingUtils::validateCompressionScheme),
-          rule(COMPRESSION_LEVEL_SUFFIX, LANCE_ENCODING_COMPRESSION_LEVEL,
+          rule(
+              COMPRESSION_LEVEL_SUFFIX,
+              LANCE_ENCODING_COMPRESSION_LEVEL,
               LanceEncodingUtils::validateCompressionLevel),
-          rule(STRUCTURAL_ENCODING_SUFFIX, LANCE_ENCODING_STRUCTURAL_ENCODING,
+          rule(
+              STRUCTURAL_ENCODING_SUFFIX,
+              LANCE_ENCODING_STRUCTURAL_ENCODING,
               LanceEncodingUtils::validateStructuralEncoding),
-          rule(RLE_THRESHOLD_SUFFIX, LANCE_ENCODING_RLE_THRESHOLD,
+          rule(
+              RLE_THRESHOLD_SUFFIX,
+              LANCE_ENCODING_RLE_THRESHOLD,
               LanceEncodingUtils::validateRleThreshold),
-          rule(BSS_SUFFIX, LANCE_ENCODING_BSS,
-              LanceEncodingUtils::validateBssMode));
+          rule(BSS_SUFFIX, LANCE_ENCODING_BSS, LanceEncodingUtils::validateBssMode));
 
   private LanceEncodingUtils() {
     // Utility class
@@ -160,9 +162,7 @@ public final class LanceEncodingUtils {
   }
 
   private static EncodingPropertyRule rule(
-      String propertySuffix,
-      String arrowMetadataKey,
-      BiConsumer<String, String> validator) {
+      String propertySuffix, String arrowMetadataKey, BiConsumer<String, String> validator) {
     return new EncodingPropertyRule(propertySuffix, arrowMetadataKey, validator);
   }
 
@@ -173,9 +173,7 @@ public final class LanceEncodingUtils {
     private final BiConsumer<String, String> validator;
 
     private EncodingPropertyRule(
-        String propertySuffix,
-        String arrowMetadataKey,
-        BiConsumer<String, String> validator) {
+        String propertySuffix, String arrowMetadataKey, BiConsumer<String, String> validator) {
       this.propertySuffix = propertySuffix;
       this.arrowMetadataKey = arrowMetadataKey;
       this.validator = validator;

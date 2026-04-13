@@ -221,7 +221,8 @@ public class SchemaConverterTest {
     StructType result = SchemaConverter.processSchemaWithProperties(schema, properties);
     StructField field = result.apply("ts");
     assertTrue(field.metadata().contains(LanceEncodingUtils.LANCE_ENCODING_RLE_THRESHOLD));
-    assertEquals("0.5", field.metadata().getString(LanceEncodingUtils.LANCE_ENCODING_RLE_THRESHOLD));
+    assertEquals(
+        "0.5", field.metadata().getString(LanceEncodingUtils.LANCE_ENCODING_RLE_THRESHOLD));
   }
 
   @Test
@@ -260,8 +261,10 @@ public class SchemaConverterTest {
     assertEquals(
         "1", field.metadata().getString(LanceEncodingUtils.LANCE_ENCODING_COMPRESSION_LEVEL));
     assertEquals(
-        "fullzip", field.metadata().getString(LanceEncodingUtils.LANCE_ENCODING_STRUCTURAL_ENCODING));
-    assertEquals("1.0", field.metadata().getString(LanceEncodingUtils.LANCE_ENCODING_RLE_THRESHOLD));
+        "fullzip",
+        field.metadata().getString(LanceEncodingUtils.LANCE_ENCODING_STRUCTURAL_ENCODING));
+    assertEquals(
+        "1.0", field.metadata().getString(LanceEncodingUtils.LANCE_ENCODING_RLE_THRESHOLD));
     assertEquals("off", field.metadata().getString(LanceEncodingUtils.LANCE_ENCODING_BSS));
   }
 
@@ -284,7 +287,10 @@ public class SchemaConverterTest {
         result.apply("id").metadata().contains(LanceEncodingUtils.LANCE_ENCODING_COMPRESSION));
     assertEquals(
         "zstd",
-        result.apply("payload").metadata().getString(LanceEncodingUtils.LANCE_ENCODING_COMPRESSION));
+        result
+            .apply("payload")
+            .metadata()
+            .getString(LanceEncodingUtils.LANCE_ENCODING_COMPRESSION));
     assertEquals(
         "none",
         result.apply("ts").metadata().getString(LanceEncodingUtils.LANCE_ENCODING_COMPRESSION));
@@ -340,7 +346,9 @@ public class SchemaConverterTest {
 
     // No exception — metadata is written and Rust decides what to do with it
     StructType result = SchemaConverter.processSchemaWithProperties(schema, properties);
-    assertEquals("fsst", result.apply("ts").metadata().getString(LanceEncodingUtils.LANCE_ENCODING_COMPRESSION));
+    assertEquals(
+        "fsst",
+        result.apply("ts").metadata().getString(LanceEncodingUtils.LANCE_ENCODING_COMPRESSION));
   }
 
   @Test
