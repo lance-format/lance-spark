@@ -15,6 +15,7 @@ package org.lance.spark.read;
 
 import org.lance.Dataset;
 import org.lance.Fragment;
+import org.lance.ipc.Query;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Utils;
 
@@ -76,12 +77,29 @@ public class LanceSplit implements Serializable {
   public static ScanPlanResult planScan(LanceSparkReadOptions readOptions) {
     try (Dataset dataset = Utils.openDatasetBuilder(readOptions).build()) {
       List<Fragment> fragments = dataset.getFragments();
-      List<LanceSplit> splits = new ArrayList<>(fragments.size());
+      List<LanceSplit> splits;
       Map<Integer, Long> fragmentRowCounts = new HashMap<>(fragments.size());
+      List<Integer> allFragmentIds = new ArrayList<>(fragments.size());
       for (Fragment fragment : fragments) {
         int id = fragment.getId();
-        splits.add(new LanceSplit(Collections.singletonList(id)));
+        allFragmentIds.add(id);
         fragmentRowCounts.put(id, fragment.metadata().getNumRows());
+      }
+      if (isIndexedVectorSearch(readOptions)) {
+        // Indexed vector search: merge into a single split with one fragment ID.
+        // Dataset-level scan is used for indexed search (see LanceFragmentScanner),
+        // so we don't need all fragment IDs — just one is enough to create the scanner.
+        // Brute-force KNN (useIndex=false) keeps per-fragment splits for parallelism.
+        splits = new ArrayList<>(1);
+        if (!allFragmentIds.isEmpty()) {
+          splits.add(new LanceSplit(Collections.singletonList(allFragmentIds.get(0))));
+        }
+      } else {
+        // Non-vector scan: keep per-fragment parallelism
+        splits = new ArrayList<>(fragments.size());
+        for (int id : allFragmentIds) {
+          splits.add(new LanceSplit(Collections.singletonList(id)));
+        }
       }
       long resolvedVersion = dataset.getVersion().getId();
       return new ScanPlanResult(splits, resolvedVersion, fragmentRowCounts);
@@ -94,5 +112,16 @@ public class LanceSplit implements Serializable {
   @Deprecated
   public static List<LanceSplit> generateLanceSplits(LanceSparkReadOptions readOptions) {
     return planScan(readOptions).getSplits();
+  }
+
+  /**
+   * Returns true when the read options specify an indexed vector search (nearest query with
+   * useIndex=true). In this mode, a single split with dataset-level scan is used to leverage the
+   * global IVF index. Brute-force KNN (useIndex=false) returns false and retains per-fragment
+   * splits for parallelism.
+   */
+  public static boolean isIndexedVectorSearch(LanceSparkReadOptions readOptions) {
+    Query nearest = readOptions.getNearest();
+    return nearest != null && nearest.isUseIndex();
   }
 }

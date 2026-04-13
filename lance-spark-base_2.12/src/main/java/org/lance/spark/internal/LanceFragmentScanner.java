@@ -19,6 +19,7 @@ import org.lance.ipc.ScanOptions;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.read.LanceInputPartition;
+import org.lance.spark.read.LanceSplit;
 
 import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.spark.sql.types.StructField;
@@ -49,13 +50,6 @@ public class LanceFragmentScanner implements AutoCloseable {
   public static LanceFragmentScanner create(int fragmentId, LanceInputPartition inputPartition) {
     try {
       LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
-      Fragment fragment =
-          LanceDatasetCache.getFragment(
-              readOptions,
-              fragmentId,
-              inputPartition.getInitialStorageOptions(),
-              inputPartition.getNamespaceImpl(),
-              inputPartition.getNamespaceProperties());
       ScanOptions.Builder scanOptions = new ScanOptions.Builder();
       List<String> projectedColumns = getColumnNames(inputPartition.getSchema());
       if (projectedColumns.isEmpty() && inputPartition.getSchema().isEmpty()) {
@@ -72,16 +66,6 @@ public class LanceFragmentScanner implements AutoCloseable {
         scanOptions.filter(inputPartition.getWhereCondition().get());
       }
       scanOptions.batchSize(readOptions.getBatchSize());
-      if (readOptions.getNearest() != null) {
-        scanOptions.nearest(readOptions.getNearest());
-        // We strictly set `prefilter = true` here to ensure query correctness.
-        // This is necessary due to the combination of two factors:
-        // 1. Spark currently performs the vector search by individually scanning each fragment.
-        // 2. Lance mandates that `prefilter` must be enabled for fragmented vector queries.
-        // If Spark's execution model or Lance's search functionality changes in the future,
-        // we need to revisit this.
-        scanOptions.prefilter(true);
-      }
       if (inputPartition.getLimit().isPresent()) {
         scanOptions.limit(inputPartition.getLimit().get());
       }
@@ -93,8 +77,40 @@ public class LanceFragmentScanner implements AutoCloseable {
       }
       boolean withFragmentId =
           inputPartition.getSchema().getFieldIndex(LanceConstant.FRAGMENT_ID).nonEmpty();
-      return new LanceFragmentScanner(
-          fragment.newScan(scanOptions.build()), fragmentId, withFragmentId, inputPartition);
+
+      LanceScanner scanner;
+      if (LanceSplit.isIndexedVectorSearch(readOptions)) {
+        // Indexed vector search: use dataset-level scan to leverage the global index,
+        // avoiding N redundant global searches from per-fragment scans.
+        // Note: fragmentId is not used to scope the scan here — it is only read later
+        // via fragmentId() for the _fragid virtual column, whose actual values come
+        // from the scan results, not the split's representative fragment ID.
+        scanOptions.nearest(readOptions.getNearest());
+        LanceDatasetCache.CachedDataset cached =
+            LanceDatasetCache.getDataset(
+                readOptions,
+                inputPartition.getInitialStorageOptions(),
+                inputPartition.getNamespaceImpl(),
+                inputPartition.getNamespaceProperties());
+        scanner = cached.getDataset().newScan(scanOptions.build());
+      } else {
+        // Regular scan or brute-force KNN (useIndex=false): per-fragment path.
+        // For brute-force KNN, we still pass the nearest query to the fragment scanner
+        // so it performs per-fragment KNN search (with prefilter for correctness).
+        if (readOptions.getNearest() != null) {
+          scanOptions.nearest(readOptions.getNearest());
+          scanOptions.prefilter(true);
+        }
+        Fragment fragment =
+            LanceDatasetCache.getFragment(
+                readOptions,
+                fragmentId,
+                inputPartition.getInitialStorageOptions(),
+                inputPartition.getNamespaceImpl(),
+                inputPartition.getNamespaceProperties());
+        scanner = fragment.newScan(scanOptions.build());
+      }
+      return new LanceFragmentScanner(scanner, fragmentId, withFragmentId, inputPartition);
     } catch (Throwable throwable) {
       throw new RuntimeException(throwable);
     }

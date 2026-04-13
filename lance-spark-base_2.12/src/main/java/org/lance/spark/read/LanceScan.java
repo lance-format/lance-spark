@@ -167,7 +167,11 @@ public class LanceScan
                 i -> {
                   LanceSplit split = finalSplits.get(i);
                   InternalRow partKeyRow = null;
-                  if (partitionInfo != null) {
+                  // Skip partition key only for indexed vector search: that single split uses
+                  // a dataset-level scan and doesn't map to any one fragment's partition value.
+                  // Brute-force KNN (useIndex=false) keeps per-fragment splits, so its
+                  // partition key is valid and SPJ can proceed normally.
+                  if (partitionInfo != null && !LanceSplit.isIndexedVectorSearch(readOptions)) {
                     int fragId = split.getFragments().get(0);
                     partKeyRow = partitionInfo.partitionKeyForFragment(fragId);
                   }

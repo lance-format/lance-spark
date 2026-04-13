@@ -34,28 +34,20 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/*
- *The test logic is same with org.lance.VectorSearchTest.test_knn
- */
-
 public abstract class BaseSparkConnectorReadWithVectorSearchTest {
   private static SparkSession spark;
   private static String dbPath;
-  private static Dataset<Row> data;
+
+  // test_dataset5 has 5 fragments and no pre-built vector index.
+  private static Dataset<Row> indexedData; // useIndex=true  → single dataset-level scan
+  private static Dataset<Row> bruteForceData; // useIndex=false → per-fragment parallel scan
 
   @BeforeAll
   static void setup() {
-
-    Query.Builder builder = new Query.Builder();
     float[] key = new float[32];
     for (int i = 0; i < 32; i++) {
       key[i] = (float) (i + 32);
     }
-    builder.setK(1);
-    builder.setColumn("vec");
-    builder.setKey(key);
-    builder.setUseIndex(true);
-    builder.setDistanceType(DistanceType.L2);
 
     spark =
         SparkSession.builder()
@@ -64,16 +56,39 @@ public abstract class BaseSparkConnectorReadWithVectorSearchTest {
             .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
             .getOrCreate();
     dbPath = TestUtils.TestTable1Config.dbPath;
-    data =
+    String datasetUri = TestUtils.getDatasetUri(dbPath, "test_dataset5");
+
+    Query.Builder indexedBuilder = new Query.Builder();
+    indexedBuilder.setK(1);
+    indexedBuilder.setColumn("vec");
+    indexedBuilder.setKey(key);
+    indexedBuilder.setUseIndex(true);
+    indexedBuilder.setDistanceType(DistanceType.L2);
+    indexedData =
         spark
             .read()
             .format(LanceDataSource.name)
-            .option(LanceSparkReadOptions.CONFIG_NEAREST, QueryUtils.queryToString(builder.build()))
             .option(
-                LanceSparkReadOptions.CONFIG_DATASET_URI,
-                TestUtils.getDatasetUri(dbPath, "test_dataset5"))
+                LanceSparkReadOptions.CONFIG_NEAREST,
+                QueryUtils.queryToString(indexedBuilder.build()))
+            .option(LanceSparkReadOptions.CONFIG_DATASET_URI, datasetUri)
             .load();
-    data.createOrReplaceTempView("test_dataset5");
+
+    Query.Builder bruteForceBuilder = new Query.Builder();
+    bruteForceBuilder.setK(1);
+    bruteForceBuilder.setColumn("vec");
+    bruteForceBuilder.setKey(key);
+    bruteForceBuilder.setUseIndex(false);
+    bruteForceBuilder.setDistanceType(DistanceType.L2);
+    bruteForceData =
+        spark
+            .read()
+            .format(LanceDataSource.name)
+            .option(
+                LanceSparkReadOptions.CONFIG_NEAREST,
+                QueryUtils.queryToString(bruteForceBuilder.build()))
+            .option(LanceSparkReadOptions.CONFIG_DATASET_URI, datasetUri)
+            .load();
   }
 
   @AfterAll
@@ -84,12 +99,24 @@ public abstract class BaseSparkConnectorReadWithVectorSearchTest {
   }
 
   @Test
-  public void validateData() {
+  public void testIndexedSearchReturnsGlobalTopK() {
+    // useIndex=true uses a single dataset-level scan, so k=1 returns exactly 1 row
+    // globally — the nearest neighbor across all fragments combined.
+    List<Row> rows = indexedData.collectAsList();
+    assertEquals(1, rows.size(), "Indexed k=1 search must return exactly 1 row globally");
+    assertEquals(1, rows.get(0).getInt(0), "Unexpected value in 'i' column");
+  }
+
+  @Test
+  public void testBruteForceSearchReturnsPerFragmentCandidates() {
+    // useIndex=false keeps per-fragment splits for parallel brute-force scan.
+    // With k=1 and 5 fragments, each fragment returns its local top-1,
+    // yielding 5 candidate rows for the caller to aggregate.
     Set<Integer> expectedI = new HashSet<>(Arrays.asList(1, 81, 161, 241, 321));
     Set<Integer> actualI = new HashSet<>();
-    List<Row> rows = data.collectAsList();
-    for (int i = 0; i < rows.size(); i++) {
-      actualI.add(rows.get(i).getInt(0));
+    List<Row> rows = bruteForceData.collectAsList();
+    for (Row row : rows) {
+      actualI.add(row.getInt(0));
     }
     assertEquals(expectedI, actualI, "Unexpected values in 'i' column");
   }
