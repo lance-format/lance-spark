@@ -201,6 +201,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     public DeltaWriter<InternalRow> createWriter(int partitionId, long taskId) {
       int batchSize = writeOptions.getBatchSize();
       boolean useQueuedBuffer = writeOptions.isUseQueuedWriteBuffer();
+      boolean useLargeVarTypes = writeOptions.isUseLargeVarTypes();
 
       // Merge initial storage options with write options
       WriteParams params = buildWriteParams();
@@ -209,9 +210,10 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       ArrowBatchWriteBuffer writeBuffer;
       if (useQueuedBuffer) {
         int queueDepth = writeOptions.getQueueDepth();
-        writeBuffer = new QueuedArrowBatchWriteBuffer(sparkSchema, batchSize, queueDepth);
+        writeBuffer =
+            new QueuedArrowBatchWriteBuffer(sparkSchema, batchSize, queueDepth, useLargeVarTypes);
       } else {
-        writeBuffer = new SemaphoreArrowBatchWriteBuffer(sparkSchema, batchSize);
+        writeBuffer = new SemaphoreArrowBatchWriteBuffer(sparkSchema, batchSize, useLargeVarTypes);
       }
 
       // Create fragment in background thread
