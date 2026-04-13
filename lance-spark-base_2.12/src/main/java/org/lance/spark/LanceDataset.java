@@ -293,7 +293,12 @@ public class LanceDataset
 
   @Override
   public Map<String, String> properties() {
-    return tableProperties;
+    // Spark's DescribeTableExec iterates TABLE_RESERVED_PROPERTIES and emits a capitalized row for
+    // each key present here (e.g. "location" -> col_name "Location"). Without this entry the
+    // physical URI is invisible to DESCRIBE EXTENDED and to any tooling that relies on it.
+    Map<String, String> props = new HashMap<>(tableProperties);
+    props.put("location", readOptions.getDatasetUri());
+    return props;
   }
 
   @Override
