@@ -22,7 +22,7 @@ RUN curl -fL -o /usr/local/bin/minio https://dl.min.io/server/minio/release/linu
 RUN python3 -m venv /opt/venv && \
     . /opt/venv/bin/activate && \
     pip install --upgrade pip && \
-    pip install pytest pytest-timeout packaging azure-storage-blob boto3 lance
+    pip install pytest pytest-timeout packaging azure-storage-blob boto3 pylance
 
 ENV PATH="/opt/venv/bin:$PATH"
 ENV SPARK_HOME="/opt/spark"
