@@ -15,7 +15,6 @@ Test organization follows the Lance documentation structure:
 import os
 import time
 import pytest
-import lance
 from packaging.version import Version
 from pyspark.sql.types import StructType, StructField, IntegerType, StringType, DoubleType, BinaryType
 
@@ -597,6 +596,7 @@ class TestDDLColumnCompression:
         that the connector correctly wired the TBLPROPERTIES into Arrow field metadata
         consumed by the Rust encoder.
         """
+        lance = pytest.importorskip("lance", reason="lance-python not installed")
         if spark._lance_backend != "local":
             pytest.skip("lance-python file inspection only supported on local backend")
 
