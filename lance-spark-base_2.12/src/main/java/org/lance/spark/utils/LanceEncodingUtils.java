@@ -63,11 +63,16 @@ public final class LanceEncodingUtils {
 
   private static final List<EncodingPropertyRule> SUPPORTED_ENCODING_PROPERTY_RULES =
       List.of(
-          rule(COMPRESSION_SUFFIX, LANCE_ENCODING_COMPRESSION, LanceEncodingUtils::validateCompressionScheme),
-          rule(COMPRESSION_LEVEL_SUFFIX, LANCE_ENCODING_COMPRESSION_LEVEL, LanceEncodingUtils::validateCompressionLevel),
-          rule(STRUCTURAL_ENCODING_SUFFIX, LANCE_ENCODING_STRUCTURAL_ENCODING, LanceEncodingUtils::validateStructuralEncoding),
-          rule(RLE_THRESHOLD_SUFFIX, LANCE_ENCODING_RLE_THRESHOLD, LanceEncodingUtils::validateRleThreshold),
-          rule(BSS_SUFFIX, LANCE_ENCODING_BSS, LanceEncodingUtils::validateBssMode));
+          rule(COMPRESSION_SUFFIX, LANCE_ENCODING_COMPRESSION,
+              LanceEncodingUtils::validateCompressionScheme),
+          rule(COMPRESSION_LEVEL_SUFFIX, LANCE_ENCODING_COMPRESSION_LEVEL,
+              LanceEncodingUtils::validateCompressionLevel),
+          rule(STRUCTURAL_ENCODING_SUFFIX, LANCE_ENCODING_STRUCTURAL_ENCODING,
+              LanceEncodingUtils::validateStructuralEncoding),
+          rule(RLE_THRESHOLD_SUFFIX, LANCE_ENCODING_RLE_THRESHOLD,
+              LanceEncodingUtils::validateRleThreshold),
+          rule(BSS_SUFFIX, LANCE_ENCODING_BSS,
+              LanceEncodingUtils::validateBssMode));
 
   private LanceEncodingUtils() {
     // Utility class
@@ -93,7 +98,8 @@ public final class LanceEncodingUtils {
     }
   }
 
-  // Only integer parseability is checked; codec-specific range enforcement is left to the Rust encoder.
+  // Only integer parseability is checked; codec-specific range enforcement is left to the Rust
+  // encoder.
   private static void validateCompressionLevel(String columnName, String value) {
     try {
       Integer.parseInt(value);
