@@ -22,7 +22,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -53,9 +52,9 @@ public abstract class BaseSpjBroadcastTest {
   @TempDir Path tempDir;
 
   @BeforeEach
-  public void setup() throws IOException {
+  public void setup() {
     Path rootPath = tempDir.resolve(UUID.randomUUID().toString());
-    Files.createDirectories(rootPath);
+    rootPath.toFile().mkdirs();
     String testRoot = rootPath.toString();
     spark =
         SparkSession.builder()
@@ -76,7 +75,7 @@ public abstract class BaseSpjBroadcastTest {
   }
 
   @AfterEach
-  public void tearDown() {
+  public void tearDown() throws IOException {
     if (spark != null) {
       spark.close();
     }

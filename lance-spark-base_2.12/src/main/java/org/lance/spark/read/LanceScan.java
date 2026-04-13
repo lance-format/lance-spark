@@ -80,6 +80,12 @@ public class LanceScan
    */
   private final java.util.Map<String, List<ZoneStats>> zonemapStats;
 
+  /**
+   * Pre-computed surviving fragment IDs from zonemap pruning in LanceScanBuilder. When non-null,
+   * {@link #pruneByZonemapStats} skips re-computing and uses these directly.
+   */
+  private final Set<Integer> cachedSurvivingFragmentIds;
+
   /** Number of partitions after pruning, set during {@link #planInputPartitions()}. */
   private transient int numPartitions = -1;
 
@@ -112,6 +118,7 @@ public class LanceScan
       Filter[] pushedFilters,
       LanceStatistics statistics,
       java.util.Map<String, List<ZoneStats>> zonemapStats,
+      Set<Integer> survivingFragmentIds,
       ZonemapFragmentPruner.PartitionInfo partitionInfo,
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
@@ -127,6 +134,7 @@ public class LanceScan
         pushedFilters != null ? Arrays.copyOf(pushedFilters, pushedFilters.length) : new Filter[0];
     this.statistics = statistics;
     this.zonemapStats = zonemapStats != null ? zonemapStats : Collections.emptyMap();
+    this.cachedSurvivingFragmentIds = survivingFragmentIds;
     this.partitionInfo = partitionInfo;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
@@ -315,17 +323,19 @@ public class LanceScan
    * predicate are skipped entirely, avoiding fragment opens, scan setup, and task scheduling.
    */
   private List<LanceSplit> pruneByZonemapStats(List<LanceSplit> allSplits) {
-    if (zonemapStats.isEmpty()) {
+    // Use cached result from LanceScanBuilder if available, otherwise compute.
+    Set<Integer> allowedIds;
+    if (cachedSurvivingFragmentIds != null) {
+      allowedIds = cachedSurvivingFragmentIds;
+    } else if (!zonemapStats.isEmpty()) {
+      allowedIds = ZonemapFragmentPruner.pruneFragments(pushedFilters, zonemapStats).orElse(null);
+    } else {
       return allSplits;
     }
 
-    java.util.Optional<Set<Integer>> targetFragmentIds =
-        ZonemapFragmentPruner.pruneFragments(pushedFilters, zonemapStats);
-    if (!targetFragmentIds.isPresent()) {
+    if (allowedIds == null) {
       return allSplits;
     }
-
-    Set<Integer> allowedIds = targetFragmentIds.get();
     List<LanceSplit> pruned =
         allSplits.stream()
             .filter(split -> split.getFragments().stream().anyMatch(allowedIds::contains))

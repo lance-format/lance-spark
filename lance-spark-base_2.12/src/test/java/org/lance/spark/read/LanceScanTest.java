@@ -213,6 +213,7 @@ public class LanceScanTest {
             new Filter[0],
             null,
             Collections.emptyMap(),
+            null,
             partInfo,
             Collections.emptyMap(),
             null,
