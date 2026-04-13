@@ -342,7 +342,7 @@ public class LanceScan
             .collect(Collectors.toList());
 
     if (pruned.size() < allSplits.size()) {
-      LOG.info(
+      LOG.debug(
           "Zonemap pruning: {} of {} splits retained," + " allowed fragment IDs: {}",
           pruned.size(),
           allSplits.size(),
