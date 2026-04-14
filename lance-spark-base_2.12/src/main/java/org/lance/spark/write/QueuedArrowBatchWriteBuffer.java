@@ -193,10 +193,11 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
     if (producerFinished) {
       return;
     }
-    producerFinished = true;
 
     try {
-      // Queue any remaining partial batch
+      // Queue any remaining partial batch before signaling completion to avoid
+      // a race where the consumer sees producerFinished=true with an empty queue
+      // and exits before the final batch is enqueued.
       int remainingRows = currentBatchRowCount.get();
       if (remainingRows > 0) {
         currentArrowWriter.finish();
@@ -215,6 +216,9 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
       }
       currentBatch = null;
       currentArrowWriter = null;
+
+      // Signal completion only after the final batch is safely in the queue
+      producerFinished = true;
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       throw new RuntimeException("Interrupted while finishing", e);
