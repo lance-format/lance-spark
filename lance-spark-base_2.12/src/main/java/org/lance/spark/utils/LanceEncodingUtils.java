@@ -115,11 +115,7 @@ public final class LanceEncodingUtils {
     }
     if (level < 0) {
       throw new IllegalArgumentException(
-          "Column '"
-              + columnName
-              + "': compression-level '"
-              + value
-              + "' must be non-negative.");
+          "Column '" + columnName + "': compression-level '" + value + "' must be non-negative.");
     }
   }
 
