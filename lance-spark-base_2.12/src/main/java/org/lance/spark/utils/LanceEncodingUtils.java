@@ -100,6 +100,7 @@ public final class LanceEncodingUtils {
     }
   }
 
+  // codec-specific upper-bound enforcement is left to the Rust encoder
   private static void validateCompressionLevel(String columnName, String value) {
     int level;
     try {
