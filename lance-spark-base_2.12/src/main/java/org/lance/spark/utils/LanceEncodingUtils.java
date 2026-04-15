@@ -100,18 +100,25 @@ public final class LanceEncodingUtils {
     }
   }
 
-  // Only integer parseability is checked; codec-specific range enforcement is left to the Rust
-  // encoder.
   private static void validateCompressionLevel(String columnName, String value) {
+    int level;
     try {
-      Integer.parseInt(value);
+      level = Integer.parseInt(value);
     } catch (NumberFormatException e) {
       throw new IllegalArgumentException(
           "Column '"
               + columnName
               + "': invalid compression-level '"
               + value
-              + "'. Must be an integer.");
+              + "'. Must be a non-negative integer.");
+    }
+    if (level < 0) {
+      throw new IllegalArgumentException(
+          "Column '"
+              + columnName
+              + "': compression-level '"
+              + value
+              + "' must be non-negative.");
     }
   }
 

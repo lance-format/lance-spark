@@ -487,4 +487,18 @@ public class SchemaConverterTest {
         IllegalArgumentException.class,
         () -> SchemaConverter.processSchemaWithProperties(schema, properties));
   }
+
+  @Test
+  public void testNegativeCompressionLevelThrows() {
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("col", DataTypes.StringType, true),
+            });
+    Map<String, String> properties = new HashMap<>();
+    properties.put("col.lance.compression-level", "-1");
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> SchemaConverter.processSchemaWithProperties(schema, properties));
+  }
 }
