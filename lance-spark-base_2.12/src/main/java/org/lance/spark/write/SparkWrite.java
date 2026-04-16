@@ -30,6 +30,12 @@ import java.util.Map;
 public class SparkWrite implements Write {
   private final LanceSparkWriteOptions writeOptions;
   private final StructType schema;
+
+  /** Returns the write options used by this SparkWrite. Visible for testing. */
+  LanceSparkWriteOptions getWriteOptions() {
+    return writeOptions;
+  }
+
   private final boolean overwrite;
 
   /**
@@ -144,6 +150,7 @@ public class SparkWrite implements Write {
                   .maxRowsPerGroup(writeOptions.getMaxRowsPerGroup())
                   .queueDepth(writeOptions.getQueueDepth())
                   .useQueuedWriteBuffer(writeOptions.isUseQueuedWriteBuffer())
+                  .useLargeVarTypes(writeOptions.isUseLargeVarTypes())
                   .enableStableRowIds(writeOptions.getEnableStableRowIds())
                   .writeMode(WriteParams.WriteMode.OVERWRITE)
                   .build();

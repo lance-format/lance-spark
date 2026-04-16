@@ -113,4 +113,29 @@ public class SparkWriteTest {
     BatchWrite batchWrite = builder.build().toBatch();
     assertInstanceOf(LanceBatchWrite.class, batchWrite);
   }
+
+  @Test
+  public void testTruncatePreservesUseLargeVarTypes(TestInfo testInfo) {
+    String datasetUri = createDataset(testInfo.getTestMethod().get().getName());
+    LanceSparkWriteOptions writeOptions =
+        LanceSparkWriteOptions.builder()
+            .datasetUri(datasetUri)
+            .writeMode(WriteParams.WriteMode.APPEND)
+            .useLargeVarTypes(true)
+            .build();
+    SparkWrite.SparkWriteBuilder builder =
+        new SparkWrite.SparkWriteBuilder(
+            SPARK_SCHEMA,
+            writeOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            null,
+            false);
+    builder.truncate();
+    SparkWrite sparkWrite = (SparkWrite) builder.build();
+    assertTrue(
+        sparkWrite.getWriteOptions().isUseLargeVarTypes(),
+        "useLargeVarTypes should be preserved after truncate()");
+  }
 }

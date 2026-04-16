@@ -694,4 +694,44 @@ public abstract class BaseSparkConnectorWriteTest {
       assertEquals("0.1", ds.getLanceFileFormatVersion());
     }
   }
+
+  @Test
+  public void createOrReplacePreservesUseLargeVarTypes(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    // Create data with binary column
+    StructType binarySchema =
+        new StructType().add("id", DataTypes.StringType).add("data", DataTypes.BinaryType);
+    List<Row> binaryData =
+        Arrays.asList(
+            RowFactory.create("r1", new byte[] {1, 2, 3}),
+            RowFactory.create("r2", new byte[] {4, 5, 6}));
+    Dataset<Row> binaryDf = spark.createDataFrame(binaryData, binarySchema);
+
+    // Write using writeTo().createOrReplace() with use_large_var_types=true
+    // This exercises the staged commit path where the option was previously dropped
+    binaryDf
+        .writeTo("lance.`" + path + "`")
+        .using("lance")
+        .option("use_large_var_types", "true")
+        .createOrReplace();
+
+    // Verify the Lance schema uses large types
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      org.apache.arrow.vector.types.pojo.Schema arrowSchema = ds.getSchema();
+      org.apache.arrow.vector.types.pojo.Field dataField = arrowSchema.findField("data");
+      assertEquals(
+          org.apache.arrow.vector.types.pojo.ArrowType.LargeBinary.INSTANCE,
+          dataField.getType(),
+          "data field should be LargeBinary when use_large_var_types=true on createOrReplace path");
+
+      org.apache.arrow.vector.types.pojo.Field idField = arrowSchema.findField("id");
+      assertEquals(
+          org.apache.arrow.vector.types.pojo.ArrowType.LargeUtf8.INSTANCE,
+          idField.getType(),
+          "id field should be LargeUtf8 when use_large_var_types=true on createOrReplace path");
+    }
+  }
 }

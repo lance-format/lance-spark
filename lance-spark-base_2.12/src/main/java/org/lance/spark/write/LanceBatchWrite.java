@@ -115,7 +115,8 @@ public class LanceBatchWrite implements BatchWrite {
             .flatMap(List::stream)
             .collect(Collectors.toList());
 
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", true);
+    Schema arrowSchema =
+        LanceArrowUtils.toArrowSchema(schema, "UTC", true, writeOptions.isUseLargeVarTypes());
     boolean isOverwrite = overwrite || writeOptions.isOverwrite();
 
     // Boxed: null means unset (inherit in lance-core); see LanceSparkWriteOptions.
