@@ -368,7 +368,8 @@ public class LanceDataset
             namespaceImpl,
             namespaceProperties,
             readOptions.getTableId(),
-            managedVersioning);
+            managedVersioning,
+            tableProperties);
 
     if (stagedCommit != null) {
       builder.setStagedCommit(stagedCommit);

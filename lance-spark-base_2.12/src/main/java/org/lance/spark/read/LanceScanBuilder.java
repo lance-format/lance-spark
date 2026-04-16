@@ -20,6 +20,7 @@ import org.lance.index.IndexDescription;
 import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.schema.LanceField;
+import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.Utils;
@@ -91,7 +92,7 @@ public class LanceScanBuilder
 
   private final java.util.Map<String, String> tableProperties;
 
-  static final String TABLE_OPT_PARTITION_COLUMNS = "lance.partition.columns";
+  static final String TABLE_OPT_PARTITION_COLUMNS = LanceConstant.TABLE_OPT_PARTITION_COLUMNS;
 
   public LanceScanBuilder(
       StructType schema,

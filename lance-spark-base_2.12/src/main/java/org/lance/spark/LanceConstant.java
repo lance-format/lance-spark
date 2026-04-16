@@ -28,4 +28,7 @@ public class LanceConstant {
 
   public static final String BACKFILL_COLUMNS_KEY = "backfill_columns";
   public static final String UPDATE_COLUMNS_KEY = "update_columns";
+
+  /** Table property that declares the partition column(s) for SPJ. */
+  public static final String TABLE_OPT_PARTITION_COLUMNS = "lance.partition.columns";
 }
