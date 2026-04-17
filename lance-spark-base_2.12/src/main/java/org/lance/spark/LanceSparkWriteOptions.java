@@ -57,6 +57,7 @@ public class LanceSparkWriteOptions implements Serializable {
   public static final String CONFIG_ENABLE_STABLE_ROW_IDS = "enable_stable_row_ids";
   public static final String CONFIG_USE_LARGE_VAR_TYPES = "use_large_var_types";
   public static final String CONFIG_MAX_BATCH_BYTES = "max_batch_bytes";
+  public static final String CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD = "blob_pack_file_size_threshold";
 
   private static final WriteMode DEFAULT_WRITE_MODE = WriteMode.APPEND;
   private static final boolean DEFAULT_USE_QUEUED_WRITE_BUFFER = false;
@@ -82,6 +83,8 @@ public class LanceSparkWriteOptions implements Serializable {
   private final Boolean enableStableRowIds;
   private final boolean useLargeVarTypes;
   private final long maxBatchBytes;
+  // Boxed: null means "unset" so lance-core uses its own default (1 GiB as of 6.0.0-beta.1).
+  private final Long blobPackFileSizeThreshold;
   private final Map<String, String> storageOptions;
 
   /** The namespace for credential vending. Transient as LanceNamespace is not serializable. */
@@ -106,6 +109,7 @@ public class LanceSparkWriteOptions implements Serializable {
     this.enableStableRowIds = builder.enableStableRowIds;
     this.useLargeVarTypes = builder.useLargeVarTypes;
     this.maxBatchBytes = builder.maxBatchBytes;
+    this.blobPackFileSizeThreshold = builder.blobPackFileSizeThreshold;
     this.storageOptions = new HashMap<>(builder.storageOptions);
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
@@ -189,6 +193,11 @@ public class LanceSparkWriteOptions implements Serializable {
     return maxBatchBytes;
   }
 
+  /** Nullable: when unset, lance-core uses its own default for blob v2 pack sidecar size. */
+  public Long getBlobPackFileSizeThreshold() {
+    return blobPackFileSizeThreshold;
+  }
+
   public Map<String, String> getStorageOptions() {
     return storageOptions;
   }
@@ -220,6 +229,7 @@ public class LanceSparkWriteOptions implements Serializable {
         .maxBatchBytes(maxBatchBytes)
         .enableStableRowIds(enableStableRowIds)
         .useLargeVarTypes(useLargeVarTypes)
+        .blobPackFileSizeThreshold(blobPackFileSizeThreshold)
         .storageOptions(storageOptions)
         .namespace(namespace)
         .tableId(tableId)
@@ -285,6 +295,9 @@ public class LanceSparkWriteOptions implements Serializable {
     if (enableStableRowIds != null) {
       builder.withEnableStableRowIds(enableStableRowIds);
     }
+    if (blobPackFileSizeThreshold != null) {
+      builder.withBlobPackFileSizeThreshold(blobPackFileSizeThreshold);
+    }
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(storageOptions, initialStorageOptions);
     if (!merged.isEmpty()) {
@@ -309,6 +322,7 @@ public class LanceSparkWriteOptions implements Serializable {
         && Objects.equals(maxBytesPerFile, that.maxBytesPerFile)
         && Objects.equals(fileFormatVersion, that.fileFormatVersion)
         && Objects.equals(enableStableRowIds, that.enableStableRowIds)
+        && Objects.equals(blobPackFileSizeThreshold, that.blobPackFileSizeThreshold)
         && Objects.equals(storageOptions, that.storageOptions)
         && Objects.equals(tableId, that.tableId)
         && Objects.equals(version, that.version);
@@ -329,6 +343,7 @@ public class LanceSparkWriteOptions implements Serializable {
         enableStableRowIds,
         useLargeVarTypes,
         maxBatchBytes,
+        blobPackFileSizeThreshold,
         storageOptions,
         tableId,
         version);
@@ -348,6 +363,7 @@ public class LanceSparkWriteOptions implements Serializable {
     private Boolean enableStableRowIds;
     private boolean useLargeVarTypes = DEFAULT_USE_LARGE_VAR_TYPES;
     private long maxBatchBytes = DEFAULT_MAX_BATCH_BYTES;
+    private Long blobPackFileSizeThreshold;
     private Map<String, String> storageOptions = new HashMap<>();
     private LanceNamespace namespace;
     private List<String> tableId;
@@ -413,6 +429,14 @@ public class LanceSparkWriteOptions implements Serializable {
     public Builder maxBatchBytes(long maxBatchBytes) {
       Preconditions.checkArgument(maxBatchBytes > 0, "maxBatchBytes must be positive");
       this.maxBatchBytes = maxBatchBytes;
+      return this;
+    }
+
+    public Builder blobPackFileSizeThreshold(Long blobPackFileSizeThreshold) {
+      Preconditions.checkArgument(
+          blobPackFileSizeThreshold == null || blobPackFileSizeThreshold > 0,
+          "blobPackFileSizeThreshold must be positive");
+      this.blobPackFileSizeThreshold = blobPackFileSizeThreshold;
       return this;
     }
 
@@ -482,6 +506,11 @@ public class LanceSparkWriteOptions implements Serializable {
         long parsedMaxBatchBytes = Long.parseLong(options.get(CONFIG_MAX_BATCH_BYTES));
         Preconditions.checkArgument(parsedMaxBatchBytes > 0, "max_batch_bytes must be positive");
         this.maxBatchBytes = parsedMaxBatchBytes;
+      }
+      if (options.containsKey(CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD)) {
+        long parsed = Long.parseLong(options.get(CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD));
+        Preconditions.checkArgument(parsed > 0, "blob_pack_file_size_threshold must be positive");
+        this.blobPackFileSizeThreshold = parsed;
       }
       return this;
     }

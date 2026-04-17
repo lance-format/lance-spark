@@ -111,6 +111,55 @@ public class LanceSparkWriteOptionsTest {
   }
 
   @Test
+  public void testBlobPackFileSizeThresholdNullByDefault() {
+    LanceSparkWriteOptions opts = LanceSparkWriteOptions.from(TEMP_URL);
+    assertNull(opts.getBlobPackFileSizeThreshold());
+  }
+
+  @Test
+  public void testBlobPackFileSizeThresholdViaBuilder() {
+    LanceSparkWriteOptions opts =
+        LanceSparkWriteOptions.builder()
+            .datasetUri(TEMP_URL)
+            .blobPackFileSizeThreshold(512L * 1024 * 1024)
+            .build();
+    assertEquals(Long.valueOf(512L * 1024 * 1024), opts.getBlobPackFileSizeThreshold());
+  }
+
+  @Test
+  public void testBlobPackFileSizeThresholdParsedFromOptions() {
+    final Map<String, String> options = new HashMap<>();
+    options.put("path", TEMP_URL);
+    options.put("blob_pack_file_size_threshold", "2147483648");
+
+    LanceSparkWriteOptions opts =
+        LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(options).build();
+
+    assertEquals(Long.valueOf(2147483648L), opts.getBlobPackFileSizeThreshold());
+  }
+
+  @Test
+  public void testToWriteParamsPropagatesBlobPackFileSizeThreshold() {
+    LanceSparkWriteOptions opts =
+        LanceSparkWriteOptions.builder()
+            .datasetUri(TEMP_URL)
+            .blobPackFileSizeThreshold(123L)
+            .build();
+
+    WriteParams params = opts.toWriteParams();
+    assertTrue(params.getBlobPackFileSizeThreshold().isPresent());
+    assertEquals(Long.valueOf(123L), params.getBlobPackFileSizeThreshold().get());
+  }
+
+  @Test
+  public void testToWriteParamsOmitsBlobPackFileSizeThresholdWhenNull() {
+    LanceSparkWriteOptions opts = LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).build();
+
+    WriteParams params = opts.toWriteParams();
+    assertFalse(params.getBlobPackFileSizeThreshold().isPresent());
+  }
+
+  @Test
   public void testFromOptionsWithAllWriteSettings() {
     final Map<String, String> options = new HashMap<>();
     options.put("path", TEMP_URL);
