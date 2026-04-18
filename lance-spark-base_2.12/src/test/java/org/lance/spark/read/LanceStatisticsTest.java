@@ -13,6 +13,9 @@
  */
 package org.lance.spark.read;
 
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -72,5 +75,113 @@ public class LanceStatisticsTest {
     LanceStatistics stats = LanceStatistics.estimatePostPruning(1000, 50000, 0, 0);
     assertEquals(1000, stats.numRows().getAsLong());
     assertEquals(50000, stats.sizeInBytes().getAsLong());
+  }
+
+  @Test
+  public void testEstimateProjectedScalesByColumnWidthRatio() {
+    // Full schema has 9 columns; project 3 of equal width → size should scale by 3/9.
+    // 24_000_000 full bytes × (3×8)/(9×8) = 8_000_000.
+    StructType full =
+        new StructType(
+            new StructField[] {
+              new StructField("c1", DataTypes.LongType, true, null),
+              new StructField("c2", DataTypes.LongType, true, null),
+              new StructField("c3", DataTypes.LongType, true, null),
+              new StructField("c4", DataTypes.LongType, true, null),
+              new StructField("c5", DataTypes.LongType, true, null),
+              new StructField("c6", DataTypes.LongType, true, null),
+              new StructField("c7", DataTypes.LongType, true, null),
+              new StructField("c8", DataTypes.LongType, true, null),
+              new StructField("c9", DataTypes.LongType, true, null)
+            });
+    StructType projected =
+        new StructType(
+            new StructField[] {
+              new StructField("c1", DataTypes.LongType, true, null),
+              new StructField("c2", DataTypes.LongType, true, null),
+              new StructField("c3", DataTypes.LongType, true, null)
+            });
+    LanceStatistics stats = LanceStatistics.estimateProjected(1000, 24_000_000L, full, projected);
+    assertEquals(1000, stats.numRows().getAsLong());
+    assertEquals(8_000_000L, stats.sizeInBytes().getAsLong());
+  }
+
+  @Test
+  public void testEstimateProjectedFavorsWideColumns() {
+    // Full schema: one String (width 20) + one Int (width 4). Total width 24.
+    // Project just the String → ratio 20/24.
+    // 24_000 full bytes × 20/24 = 20_000.
+    StructType full =
+        new StructType(
+            new StructField[] {
+              new StructField("name", DataTypes.StringType, true, null),
+              new StructField("id", DataTypes.IntegerType, true, null)
+            });
+    StructType projected =
+        new StructType(
+            new StructField[] {new StructField("name", DataTypes.StringType, true, null)});
+    LanceStatistics stats = LanceStatistics.estimateProjected(1000, 24_000L, full, projected);
+    assertEquals(20_000L, stats.sizeInBytes().getAsLong());
+  }
+
+  @Test
+  public void testEstimateProjectedAllColumnsUnchanged() {
+    // Projection == full schema → no scaling.
+    StructType full =
+        new StructType(new StructField[] {new StructField("a", DataTypes.LongType, true, null)});
+    LanceStatistics stats = LanceStatistics.estimateProjected(1000, 50_000L, full, full);
+    assertEquals(50_000L, stats.sizeInBytes().getAsLong());
+  }
+
+  @Test
+  public void testEstimateProjectedEmptyProjectionReturnsFullSize() {
+    // Count-only scan: no columns projected. Fall back to full size rather than zero.
+    StructType full =
+        new StructType(new StructField[] {new StructField("a", DataTypes.LongType, true, null)});
+    StructType projected = new StructType(new StructField[] {});
+    LanceStatistics stats = LanceStatistics.estimateProjected(1000, 50_000L, full, projected);
+    assertEquals(50_000L, stats.sizeInBytes().getAsLong());
+  }
+
+  @Test
+  public void testEstimateProjectedNeverZero() {
+    StructType full =
+        new StructType(new StructField[] {new StructField("a", DataTypes.LongType, true, null)});
+    LanceStatistics stats = LanceStatistics.estimateProjected(0, 0L, full, full);
+    assertEquals(1, stats.sizeInBytes().getAsLong());
+  }
+
+  @Test
+  public void estimateProjected_unchangedByZoneLevelPartitioning() {
+    LanceStatistics stats =
+        LanceStatistics.estimateProjected(
+            1000L,
+            1_000_000L,
+            new StructType().add("a", DataTypes.LongType).add("b", DataTypes.StringType),
+            new StructType().add("a", DataTypes.LongType));
+    assertEquals(1000L, stats.numRows().getAsLong());
+    assertTrue(stats.sizeInBytes().getAsLong() <= 1_000_000L);
+  }
+
+  @Test
+  public void testEstimateProjectedTruncationClampsToOne() {
+    // Very narrow projection of a tiny table truncates to 0 after (long) cast.
+    // Clamp must restore it to 1 so JoinSelection doesn't read it as empty.
+    StructType full =
+        new StructType(
+            new StructField[] {
+              new StructField("key", DataTypes.LongType, true, null),
+              new StructField("s1", DataTypes.StringType, true, null),
+              new StructField("s2", DataTypes.StringType, true, null),
+              new StructField("s3", DataTypes.StringType, true, null),
+              new StructField("s4", DataTypes.StringType, true, null),
+              new StructField("s5", DataTypes.StringType, true, null)
+            });
+    StructType projected =
+        new StructType(new StructField[] {new StructField("key", DataTypes.LongType, true, null)});
+    // fullWidths = 8 + 5*20 = 108; projWidths = 8.
+    // 10 bytes × 8 / 108 = 0.74 → (long) cast → 0 → clamp → 1.
+    LanceStatistics stats = LanceStatistics.estimateProjected(1000, 10L, full, projected);
+    assertEquals(1L, stats.sizeInBytes().getAsLong());
   }
 }

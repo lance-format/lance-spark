@@ -531,6 +531,7 @@ object IndexUtils {
     method match {
       case "btree" => IndexType.BTREE
       case "fts" => IndexType.INVERTED
+      case "zonemap" => IndexType.ZONEMAP
       case other => throw new UnsupportedOperationException(s"Unsupported index method: $other")
     }
   }

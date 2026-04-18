@@ -33,9 +33,8 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -195,11 +194,12 @@ public class LanceScanTest {
   @Test
   public void testOutputPartitioningWithPartitionInfo() {
     // Create a LanceScan with partition info
-    Map<Integer, Comparable<?>> fragValues = new HashMap<>();
-    fragValues.put(0, "east");
-    fragValues.put(1, "west");
     ZonemapFragmentPruner.PartitionInfo partInfo =
-        new ZonemapFragmentPruner.PartitionInfo("region", fragValues);
+        new ZonemapFragmentPruner.PartitionInfo(
+            "region",
+            Arrays.asList(
+                new ZonemapFragmentPruner.Assignment(0, "east"),
+                new ZonemapFragmentPruner.Assignment(1, "west")));
 
     LanceScan scan =
         new LanceScan(

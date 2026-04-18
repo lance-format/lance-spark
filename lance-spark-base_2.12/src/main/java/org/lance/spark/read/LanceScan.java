@@ -45,6 +45,7 @@ import org.slf4j.LoggerFactory;
 import scala.collection.immutable.Map;
 
 import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -147,6 +148,14 @@ public class LanceScan
     return this;
   }
 
+  private static org.lance.spark.utils.Optional<String> combineWhere(
+      org.lance.spark.utils.Optional<String> existing, String predicate) {
+    if (!existing.isPresent()) {
+      return org.lance.spark.utils.Optional.of(predicate);
+    }
+    return org.lance.spark.utils.Optional.of("(" + existing.get() + ") AND (" + predicate + ")");
+  }
+
   @Override
   public InputPartition[] planInputPartitions() {
     LanceSplit.ScanPlanResult planResult = LanceSplit.planScan(readOptions);
@@ -170,33 +179,67 @@ public class LanceScan
     LanceSparkReadOptions resolvedReadOptions =
         readOptions.withVersion((int) planResult.getResolvedVersion());
 
-    InputPartition[] result =
-        IntStream.range(0, finalSplits.size())
-            .mapToObj(
-                i -> {
-                  LanceSplit split = finalSplits.get(i);
-                  InternalRow partKeyRow = null;
-                  if (partitionInfo != null) {
-                    int fragId = split.getFragments().get(0);
-                    partKeyRow = partitionInfo.partitionKeyForFragment(fragId);
-                  }
-                  return new LanceInputPartition(
-                      schema,
-                      i,
-                      split,
-                      resolvedReadOptions,
-                      whereConditions,
-                      limit,
-                      offset,
-                      topNSortOrders,
-                      pushedAggregation,
-                      scanId,
-                      initialStorageOptions,
-                      namespaceImpl,
-                      namespaceProperties,
-                      partKeyRow);
-                })
-            .toArray(InputPartition[]::new);
+    InputPartition[] result;
+    if (partitionInfo == null) {
+      // Legacy path: one partition per surviving split.
+      result =
+          IntStream.range(0, finalSplits.size())
+              .mapToObj(
+                  i -> {
+                    LanceSplit split = finalSplits.get(i);
+                    InternalRow partKeyRow = null;
+                    return new LanceInputPartition(
+                        schema,
+                        i,
+                        split,
+                        resolvedReadOptions,
+                        whereConditions,
+                        limit,
+                        offset,
+                        topNSortOrders,
+                        pushedAggregation,
+                        scanId,
+                        initialStorageOptions,
+                        namespaceImpl,
+                        namespaceProperties,
+                        partKeyRow);
+                  })
+              .toArray(InputPartition[]::new);
+    } else {
+      // Zone-level path: one partition per (surviving fragment x assignment value).
+      Set<Integer> survivingFragments =
+          finalSplits.stream().flatMap(s -> s.getFragments().stream()).collect(Collectors.toSet());
+
+      List<LanceInputPartition> partitions = new ArrayList<>();
+      int partitionId = 0;
+      for (ZonemapFragmentPruner.Assignment assignment : partitionInfo.getAssignments()) {
+        if (!survivingFragments.contains(assignment.getFragmentId())) {
+          continue;
+        }
+        String predicate = partitionInfo.compilePredicate(assignment.getValue());
+        org.lance.spark.utils.Optional<String> combined = combineWhere(whereConditions, predicate);
+        InternalRow partKeyRow = partitionInfo.partitionKeyFor(assignment.getValue());
+        LanceSplit singleFragmentSplit =
+            new LanceSplit(Collections.singletonList(assignment.getFragmentId()));
+        partitions.add(
+            new LanceInputPartition(
+                schema,
+                partitionId++,
+                singleFragmentSplit,
+                resolvedReadOptions,
+                combined,
+                limit,
+                offset,
+                topNSortOrders,
+                pushedAggregation,
+                scanId,
+                initialStorageOptions,
+                namespaceImpl,
+                namespaceProperties,
+                partKeyRow));
+      }
+      result = partitions.toArray(new InputPartition[0]);
+    }
 
     this.numPartitions = result.length;
     return result;
@@ -367,13 +410,8 @@ public class LanceScan
   @Override
   public Partitioning outputPartitioning() {
     if (partitionInfo != null) {
-      // Use partition info fragment count — available before
-      // planInputPartitions() is called. This allows
-      // V2ScanPartitioningAndOrdering to see the partitioning
-      // early enough for SPJ.
-      int partCount =
-          numPartitions >= 0 ? numPartitions : partitionInfo.getFragmentPartitionValues().size();
-      Expression[] keys = new Expression[] {FieldReference.apply(partitionInfo.getColumnName())};
+      int partCount = partitionInfo.getDistinctPartitionCount();
+      Expression[] keys = new Expression[] {FieldReference.column(partitionInfo.getColumnName())};
       return new KeyGroupedPartitioning(keys, partCount);
     }
     return new UnknownPartitioning(numPartitions >= 0 ? numPartitions : 0);

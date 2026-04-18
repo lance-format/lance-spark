@@ -67,6 +67,7 @@ public class LanceScanBuilder
   private static final Logger LOG = LoggerFactory.getLogger(LanceScanBuilder.class);
 
   private final LanceSparkReadOptions readOptions;
+  private final StructType fullSchema;
   private StructType schema;
 
   private Filter[] pushedFilters = new Filter[0];
@@ -101,6 +102,7 @@ public class LanceScanBuilder
       String namespaceImpl,
       java.util.Map<String, String> namespaceProperties,
       java.util.Map<String, String> tableProperties) {
+    this.fullSchema = schema;
     this.schema = schema;
     this.readOptions = readOptions;
     this.initialStorageOptions = initialStorageOptions;
@@ -152,9 +154,6 @@ public class LanceScanBuilder
     // Load zonemap stats for all requested columns in one pass.
     Map<String, List<ZoneStats>> zonemapStats = loadZonemapStats(getOrOpenDataset(), columnsToLoad);
 
-    // Detect partition-compatible columns, gated on lance.partition.columns table property.
-    // Currently a partitioned column is only valid if each fragment contains only a single
-    // value for that column (i.e., all zonemap zones have min == max with the same value).
     ZonemapFragmentPruner.PartitionInfo partitionInfo = null;
     if (partitionColumn != null) {
       if (!zonemapStats.containsKey(partitionColumn)) {
@@ -164,15 +163,41 @@ public class LanceScanBuilder
             partitionColumn,
             TABLE_OPT_PARTITION_COLUMNS);
       } else {
-        Map<Integer, Comparable<?>> partValues =
-            ZonemapFragmentPruner.computeFragmentPartitionValues(zonemapStats.get(partitionColumn))
+        ZonemapFragmentPruner.PartitionInfo candidate =
+            ZonemapFragmentPruner.computeZonePartitions(
+                    partitionColumn, zonemapStats.get(partitionColumn))
                 .orElse(null);
-        if (partValues != null) {
-          partitionInfo = new ZonemapFragmentPruner.PartitionInfo(partitionColumn, partValues);
+        if (candidate == null) {
           LOG.info(
-              "Detected partition-compatible column '{}' with {} fragments",
-              partitionColumn,
-              partValues.size());
+              "Partition column '{}' has non-single-valued zones; SPJ disabled", partitionColumn);
+        } else {
+          // Coverage check: every fragment must have at least one assignment.
+          // Unindexed fragments (appended after CREATE INDEX) would be silently
+          // dropped in planInputPartitions, causing data loss.
+          Set<Integer> allFragmentIds = new HashSet<>();
+          for (Fragment f : getOrOpenDataset().getFragments()) {
+            allFragmentIds.add(f.getId());
+          }
+          Set<Integer> assignedFragmentIds = new HashSet<>();
+          for (ZonemapFragmentPruner.Assignment a : candidate.getAssignments()) {
+            assignedFragmentIds.add(a.getFragmentId());
+          }
+          if (!assignedFragmentIds.containsAll(allFragmentIds)) {
+            Set<Integer> missing = new HashSet<>(allFragmentIds);
+            missing.removeAll(assignedFragmentIds);
+            LOG.warn(
+                "Partition column '{}' missing zone stats for fragments {};" + " SPJ disabled",
+                partitionColumn,
+                missing);
+          } else {
+            partitionInfo = candidate;
+            LOG.info(
+                "Detected zone-level partition column '{}' with {} assignments"
+                    + " across {} distinct values",
+                partitionColumn,
+                candidate.getAssignments().size(),
+                candidate.getDistinctPartitionCount());
+          }
         }
       }
     }
@@ -186,14 +211,18 @@ public class LanceScanBuilder
           ZonemapFragmentPruner.pruneFragments(pushedFilters, zonemapStats).orElse(null);
     }
 
-    LanceStatistics statistics;
+    // Scale rows and full size by the zonemap fragment-pruning ratio first, then let
+    // LanceStatistics.estimateProjected apply the column-width ratio on top.
+    long projectedRows = summary.getTotalRows();
+    long projectedFullSize = summary.getTotalFilesSize();
+    if (survivingFragmentIds != null && summary.getTotalFragments() > 0) {
+      double ratio = (double) survivingFragmentIds.size() / summary.getTotalFragments();
+      projectedRows = (long) (projectedRows * ratio);
+      projectedFullSize = (long) (projectedFullSize * ratio);
+    }
+    LanceStatistics statistics =
+        LanceStatistics.estimateProjected(projectedRows, projectedFullSize, fullSchema, schema);
     if (survivingFragmentIds != null) {
-      statistics =
-          LanceStatistics.estimatePostPruning(
-              summary.getTotalRows(),
-              summary.getTotalFilesSize(),
-              summary.getTotalFragments(),
-              survivingFragmentIds.size());
       LOG.debug(
           "Estimated post-pruning statistics: {} of {} fragments survive,"
               + " estimatedSize={}, estimatedRows={} (full: size={}, rows={})",
@@ -203,8 +232,6 @@ public class LanceScanBuilder
           statistics.numRows(),
           summary.getTotalFilesSize(),
           summary.getTotalRows());
-    } else {
-      statistics = new LanceStatistics(summary);
     }
 
     // Close the lazily opened dataset - it's no longer needed after build
@@ -394,7 +421,8 @@ public class LanceScanBuilder
       }
 
       for (IndexDescription idx : dataset.describeIndices()) {
-        if ("ZONEMAP".equalsIgnoreCase(idx.getIndexType())) {
+        if ("ZONEMAP".equalsIgnoreCase(idx.getIndexType())
+            || "BTREE".equalsIgnoreCase(idx.getIndexType())) {
           for (int fieldId : idx.getFieldIds()) {
             String name = fieldIdToName.get(fieldId);
             if (name != null) {

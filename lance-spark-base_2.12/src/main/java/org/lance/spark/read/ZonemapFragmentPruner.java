@@ -34,11 +34,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
+import java.util.AbstractMap;
+import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
@@ -342,37 +344,70 @@ public final class ZonemapFragmentPruner {
     GREATER_THAN_OR_EQUAL
   }
 
-  /**
-   * Result of partition detection: the partition column name and a map from fragment ID to the
-   * partition value for that fragment.
-   */
-  public static final class PartitionInfo implements Serializable {
+  public static final class Assignment implements Serializable {
     private static final long serialVersionUID = 1L;
+    private final int fragmentId;
+    private final Comparable<?> value;
 
+    Assignment(int fragmentId, Comparable<?> value) {
+      this.fragmentId = fragmentId;
+      this.value = value;
+    }
+
+    public int getFragmentId() {
+      return fragmentId;
+    }
+
+    public Comparable<?> getValue() {
+      return value;
+    }
+  }
+
+  public static final class PartitionInfo implements Serializable {
+    private static final long serialVersionUID = 2L;
     private final String columnName;
-    private final Map<Integer, Comparable<?>> fragmentPartitionValues;
+    private final List<Assignment> assignments;
+    private final int distinctPartitionCount;
 
-    public PartitionInfo(String columnName, Map<Integer, Comparable<?>> fragmentPartitionValues) {
-      this.columnName = columnName;
-      this.fragmentPartitionValues = Collections.unmodifiableMap(fragmentPartitionValues);
+    public PartitionInfo(String columnName, List<Assignment> assignments) {
+      this.columnName = Objects.requireNonNull(columnName, "columnName");
+      this.assignments = Collections.unmodifiableList(new ArrayList<>(assignments));
+      Set<Object> distinct = new HashSet<>();
+      for (Assignment a : this.assignments) {
+        distinct.add(a.getValue());
+      }
+      this.distinctPartitionCount = distinct.size();
     }
 
     public String getColumnName() {
       return columnName;
     }
 
-    public Map<Integer, Comparable<?>> getFragmentPartitionValues() {
-      return fragmentPartitionValues;
+    public List<Assignment> getAssignments() {
+      return assignments;
     }
 
-    /**
-     * Returns a partition key {@link InternalRow} for the given fragment ID. The row contains a
-     * single column with the partition value, converted to a Spark-compatible type.
-     */
-    public InternalRow partitionKeyForFragment(int fragmentId) {
-      Comparable<?> value = fragmentPartitionValues.get(fragmentId);
-      Object sparkValue = toSparkValue(value);
-      return new GenericInternalRow(new Object[] {sparkValue});
+    public int getDistinctPartitionCount() {
+      return distinctPartitionCount;
+    }
+
+    /** SQL predicate for a partition value, using the same compiler as filter pushdown. */
+    public String compilePredicate(Comparable<?> value) {
+      Objects.requireNonNull(value, "partition value must not be null");
+      org.apache.spark.sql.sources.Filter filter =
+          new org.apache.spark.sql.sources.EqualTo(columnName, value);
+      org.lance.spark.utils.Optional<String> compiled =
+          FilterPushDown.compileFiltersToSqlWhereClause(
+              new org.apache.spark.sql.sources.Filter[] {filter});
+      if (!compiled.isPresent()) {
+        throw new IllegalStateException(
+            "EqualTo(" + columnName + ", " + value + ") compiled to empty SQL");
+      }
+      return compiled.get();
+    }
+
+    public InternalRow partitionKeyFor(Comparable<?> value) {
+      return new GenericInternalRow(new Object[] {toSparkValue(value)});
     }
 
     private static Object toSparkValue(Comparable<?> value) {
@@ -382,48 +417,66 @@ public final class ZonemapFragmentPruner {
       if (value instanceof String) {
         return UTF8String.fromString((String) value);
       }
-      // Long, Double, Boolean, Integer are already compatible
       return value;
     }
   }
 
-  /**
-   * Checks whether zonemap zones are partitionable — i.e., every fragment has exactly one distinct
-   * value (all zones have {@code min == max} with the same value per fragment).
-   *
-   * @param zones zonemap zones for a single column
-   * @return map from fragment ID to partition value, or empty if zones are not partitionable
-   */
-  static Optional<Map<Integer, Comparable<?>>> computeFragmentPartitionValues(
-      List<ZoneStats> zones) {
+  static final int LANCE_SPJ_MAX_ASSIGNMENTS = 10_000;
 
+  public static Optional<PartitionInfo> computeZonePartitions(
+      String columnName, List<ZoneStats> zones) {
     if (zones == null || zones.isEmpty()) {
       return Optional.empty();
     }
-
-    Map<Integer, Comparable<?>> result = new HashMap<>();
-
+    Set<Map.Entry<Integer, Comparable<?>>> seen = new HashSet<>();
+    List<Assignment> assignments = new ArrayList<>();
     for (ZoneStats zone : zones) {
       Comparable<?> min = zone.getMin();
       Comparable<?> max = zone.getMax();
-
-      if (min == null || max == null) {
+      if (min == null || max == null || !min.equals(max)) {
+        LOG.info(
+            "SPJ disabled for '{}': min!=max (frag={}, min={}, max={})",
+            columnName,
+            zone.getFragmentId(),
+            min,
+            max);
         return Optional.empty();
       }
-
-      if (!min.equals(max)) {
+      if (zone.getNullCount() > 0) {
+        LOG.info(
+            "SPJ disabled for '{}': nulls in zone (frag={}, nullCount={})",
+            columnName,
+            zone.getFragmentId(),
+            zone.getNullCount());
         return Optional.empty();
       }
-
-      int fragId = zone.getFragmentId();
-      Comparable<?> existing = result.get(fragId);
-      if (existing != null && !existing.equals(min)) {
+      if (!isPartitionValueTypeSupported(min)) {
+        LOG.info(
+            "SPJ disabled for '{}': type {} not in allowlist",
+            columnName,
+            min.getClass().getName());
         return Optional.empty();
       }
-
-      result.put(fragId, min);
+      Map.Entry<Integer, Comparable<?>> key =
+          new AbstractMap.SimpleImmutableEntry<>(zone.getFragmentId(), min);
+      if (seen.add(key)) {
+        assignments.add(new Assignment(zone.getFragmentId(), min));
+        if (assignments.size() > LANCE_SPJ_MAX_ASSIGNMENTS) {
+          LOG.warn(
+              "SPJ disabled for '{}': exceeded max assignments {}",
+              columnName,
+              LANCE_SPJ_MAX_ASSIGNMENTS);
+          return Optional.empty();
+        }
+      }
     }
+    return Optional.of(new PartitionInfo(columnName, assignments));
+  }
 
-    return Optional.of(result);
+  static boolean isPartitionValueTypeSupported(Object value) {
+    return value instanceof String
+        || value instanceof Long
+        || value instanceof Integer
+        || value instanceof Boolean;
   }
 }
