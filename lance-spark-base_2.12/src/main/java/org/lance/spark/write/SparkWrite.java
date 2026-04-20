@@ -97,11 +97,6 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
             : Collections.emptyMap();
   }
 
-  /** Returns the write options used by this SparkWrite. Visible for testing. */
-  LanceSparkWriteOptions getWriteOptions() {
-    return writeOptions;
-  }
-
   @Override
   public Distribution requiredDistribution() {
     String partitionColumns = tableProperties.get(LanceConstant.TABLE_OPT_PARTITION_COLUMNS);

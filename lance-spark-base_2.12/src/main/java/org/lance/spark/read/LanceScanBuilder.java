@@ -92,8 +92,6 @@ public class LanceScanBuilder
 
   private final java.util.Map<String, String> tableProperties;
 
-  static final String TABLE_OPT_PARTITION_COLUMNS = LanceConstant.TABLE_OPT_PARTITION_COLUMNS;
-
   public LanceScanBuilder(
       StructType schema,
       LanceSparkReadOptions readOptions,
@@ -142,7 +140,7 @@ public class LanceScanBuilder
 
     // Collect all columns that need zonemap stats: filter columns + partition column (if declared).
     Set<String> columnsToLoad = extractReferencedColumns(pushedFilters);
-    String partitionColumn = tableProperties.get(TABLE_OPT_PARTITION_COLUMNS);
+    String partitionColumn = tableProperties.get(LanceConstant.TABLE_OPT_PARTITION_COLUMNS);
     if (partitionColumn != null && !partitionColumn.trim().isEmpty()) {
       partitionColumn = partitionColumn.trim();
       columnsToLoad.add(partitionColumn);
@@ -163,7 +161,7 @@ public class LanceScanBuilder
             "Partition column '{}' declared in {} has no zonemap index or stats;"
                 + " partition detection disabled",
             partitionColumn,
-            TABLE_OPT_PARTITION_COLUMNS);
+            LanceConstant.TABLE_OPT_PARTITION_COLUMNS);
       } else {
         Map<Integer, Comparable<?>> partValues =
             ZonemapFragmentPruner.computeFragmentPartitionValues(zonemapStats.get(partitionColumn))
