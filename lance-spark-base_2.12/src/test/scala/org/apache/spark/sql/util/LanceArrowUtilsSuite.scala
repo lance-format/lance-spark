@@ -23,7 +23,7 @@ package org.apache.spark.sql.util
  * It has been modified by the Lance developers to fit the needs of the Lance project.
  */
 
-import org.apache.arrow.vector.types.DateUnit
+import org.apache.arrow.vector.types.{DateUnit, FloatingPointPrecision}
 import org.apache.arrow.vector.types.pojo.{Field, FieldType}
 import org.apache.arrow.vector.types.pojo.ArrowType
 import org.apache.spark.SparkUnsupportedOperationException
@@ -115,6 +115,115 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
     roundtrip(new StructType().add(
       "struct",
       new StructType().add("i", IntegerType).add("arr", ArrayType(IntegerType))))
+  }
+
+  test("float16 widens to FloatType across complex nestings") {
+    // Lance emits half-precision float columns as FloatingPoint(HALF). Spark
+    // has no native float16, so LanceArrowUtils widens to FloatType. The
+    // recursion must also hit every nested occurrence — otherwise the nested
+    // field falls through to Spark's ArrowUtils and raises UNSUPPORTED_ARROWTYPE.
+
+    def halfField(name: String, nullable: Boolean = true): Field = new Field(
+      name,
+      new FieldType(
+        nullable,
+        new ArrowType.FloatingPoint(FloatingPointPrecision.HALF),
+        null,
+        null),
+      java.util.Collections.emptyList())
+
+    // 1. Scalar Float16 at top level.
+    assert(LanceArrowUtils.fromArrowField(halfField("half")) === FloatType)
+
+    // 2. Struct with a Float16 field.
+    val structField = new Field(
+      "s",
+      new FieldType(true, ArrowType.Struct.INSTANCE, null, null),
+      java.util.Arrays.asList(halfField("h")))
+    assert(
+      LanceArrowUtils
+        .fromArrowField(structField)
+        .asInstanceOf[StructType]("h")
+        .dataType === FloatType)
+
+    // 3. Variable-size List<Float16>.
+    val listField = new Field(
+      "lst",
+      new FieldType(true, ArrowType.List.INSTANCE, null, null),
+      java.util.Arrays.asList(halfField("element")))
+    assert(
+      LanceArrowUtils.fromArrowField(listField) ===
+        ArrayType(FloatType, containsNull = true))
+
+    // 4. FixedSizeList<Float16> — the canonical embedding-vector shape.
+    val fixedListField = new Field(
+      "vec",
+      new FieldType(true, new ArrowType.FixedSizeList(8), null, null),
+      java.util.Arrays.asList(halfField("element")))
+    assert(
+      LanceArrowUtils.fromArrowField(fixedListField) ===
+        ArrayType(FloatType, containsNull = true))
+
+    // 5. Map<Utf8, Float16>.
+    val keyField = new Field(
+      "key",
+      new FieldType(false, ArrowType.Utf8.INSTANCE, null, null),
+      java.util.Collections.emptyList())
+    val entriesField = new Field(
+      "entries",
+      new FieldType(false, ArrowType.Struct.INSTANCE, null, null),
+      java.util.Arrays.asList(keyField, halfField("value")))
+    val mapField = new Field(
+      "m",
+      new FieldType(true, new ArrowType.Map(false), null, null),
+      java.util.Arrays.asList(entriesField))
+    val mapType = LanceArrowUtils.fromArrowField(mapField).asInstanceOf[MapType]
+    assert(mapType.keyType === StringType)
+    assert(mapType.valueType === FloatType)
+
+    // 6. Struct containing a List<Float16> — list-in-struct.
+    val listInStruct = new Field(
+      "s",
+      new FieldType(true, ArrowType.Struct.INSTANCE, null, null),
+      java.util.Arrays.asList(
+        new Field(
+          "lst",
+          new FieldType(true, ArrowType.List.INSTANCE, null, null),
+          java.util.Arrays.asList(halfField("element")))))
+    val listInStructType =
+      LanceArrowUtils.fromArrowField(listInStruct).asInstanceOf[StructType]
+    assert(
+      listInStructType("lst").dataType ===
+        ArrayType(FloatType, containsNull = true))
+
+    // 7. Deep nesting: Struct > FixedSizeList<Float16> + sibling scalar Float16.
+    val deep = new Field(
+      "wrapper",
+      new FieldType(true, ArrowType.Struct.INSTANCE, null, null),
+      java.util.Arrays.asList(
+        new Field(
+          "vec",
+          new FieldType(true, new ArrowType.FixedSizeList(4), null, null),
+          java.util.Arrays.asList(halfField("element"))),
+        halfField("score")))
+    val deepType = LanceArrowUtils.fromArrowField(deep).asInstanceOf[StructType]
+    assert(
+      deepType("vec").dataType === ArrayType(FloatType, containsNull = true))
+    assert(deepType("score").dataType === FloatType)
+
+    // 8. List<Struct<Float16>> — struct-inside-list with Float16 field.
+    val structWithHalf = new Field(
+      "element",
+      new FieldType(true, ArrowType.Struct.INSTANCE, null, null),
+      java.util.Arrays.asList(halfField("h")))
+    val listOfStruct = new Field(
+      "items",
+      new FieldType(true, ArrowType.List.INSTANCE, null, null),
+      java.util.Arrays.asList(structWithHalf))
+    val listOfStructType =
+      LanceArrowUtils.fromArrowField(listOfStruct).asInstanceOf[ArrayType]
+    val innerStruct = listOfStructType.elementType.asInstanceOf[StructType]
+    assert(innerStruct("h").dataType === FloatType)
   }
 
   test("nested date millisecond types") {
