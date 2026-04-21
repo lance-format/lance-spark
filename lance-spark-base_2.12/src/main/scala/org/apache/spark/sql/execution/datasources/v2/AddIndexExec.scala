@@ -85,6 +85,10 @@ case class AddIndexExec(
     val indexType = IndexUtils.buildIndexType(method)
 
     if (indexType == IndexType.ZONEMAP) {
+      if (columns.size != 1) {
+        throw new UnsupportedOperationException(
+          "Zonemap index currently supports a single column only")
+      }
       createDirectScalarIndex(readOptions, indexType)
       return Seq(new GenericInternalRow(Array[Any](
         fragmentIds.size.toLong,

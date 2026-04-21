@@ -24,7 +24,7 @@ The following index methods are supported:
 
 | Method  | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
-| `zonemap` | Lightweight min/max index for fragment pruning on scalar columns.         |
+| `zonemap` | Lightweight min/max index for fragment pruning on a scalar column. |
 | `btree` | B-tree index for efficient range queries and point lookups on scalar columns. |
 | `fts`   | Full-text search (inverted) index for text search on string columns.        |
 
@@ -158,4 +158,5 @@ The `CREATE INDEX` command operates as follows:
 ## Notes and Limitations
 
 - **Index Methods**: The `zonemap`, `btree`, and `fts` methods are supported for scalar index creation.
+- **Zonemap Column Count**: Zonemap indexes currently support a single column only. The generic `CREATE INDEX` grammar accepts a column list, but Lance rejects multi-column zonemap creation.
 - **Index Replacement**: If you create an index with the same name as an existing one, the old index will be replaced by the new one. This is because the underlying implementation uses `replace(true)`.
