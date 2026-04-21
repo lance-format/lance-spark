@@ -49,7 +49,7 @@ The `SHOW INDEXES` command returns the following columns:
 |-------------------------|---------------|--------------------------------------------------------------------|
 | `name`                  | string        | Logical name of the index.                                         |
 | `fields`                | array<string> | List of column names included in the index.                        |
-| `index_type`            | string        | Human-readable index type (for example `btree`).                   |
+| `index_type`            | string        | Human-readable index type (for example `btree` or `zonemap`).      |
 | `num_indexed_fragments` | long          | Number of fragments fully or partially covered by the index.       |
 | `num_indexed_rows`      | long          | Approximate number of rows covered by the index.                   |
 | `num_unindexed_fragments` | long        | Number of fragments that are not yet indexed.                      |

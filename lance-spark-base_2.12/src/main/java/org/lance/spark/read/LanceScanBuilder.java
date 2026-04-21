@@ -16,7 +16,8 @@ package org.lance.spark.read;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.ManifestSummary;
-import org.lance.index.IndexDescription;
+import org.lance.index.Index;
+import org.lance.index.IndexType;
 import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.schema.LanceField;
@@ -381,9 +382,9 @@ public class LanceScanBuilder
         fieldIdToName.put(field.getId(), field.getName());
       }
 
-      for (IndexDescription idx : dataset.describeIndices()) {
-        if ("ZONEMAP".equalsIgnoreCase(idx.getIndexType())) {
-          for (int fieldId : idx.getFieldIds()) {
+      for (Index idx : dataset.getIndexes()) {
+        if (idx.indexType() == IndexType.ZONEMAP) {
+          for (int fieldId : idx.fields()) {
             String name = fieldIdToName.get(fieldId);
             if (name != null) {
               columns.add(name);

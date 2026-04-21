@@ -76,6 +76,16 @@ public class ZonemapFragmentPrunerTest {
   }
 
   @Test
+  public void testEqualToMatchesOneFragmentWithIntegerFilterValue() {
+    Map<String, List<ZoneStats>> stats = threeFragmentStats("x");
+    Filter[] filters = new Filter[] {new EqualTo("x", 150)};
+
+    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    assertTrue(result.isPresent());
+    assertEquals(Set.of(1), result.get());
+  }
+
+  @Test
   public void testEqualToMatchesNoFragment() {
     Map<String, List<ZoneStats>> stats = threeFragmentStats("x");
     Filter[] filters = new Filter[] {new EqualTo("x", 500L)};
