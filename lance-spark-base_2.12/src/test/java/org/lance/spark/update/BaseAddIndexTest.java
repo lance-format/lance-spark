@@ -243,6 +243,25 @@ public abstract class BaseAddIndexTest {
   }
 
   @Test
+  public void testCreateMultiColumnZonemapIndexThrowsHelpfulError() {
+    prepareDataset();
+
+    UnsupportedOperationException exception =
+        Assertions.assertThrows(
+            UnsupportedOperationException.class,
+            () ->
+                spark.sql(
+                    String.format(
+                        "alter table %s create index test_index_zonemap_multi using zonemap (id, text) with (rows_per_zone=4)",
+                        fullTable)));
+
+    Assertions.assertTrue(
+        exception.getMessage().contains("single column"),
+        "Expected multi-column zonemap error to mention single-column support, got: "
+            + exception.getMessage());
+  }
+
+  @Test
   public void testCreateBTreeIndexWithRangeMode() {
     prepareDataset();
 
@@ -497,6 +516,10 @@ public abstract class BaseAddIndexTest {
   }
 
   private void assertZonemapFilterPrunesFragments(int targetId) {
+    assertZonemapFilterPrunesFragments(new EqualTo("id", targetId), String.format("id=%d", targetId));
+  }
+
+  private void assertZonemapFilterPrunesFragments(Filter filter, String description) {
     LanceSparkReadOptions readOptions = LanceSparkReadOptions.from(tableDir);
 
     LanceScanBuilder unfilteredBuilder =
@@ -519,14 +542,14 @@ public abstract class BaseAddIndexTest {
             null,
             Collections.emptyMap(),
             Collections.emptyMap());
-    filteredBuilder.pushFilters(new Filter[] {new EqualTo("id", targetId)});
+    filteredBuilder.pushFilters(new Filter[] {filter});
     int filteredPartitions = ((LanceScan) filteredBuilder.build()).planInputPartitions().length;
 
     Assertions.assertTrue(
         filteredPartitions < unfilteredPartitions,
         String.format(
-            "Expected zonemap pruning to reduce planned partitions for id=%d (before=%d, after=%d)",
-            targetId, unfilteredPartitions, filteredPartitions));
+            "Expected zonemap pruning to reduce planned partitions for %s (before=%d, after=%d)",
+            description, unfilteredPartitions, filteredPartitions));
   }
 
   private void checkIndex(String indexName) {
