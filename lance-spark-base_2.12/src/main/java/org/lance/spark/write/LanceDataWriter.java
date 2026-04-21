@@ -86,41 +86,51 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
   @Override
   public void write(InternalRow record) throws IOException {
     if (partitionColumnIndices.length > 0) {
-      Object[] currentKey = extractKey(record);
-      if (hasRowsInCurrentFragment && !keysEqual(lastKey, currentKey)) {
+      if (!hasRowsInCurrentFragment) {
+        captureKey(record);
+      } else if (!rowMatchesLastKey(record)) {
         rollFragment();
+        captureKey(record);
       }
-      lastKey = currentKey;
     }
     writeBuffer.write(record);
     hasRowsInCurrentFragment = true;
   }
 
-  private Object[] extractKey(InternalRow row) {
-    Object[] key = new Object[partitionColumnIndices.length];
+  /** Compares the row's partition values against {@link #lastKey} without allocating. */
+  private boolean rowMatchesLastKey(InternalRow row) {
+    for (int k = 0; k < partitionColumnIndices.length; k++) {
+      int idx = partitionColumnIndices[k];
+      Object prev = lastKey[k];
+      if (row.isNullAt(idx)) {
+        if (prev != null) return false;
+      } else {
+        if (prev == null) return false;
+        if (!prev.equals(row.get(idx, partitionColumnTypes[k]))) return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Snapshots the row's partition values into {@link #lastKey}. Only called on the first row of a
+   * fragment, so the per-row hot path stays allocation-free.
+   */
+  private void captureKey(InternalRow row) {
+    if (lastKey == null) {
+      lastKey = new Object[partitionColumnIndices.length];
+    }
     for (int k = 0; k < partitionColumnIndices.length; k++) {
       int idx = partitionColumnIndices[k];
       if (row.isNullAt(idx)) {
-        key[k] = null;
+        lastKey[k] = null;
       } else {
         Object value = row.get(idx, partitionColumnTypes[k]);
         // UTF8String wraps a pointer into the row buffer, which may be reused
         // across calls — snapshot the bytes so the key stays stable.
-        key[k] = value instanceof UTF8String ? ((UTF8String) value).clone() : value;
+        lastKey[k] = value instanceof UTF8String ? ((UTF8String) value).clone() : value;
       }
     }
-    return key;
-  }
-
-  private static boolean keysEqual(Object[] a, Object[] b) {
-    if (a == b) return true;
-    if (a == null || b == null || a.length != b.length) return false;
-    for (int i = 0; i < a.length; i++) {
-      if (a[i] == null ? b[i] != null : !a[i].equals(b[i])) {
-        return false;
-      }
-    }
-    return true;
   }
 
   /**
