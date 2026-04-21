@@ -33,9 +33,9 @@ import org.apache.spark.unsafe.types.UTF8String;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.Serializable;
 import java.math.BigDecimal;
 import java.math.BigInteger;
-import java.io.Serializable;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -267,7 +267,9 @@ public final class ZonemapFragmentPruner {
     if (value instanceof BigInteger) {
       return new BigDecimal((BigInteger) value);
     }
-    if (value instanceof Byte || value instanceof Short || value instanceof Integer
+    if (value instanceof Byte
+        || value instanceof Short
+        || value instanceof Integer
         || value instanceof Long) {
       return BigDecimal.valueOf(value.longValue());
     }

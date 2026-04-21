@@ -516,7 +516,8 @@ public abstract class BaseAddIndexTest {
   }
 
   private void assertZonemapFilterPrunesFragments(int targetId) {
-    assertZonemapFilterPrunesFragments(new EqualTo("id", targetId), String.format("id=%d", targetId));
+    assertZonemapFilterPrunesFragments(
+        new EqualTo("id", targetId), String.format("id=%d", targetId));
   }
 
   private void assertZonemapFilterPrunesFragments(Filter filter, String description) {
