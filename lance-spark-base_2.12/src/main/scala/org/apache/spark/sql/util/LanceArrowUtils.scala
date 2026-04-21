@@ -23,12 +23,12 @@ package org.apache.spark.sql.util
  * It has been modified by the Lance developers to fit the needs of the Lance project.
  */
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import org.apache.arrow.vector.complex.MapVector
 import org.apache.arrow.vector.types.{DateUnit, FloatingPointPrecision, IntervalUnit, TimeUnit}
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.apache.spark.{SparkException, SparkUnsupportedOperationException}
 import org.apache.spark.sql.types._
-import com.fasterxml.jackson.databind.ObjectMapper
 import org.lance.spark.LanceConstant
 import org.lance.spark.utils.{BlobUtils, Float16Utils, LargeVarCharUtils, VectorUtils}
 
