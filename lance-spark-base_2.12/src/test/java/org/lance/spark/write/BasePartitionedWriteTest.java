@@ -72,12 +72,15 @@ public abstract class BasePartitionedWriteTest {
     String tableName = "part_write_" + UUID.randomUUID().toString().replace("-", "");
     String fullTable = catalogName + ".default." + tableName;
 
-    // Create table with partition column property
+    // TODO: collapse back to `CREATE TABLE ... TBLPROPERTIES(...)` once the catalog
+    // persists TBLPROPERTIES on create. Today only ALTER TABLE goes through
+    // dataset.updateConfig, so properties set on CREATE are dropped before INSERT.
     spark.sql(
         String.format(
-            "CREATE TABLE %s (id INT, region STRING, value DOUBLE) USING lance "
-                + "TBLPROPERTIES ('lance.partition.columns' = 'region')",
-            fullTable));
+            "CREATE TABLE %s (id INT, region STRING, value DOUBLE) USING lance", fullTable));
+    spark.sql(
+        String.format(
+            "ALTER TABLE %s SET TBLPROPERTIES ('lance.partition.columns' = 'region')", fullTable));
 
     // Insert data with multiple regions in a single INSERT — the write distribution
     // should cluster rows by region so each fragment gets one region value.
@@ -118,6 +121,73 @@ public abstract class BasePartitionedWriteTest {
           distinctRegions,
           String.format(
               "Fragment %d has %d distinct regions; expected 1 for partition-clustered write",
+              row.getInt(0), distinctRegions));
+    }
+  }
+
+  @Test
+  public void testHashCollisionsBreakSinglePartitionPerFragment() {
+    // Force only 2 shuffle partitions so many distinct partition values MUST hash-collide
+    // into the same Spark write task. ClusteredDistribution is typically satisfied by hash
+    // partitioning, so with (distinct values) > (shuffle partitions) collisions are
+    // unavoidable. AQE coalesce is disabled to keep the 2-partition shape deterministic.
+    spark.conf().set("spark.sql.shuffle.partitions", "2");
+    spark.conf().set("spark.sql.adaptive.coalescePartitions.enabled", "false");
+
+    String tableName = "part_collide_" + UUID.randomUUID().toString().replace("-", "");
+    String fullTable = catalogName + ".default." + tableName;
+
+    // TODO: collapse back to `CREATE TABLE ... TBLPROPERTIES(...)` once the catalog
+    // persists TBLPROPERTIES on create. Today only ALTER TABLE goes through
+    // dataset.updateConfig, so properties set on CREATE are dropped before INSERT.
+    spark.sql(
+        String.format(
+            "CREATE TABLE %s (id INT, region STRING, value DOUBLE) USING lance", fullTable));
+    spark.sql(
+        String.format(
+            "ALTER TABLE %s SET TBLPROPERTIES ('lance.partition.columns' = 'region')", fullTable));
+
+    // 20 distinct regions into 2 buckets => some task will receive multiple regions.
+    // Rows-per-region is tiny so all rows in a task comfortably fit in a single fragment —
+    // that fragment will therefore span several distinct region values, violating the
+    // "one value per fragment" guarantee that SPJ relies on.
+    StringBuilder values = new StringBuilder();
+    int numRegions = 20;
+    int rowsPerRegion = 2;
+    for (int r = 0; r < numRegions; r++) {
+      String region = "region_" + r;
+      for (int i = 0; i < rowsPerRegion; i++) {
+        if (values.length() > 0) {
+          values.append(",");
+        }
+        int id = r * rowsPerRegion + i;
+        values.append(String.format("(%d, '%s', %f)", id, region, id * 1.5));
+      }
+    }
+    spark.sql(String.format("INSERT INTO %s (id, region, value) VALUES %s", fullTable, values));
+
+    Dataset<Row> fragRegions =
+        spark.sql(
+            String.format(
+                "SELECT _fragid, COUNT(DISTINCT region) AS distinct_regions "
+                    + "FROM %s GROUP BY _fragid",
+                fullTable));
+
+    List<Row> rows = fragRegions.collectAsList();
+    assertFalse(rows.isEmpty(), "Should have at least one fragment");
+
+    // Correctness claim: each fragment holds exactly one region. Expected to FAIL —
+    // clustered distribution + sort does not imply single-value fragments, because
+    // (a) hash collisions put multiple values in one task, and
+    // (b) Lance rolls fragments on size, not on partition-value boundaries.
+    for (Row row : rows) {
+      long distinctRegions = row.getLong(1);
+      assertEquals(
+          1,
+          distinctRegions,
+          String.format(
+              "Fragment %d contains %d distinct regions — clustered distribution "
+                  + "alone does not guarantee single-value fragments",
               row.getInt(0), distinctRegions));
     }
   }

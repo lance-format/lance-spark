@@ -36,6 +36,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * Spark write implementation for Lance tables.
@@ -97,37 +98,40 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
             : Collections.emptyMap();
   }
 
+  /** Returns partition column names from the table property, empty list if unset. */
+  private List<String> partitionColumnList() {
+    String raw = tableProperties.get(LanceConstant.TABLE_OPT_PARTITION_COLUMNS);
+    if (raw == null || raw.trim().isEmpty()) {
+      return Collections.emptyList();
+    }
+    return Arrays.stream(raw.split(","))
+        .map(String::trim)
+        .filter(s -> !s.isEmpty())
+        .collect(Collectors.toList());
+  }
+
   @Override
   public Distribution requiredDistribution() {
-    String partitionColumns = tableProperties.get(LanceConstant.TABLE_OPT_PARTITION_COLUMNS);
-    if (partitionColumns != null && !partitionColumns.trim().isEmpty()) {
-      NamedReference[] refs =
-          Arrays.stream(partitionColumns.split(","))
-              .map(String::trim)
-              .filter(s -> !s.isEmpty())
-              .map(Expressions::column)
-              .toArray(NamedReference[]::new);
-      if (refs.length > 0) {
-        return Distributions.clustered(refs);
-      }
+    List<String> cols = partitionColumnList();
+    if (cols.isEmpty()) {
+      return Distributions.unspecified();
     }
-    return Distributions.unspecified();
+    NamedReference[] refs = cols.stream().map(Expressions::column).toArray(NamedReference[]::new);
+    return Distributions.clustered(refs);
   }
 
   @Override
   public SortOrder[] requiredOrdering() {
-    String partitionColumns = tableProperties.get(LanceConstant.TABLE_OPT_PARTITION_COLUMNS);
-    if (partitionColumns != null && !partitionColumns.trim().isEmpty()) {
-      return Arrays.stream(partitionColumns.split(","))
-          .map(String::trim)
-          .filter(s -> !s.isEmpty())
-          .map(
-              col ->
-                  Expressions.sort(
-                      Expressions.column(col), SortDirection.ASCENDING, NullOrdering.NULLS_FIRST))
-          .toArray(SortOrder[]::new);
+    List<String> cols = partitionColumnList();
+    if (cols.isEmpty()) {
+      return new SortOrder[0];
     }
-    return new SortOrder[0];
+    return cols.stream()
+        .map(
+            col ->
+                Expressions.sort(
+                    Expressions.column(col), SortDirection.ASCENDING, NullOrdering.NULLS_FIRST))
+        .toArray(SortOrder[]::new);
   }
 
   @Override
@@ -141,7 +145,8 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
         namespaceProperties,
         tableId,
         managedVersioning,
-        stagedCommit);
+        stagedCommit,
+        partitionColumnList());
   }
 
   @Override

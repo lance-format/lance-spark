@@ -36,6 +36,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -63,6 +64,12 @@ public class LanceBatchWrite implements BatchWrite {
 
   private final StagedCommit stagedCommit;
 
+  /**
+   * Partition column names — fragments will be rolled at transitions so each fragment contains
+   * exactly one partition value. Empty when no partitioning is requested.
+   */
+  private final List<String> partitionColumns;
+
   public LanceBatchWrite(
       StructType schema,
       LanceSparkWriteOptions writeOptions,
@@ -73,6 +80,30 @@ public class LanceBatchWrite implements BatchWrite {
       List<String> tableId,
       boolean managedVersioning,
       StagedCommit stagedCommit) {
+    this(
+        schema,
+        writeOptions,
+        overwrite,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        tableId,
+        managedVersioning,
+        stagedCommit,
+        Collections.emptyList());
+  }
+
+  public LanceBatchWrite(
+      StructType schema,
+      LanceSparkWriteOptions writeOptions,
+      boolean overwrite,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      List<String> tableId,
+      boolean managedVersioning,
+      StagedCommit stagedCommit,
+      List<String> partitionColumns) {
     this.schema = schema;
     this.overwrite = overwrite;
     this.initialStorageOptions = initialStorageOptions;
@@ -81,6 +112,7 @@ public class LanceBatchWrite implements BatchWrite {
     this.tableId = tableId;
     this.managedVersioning = managedVersioning;
     this.stagedCommit = stagedCommit;
+    this.partitionColumns = partitionColumns == null ? Collections.emptyList() : partitionColumns;
 
     // For staged operations, the dataset is managed by StagedCommit.
     // For non-staged operations, pin the dataset version for OCC.
@@ -98,7 +130,13 @@ public class LanceBatchWrite implements BatchWrite {
   @Override
   public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
     return new LanceDataWriter.WriterFactory(
-        schema, writeOptions, initialStorageOptions, namespaceImpl, namespaceProperties, tableId);
+        schema,
+        writeOptions,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        tableId,
+        partitionColumns);
   }
 
   @Override
