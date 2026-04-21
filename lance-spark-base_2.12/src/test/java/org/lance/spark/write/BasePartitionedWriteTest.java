@@ -68,64 +68,6 @@ public abstract class BasePartitionedWriteTest {
   }
 
   @Test
-  public void testWriteWithPartitionColumnClustersData() {
-    String tableName = "part_write_" + UUID.randomUUID().toString().replace("-", "");
-    String fullTable = catalogName + ".default." + tableName;
-
-    // TODO: collapse back to `CREATE TABLE ... TBLPROPERTIES(...)` once the catalog
-    // persists TBLPROPERTIES on create. Today only ALTER TABLE goes through
-    // dataset.updateConfig, so properties set on CREATE are dropped before INSERT.
-    spark.sql(
-        String.format(
-            "CREATE TABLE %s (id INT, region STRING, value DOUBLE) USING lance", fullTable));
-    spark.sql(
-        String.format(
-            "ALTER TABLE %s SET TBLPROPERTIES ('lance.partition.columns' = 'region')", fullTable));
-
-    // Insert data with multiple regions in a single INSERT — the write distribution
-    // should cluster rows by region so each fragment gets one region value.
-    String[] regions = {"east", "west", "north", "south", "central"};
-    StringBuilder values = new StringBuilder();
-    for (int r = 0; r < regions.length; r++) {
-      for (int i = 0; i < 10; i++) {
-        if (values.length() > 0) {
-          values.append(",");
-        }
-        int id = r * 10 + i;
-        values.append(String.format("(%d, '%s', %f)", id, regions[r], id * 1.5));
-      }
-    }
-    spark.sql(String.format("INSERT INTO %s (id, region, value) VALUES %s", fullTable, values));
-
-    // Verify all data was written correctly
-    Dataset<Row> result = spark.sql("SELECT * FROM " + fullTable);
-    assertEquals(50, result.count());
-
-    // Verify that data is clustered: within each fragment, there should be
-    // at most one distinct region value. We check this by reading with _fragid
-    // and verifying the count of distinct regions per fragment.
-    Dataset<Row> fragRegions =
-        spark.sql(
-            String.format(
-                "SELECT _fragid, COUNT(DISTINCT region) as distinct_regions "
-                    + "FROM %s GROUP BY _fragid",
-                fullTable));
-
-    List<Row> rows = fragRegions.collectAsList();
-    assertFalse(rows.isEmpty(), "Should have at least one fragment");
-
-    for (Row row : rows) {
-      long distinctRegions = row.getLong(1);
-      assertEquals(
-          1,
-          distinctRegions,
-          String.format(
-              "Fragment %d has %d distinct regions; expected 1 for partition-clustered write",
-              row.getInt(0), distinctRegions));
-    }
-  }
-
-  @Test
   public void testHashCollisionsBreakSinglePartitionPerFragment() {
     // Force only 2 shuffle partitions so many distinct partition values MUST hash-collide
     // into the same Spark write task. ClusteredDistribution is typically satisfied by hash
@@ -176,18 +118,18 @@ public abstract class BasePartitionedWriteTest {
     List<Row> rows = fragRegions.collectAsList();
     assertFalse(rows.isEmpty(), "Should have at least one fragment");
 
-    // Correctness claim: each fragment holds exactly one region. Expected to FAIL —
-    // clustered distribution + sort does not imply single-value fragments, because
-    // (a) hash collisions put multiple values in one task, and
-    // (b) Lance rolls fragments on size, not on partition-value boundaries.
+    // Correctness claim: each fragment holds exactly one region — even under forced
+    // hash collisions. This only holds because the writer rolls a fresh fragment at
+    // every partition-value transition in the sorted stream; `Distributions.clustered`
+    // alone does not imply one-value-per-fragment.
     for (Row row : rows) {
       long distinctRegions = row.getLong(1);
       assertEquals(
           1,
           distinctRegions,
           String.format(
-              "Fragment %d contains %d distinct regions — clustered distribution "
-                  + "alone does not guarantee single-value fragments",
+              "Fragment %d contains %d distinct regions — writer failed to roll on "
+                  + "partition-value boundary",
               row.getInt(0), distinctRegions));
     }
   }
