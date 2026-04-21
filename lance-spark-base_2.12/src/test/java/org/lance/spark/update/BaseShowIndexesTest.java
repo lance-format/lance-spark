@@ -131,4 +131,30 @@ public abstract class BaseShowIndexesTest {
     long numIndexedRows = row.getLong(4);
     Assertions.assertTrue(numIndexedRows >= 1L, "num_indexed_rows should be at least 1");
   }
+
+  @Test
+  public void testShowZonemapIndexes() {
+    prepareDataset();
+
+    spark.sql(
+        String.format(
+            "alter table %s create index test_zonemap using zonemap (id) with (rows_per_zone=4)",
+            fullTable));
+
+    Dataset<Row> result = spark.sql(String.format("show indexes from %s", fullTable));
+    List<Row> rows = result.collectAsList();
+
+    Row row =
+        rows.stream()
+            .filter(r -> "test_zonemap".equals(r.getString(0)))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("Expected SHOW INDEXES to include test_zonemap"));
+
+    @SuppressWarnings("unchecked")
+    List<String> fieldNames = row.getList(1);
+    Assertions.assertTrue(fieldNames.contains("id"), "fields should contain column name 'id'");
+    Assertions.assertEquals("zonemap", row.getString(2));
+    Assertions.assertTrue(row.getLong(3) >= 1L, "num_indexed_fragments should be at least 1");
+    Assertions.assertTrue(row.getLong(4) >= 1L, "num_indexed_rows should be at least 1");
+  }
 }

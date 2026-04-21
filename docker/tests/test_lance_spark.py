@@ -492,7 +492,7 @@ class TestDDLAlterTableProperties:
 
 
 class TestDDLIndex:
-    """Test DDL index operations: CREATE INDEX (BTree, FTS)."""
+    """Test DDL index operations: CREATE INDEX (BTree, ZoneMap, FTS)."""
 
     def test_create_btree_index_on_int(self, spark):
         """Test CREATE INDEX with BTree on integer column."""
@@ -561,6 +561,42 @@ class TestDDLIndex:
             SELECT * FROM default.employees WHERE department = 'Engineering'
         """).collect()
         assert len(query_result) == 3
+
+    def test_create_zonemap_index_on_int(self, spark):
+        """Test CREATE INDEX with ZoneMap on integer column."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING,
+                value DOUBLE
+            )
+        """)
+
+        data = [(i, f"Name{i}", float(i * 10)) for i in range(100)]
+        df = spark.createDataFrame(data, ["id", "name", "value"])
+        df.writeTo("default.test_table").append()
+
+        result = spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX idx_id_zonemap USING zonemap (id)
+            WITH (rows_per_zone = 8)
+        """).collect()
+
+        assert len(result) == 1
+        assert result[0][1] == "idx_id_zonemap"
+
+        indexes = spark.sql("""
+            SHOW INDEXES IN default.test_table
+        """).collect()
+        zonemap_rows = [row for row in indexes if row["name"] == "idx_id_zonemap"]
+        assert len(zonemap_rows) == 1
+        assert zonemap_rows[0]["index_type"] == "zonemap"
+
+        query_result = spark.sql("""
+            SELECT * FROM default.test_table WHERE id = 50
+        """).collect()
+        assert len(query_result) == 1
+        assert query_result[0].id == 50
 
     def test_create_fts_index(self, spark):
         """Test CREATE INDEX with full-text search (FTS)."""

@@ -14,10 +14,15 @@
 package org.lance.spark.update;
 
 import org.lance.index.Index;
+import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.read.LanceScan;
+import org.lance.spark.read.LanceScanBuilder;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.sources.EqualTo;
+import org.apache.spark.sql.sources.Filter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
@@ -28,6 +33,7 @@ import java.io.IOException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -188,6 +194,47 @@ public abstract class BaseAddIndexTest {
     checkIndex("test_index_btree_param");
 
     // Verify query using the indexed field with zone_size parameter
+    Dataset<Row> query = spark.sql(String.format("select * from %s where id=15", fullTable));
+    Assertions.assertEquals(1L, query.count());
+    Row r = query.collectAsList().get(0);
+    Assertions.assertEquals(15, r.getInt(0));
+    Assertions.assertEquals("text_15", r.getString(1));
+  }
+
+  @Test
+  public void testCreateZonemapIndexWithRowsPerZone() {
+    prepareDataset();
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index test_index_zonemap using zonemap (id) with (rows_per_zone=4)",
+                fullTable));
+
+    Assertions.assertEquals(
+        "StructType(StructField(fragments_indexed,LongType,true),StructField(index_name,StringType,true))",
+        result.schema().toString());
+
+    Row row = result.collectAsList().get(0);
+    long fragmentsIndexed = row.getLong(0);
+    String indexName = row.getString(1);
+
+    Assertions.assertTrue(fragmentsIndexed >= 2, "Expected at least 2 fragments to be indexed");
+    Assertions.assertEquals("test_index_zonemap", indexName);
+
+    checkIndex("test_index_zonemap");
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      Assertions.assertFalse(
+          lanceDataset.getZonemapStats("id").isEmpty(),
+          "Expected zonemap stats for indexed column");
+    } finally {
+      lanceDataset.close();
+    }
+
+    assertZonemapFilterPrunesFragments(15);
+
     Dataset<Row> query = spark.sql(String.format("select * from %s where id=15", fullTable));
     Assertions.assertEquals(1L, query.count());
     Row r = query.collectAsList().get(0);
@@ -447,6 +494,39 @@ public abstract class BaseAddIndexTest {
     // Verify query still works
     Dataset<Row> query = spark.sql(String.format("select * from %s where id=5", fullTable));
     Assertions.assertEquals(1L, query.count());
+  }
+
+  private void assertZonemapFilterPrunesFragments(int targetId) {
+    LanceSparkReadOptions readOptions = LanceSparkReadOptions.from(tableDir);
+
+    LanceScanBuilder unfilteredBuilder =
+        new LanceScanBuilder(
+            spark.table(fullTable).schema(),
+            readOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            Collections.emptyMap());
+    int unfilteredPartitions = ((LanceScan) unfilteredBuilder.build()).planInputPartitions().length;
+    Assertions.assertTrue(
+        unfilteredPartitions >= 2, "Expected multiple partitions for zonemap pruning test");
+
+    LanceScanBuilder filteredBuilder =
+        new LanceScanBuilder(
+            spark.table(fullTable).schema(),
+            readOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            Collections.emptyMap());
+    filteredBuilder.pushFilters(new Filter[] {new EqualTo("id", targetId)});
+    int filteredPartitions = ((LanceScan) filteredBuilder.build()).planInputPartitions().length;
+
+    Assertions.assertTrue(
+        filteredPartitions < unfilteredPartitions,
+        String.format(
+            "Expected zonemap pruning to reduce planned partitions for id=%d (before=%d, after=%d)",
+            targetId, unfilteredPartitions, filteredPartitions));
   }
 
   private void checkIndex(String indexName) {

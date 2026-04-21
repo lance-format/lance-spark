@@ -40,12 +40,12 @@ import java.util.{Collections, Optional, UUID}
 import scala.collection.JavaConverters._
 
 /**
- * Physical execution of distributed CREATE INDEX (ALTER TABLE ... CREATE INDEX ...) for Lance datasets.
+ * Physical execution of CREATE INDEX (ALTER TABLE ... CREATE INDEX ...) for Lance datasets.
  *
  * <ul>
  * <li>For BTREE index, it uses a range-based approach that redistributes and sorts data across partitions, creates indexes for each range in parallel, and finally merges them into a global index structure.
- * <li>For other index types, it processes each fragment independently in parallel, merges index metadata
- * and commits an index-creation transaction.
+ * <li>For fragment-trainable scalar index types, it processes each fragment independently in parallel, merges index metadata and commits an index-creation transaction.
+ * <li>For zonemap index, it delegates to the underlying Lance single-phase index creation path because zonemap does not support fragment training.
  * </ul>
  */
 case class AddIndexExec(
@@ -83,6 +83,13 @@ case class AddIndexExec(
 
     val uuid = UUID.randomUUID()
     val indexType = IndexUtils.buildIndexType(method)
+
+    if (indexType == IndexType.ZONEMAP) {
+      createDirectScalarIndex(readOptions, indexType)
+      return Seq(new GenericInternalRow(Array[Any](
+        fragmentIds.size.toLong,
+        UTF8String.fromString(indexName))))
+    }
 
     // Create distributed index job and run it
     createIndexJob(lanceDataset, readOptions, uuid.toString, fragmentIds).run()
@@ -137,6 +144,28 @@ case class AddIndexExec(
     Seq(new GenericInternalRow(Array[Any](
       fragmentIds.size.toLong,
       UTF8String.fromString(indexName))))
+  }
+
+  private def createDirectScalarIndex(
+      readOptions: LanceSparkReadOptions,
+      indexType: IndexType): Unit = {
+    val argsJson = IndexUtils.toJson(args)
+    val params = IndexParams.builder()
+      .setScalarIndexParams(ScalarIndexParams.create(method, argsJson))
+      .build()
+
+    val indexOptions = IndexOptions
+      .builder(columns.asJava, indexType, params)
+      .replace(true)
+      .withIndexName(indexName)
+      .build()
+
+    val dataset = Utils.openDatasetBuilder(readOptions).build()
+    try {
+      dataset.createIndex(indexOptions)
+    } finally {
+      dataset.close()
+    }
   }
 
   private def createIndexJob(
@@ -530,6 +559,7 @@ object IndexUtils {
   def buildIndexType(method: String): IndexType = {
     method match {
       case "btree" => IndexType.BTREE
+      case "zonemap" => IndexType.ZONEMAP
       case "fts" => IndexType.INVERTED
       case other => throw new UnsupportedOperationException(s"Unsupported index method: $other")
     }

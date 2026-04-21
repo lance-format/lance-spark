@@ -33,6 +33,8 @@ import org.apache.spark.unsafe.types.UTF8String;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.io.Serializable;
 import java.util.Collections;
 import java.util.HashMap;
@@ -159,7 +161,6 @@ public final class ZonemapFragmentPruner {
     return Optional.empty();
   }
 
-  @SuppressWarnings("unchecked")
   private static Optional<Set<Integer>> analyzeComparison(
       String column,
       Object value,
@@ -171,17 +172,9 @@ public final class ZonemapFragmentPruner {
       return Optional.empty();
     }
 
-    Comparable<Object> target;
-    try {
-      target = (Comparable<Object>) value;
-    } catch (ClassCastException e) {
-      LOG.warn("Cannot cast filter value {} to Comparable for zonemap pruning", value);
-      return Optional.empty();
-    }
-
     Set<Integer> matchingFragments = new HashSet<>();
     for (ZoneStats zone : stats) {
-      if (zoneMatchesComparison(zone, target, type)) {
+      if (zoneMatchesComparison(zone, value, type)) {
         matchingFragments.add(zone.getFragmentId());
       }
     }
@@ -189,12 +182,10 @@ public final class ZonemapFragmentPruner {
     return Optional.of(matchingFragments);
   }
 
-  @SuppressWarnings("unchecked")
-  private static boolean zoneMatchesComparison(
-      ZoneStats zone, Comparable<Object> target, ComparisonType type) {
+  private static boolean zoneMatchesComparison(ZoneStats zone, Object target, ComparisonType type) {
 
-    Comparable<Object> min = (Comparable<Object>) zone.getMin();
-    Comparable<Object> max = (Comparable<Object>) zone.getMax();
+    Object min = zone.getMin();
+    Object max = zone.getMax();
 
     // If min or max is null, the zone contains only nulls for the indexed range;
     // non-null comparisons cannot match.
@@ -206,27 +197,26 @@ public final class ZonemapFragmentPruner {
       switch (type) {
         case EQUALS:
           // target ∈ [min, max]
-          return target.compareTo(min) >= 0 && target.compareTo(max) <= 0;
+          return compareValues(target, min) >= 0 && compareValues(target, max) <= 0;
         case LESS_THAN:
           // ∃ row < target  ⟺  zone.min < target
-          return min.compareTo(target) < 0;
+          return compareValues(min, target) < 0;
         case LESS_THAN_OR_EQUAL:
-          return min.compareTo(target) <= 0;
+          return compareValues(min, target) <= 0;
         case GREATER_THAN:
-          return max.compareTo(target) > 0;
+          return compareValues(max, target) > 0;
         case GREATER_THAN_OR_EQUAL:
-          return max.compareTo(target) >= 0;
+          return compareValues(max, target) >= 0;
         default:
           return true; // conservative
       }
-    } catch (ClassCastException e) {
+    } catch (ClassCastException | IllegalArgumentException e) {
       // Type mismatch between filter value and zone stats — be conservative
       LOG.warn("Type mismatch in zonemap comparison, skipping pruning for zone", e);
       return true;
     }
   }
 
-  @SuppressWarnings("unchecked")
   private static Optional<Set<Integer>> analyzeIn(
       String column, Object[] values, Map<String, List<ZoneStats>> statsByColumn) {
 
@@ -244,14 +234,7 @@ public final class ZonemapFragmentPruner {
             break;
           }
         } else {
-          try {
-            Comparable<Object> target = (Comparable<Object>) value;
-            if (zoneMatchesComparison(zone, target, ComparisonType.EQUALS)) {
-              matchingFragments.add(zone.getFragmentId());
-              break;
-            }
-          } catch (ClassCastException e) {
-            // Non-comparable value, conservatively include
+          if (zoneMatchesComparison(zone, value, ComparisonType.EQUALS)) {
             matchingFragments.add(zone.getFragmentId());
             break;
           }
@@ -260,6 +243,42 @@ public final class ZonemapFragmentPruner {
     }
 
     return Optional.of(matchingFragments);
+  }
+
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  private static int compareValues(Object left, Object right) {
+    if (left instanceof Number && right instanceof Number) {
+      return compareNumbers((Number) left, (Number) right);
+    }
+    if (isStringLike(left) && isStringLike(right)) {
+      return left.toString().compareTo(right.toString());
+    }
+    return ((Comparable) left).compareTo(right);
+  }
+
+  private static int compareNumbers(Number left, Number right) {
+    return toBigDecimal(left).compareTo(toBigDecimal(right));
+  }
+
+  private static BigDecimal toBigDecimal(Number value) {
+    if (value instanceof BigDecimal) {
+      return (BigDecimal) value;
+    }
+    if (value instanceof BigInteger) {
+      return new BigDecimal((BigInteger) value);
+    }
+    if (value instanceof Byte || value instanceof Short || value instanceof Integer
+        || value instanceof Long) {
+      return BigDecimal.valueOf(value.longValue());
+    }
+    if (value instanceof Float || value instanceof Double) {
+      return BigDecimal.valueOf(value.doubleValue());
+    }
+    return new BigDecimal(value.toString());
+  }
+
+  private static boolean isStringLike(Object value) {
+    return value instanceof CharSequence || value instanceof UTF8String;
   }
 
   private static Optional<Set<Integer>> analyzeIsNull(
