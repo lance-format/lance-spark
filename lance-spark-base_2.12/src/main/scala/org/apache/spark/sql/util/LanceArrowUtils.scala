@@ -28,8 +28,7 @@ import org.apache.arrow.vector.types.{DateUnit, FloatingPointPrecision, Interval
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.apache.spark.{SparkException, SparkUnsupportedOperationException}
 import org.apache.spark.sql.types._
-import org.json4s.{DefaultFormats, Formats}
-import org.json4s.JsonAST.{JObject, JString}
+import com.fasterxml.jackson.databind.ObjectMapper
 import org.lance.spark.LanceConstant
 import org.lance.spark.utils.{BlobUtils, Float16Utils, LargeVarCharUtils, VectorUtils}
 
@@ -39,6 +38,9 @@ import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.JavaConverters._
 
 object LanceArrowUtils {
+
+  private val mapper = new ObjectMapper()
+
   val ARROW_FIXED_SIZE_LIST_SIZE_KEY = VectorUtils.ARROW_FIXED_SIZE_LIST_SIZE_KEY
   val ARROW_FLOAT16_KEY = Float16Utils.ARROW_FLOAT16_KEY
   val ENCODING_BLOB = BlobUtils.LANCE_ENCODING_BLOB_KEY
@@ -157,8 +159,8 @@ object LanceArrowUtils {
           new MetadataBuilder()
             .putString(ARROW_LARGE_VAR_CHAR_KEY, "true")
             .build()
-        case _ => Metadata.fromJObject(
-            JObject(field.getMetadata.asScala.map { case (k, v) => (k, JString(v)) }.toList))
+        case _ => Metadata.fromJson(
+            mapper.writeValueAsString(field.getMetadata))
       }
       StructField(field.getName, dt, field.isNullable, metadata)
     }.toArray)
@@ -207,10 +209,9 @@ object LanceArrowUtils {
         large = true
       }
 
-      implicit val formats: Formats = DefaultFormats
-      meta = metadata.jsonValue.extract[Map[String, Object]].map { case (k, v) =>
-        (k, String.valueOf(v))
-      }
+      meta = mapper
+        .readValue(metadata.json, classOf[java.util.LinkedHashMap[_, _]])
+        .asScala.map { case (k, v) => (k.toString, String.valueOf(v)) }.toMap
     }
 
     dt match {
