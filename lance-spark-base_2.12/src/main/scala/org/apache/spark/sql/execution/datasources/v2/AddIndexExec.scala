@@ -37,6 +37,7 @@ import org.lance.spark.write.SingleBatchArrowReader
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
 import java.util.{Collections, Optional, UUID}
+
 import scala.collection.JavaConverters._
 
 /**
