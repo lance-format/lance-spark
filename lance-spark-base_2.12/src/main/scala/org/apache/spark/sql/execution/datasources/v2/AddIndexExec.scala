@@ -13,6 +13,8 @@
  */
 package org.apache.spark.sql.execution.datasources.v2
 
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.node.ObjectNode
 import org.apache.arrow.c.{ArrowArrayStream, Data}
 import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.arrow.vector.ipc.{ArrowStreamReader, ArrowStreamWriter}
@@ -24,8 +26,6 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.LanceArrowUtils
 import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
 import org.apache.spark.unsafe.types.UTF8String
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.databind.node.ObjectNode
 import org.lance.{CommitBuilder, Dataset, Transaction}
 import org.lance.index.{Index, IndexOptions, IndexParams, IndexType}
 import org.lance.index.scalar.{BTreeIndexParams, ScalarIndexParams}
