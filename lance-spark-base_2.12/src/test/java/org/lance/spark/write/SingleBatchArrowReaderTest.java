@@ -77,7 +77,6 @@ public class SingleBatchArrowReaderTest {
         SingleBatchArrowReader reader = new SingleBatchArrowReader(allocator, source);
         ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator)) {
 
-      // 导出到ArrowArrayStream
       Data.exportArrayStream(allocator, reader, stream);
 
       try (ArrowReader exportedReader = Data.importArrayStream(allocator, stream)) {
