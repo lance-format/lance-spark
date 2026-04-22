@@ -24,8 +24,8 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.LanceArrowUtils
 import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
 import org.apache.spark.unsafe.types.UTF8String
-import org.json4s.JsonAST._
-import org.json4s.jackson.JsonMethods.{compact, render}
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.node.ObjectNode
 import org.lance.{CommitBuilder, Dataset, Transaction}
 import org.lance.index.{Index, IndexOptions, IndexParams, IndexType}
 import org.lance.index.scalar.{BTreeIndexParams, ScalarIndexParams}
@@ -520,6 +520,8 @@ case class RangeBTreeIndexBuilder(
  */
 object IndexUtils {
 
+  private val jsonMapper = new ObjectMapper()
+
   /**
    * Build an [[IndexType]] from the given index method string.
    *
@@ -539,25 +541,25 @@ object IndexUtils {
     if (args.isEmpty) {
       "{}"
     } else {
-      val fields = args.map { a =>
-        val jv = a.value match {
-          case null => JNull
+      val node: ObjectNode = jsonMapper.createObjectNode()
+      args.foreach { a =>
+        a.value match {
+          case null => node.putNull(a.name)
           case s: java.lang.String =>
             val trimmed = s.stripPrefix("\"").stripSuffix("\"").stripPrefix("'").stripSuffix("'")
-            JString(trimmed)
-          case b: java.lang.Boolean => JBool(b.booleanValue())
-          case c: java.lang.Character => JString(String.valueOf(c))
-          case by: java.lang.Byte => JInt(BigInt(by.intValue()))
-          case sh: java.lang.Short => JInt(BigInt(sh.intValue()))
-          case i: java.lang.Integer => JInt(BigInt(i.intValue()))
-          case l: java.lang.Long => JInt(BigInt(l.longValue()))
-          case f: java.lang.Float => JDouble(f.doubleValue())
-          case d: java.lang.Double => JDouble(d.doubleValue())
-          case other => JString(String.valueOf(other))
+            node.put(a.name, trimmed)
+          case b: java.lang.Boolean => node.put(a.name, b.booleanValue())
+          case c: java.lang.Character => node.put(a.name, String.valueOf(c))
+          case by: java.lang.Byte => node.put(a.name, by.intValue())
+          case sh: java.lang.Short => node.put(a.name, sh.intValue())
+          case i: java.lang.Integer => node.put(a.name, i.intValue())
+          case l: java.lang.Long => node.put(a.name, l.longValue())
+          case f: java.lang.Float => node.put(a.name, f.doubleValue())
+          case d: java.lang.Double => node.put(a.name, d.doubleValue())
+          case other => node.put(a.name, String.valueOf(other))
         }
-        JField(a.name, jv)
       }
-      compact(render(JObject(fields.toList)))
+      jsonMapper.writeValueAsString(node)
     }
   }
 
