@@ -33,10 +33,10 @@ import org.lance.operation.{CreateIndex => AddIndexOperation}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceRuntime, LanceSparkReadOptions}
 import org.lance.spark.arrow.LanceArrowWriter
 import org.lance.spark.utils.{CloseableUtil, Utils}
+import org.lance.spark.write.SingleBatchArrowReader
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
 import java.util.{Collections, Optional, UUID}
-
 import scala.collection.JavaConverters._
 
 /**
@@ -455,24 +455,8 @@ case class RangeBTreeIndexBuilder(
       return Iterator.empty
     }
 
-    // Serialize the arrow stream to byte array
-    val out = new ByteArrayOutputStream()
-    val streamWriter = new ArrowStreamWriter(data, null, out)
-    try {
-      streamWriter.start()
-      streamWriter.writeBatch()
-      streamWriter.end()
-    } finally {
-      CloseableUtil.closeQuietly(streamWriter)
-      CloseableUtil.closeQuietly(data)
-    }
-
-    val arrowData = out.toByteArray()
-    val in = new ByteArrayInputStream(arrowData)
-
-    // Export data to lance
-    val reader = new ArrowStreamReader(in, allocator)
     val stream = ArrowArrayStream.allocateNew(allocator)
+    val reader = new SingleBatchArrowReader(allocator, data)
 
     var dataset: Dataset = null
 
@@ -505,6 +489,7 @@ case class RangeBTreeIndexBuilder(
     } finally {
       CloseableUtil.closeQuietly(stream)
       CloseableUtil.closeQuietly(reader)
+      CloseableUtil.closeQuietly(data)
 
       if (dataset != null) {
         CloseableUtil.closeQuietly(dataset)
