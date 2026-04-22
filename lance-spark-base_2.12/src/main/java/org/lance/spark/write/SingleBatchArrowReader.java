@@ -21,13 +21,23 @@ import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.arrow.vector.ipc.message.ArrowRecordBatch;
 import org.apache.arrow.vector.types.pojo.Schema;
 
+import java.io.IOException;
+import java.util.Objects;
+
+/**
+ * An ArrowReader implementation that provides a single ArrowRecordBatch from a given
+ * VectorSchemaRoot.
+ *
+ * <p>This reader will return the batch exactly once when {@link #loadNextBatch()} is called, and
+ * subsequent calls will return false indicating no more batches are available.
+ */
 public class SingleBatchArrowReader extends ArrowReader {
   private final VectorSchemaRoot source;
   private boolean returned = false;
 
   public SingleBatchArrowReader(BufferAllocator allocator, VectorSchemaRoot source) {
     super(allocator);
-    this.source = source;
+    this.source = Objects.requireNonNull(source, "source must not be null");
   }
 
   @Override
@@ -36,7 +46,7 @@ public class SingleBatchArrowReader extends ArrowReader {
   }
 
   @Override
-  public boolean loadNextBatch() throws java.io.IOException {
+  public boolean loadNextBatch() throws IOException {
     if (returned) {
       return false;
     }
@@ -53,7 +63,7 @@ public class SingleBatchArrowReader extends ArrowReader {
 
   @Override
   public long bytesRead() {
-    throw new UnsupportedOperationException();
+    return 0;
   }
 
   @Override

@@ -15,7 +15,7 @@ package org.apache.spark.sql.execution.datasources.v2
 
 import org.apache.arrow.c.{ArrowArrayStream, Data}
 import org.apache.arrow.vector.VectorSchemaRoot
-import org.apache.arrow.vector.ipc.{ArrowStreamReader, ArrowStreamWriter}
+import org.apache.arrow.vector.ipc.ArrowReader
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
 import org.apache.spark.sql.catalyst.plans.logical.{AddIndexOutputType, LanceNamedArgument}
@@ -35,7 +35,6 @@ import org.lance.spark.arrow.LanceArrowWriter
 import org.lance.spark.utils.{CloseableUtil, Utils}
 import org.lance.spark.write.SingleBatchArrowReader
 
-import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
 import java.util.{Collections, Optional, UUID}
 
 import scala.collection.JavaConverters._
@@ -456,12 +455,14 @@ case class RangeBTreeIndexBuilder(
       return Iterator.empty
     }
 
-    val stream = ArrowArrayStream.allocateNew(allocator)
-    val reader = new SingleBatchArrowReader(allocator, data)
-
+    var stream: ArrowArrayStream = null
+    var reader: ArrowReader = null
     var dataset: Dataset = null
 
     try {
+      stream = ArrowArrayStream.allocateNew(allocator)
+      reader = new SingleBatchArrowReader(allocator, data)
+
       dataset = Utils.openDatasetBuilder(
         decode[LanceSparkReadOptions](encodedReadOptions))
         .initialStorageOptions(initialStorageOptions.map(_.asJava).orNull)
@@ -491,10 +492,7 @@ case class RangeBTreeIndexBuilder(
       CloseableUtil.closeQuietly(stream)
       CloseableUtil.closeQuietly(reader)
       CloseableUtil.closeQuietly(data)
-
-      if (dataset != null) {
-        CloseableUtil.closeQuietly(dataset)
-      }
+      CloseableUtil.closeQuietly(dataset)
     }
 
     Iterator.empty
