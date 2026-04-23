@@ -43,9 +43,10 @@ public class LanceColumnarPartitionReaderTest {
             Optional.empty() /* topNSortOrders */,
             Optional.empty() /* pushedAggregation */,
             "test" /* scanId */,
-            null /* initialStorageOptions */,
+            true /* useScalarIndex */,
+            Collections.emptyMap() /* initialStorageOptions */,
             null /* namespaceImpl */,
-            null /* namespaceProperties */,
+            Collections.emptyMap() /* namespaceProperties */,
             null /* partitionKeyRow */);
     try (LanceColumnarPartitionReader reader = new LanceColumnarPartitionReader(partition)) {
       List<List<Long>> expectedValues = TestUtils.TestTable1Config.expectedValues;
@@ -86,9 +87,10 @@ public class LanceColumnarPartitionReaderTest {
             Optional.empty() /* topNSortOrders */,
             Optional.empty() /* pushedAggregation */,
             "testOffsetAndLimit" /* scanId */,
-            null /* initialStorageOptions */,
+            true /* useScalarIndex */,
+            Collections.emptyMap() /* initialStorageOptions */,
             null /* namespaceImpl */,
-            null /* namespaceProperties */,
+            Collections.emptyMap() /* namespaceProperties */,
             null /* partitionKeyRow */);
     try (LanceColumnarPartitionReader reader = new LanceColumnarPartitionReader(partition)) {
       List<List<Long>> expectedValues = TestUtils.TestTable1Config.expectedValues;
@@ -131,9 +133,10 @@ public class LanceColumnarPartitionReaderTest {
             Optional.of(Collections.singletonList(builder.build())) /* topNSortOrders */,
             Optional.empty() /* pushedAggregation */,
             "testTopN" /* scanId */,
-            null /* initialStorageOptions */,
+            true /* useScalarIndex */,
+            Collections.emptyMap() /* initialStorageOptions */,
             null /* namespaceImpl */,
-            null /* namespaceProperties */,
+            Collections.emptyMap() /* namespaceProperties */,
             null /* partitionKeyRow */);
     try (LanceColumnarPartitionReader reader = new LanceColumnarPartitionReader(partition)) {
       List<List<Long>> expectedValues = TestUtils.TestTable1Config.expectedValues;

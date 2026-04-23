@@ -107,6 +107,7 @@ public class LanceScan
   private final String namespaceImpl;
 
   private final java.util.Map<String, String> namespaceProperties;
+  private final boolean useScalarIndex;
 
   public LanceScan(
       StructType schema,
@@ -121,6 +122,7 @@ public class LanceScan
       java.util.Map<String, List<ZoneStats>> zonemapStats,
       Set<Integer> survivingFragmentIds,
       ZonemapFragmentPruner.PartitionInfo partitionInfo,
+      boolean useScalarIndex,
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
       java.util.Map<String, String> namespaceProperties) {
@@ -137,6 +139,7 @@ public class LanceScan
     this.zonemapStats = zonemapStats != null ? zonemapStats : Collections.emptyMap();
     this.cachedSurvivingFragmentIds = survivingFragmentIds;
     this.partitionInfo = partitionInfo;
+    this.useScalarIndex = useScalarIndex;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
@@ -191,6 +194,7 @@ public class LanceScan
                       topNSortOrders,
                       pushedAggregation,
                       scanId,
+                      useScalarIndex,
                       initialStorageOptions,
                       namespaceImpl,
                       namespaceProperties,

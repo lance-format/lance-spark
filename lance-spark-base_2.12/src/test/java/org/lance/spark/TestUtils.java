@@ -23,6 +23,7 @@ import org.apache.spark.sql.types.StructType;
 
 import java.net.URL;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 public class TestUtils {
@@ -88,9 +89,10 @@ public class TestUtils {
               Optional.empty() /* topNSortOrders */,
               Optional.empty() /* pushedAggregation */,
               "test" /* scanId */,
-              null /* initialStorageOptions */,
+              true /* useScalarIndex */,
+              Collections.emptyMap() /* initialStorageOptions */,
               null /* namespaceImpl */,
-              null /* namespaceProperties */,
+              Collections.emptyMap() /* namespaceProperties */,
               null /* partitionKeyRow */);
     }
   }

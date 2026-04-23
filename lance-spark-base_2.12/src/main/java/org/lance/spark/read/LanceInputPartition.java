@@ -38,6 +38,7 @@ public class LanceInputPartition implements HasPartitionKey {
   private final Optional<List<ColumnOrdering>> topNSortOrders;
   private final Optional<Aggregation> pushedAggregation;
   private final String scanId;
+  private final boolean useScalarIndex;
 
   /**
    * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
@@ -69,6 +70,7 @@ public class LanceInputPartition implements HasPartitionKey {
       Optional<List<ColumnOrdering>> topNSortOrders,
       Optional<Aggregation> pushedAggregation,
       String scanId,
+      boolean useScalarIndex,
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
@@ -83,6 +85,7 @@ public class LanceInputPartition implements HasPartitionKey {
     this.topNSortOrders = topNSortOrders;
     this.pushedAggregation = pushedAggregation;
     this.scanId = scanId;
+    this.useScalarIndex = useScalarIndex;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
@@ -127,6 +130,10 @@ public class LanceInputPartition implements HasPartitionKey {
 
   public String getScanId() {
     return scanId;
+  }
+
+  public boolean isUseScalarIndex() {
+    return useScalarIndex;
   }
 
   public Map<String, String> getInitialStorageOptions() {

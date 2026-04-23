@@ -31,6 +31,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -125,9 +126,10 @@ public class LanceDatasetReadTest {
                 Optional.empty() /* topNSortOrders */,
                 Optional.empty() /* pushedAggregation */,
                 "validateFragment" /* scanId */,
-                null /* initialStorageOptions */,
+                true /* useScalarIndex */,
+                Collections.emptyMap() /* initialStorageOptions */,
                 null /* namespaceImpl */,
-                null /* namespaceProperties */,
+                Collections.emptyMap() /* namespaceProperties */,
                 null /* partitionKeyRow */))) {
       try (ArrowReader reader = scanner.getArrowReader()) {
         VectorSchemaRoot root = reader.getVectorSchemaRoot();

@@ -49,6 +49,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -71,6 +72,7 @@ public class LanceScanBuilder
   private StructType schema;
 
   private Filter[] pushedFilters = new Filter[0];
+  private boolean forcePostScanFiltering = false;
   private Optional<Integer> limit = Optional.empty();
   private Optional<Integer> offset = Optional.empty();
   private Optional<List<ColumnOrdering>> topNSortOrders = Optional.empty();
@@ -213,7 +215,11 @@ public class LanceScanBuilder
     // Close the lazily opened dataset - it's no longer needed after build
     closeLazyDataset();
 
-    Optional<String> whereCondition = FilterPushDown.compileFiltersToSqlWhereClause(pushedFilters);
+    Optional<String> whereCondition =
+        forcePostScanFiltering
+            ? Optional.empty()
+            : FilterPushDown.compileFiltersToSqlWhereClause(pushedFilters);
+    boolean useScalarIndex = zonemapStats.isEmpty();
     return new LanceScan(
         schema,
         readOptions,
@@ -227,6 +233,7 @@ public class LanceScanBuilder
         zonemapStats,
         survivingFragmentIds,
         partitionInfo,
+        useScalarIndex,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties);
@@ -244,7 +251,14 @@ public class LanceScanBuilder
     }
     Filter[][] processFilters = FilterPushDown.processFilters(filters);
     pushedFilters = processFilters[0];
-    return processFilters[1];
+    forcePostScanFiltering = shouldForcePostScanFiltering(pushedFilters);
+    if (!forcePostScanFiltering) {
+      return processFilters[1];
+    }
+    LOG.info(
+        "Using Spark post-scan filtering for segmented zonemap query on dataset {}",
+        readOptions.getDatasetUri());
+    return concatFilters(processFilters[0], processFilters[1]);
   }
 
   @Override
@@ -304,6 +318,9 @@ public class LanceScanBuilder
 
   @Override
   public boolean pushAggregation(Aggregation aggregation) {
+    if (forcePostScanFiltering && pushedFilters.length > 0) {
+      return false;
+    }
     AggregateFunc[] funcs = aggregation.aggregateExpressions();
     if (aggregation.groupByExpressions().length > 0) {
       return false;
@@ -406,5 +423,53 @@ public class LanceScanBuilder
       }
     }
     return columns;
+  }
+
+  /**
+   * Segmented zonemap indexes are currently used safely for fragment pruning, but scan-time filter
+   * pushdown still needs a Spark-side fallback until Lance-core query execution fully handles that
+   * layout.
+   */
+  private boolean shouldForcePostScanFiltering(Filter[] acceptedFilters) {
+    if (acceptedFilters.length == 0) {
+      return false;
+    }
+
+    Set<String> referencedColumns = extractReferencedColumns(acceptedFilters);
+    if (referencedColumns.isEmpty()) {
+      return false;
+    }
+
+    Dataset dataset = getOrOpenDataset();
+    Map<Integer, String> fieldIdToName = new HashMap<>();
+    for (LanceField field : dataset.getLanceSchema().fields()) {
+      fieldIdToName.put(field.getId(), field.getName());
+    }
+
+    Map<String, Integer> segmentedZonemapCounts = new HashMap<>();
+    for (Index idx : dataset.getIndexes()) {
+      if (idx.indexType() != IndexType.ZONEMAP || idx.fields().size() != 1) {
+        continue;
+      }
+      if (!idx.fragments().isPresent() || idx.fragments().get().size() != 1) {
+        continue;
+      }
+
+      String columnName = fieldIdToName.get(idx.fields().get(0));
+      if (columnName == null || !referencedColumns.contains(columnName)) {
+        continue;
+      }
+
+      String key = idx.name() + ":" + columnName;
+      segmentedZonemapCounts.merge(key, 1, Integer::sum);
+    }
+
+    return segmentedZonemapCounts.values().stream().anyMatch(count -> count > 1);
+  }
+
+  private static Filter[] concatFilters(Filter[] first, Filter[] second) {
+    Filter[] combined = Arrays.copyOf(first, first.length + second.length);
+    System.arraycopy(second, 0, combined, first.length, second.length);
+    return combined;
   }
 }

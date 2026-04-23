@@ -25,6 +25,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -49,9 +50,10 @@ public class LanceCountStarPartitionReaderTest {
             Optional.empty(),
             Optional.of(countStarAgg),
             "testCountStarMemoryLeak",
+            true,
+            Collections.emptyMap(),
             null,
-            null,
-            null,
+            Collections.emptyMap(),
             null);
 
     LanceCountStarPartitionReader reader = new LanceCountStarPartitionReader(partition);

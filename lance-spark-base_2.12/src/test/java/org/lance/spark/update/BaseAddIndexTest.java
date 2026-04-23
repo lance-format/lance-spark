@@ -226,6 +226,35 @@ public abstract class BaseAddIndexTest {
 
     org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
     try {
+      int fragmentCount = lanceDataset.getFragments().size();
+      int expectedSegmentCount =
+          Math.min(fragmentCount, spark.sparkContext().defaultParallelism());
+      List<Index> zonemapSegments =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> "test_index_zonemap".equals(index.name()))
+              .collect(Collectors.toList());
+      int coveredFragments =
+          zonemapSegments.stream()
+              .map(index -> index.fragments().orElse(Collections.emptyList()).size())
+              .mapToInt(Integer::intValue)
+              .sum();
+
+      Assertions.assertEquals(
+          expectedSegmentCount,
+          zonemapSegments.size(),
+          "Expected distributed zonemap build to batch fragments into bounded segment count");
+      Assertions.assertTrue(
+          zonemapSegments.stream()
+              .allMatch(index -> index.fragments().isPresent() && !index.fragments().get().isEmpty()),
+          "Expected each zonemap segment to cover at least one fragment");
+      Assertions.assertTrue(
+          zonemapSegments.stream()
+              .anyMatch(index -> index.fragments().isPresent() && index.fragments().get().size() > 1),
+          "Expected zonemap batching to create at least one multi-fragment segment");
+      Assertions.assertEquals(
+          fragmentCount,
+          coveredFragments,
+          "Expected zonemap segments to cover all fragments exactly once");
       Assertions.assertFalse(
           lanceDataset.getZonemapStats("id").isEmpty(),
           "Expected zonemap stats for indexed column");
@@ -259,6 +288,50 @@ public abstract class BaseAddIndexTest {
         exception.getMessage().contains("single column"),
         "Expected multi-column zonemap error to mention single-column support, got: "
             + exception.getMessage());
+  }
+
+  @Test
+  public void testRepeatedCreateZonemapIndexReplacesExistingSegments() {
+    prepareDataset();
+
+    String sql =
+        String.format(
+            "alter table %s create index test_index_zonemap_repeat using zonemap (id) with (rows_per_zone=4)",
+            fullTable);
+
+    spark.sql(sql);
+    spark.sql(sql);
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int fragmentCount = lanceDataset.getFragments().size();
+      int expectedSegmentCount =
+          Math.min(fragmentCount, spark.sparkContext().defaultParallelism());
+      List<Index> zonemapSegments =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> "test_index_zonemap_repeat".equals(index.name()))
+              .collect(Collectors.toList());
+      int coveredFragments =
+          zonemapSegments.stream()
+              .map(index -> index.fragments().orElse(Collections.emptyList()).size())
+              .mapToInt(Integer::intValue)
+              .sum();
+
+      Assertions.assertEquals(
+          expectedSegmentCount,
+          zonemapSegments.size(),
+          "Expected recreated zonemap index to replace existing batched segments instead of duplicating them");
+      Assertions.assertTrue(
+          zonemapSegments.stream()
+              .allMatch(index -> index.fragments().isPresent() && !index.fragments().get().isEmpty()),
+          "Expected recreated zonemap segments to keep non-empty fragment coverage");
+      Assertions.assertEquals(
+          fragmentCount,
+          coveredFragments,
+          "Expected recreated zonemap segments to cover all fragments exactly once");
+    } finally {
+      lanceDataset.close();
+    }
   }
 
   @Test

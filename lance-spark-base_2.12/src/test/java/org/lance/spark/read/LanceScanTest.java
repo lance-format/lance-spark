@@ -215,6 +215,7 @@ public class LanceScanTest {
             Collections.emptyMap(),
             null,
             partInfo,
+            true,
             Collections.emptyMap(),
             null,
             Collections.emptyMap());

@@ -7,7 +7,7 @@ Creates a scalar index on a Lance table to accelerate queries.
 
 ## Overview
 
-The `CREATE INDEX` command builds an index on one or more columns of a Lance table. Indexing can improve the performance of queries that filter on the indexed columns. Depending on the index method, Lance Spark either uses a fragment-parallel build path or delegates to Lance's built-in single-phase index creation path.
+The `CREATE INDEX` command builds an index on one or more columns of a Lance table. Indexing can improve the performance of queries that filter on the indexed columns. Depending on the index method, Lance Spark either uses a fragment-parallel build path or a driver-coordinated commit flow after parallel executor builds.
 
 ## Basic Usage
 
@@ -151,12 +151,12 @@ Consider creating an index when:
 
 The `CREATE INDEX` command operates as follows:
 
-1.  **Index Build Execution**: Lance Spark chooses an execution path based on the index method. Methods such as `btree` can use fragment-parallel execution, while `zonemap` is built through Lance's single-phase create-index API.
-2.  **Metadata Finalization**: Lance records the new index metadata as part of the index creation flow.
+1.  **Index Build Execution**: Lance Spark chooses an execution path based on the index method. Methods such as `btree`, `fts`, and `zonemap` can build physical index segments in parallel across fragments. Range-mode `btree` uses Spark repartitioning and sorted preprocessed data.
+2.  **Metadata Finalization**: Lance Spark merges or commits the resulting index metadata on the driver so the new logical index becomes visible atomically.
 3.  **Transactional Commit**: A new table version is committed with the new index information. The operation is atomic and ensures that concurrent reads are not affected.
 
 ## Notes and Limitations
 
 - **Index Methods**: The `zonemap`, `btree`, and `fts` methods are supported for scalar index creation.
 - **Zonemap Column Count**: Zonemap indexes currently support a single column only. The generic `CREATE INDEX` grammar accepts a column list, but Lance rejects multi-column zonemap creation.
-- **Index Replacement**: If you create an index with the same name as an existing one, the old index will be replaced by the new one. This is because the underlying implementation uses `replace(true)`.
+- **Index Replacement**: If you create an index with the same name as an existing one, the old index will be replaced by the new one.

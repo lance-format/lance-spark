@@ -45,7 +45,7 @@ import scala.collection.JavaConverters._
  * <ul>
  * <li>For BTREE index, it uses a range-based approach that redistributes and sorts data across partitions, creates indexes for each range in parallel, and finally merges them into a global index structure.
  * <li>For fragment-trainable scalar index types, it processes each fragment independently in parallel, merges index metadata and commits an index-creation transaction.
- * <li>For zonemap index, it delegates to the underlying Lance single-phase index creation path because zonemap does not support fragment training.
+ * <li>For zonemap index, it builds one uncommitted segment per fragment in parallel and commits the logical index on the driver.
  * </ul>
  */
 case class AddIndexExec(
@@ -84,19 +84,20 @@ case class AddIndexExec(
     val uuid = UUID.randomUUID()
     val indexType = IndexUtils.buildIndexType(method)
 
+    if (indexType == IndexType.ZONEMAP && columns.size != 1) {
+      throw new UnsupportedOperationException(
+        "Zonemap index currently supports a single column only")
+    }
+
+    // Create distributed index job and run it
+    val createdSegments = createIndexJob(lanceDataset, readOptions, indexType, uuid.toString, fragmentIds).run()
+
     if (indexType == IndexType.ZONEMAP) {
-      if (columns.size != 1) {
-        throw new UnsupportedOperationException(
-          "Zonemap index currently supports a single column only")
-      }
-      createDirectScalarIndex(readOptions, indexType)
+      commitIndexSegments(readOptions, columns.head, createdSegments)
       return Seq(new GenericInternalRow(Array[Any](
         fragmentIds.size.toLong,
         UTF8String.fromString(indexName))))
     }
-
-    // Create distributed index job and run it
-    createIndexJob(lanceDataset, readOptions, uuid.toString, fragmentIds).run()
 
     val dataset = Utils.openDatasetBuilder(readOptions).build()
     try {
@@ -150,23 +151,50 @@ case class AddIndexExec(
       UTF8String.fromString(indexName))))
   }
 
-  private def createDirectScalarIndex(
+  private def commitIndexSegments(
       readOptions: LanceSparkReadOptions,
-      indexType: IndexType): Unit = {
-    val argsJson = IndexUtils.toJson(args)
-    val params = IndexParams.builder()
-      .setScalarIndexParams(ScalarIndexParams.create(method, argsJson))
-      .build()
-
-    val indexOptions = IndexOptions
-      .builder(columns.asJava, indexType, params)
-      .replace(true)
-      .withIndexName(indexName)
-      .build()
-
+      column: String,
+      segments: Seq[Index]): Unit = {
     val dataset = Utils.openDatasetBuilder(readOptions).build()
     try {
-      dataset.createIndex(indexOptions)
+      val existingIndices = dataset.getIndexes.asScala
+        .filter(_.name() == indexName)
+        .toList
+
+      val committedSegments =
+        dataset.commitExistingIndexSegments(indexName, column, segments.toList.asJava).asScala.toList
+
+      if (existingIndices.nonEmpty) {
+        val committedUuids = committedSegments.map(_.uuid()).toSet
+        val refreshedDataset = Utils.openDatasetBuilder(readOptions).build()
+        try {
+          val removedIndices = refreshedDataset.getIndexes.asScala
+            .filter(index => index.name() == indexName && !committedUuids.contains(index.uuid()))
+            .toList
+            .asJava
+
+          if (!removedIndices.isEmpty) {
+            val op = AddIndexOperation.builder()
+              .withNewIndices(Collections.emptyList())
+              .withRemovedIndices(removedIndices)
+              .build()
+            val txn = new Transaction.Builder()
+              .readVersion(refreshedDataset.version())
+              .operation(op)
+              .build()
+            try {
+              val newDataset = new CommitBuilder(refreshedDataset)
+                .writeParams(readOptions.getStorageOptions)
+                .execute(txn)
+              newDataset.close()
+            } finally {
+              txn.close()
+            }
+          }
+        } finally {
+          refreshedDataset.close()
+        }
+      }
     } finally {
       dataset.close()
     }
@@ -175,6 +203,7 @@ case class AddIndexExec(
   private def createIndexJob(
       lanceDataset: LanceDataset,
       readOptions: LanceSparkReadOptions,
+      indexType: IndexType,
       uuid: String,
       fragmentIds: List[Integer]): IndexJob = {
     // Get namespace info from catalog if available (for credential vending on workers)
@@ -192,7 +221,7 @@ case class AddIndexExec(
       case _ => (None, None, None, None)
     }
 
-    IndexUtils.buildIndexType(method) match {
+    indexType match {
       case IndexType.BTREE =>
         val mode = args.find(_.name == "build_mode").map(_.value.asInstanceOf[String])
         mode match {
@@ -210,7 +239,7 @@ case class AddIndexExec(
             new FragmentBasedIndexJob(
               this,
               readOptions,
-              uuid,
+              Some(uuid),
               fragmentIds,
               nsImpl,
               nsProps,
@@ -226,7 +255,7 @@ case class AddIndexExec(
         new FragmentBasedIndexJob(
           this,
           readOptions,
-          uuid,
+          if (indexType == IndexType.ZONEMAP) None else Some(uuid),
           fragmentIds,
           nsImpl,
           nsProps,
@@ -240,7 +269,7 @@ case class AddIndexExec(
  * Interface for index job to implement different indexing strategies.
  */
 trait IndexJob extends Serializable {
-  def run(): Unit
+  def run(): Seq[Index]
 }
 
 /**
@@ -260,28 +289,32 @@ trait IndexJob extends Serializable {
 class FragmentBasedIndexJob(
     addIndexExec: AddIndexExec,
     readOptions: LanceSparkReadOptions,
-    uuid: String,
+    indexUuid: Option[String],
     fragmentIds: List[Integer],
     nsImpl: Option[String],
     nsProps: Option[Map[String, String]],
     tableId: Option[List[String]],
     initialStorageOpts: Option[Map[String, String]]) extends IndexJob {
 
-  override def run(): Unit = {
+  override def run(): Seq[Index] = {
     val encodedReadOptions = encode(readOptions)
     val columns = addIndexExec.columns.toList
     val argsJson = IndexUtils.toJson(addIndexExec.args)
+    val fragmentBatches = if (IndexUtils.buildIndexType(addIndexExec.method) == IndexType.ZONEMAP) {
+      batchFragments(fragmentIds)
+    } else {
+      fragmentIds.map(fid => List(fid))
+    }
 
-    // Build per-fragment tasks
-    val tasks = fragmentIds.map { fid =>
+    val tasks = fragmentBatches.map { batch =>
       FragmentIndexTask(
         encodedReadOptions,
         columns,
         addIndexExec.method,
         argsJson,
         addIndexExec.indexName,
-        uuid,
-        fid,
+        indexUuid,
+        batch,
         nsImpl,
         nsProps,
         tableId,
@@ -292,6 +325,14 @@ class FragmentBasedIndexJob(
       .parallelize(tasks, tasks.size)
       .map(t => t.execute())
       .collect()
+      .map(decode[Index])
+      .toSeq
+  }
+
+  private def batchFragments(fragmentIds: List[Integer]): Seq[List[Integer]] = {
+    val targetTasks = math.max(1, math.min(fragmentIds.size, addIndexExec.session.sparkContext.defaultParallelism))
+    val batchSize = math.ceil(fragmentIds.size.toDouble / targetTasks.toDouble).toInt
+    fragmentIds.grouped(batchSize).map(_.toList).toSeq
   }
 }
 
@@ -305,7 +346,7 @@ class FragmentBasedIndexJob(
  * @param argsJson              JSON string containing index parameters
  * @param indexName             Name of the index being created
  * @param uuid                  Unique identifier for this index operation
- * @param fragmentId            ID of the fragment to create index on
+ * @param fragmentIds           IDs of the fragments to create index on
  * @param namespaceImpl         Implementation class for namespace operations
  * @param namespaceProperties   Properties of the namespace
  * @param tableId               Identifier for the table within the namespace
@@ -317,8 +358,8 @@ case class FragmentIndexTask(
     method: String,
     argsJson: String,
     indexName: String,
-    uuid: String,
-    fragmentId: Int,
+    indexUuid: Option[String],
+    fragmentIds: List[Integer],
     namespaceImpl: Option[String],
     namespaceProperties: Option[Map[String, String]],
     tableId: Option[List[String]],
@@ -333,23 +374,25 @@ case class FragmentIndexTask(
 
     val indexOptions = IndexOptions
       .builder(java.util.Arrays.asList(columns: _*), indexType, params)
-      .replace(true)
-      .withIndexName(indexName)
-      .withIndexUUID(uuid)
-      .withFragmentIds(Collections.singletonList(fragmentId))
-      .build()
+      .withFragmentIds(fragmentIds.asJava)
+    if (indexType == IndexType.ZONEMAP) {
+      indexOptions.replace(false)
+    } else {
+      indexOptions
+        .replace(true)
+        .withIndexName(indexName)
+      indexUuid.foreach(indexOptions.withIndexUUID)
+    }
 
     val dataset = Utils.openDatasetBuilder(readOptions)
       .initialStorageOptions(initialStorageOptions.map(_.asJava).orNull)
       .build()
 
     try {
-      dataset.createIndex(indexOptions)
+      encode(dataset.createIndex(indexOptions.build()))
     } finally {
       dataset.close()
     }
-
-    encode("OK")
   }
 }
 
@@ -377,7 +420,7 @@ class RangeBasedBTreeIndexJob(
 
   private val VALUE_COLUMN_NAME = "value"
 
-  override def run(): Unit = {
+  override def run(): Seq[Index] = {
     if (addIndexExec.columns.size != 1) {
       throw new UnsupportedOperationException(
         "Range-based BTree index currently supports a single column only")
@@ -426,6 +469,8 @@ class RangeBasedBTreeIndexJob(
     rangeDf.queryExecution.toRdd.mapPartitionsWithIndex { case (rangeId, rowsIter) =>
       indexBuilder.buildForRange(rangeId, rowsIter)
     }.collect()
+
+    Seq.empty
   }
 
 }
