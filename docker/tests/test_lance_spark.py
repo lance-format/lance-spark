@@ -562,6 +562,41 @@ class TestDDLIndex:
         """).collect()
         assert len(query_result) == 3
 
+    def test_create_bitmap_index(self, spark):
+        """Test CREATE INDEX with Bitmap on low-cardinality column."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING,
+                department STRING,
+                salary INT
+            )
+        """)
+
+        data = [
+            (1, "Alice", "Engineering", 75000),
+            (2, "Bob", "Marketing", 65000),
+            (3, "Charlie", "Engineering", 70000),
+            (4, "Diana", "Sales", 80000),
+            (5, "Eve", "Engineering", 60000),
+        ]
+        df = spark.createDataFrame(data, ["id", "name", "department", "salary"])
+        df.writeTo("default.test_table").append()
+
+        result = spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX idx_dept_bitmap USING bitmap (department)
+        """).collect()
+
+        assert len(result) == 1
+        assert result[0][1] == "idx_dept_bitmap"
+
+        # Query using the indexed column
+        query_result = spark.sql("""
+            SELECT * FROM default.test_table WHERE department = 'Engineering'
+        """).collect()
+        assert len(query_result) == 3
+
     def test_create_fts_index(self, spark):
         """Test CREATE INDEX with full-text search (FTS)."""
         spark.sql("""

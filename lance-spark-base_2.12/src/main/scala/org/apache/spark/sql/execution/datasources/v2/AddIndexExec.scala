@@ -44,6 +44,8 @@ import scala.collection.JavaConverters._
  *
  * <ul>
  * <li>For BTREE index, it uses a range-based approach that redistributes and sorts data across partitions, creates indexes for each range in parallel, and finally merges them into a global index structure.
+ * <li>For BITMAP index, it builds the index on the full dataset in a single non-distributed operation,
+ * since bitmap indexes do not support per-fragment training.
  * <li>For other index types, it processes each fragment independently in parallel, merges index metadata
  * and commits an index-creation transaction.
  * </ul>
@@ -81,10 +83,28 @@ case class AddIndexExec(
       return Seq(new GenericInternalRow(Array[Any](0L, UTF8String.fromString(indexName))))
     }
 
-    val uuid = UUID.randomUUID()
     val indexType = IndexUtils.buildIndexType(method)
 
-    // Create distributed index job and run it
+    if (IndexUtils.supportsDistributedBuild(indexType)) {
+      // Create distributed index job and run it
+      buildDistributedIndex(lanceDataset, readOptions, indexType, fragmentIds)
+    } else {
+      // Create non-distributed index job and run it
+      buildNonDistributedIndex(readOptions, indexType)
+    }
+
+    Seq(new GenericInternalRow(Array[Any](
+      fragmentIds.size.toLong,
+      UTF8String.fromString(indexName))))
+  }
+
+  private def buildDistributedIndex(
+      lanceDataset: LanceDataset,
+      readOptions: LanceSparkReadOptions,
+      indexType: IndexType,
+      fragmentIds: List[Integer]): Unit = {
+    val uuid = UUID.randomUUID()
+
     createIndexJob(lanceDataset, readOptions, uuid.toString, fragmentIds).run()
 
     val dataset = Utils.openDatasetBuilder(readOptions).build()
@@ -133,10 +153,27 @@ case class AddIndexExec(
     } finally {
       dataset.close()
     }
+  }
 
-    Seq(new GenericInternalRow(Array[Any](
-      fragmentIds.size.toLong,
-      UTF8String.fromString(indexName))))
+  private def buildNonDistributedIndex(
+      readOptions: LanceSparkReadOptions,
+      indexType: IndexType): Unit = {
+    val argsJson = IndexUtils.toJson(args)
+    val params = IndexParams.builder()
+      .setScalarIndexParams(ScalarIndexParams.create(method, argsJson))
+      .build()
+    val indexOptions = IndexOptions
+      .builder(java.util.Arrays.asList(columns: _*), indexType, params)
+      .replace(true)
+      .withIndexName(indexName)
+      .build()
+
+    val dataset = openDataset(readOptions)
+    try {
+      dataset.createIndex(indexOptions)
+    } finally {
+      dataset.close()
+    }
   }
 
   private def createIndexJob(
@@ -514,8 +551,21 @@ object IndexUtils {
   def buildIndexType(method: String): IndexType = {
     method match {
       case "btree" => IndexType.BTREE
+      case "bitmap" => IndexType.BITMAP
       case "fts" => IndexType.INVERTED
       case other => throw new UnsupportedOperationException(s"Unsupported index method: $other")
+    }
+  }
+
+  /**
+   * Returns whether the given index type supports distributed (per-fragment) building.
+   * Index types that don't support it (e.g. bitmap) must be built on the full dataset
+   * in a single operation.
+   */
+  def supportsDistributedBuild(indexType: IndexType): Boolean = {
+    indexType match {
+      case IndexType.BITMAP => false
+      case _ => true
     }
   }
 

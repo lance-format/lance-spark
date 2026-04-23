@@ -22,10 +22,11 @@ The command uses the `ALTER TABLE` syntax to add an index.
 
 The following index methods are supported:
 
-| Method  | Description                                                                 |
-|---------|-----------------------------------------------------------------------------|
-| `btree` | B-tree index for efficient range queries and point lookups on scalar columns. |
-| `fts`   | Full-text search (inverted) index for text search on string columns.        |
+| Method   | Description                                                                 |
+|----------|-----------------------------------------------------------------------------|
+| `btree`  | B-tree index for efficient range queries and point lookups on scalar columns. |
+| `bitmap` | Bitmap index for fast queries on low-cardinality columns using bit arrays.  |
+| `fts`    | Full-text search (inverted) index for text search on string columns.        |
 
 ## Options
 
@@ -39,6 +40,10 @@ For the `btree` method, the following options are supported:
 |-------------|--------|----------------------------------------------|
 | `zone_size` | Long   | The number of rows per zone in the B-tree index. |
 | `build_mode`| String | Index building mode: 'fragment' builds indexes in parallel by fragment; 'range' sorts data by indexed columns first, then partitions and builds indexes in parallel by partition. Default is 'fragment'.|
+
+### Bitmap Options
+
+The `bitmap` method has no additional options. It is best suited for columns with low cardinality (few unique values). Bitmap indices use bit arrays to represent the presence or absence of values, providing fast query performance for equality, range, IN, and IS NULL queries.
 
 ### FTS Options
 
@@ -86,6 +91,15 @@ Create an index and specify the `zone_size` for the B-tree:
     ALTER TABLE lance.db.users CREATE INDEX idx_id_zoned USING btree (id) WITH (zone_size = 2048);
     ```
 
+### Bitmap Index
+
+Create a bitmap index on a low-cardinality column:
+
+=== "SQL"
+    ```sql
+    ALTER TABLE lance.db.employees CREATE INDEX idx_dept USING bitmap (department);
+    ```
+
 ### Full-Text Search Index
 
 Create an FTS index on a text column:
@@ -129,5 +143,5 @@ The `CREATE INDEX` command operates as follows:
 
 ## Notes and Limitations
 
-- **Index Methods**: The `btree` and `fts` methods are supported for scalar index creation.
+- **Index Methods**: The `btree`, `bitmap`, and `fts` methods are supported for scalar index creation.
 - **Index Replacement**: If you create an index with the same name as an existing one, the old index will be replaced by the new one. This is because the underlying implementation uses `replace(true)`.
