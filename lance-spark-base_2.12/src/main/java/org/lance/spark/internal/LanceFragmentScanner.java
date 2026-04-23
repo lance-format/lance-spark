@@ -56,7 +56,18 @@ public class LanceFragmentScanner implements AutoCloseable {
     Dataset dataset = null;
     try {
       LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
-      if (inputPartition.getNamespaceImpl() != null) {
+      // Optionally rebuild the namespace client on the executor so the dataset open routes through
+      // Utils.OpenDatasetBuilder's namespaceClient branch. This preserves the storage options
+      // provider on the Rust side, which refreshes short-lived vended credentials (e.g. STS
+      // tokens) during long-running scans. The price is an eager describeTable() RPC against the
+      // namespace on every fragment open.
+      //
+      // For catalogs whose backing service authenticates per-call (e.g. Hive Metastore over
+      // Kerberos) executors typically lack a TGT and that RPC fails with "GSS initiate failed".
+      // Setting LanceSparkReadOptions.CONFIG_EXECUTOR_CREDENTIAL_REFRESH=false makes executors
+      // skip the rebuild and open the dataset by URI using the initialStorageOptions the driver
+      // already obtained, at the cost of losing the Rust-side credential refresh callback.
+      if (inputPartition.getNamespaceImpl() != null && readOptions.isExecutorCredentialRefresh()) {
         if (LanceRuntime.useNamespaceOnWorkers(inputPartition.getNamespaceImpl())) {
           readOptions.setNamespace(
               LanceRuntime.getOrCreateNamespace(
