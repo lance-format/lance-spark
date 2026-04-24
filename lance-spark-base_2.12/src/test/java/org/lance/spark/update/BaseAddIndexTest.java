@@ -32,6 +32,7 @@ import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -600,5 +601,150 @@ public abstract class BaseAddIndexTest {
     if ("2".equals(System.getenv("LANCE_FTS_FORMAT_VERSION"))) {
       Assertions.assertEquals(2, index.indexVersion());
     }
+  }
+
+  private static final int VECTOR_DIM = 16;
+  // PQ training with num_bits=8 needs ≥ 256 rows (2^8 centroids per subspace).
+  private static final int VECTOR_ROWS_PER_FRAGMENT = 256;
+
+  /**
+   * Build a dataset with an `embedding` fixed-size-list vector column split across two fragments,
+   * for testing IVF-family vector indexes.
+   */
+  private void prepareVectorDataset() {
+    spark.sql(
+        String.format(
+            "create table %s (id int, embedding array<float>) using lance "
+                + "TBLPROPERTIES ('embedding.arrow.fixed-size-list.size' = '%d')",
+            fullTable, VECTOR_DIM));
+    // Two inserts → two fragments, deterministic vectors.
+    insertVectors(0, VECTOR_ROWS_PER_FRAGMENT, 42L);
+    insertVectors(VECTOR_ROWS_PER_FRAGMENT, 2 * VECTOR_ROWS_PER_FRAGMENT, 43L);
+  }
+
+  private void insertVectors(int fromId, int toId, long seed) {
+    Random rng = new Random(seed);
+    String values =
+        IntStream.range(fromId, toId)
+            .mapToObj(
+                i -> {
+                  StringBuilder sb = new StringBuilder("array(");
+                  for (int j = 0; j < VECTOR_DIM; j++) {
+                    if (j > 0) sb.append(", ");
+                    sb.append(rng.nextFloat());
+                  }
+                  sb.append(")");
+                  return String.format("(%d, %s)", i, sb);
+                })
+            .collect(Collectors.joining(","));
+    spark.sql(String.format("insert into %s (id, embedding) values %s", fullTable, values));
+  }
+
+  @Test
+  public void testCreateIvfFlatIndex() {
+    prepareVectorDataset();
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index test_ivf_flat using ivf_flat (embedding) "
+                    + "with (num_partitions=4, metric_type='l2')",
+                fullTable));
+
+    Assertions.assertEquals(
+        "StructType(StructField(fragments_indexed,LongType,true),StructField(index_name,StringType,true))",
+        result.schema().toString());
+
+    Row row = result.collectAsList().get(0);
+    long fragmentsIndexed = row.getLong(0);
+    String indexName = row.getString(1);
+
+    Assertions.assertTrue(fragmentsIndexed >= 2, "Expected at least 2 segments committed");
+    Assertions.assertEquals("test_ivf_flat", indexName);
+
+    checkIndex("test_ivf_flat");
+  }
+
+  @Test
+  public void testCreateIvfPqIndex() {
+    prepareVectorDataset();
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index test_ivf_pq using ivf_pq (embedding) "
+                    + "with (num_partitions=4, num_sub_vectors=4, num_bits=8, metric_type='l2')",
+                fullTable));
+
+    Row row = result.collectAsList().get(0);
+    long fragmentsIndexed = row.getLong(0);
+    String indexName = row.getString(1);
+
+    Assertions.assertTrue(fragmentsIndexed >= 2);
+    Assertions.assertEquals("test_ivf_pq", indexName);
+
+    checkIndex("test_ivf_pq");
+  }
+
+  @Test
+  public void testCreateIvfSqIndex() {
+    prepareVectorDataset();
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index test_ivf_sq using ivf_sq (embedding) "
+                    + "with (num_partitions=4, num_bits=8, metric_type='cosine')",
+                fullTable));
+
+    Row row = result.collectAsList().get(0);
+    long fragmentsIndexed = row.getLong(0);
+    String indexName = row.getString(1);
+
+    Assertions.assertTrue(fragmentsIndexed >= 2);
+    Assertions.assertEquals("test_ivf_sq", indexName);
+
+    checkIndex("test_ivf_sq");
+  }
+
+  @Test
+  public void testRecreateIvfPqIndexReplacesOld() {
+    prepareVectorDataset();
+
+    spark.sql(
+        String.format(
+            "alter table %s create index test_ivf_pq_repeat using ivf_pq (embedding) "
+                + "with (num_partitions=4, num_sub_vectors=4, num_bits=8, metric_type='l2')",
+            fullTable));
+    checkIndex("test_ivf_pq_repeat");
+
+    // Recreate with same name should replace (drop-then-commit).
+    spark.sql(
+        String.format(
+            "alter table %s create index test_ivf_pq_repeat using ivf_pq (embedding) "
+                + "with (num_partitions=4, num_sub_vectors=4, num_bits=8, metric_type='l2')",
+            fullTable));
+    checkIndex("test_ivf_pq_repeat");
+  }
+
+  @Test
+  public void testCreateIvfPqWithoutNumPartitionsFails() {
+    prepareVectorDataset();
+
+    RuntimeException exception =
+        Assertions.assertThrows(
+            RuntimeException.class,
+            () ->
+                spark
+                    .sql(
+                        String.format(
+                            "alter table %s create index test_ivf_pq_missing using ivf_pq (embedding) "
+                                + "with (num_sub_vectors=4)",
+                            fullTable))
+                    .collect());
+
+    Assertions.assertTrue(
+        exception.getMessage().contains("num_partitions"),
+        "Expected error to mention missing num_partitions, got: " + exception.getMessage());
   }
 }
