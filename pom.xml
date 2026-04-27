@@ -53,6 +53,12 @@
         <lance-spark.version>0.4.0-beta.3</lance-spark.version>
         <lance.version>6.0.0-beta.2</lance.version>
         <lance-namespace-impl.version>0.1.3</lance-namespace-impl.version>
+        <!-- Pinned to 0.84.1 because 0.85.0 removed the deprecated SimpleExtensionURI proto class
+             entirely, leaving only SimpleExtensionURN. Lance's datafusion-substrait consumer (as of
+             lance-core 5.0.0-beta.5) still uses the deprecated URI fields and leaves URN empty,
+             so 0.85+ is wire-incompatible. 0.84.1 has BOTH URI and URN classes available, giving
+             us a forward path when Lance upgrades. -->
+        <substrait-java.version>0.84.1</substrait-java.version>
 
         <arrow14.version>14.0.2</arrow14.version>
         <arrow15.version>15.0.2</arrow15.version>
@@ -187,6 +193,33 @@
                 <artifactId>arrow-dataset</artifactId>
                 <version>${arrow.version}</version>
             </dependency>
+            <!-- Substrait Java for filter / aggregate pushdown encoding. The bundle modules
+                 shade+relocate substrait and protobuf; downstream bundle users are isolated
+                 from Spark's runtime protobuf version. -->
+            <dependency>
+                <groupId>io.substrait</groupId>
+                <artifactId>core</artifactId>
+                <version>${substrait-java.version}</version>
+                <exclusions>
+                    <!-- substrait-java's runtime-scope slf4j-api shadows the compile-time
+                         slf4j-api Spark's Logging trait needs. Spark provides slf4j adapters,
+                         so excluding here is safe. -->
+                    <exclusion>
+                        <groupId>org.slf4j</groupId>
+                        <artifactId>slf4j-api</artifactId>
+                    </exclusion>
+                </exclusions>
+            </dependency>
+            <!-- Pin protobuf-java to the version substrait-java 0.84.1 was compiled against.
+                 substrait-java's bytecode calls APIs (e.g. LazyStringArrayList.emptyList())
+                 absent from Spark's provided protobuf 3.19.6 / 4.x. At runtime inside the
+                 bundle, protobuf is relocated and this version is irrelevant; this pin only
+                 matters for the un-shaded test classpath. -->
+            <dependency>
+                <groupId>com.google.protobuf</groupId>
+                <artifactId>protobuf-java</artifactId>
+                <version>3.25.8</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
@@ -201,6 +234,14 @@
                     <artifactId>slf4j-api</artifactId>
                 </exclusion>
             </exclusions>
+        </dependency>
+        <!-- Substrait Java protobuf classes for filter / aggregate pushdown encoding.
+             Inherited by every child module so cross-compiled version-specific modules
+             (3.4 / 3.5 / 4.0 / 4.1) can compile sources from lance-spark-base_2.12 that
+             import io.substrait.proto.*. -->
+        <dependency>
+            <groupId>io.substrait</groupId>
+            <artifactId>core</artifactId>
         </dependency>
         <!-- lance-namespace-core is now included transitively via lance-core -->
         <dependency>

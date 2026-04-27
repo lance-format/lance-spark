@@ -96,6 +96,17 @@
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheLicenseResourceTransformer" />
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheNoticeResourceTransformer" />
                             </transformers>
+                            <relocations>
+                                <!-- See lance-spark-bundle-3.5_2.12/pom.xml for rationale. -->
+                                <relocation>
+                                    <pattern>io.substrait</pattern>
+                                    <shadedPattern>org.lance.spark.shaded.substrait</shadedPattern>
+                                </relocation>
+                                <relocation>
+                                    <pattern>com.google.protobuf</pattern>
+                                    <shadedPattern>org.lance.spark.shaded.protobuf</shadedPattern>
+                                </relocation>
+                            </relocations>
                             <filters>
                                 <filter>
                                     <artifact>*:*</artifact>

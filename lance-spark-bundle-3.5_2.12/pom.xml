@@ -92,6 +92,20 @@
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheLicenseResourceTransformer" />
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheNoticeResourceTransformer" />
                             </transformers>
+                            <relocations>
+                                <!-- Isolate substrait-java's bundled protobuf from Spark's
+                                     runtime protobuf. Both relocations are required: substrait
+                                     classes reference com.google.protobuf directly, so
+                                     relocating substrait without protobuf would still leak. -->
+                                <relocation>
+                                    <pattern>io.substrait</pattern>
+                                    <shadedPattern>org.lance.spark.shaded.substrait</shadedPattern>
+                                </relocation>
+                                <relocation>
+                                    <pattern>com.google.protobuf</pattern>
+                                    <shadedPattern>org.lance.spark.shaded.protobuf</shadedPattern>
+                                </relocation>
+                            </relocations>
                             <filters>
                                 <filter>
                                     <artifact>*:*</artifact>
