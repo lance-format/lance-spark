@@ -35,8 +35,9 @@ Use `-pl <module> -am` to target a specific Spark/Scala version and build its de
 
 - Use Scala for new code unless Java is required for Spark API compatibility.
 - Follow existing code style — enforced by Spotless (`checkstyle.xml`) and scalafmt (`.scalafmt.conf`).
-- Prefer top-level imports over fully qualified class names.
+- Use top-level imports — do not use fully qualified class names.
 - Keep the connector logic thin — delegate to `lance-core` where possible.
+- **Never open a Lance dataset directly.** Use `Utils.openDatasetBuilder()` to construct an `OpenDatasetBuilder` from `LanceSparkReadOptions` or `LanceSparkWriteOptions`. The builder handles storage option merging and runtime session management.
 
 ## Documentation
 
@@ -49,6 +50,10 @@ Use `-pl <module> -am` to target a specific Spark/Scala version and build its de
 - Add tests to existing test files/suites when possible rather than creating new ones.
 - Tests run against real Lance datasets (no mocking the storage layer).
 - For Spark version-specific behavior, add tests in the appropriate version module.
+
+## Git Workflow
+
+- Never force-push commits. Append new commits instead to keep the log clean for incremental review.
 
 ## Review Guidelines
 
