@@ -44,6 +44,23 @@ public class LanceSparkWriteOptionsTest {
   }
 
   @Test
+  public void fileFormatVersionUsesValueEquality() {
+    LanceSparkWriteOptions left =
+        LanceSparkWriteOptions.builder()
+            .datasetUri(TEMP_URL)
+            .fileFormatVersion(new String("stable"))
+            .build();
+    LanceSparkWriteOptions right =
+        LanceSparkWriteOptions.builder()
+            .datasetUri(TEMP_URL)
+            .fileFormatVersion(new String("stable"))
+            .build();
+
+    assertEquals(left, right);
+    assertEquals(left.hashCode(), right.hashCode());
+  }
+
+  @Test
   public void withVersionCopiesOptions() {
     LanceSparkWriteOptions base = LanceSparkWriteOptions.from(TEMP_URL);
     LanceSparkWriteOptions pinned = base.withVersion(3L);

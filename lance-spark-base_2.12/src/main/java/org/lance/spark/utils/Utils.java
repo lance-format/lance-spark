@@ -78,6 +78,9 @@ public class Utils {
     private final Integer metadataCacheSize;
 
     private Map<String, String> initialStorageOptions;
+    private String runtimeNamespaceImpl;
+    private Map<String, String> runtimeNamespaceProperties;
+    private List<String> runtimeTableId;
 
     private OpenDatasetBuilder(LanceSparkReadOptions opts) {
       this.uri = opts.getDatasetUri();
@@ -106,6 +109,15 @@ public class Utils {
     /** Sets initial storage options from {@code describeTable()}. */
     public OpenDatasetBuilder initialStorageOptions(Map<String, String> initialStorageOptions) {
       this.initialStorageOptions = initialStorageOptions;
+      return this;
+    }
+
+    /** Reconnects a namespace when this builder is used after options deserialization. */
+    public OpenDatasetBuilder runtimeNamespace(
+        String namespaceImpl, Map<String, String> namespaceProperties, List<String> tableId) {
+      this.runtimeNamespaceImpl = namespaceImpl;
+      this.runtimeNamespaceProperties = namespaceProperties;
+      this.runtimeTableId = tableId;
       return this;
     }
 
@@ -138,6 +150,19 @@ public class Utils {
             .tableId(tableId)
             .readOptions(roBuilder.build())
             .build();
+      }
+      if (runtimeNamespaceImpl != null) {
+        LanceNamespace runtimeNamespace =
+            LanceRuntime.getOrCreateNamespace(runtimeNamespaceImpl, runtimeNamespaceProperties);
+        List<String> effectiveTableId = runtimeTableId != null ? runtimeTableId : tableId;
+        if (runtimeNamespace != null && effectiveTableId != null) {
+          return Dataset.open()
+              .allocator(LanceRuntime.allocator())
+              .namespaceClient(runtimeNamespace)
+              .tableId(effectiveTableId)
+              .readOptions(roBuilder.build())
+              .build();
+        }
       }
       return Dataset.open()
           .allocator(LanceRuntime.allocator())

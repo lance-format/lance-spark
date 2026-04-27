@@ -26,6 +26,92 @@ requires_update_or_merge = pytest.mark.skipif(
     reason="UPDATE/MERGE require Spark 3.5+ (row-level rewrite rules not available in 3.4)"
 )
 
+LANCE_CATALOG = "lance"
+
+
+def _java_hash_map(spark, values):
+    java_map = spark._jvm.java.util.HashMap()
+    for key, value in values.items():
+        if value is not None:
+            java_map.put(key, value)
+    return java_map
+
+
+def _lance_storage_options(spark):
+    prefix = f"spark.sql.catalog.{LANCE_CATALOG}.storage."
+    return {
+        key[len(prefix) :]: value
+        for key, value in spark.sparkContext.getConf().getAll()
+        if key.startswith(prefix)
+    }
+
+
+def _table_location(spark, table_name):
+    rows = (
+        spark.sql(f"DESCRIBE EXTENDED {table_name}")
+        .filter("col_name == 'Location'")
+        .collect()
+    )
+    assert rows, f"DESCRIBE EXTENDED did not return a Location row for {table_name}"
+    return rows[0].data_type
+
+
+def _read_options_builder(jvm):
+    try:
+        return jvm.org.lance.ReadOptions.Builder()
+    except Exception:
+        return getattr(jvm.org.lance, "ReadOptions$Builder")()
+
+
+def _lance_index_metadata(spark, table_name, index_name):
+    if getattr(spark, "_lance_backend", None) == "lancedb":
+        return None
+
+    jvm = spark._jvm
+    storage_options = _java_hash_map(spark, _lance_storage_options(spark))
+    read_options = (
+        _read_options_builder(jvm)
+        .setStorageOptions(storage_options)
+        .setSession(jvm.org.lance.spark.LanceRuntime.session(LANCE_CATALOG))
+        .build()
+    )
+    dataset = (
+        jvm.org.lance.Dataset.open()
+        .allocator(jvm.org.lance.spark.LanceRuntime.allocator())
+        .uri(_table_location(spark, table_name))
+        .readOptions(read_options)
+        .build()
+    )
+    try:
+        indexes = dataset.getIndexes()
+        for pos in range(indexes.size()):
+            index = indexes.get(pos)
+            if index.name() == index_name:
+                index_details = index.indexDetails()
+                return {
+                    "name": index.name(),
+                    "index_type": index.indexType().name(),
+                    "index_version": index.indexVersion(),
+                    "index_details_present": index_details.isPresent(),
+                    "index_details_length": (
+                        len(index_details.get()) if index_details.isPresent() else 0
+                    ),
+                }
+    finally:
+        dataset.close()
+
+    pytest.fail(f"Index {index_name} not found in {table_name}")
+
+
+def _assert_lance_index_metadata(spark, table_name, index_name, expected_type):
+    metadata = _lance_index_metadata(spark, table_name, index_name)
+    if metadata is None:
+        return None
+    assert metadata["index_type"] == expected_type
+    assert metadata["index_details_present"]
+    assert metadata["index_details_length"] > 0
+    return metadata
+
 
 # =============================================================================
 # DDL (Data Definition Language) Tests
@@ -653,6 +739,7 @@ class TestDDLIndex:
         """).collect()
         assert len(query_result) == 1
         assert query_result[0].id == 50
+        _assert_lance_index_metadata(spark, "default.test_table", "idx_id", "BTREE")
 
     def test_create_btree_index_on_string(self, spark):
         """Test CREATE INDEX with BTree on string column."""
@@ -689,6 +776,7 @@ class TestDDLIndex:
             SELECT * FROM default.employees WHERE department = 'Engineering'
         """).collect()
         assert len(query_result) == 3
+        _assert_lance_index_metadata(spark, "default.employees", "idx_dept", "BTREE")
 
     def test_create_fts_index(self, spark):
         """Test CREATE INDEX with full-text search (FTS)."""
@@ -719,6 +807,46 @@ class TestDDLIndex:
 
         assert len(result) == 1
         assert result[0][1] == "idx_content_fts"
+        metadata = _assert_lance_index_metadata(
+            spark, "default.test_table", "idx_content_fts", "INVERTED"
+        )
+        if metadata is not None:
+            assert metadata["index_version"] > 0
+            if os.environ.get("LANCE_FTS_FORMAT_VERSION") == "2":
+                assert metadata["index_version"] == 2
+
+    def test_create_fts_index_honors_format_version_v2(self, spark):
+        """Test FTS v2 when the Docker test process enables the Lance runtime flag."""
+        if os.environ.get("LANCE_FTS_FORMAT_VERSION") != "2":
+            pytest.skip("run with LANCE_FTS_FORMAT_VERSION=2")
+        if getattr(spark, "_lance_backend", None) == "lancedb":
+            pytest.skip("direct JVM dataset inspection is not configured for REST-backed tables")
+
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                content STRING
+            )
+        """)
+
+        data = [
+            (1, "distributed indexing records metadata"),
+            (2, "full text search v2"),
+            (3, "lance spark integration"),
+        ]
+        df = spark.createDataFrame(data, ["id", "content"])
+        df.writeTo("default.test_table").append()
+
+        spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX idx_content_fts_v2 USING fts (content)
+            WITH ( base_tokenizer = 'simple', language = 'English' )
+        """)
+
+        metadata = _assert_lance_index_metadata(
+            spark, "default.test_table", "idx_content_fts_v2", "INVERTED"
+        )
+        assert metadata["index_version"] == 2
 
     def test_create_index_empty_table(self, spark):
         """Test CREATE INDEX on empty table."""

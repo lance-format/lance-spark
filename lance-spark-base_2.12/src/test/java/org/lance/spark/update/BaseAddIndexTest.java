@@ -16,6 +16,7 @@ package org.lance.spark.update;
 import org.lance.index.Index;
 import org.lance.index.IndexCriteria;
 import org.lance.index.IndexDescription;
+import org.lance.index.IndexType;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
@@ -302,7 +303,7 @@ public abstract class BaseAddIndexTest {
     Assertions.assertEquals("test_fts_index", indexName);
 
     // Check index is created successfully
-    checkIndex("test_fts_index");
+    checkFtsIndex("test_fts_index");
 
     // Verify query using the text column
     Dataset<Row> query =
@@ -344,7 +345,7 @@ public abstract class BaseAddIndexTest {
     Assertions.assertTrue(fragmentsIndexed >= 2, "Expected at least 2 fragments to be indexed");
     Assertions.assertEquals("test_fts_stem", indexName);
 
-    checkIndex("test_fts_stem");
+    checkFtsIndex("test_fts_stem");
   }
 
   @Test
@@ -377,7 +378,7 @@ public abstract class BaseAddIndexTest {
     Assertions.assertEquals("test_fts_repeat", indexName1);
 
     // Check index is created successfully
-    checkIndex("test_fts_repeat");
+    checkFtsIndex("test_fts_repeat");
 
     // Second FTS index creation with same name (should replace)
     Dataset<Row> result2 =
@@ -395,7 +396,7 @@ public abstract class BaseAddIndexTest {
     Assertions.assertEquals("test_fts_repeat", indexName2);
 
     // Check index still exists after replacement
-    checkIndex("test_fts_repeat");
+    checkFtsIndex("test_fts_repeat");
   }
 
   @Test
@@ -502,6 +503,19 @@ public abstract class BaseAddIndexTest {
       Assertions.assertTrue(
           index.indexDetails().isPresent(),
           "index_details should be populated for index '" + indexName + "'");
+      Assertions.assertTrue(
+          index.indexDetails().get().length > 0,
+          "index_details should not be empty for index '" + indexName + "'");
+      Assertions.assertEquals(
+          IndexType.valueOf(expectedIndexType.toUpperCase()),
+          index.indexType(),
+          "Index type mismatch for '" + indexName + "'");
+      if (index.indexType() == IndexType.INVERTED) {
+        Assertions.assertTrue(index.indexVersion() > 0, "FTS index version should be positive");
+        if ("2".equals(System.getenv("LANCE_FTS_FORMAT_VERSION"))) {
+          Assertions.assertEquals(2, index.indexVersion());
+        }
+      }
 
       // criteria-based overload
       IndexCriteria criteria = new IndexCriteria.Builder().build();
@@ -531,7 +545,7 @@ public abstract class BaseAddIndexTest {
     }
   }
 
-  private void checkIndex(String indexName) {
+  private Index checkIndex(String indexName) {
     // Check index is created successfully
     org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
     try {
@@ -539,8 +553,26 @@ public abstract class BaseAddIndexTest {
       Assertions.assertTrue(indexList.size() >= 1);
       Set<String> indexNames = indexList.stream().map(Index::name).collect(Collectors.toSet());
       Assertions.assertTrue(indexNames.contains(indexName));
+      Index index =
+          indexList.stream()
+              .filter(i -> indexName.equals(i.name()))
+              .findFirst()
+              .orElseThrow(() -> new AssertionError("Index not found: " + indexName));
+      Assertions.assertTrue(index.indexDetails().isPresent(), "Index details should be present");
+      Assertions.assertTrue(
+          index.indexDetails().get().length > 0, "Index details should not be empty");
+      return index;
     } finally {
       lanceDataset.close();
+    }
+  }
+
+  private void checkFtsIndex(String indexName) {
+    Index index = checkIndex(indexName);
+    Assertions.assertEquals(IndexType.INVERTED, index.indexType());
+    Assertions.assertTrue(index.indexVersion() > 0, "FTS index version should be positive");
+    if ("2".equals(System.getenv("LANCE_FTS_FORMAT_VERSION"))) {
+      Assertions.assertEquals(2, index.indexVersion());
     }
   }
 }

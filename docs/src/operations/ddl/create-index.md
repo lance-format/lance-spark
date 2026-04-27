@@ -57,6 +57,19 @@ For the `fts` method, the following options are required:
 
 For advanced tokenizer configuration, refer to the [Lance FTS documentation](https://lance.org/format/table/index/scalar/fts/#tokenizers).
 
+### FTS Format Version
+
+Lance FTS index format v2 is selected by the Lance runtime environment variable `LANCE_FTS_FORMAT_VERSION=2`. Configure it on both the Spark driver and executors before creating the index.
+
+=== "spark-submit"
+    ```bash
+    LANCE_FTS_FORMAT_VERSION=2 spark-submit \
+        --conf spark.executorEnv.LANCE_FTS_FORMAT_VERSION=2 \
+        ...
+    ```
+
+Spark SQL currently does not expose a per-index `fts_version` option. Use `USING fts` with the normal FTS options shown above; Spark records the index details and version returned by Lance.
+
 ## Examples
 
 ### Basic Index Creation
@@ -103,6 +116,7 @@ Create an FTS index on a text column:
         with_position = true
     );
     ```
+
 ## Output
 
 The `CREATE INDEX` command returns the following information about the operation:
