@@ -19,6 +19,7 @@ import org.lance.namespace.LanceNamespace;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -67,7 +68,43 @@ public final class LanceRuntime {
   /** Per-catalog sessions for cache isolation (lazy initialized). */
   private static final Map<String, Session> CATALOG_SESSIONS = new ConcurrentHashMap<>();
 
+  /** External namespace implementation aliases used by Spark catalog configuration. */
+  private static final Map<String, String> EXTERNAL_NAMESPACE_IMPLS =
+      createExternalNamespaceImpls();
+
+  /** Namespace implementations that can use driver-resolved URI and storage options on tasks. */
+  private static final Map<String, Boolean> USE_NAMESPACE_ON_WORKERS =
+      createUseNamespaceOnWorkers();
+
   private LanceRuntime() {}
+
+  private static Map<String, String> createExternalNamespaceImpls() {
+    Map<String, String> impls = new HashMap<>();
+    impls.put("glue", "org.lance.namespace.glue.GlueNamespace");
+    impls.put("hive2", "org.lance.namespace.hive2.Hive2Namespace");
+    impls.put("hive3", "org.lance.namespace.hive3.Hive3Namespace");
+    impls.put("iceberg", "org.lance.namespace.iceberg.IcebergNamespace");
+    impls.put("unity", "org.lance.namespace.unity.UnityNamespace");
+    impls.put("polaris", "org.lance.namespace.polaris.PolarisNamespace");
+    return Collections.unmodifiableMap(impls);
+  }
+
+  private static Map<String, Boolean> createUseNamespaceOnWorkers() {
+    Map<String, Boolean> impls = new HashMap<>();
+    impls.put("glue", false);
+    return Collections.unmodifiableMap(impls);
+  }
+
+  static void registerKnownNamespaceImpl(String namespaceImpl) {
+    String className = EXTERNAL_NAMESPACE_IMPLS.get(namespaceImpl);
+    if (className != null && !LanceNamespace.isRegistered(namespaceImpl)) {
+      LanceNamespace.registerNamespaceImpl(namespaceImpl, className);
+    }
+  }
+
+  public static boolean useNamespaceOnWorkers(String namespaceImpl) {
+    return USE_NAMESPACE_ON_WORKERS.getOrDefault(namespaceImpl, true);
+  }
 
   /**
    * Returns the global shared Arrow buffer allocator.
@@ -212,6 +249,7 @@ public final class LanceRuntime {
     if (namespaceImpl == null) {
       return null;
     }
+    registerKnownNamespaceImpl(namespaceImpl);
     return LanceNamespace.connect(namespaceImpl, namespaceProperties, allocator());
   }
 

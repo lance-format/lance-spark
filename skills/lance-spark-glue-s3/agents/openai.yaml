@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lance Spark Glue/S3"
+  short_description: "Use Lance Spark with AWS Glue and S3"
+  default_prompt: "Use $lance-spark-glue-s3 to configure and validate Lance Spark against AWS Glue Data Catalog and S3."

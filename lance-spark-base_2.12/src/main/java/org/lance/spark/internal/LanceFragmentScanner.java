@@ -57,9 +57,13 @@ public class LanceFragmentScanner implements AutoCloseable {
     try {
       LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
       if (inputPartition.getNamespaceImpl() != null) {
-        readOptions.setNamespace(
-            LanceRuntime.getOrCreateNamespace(
-                inputPartition.getNamespaceImpl(), inputPartition.getNamespaceProperties()));
+        if (LanceRuntime.useNamespaceOnWorkers(inputPartition.getNamespaceImpl())) {
+          readOptions.setNamespace(
+              LanceRuntime.getOrCreateNamespace(
+                  inputPartition.getNamespaceImpl(), inputPartition.getNamespaceProperties()));
+        } else {
+          readOptions.setNamespace(null);
+        }
       }
       dataset =
           Utils.openDatasetBuilder(readOptions)
