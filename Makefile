@@ -41,6 +41,14 @@ endif
 # Example: make docker-build-test-base DOCKER_CACHE_FROM="type=gha" DOCKER_CACHE_TO="type=gha,mode=max"
 DOCKER_CACHE_FROM ?=
 DOCKER_CACHE_TO ?=
+comma := ,
+
+NAMESPACE_IMPLS_JAVA_DIR ?= ../lance-namespace-impls/java
+NAMESPACE_DOCKER_JARS_DIR := docker/jars
+LANCE_NAMESPACE_GLUE_BUNDLE_JAR ?= $(firstword $(wildcard $(NAMESPACE_IMPLS_JAVA_DIR)/lance-namespace-glue/target/lance-namespace-glue-*-bundle.jar))
+EFFECTIVE_TEST_BACKENDS := $(if $(TEST_BACKENDS),$(TEST_BACKENDS),$(if $(AWS_S3_BUCKET_NAME),glue,))
+TEST_BACKEND_LIST := $(subst $(comma), ,$(EFFECTIVE_TEST_BACKENDS))
+NEEDS_GLUE_BUNDLE := $(filter glue,$(TEST_BACKEND_LIST))
 
 DOCKER_COMPOSE := $(shell \
 	if docker compose version >/dev/null 2>&1; then \
@@ -165,8 +173,27 @@ docker-build-test-base:
 		-t lance-spark-test-base:$(SPARK_VERSION)_$(SCALA_VERSION) \
 		.
 
+.PHONY: docker-stage-namespace-jars
+docker-stage-namespace-jars:
+	@mkdir -p $(NAMESPACE_DOCKER_JARS_DIR)
+	@rm -f $(NAMESPACE_DOCKER_JARS_DIR)/lance-namespace-*.jar
+	@if [ -n "$(LANCE_NAMESPACE_GLUE_BUNDLE_JAR)" ]; then \
+		if [ ! -f "$(LANCE_NAMESPACE_GLUE_BUNDLE_JAR)" ]; then \
+			echo "Error: LANCE_NAMESPACE_GLUE_BUNDLE_JAR not found: $(LANCE_NAMESPACE_GLUE_BUNDLE_JAR)"; \
+			exit 1; \
+		fi; \
+		cp "$(LANCE_NAMESPACE_GLUE_BUNDLE_JAR)" "$(NAMESPACE_DOCKER_JARS_DIR)/"; \
+		echo "Staged namespace implementation jar: $(LANCE_NAMESPACE_GLUE_BUNDLE_JAR)"; \
+	elif [ -n "$(NEEDS_GLUE_BUNDLE)" ]; then \
+		echo "Error: Glue backend requested but no Glue namespace bundle jar was found."; \
+		echo "Run 'make bundle-glue' in $(NAMESPACE_IMPLS_JAVA_DIR) or set LANCE_NAMESPACE_GLUE_BUNDLE_JAR."; \
+		exit 1; \
+	else \
+		echo "No namespace implementation jars staged."; \
+	fi
+
 .PHONY: docker-build-test
-docker-build-test:
+docker-build-test: docker-stage-namespace-jars
 	@ls $(BUNDLE_MODULE)/target/$(BUNDLE_MODULE)-*.jar >/dev/null 2>&1 || \
 		(echo "Error: Bundle jar not found. Run 'make bundle' first." && exit 1)
 	docker build --no-cache \
@@ -189,6 +216,16 @@ docker-test:
 		$(if $(LANCEDB_REGION),-e LANCEDB_REGION=$(LANCEDB_REGION)) \
 		$(if $(TEST_BACKENDS),-e TEST_BACKENDS=$(TEST_BACKENDS)) \
 		$(if $(LANCE_FTS_FORMAT_VERSION),-e LANCE_FTS_FORMAT_VERSION=$(LANCE_FTS_FORMAT_VERSION)) \
+		$(if $(AWS_REGION),-e AWS_REGION=$(AWS_REGION)) \
+		$(if $(AWS_DEFAULT_REGION),-e AWS_DEFAULT_REGION=$(AWS_DEFAULT_REGION)) \
+		$(if $(AWS_S3_BUCKET_NAME),-e AWS_S3_BUCKET_NAME=$(AWS_S3_BUCKET_NAME)) \
+		$(if $(AWS_GLUE_CATALOG_ID),-e AWS_GLUE_CATALOG_ID=$(AWS_GLUE_CATALOG_ID)) \
+		$(if $(AWS_GLUE_ENDPOINT),-e AWS_GLUE_ENDPOINT=$(AWS_GLUE_ENDPOINT)) \
+		$(if $(AWS_ACCESS_KEY_ID),-e AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID)) \
+		$(if $(AWS_SECRET_ACCESS_KEY),-e AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY)) \
+		$(if $(AWS_SESSION_TOKEN),-e AWS_SESSION_TOKEN=$(AWS_SESSION_TOKEN)) \
+		$(if $(AWS_PROFILE),-e AWS_PROFILE=$(AWS_PROFILE)) \
+		$(if $(AWS_PROFILE),-v $(HOME)/.aws:/root/.aws:ro) \
 		lance-spark-test:$(SPARK_VERSION)_$(SCALA_VERSION) \
 		"pytest /home/lance/tests/ -v --timeout=180"
 

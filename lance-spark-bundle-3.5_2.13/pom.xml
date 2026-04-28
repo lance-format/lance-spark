@@ -51,7 +51,7 @@
                             <overWriteReleases>false</overWriteReleases>
                             <overWriteSnapshots>false</overWriteSnapshots>
                             <overWriteIfNewer>true</overWriteIfNewer>
-                            <includeArtifactIds>lance-core,lance-spark-base_${scala.compat.version},lance-spark-${spark35.compat.version}_${scala.compat.version},arrow-c-data,jar-jni,arrow-dataset</includeArtifactIds>
+                            <includeArtifactIds>lance-core,lance-namespace-core,lance-namespace-apache-client,lance-spark-base_${scala.compat.version},lance-spark-${spark35.compat.version}_${scala.compat.version},arrow-c-data,jar-jni,arrow-dataset</includeArtifactIds>
                         </configuration>
                     </execution>
                     <execution>

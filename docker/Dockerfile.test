@@ -18,6 +18,8 @@ ARG SCALA_VERSION=2.13
 ADD "https://www.random.org/cgi-bin/randbyte?nbytes=10&format=h" skipcache
 
 COPY lance-spark-bundle-${SPARK_MAJOR_VERSION}_${SCALA_VERSION}/target/lance-spark-bundle-${SPARK_MAJOR_VERSION}_${SCALA_VERSION}-*.jar ${SPARK_HOME}/jars/
+COPY docker/jars/ ${SPARK_HOME}/jars/
+RUN rm -f ${SPARK_HOME}/jars/.gitignore
 
 # Spark configuration and entrypoint
 COPY docker/spark-defaults.conf ${SPARK_HOME}/conf/

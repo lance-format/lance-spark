@@ -238,6 +238,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     this.namespaceProperties = new HashMap<>(namespaceOptions);
 
     // Use the global buffer allocator
+    LanceRuntime.registerKnownNamespaceImpl(impl);
     this.namespace = LanceNamespace.connect(impl, namespaceOptions, LanceRuntime.allocator());
 
     // Handle single-level namespace configuration
@@ -723,8 +724,13 @@ public abstract class BaseLanceNamespaceSparkCatalog
       namespace.deregisterTable(deregisterRequest);
 
       return true;
+    } catch (LanceNamespaceException e) {
+      if (e.getErrorCode() == ErrorCode.TABLE_NOT_FOUND) {
+        return false;
+      }
+      throw e;
     } catch (Exception e) {
-      return false;
+      throw new RuntimeException("Failed to drop Lance table: " + ident, e);
     }
   }
 
@@ -757,8 +763,13 @@ public abstract class BaseLanceNamespaceSparkCatalog
       namespace.dropTable(dropRequest);
 
       return true;
+    } catch (LanceNamespaceException e) {
+      if (e.getErrorCode() == ErrorCode.TABLE_NOT_FOUND) {
+        return false;
+      }
+      throw e;
     } catch (Exception e) {
-      return false;
+      throw new RuntimeException("Failed to purge Lance table: " + ident, e);
     }
   }
 
