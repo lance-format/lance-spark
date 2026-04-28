@@ -19,7 +19,7 @@ on:
     paths-ignore:
       - 'docs/**'
       - 'README.md'
-  pull_request_target:
+  pull_request:
     types:
       - opened
       - synchronize
@@ -49,7 +49,7 @@ env:
 
 jobs:
   glue-s3-integration-test:
-    if: github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Glue/S3 Docker Test Spark ${{ matrix.spark-version }} / Scala ${{ matrix.scala-version }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -116,6 +116,28 @@ jobs:
             SPARK_VERSION=${{ matrix.spark-version }} \
             SCALA_VERSION=${{ matrix.scala-version }} \
             LANCE_NAMESPACE_IMPL_VERSION=${{ steps.docker-args.outputs.lance-namespace-impl-version }}
+      - name: Verify AWS Glue/S3 targets
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+          AWS_S3_BUCKET_NAME: ${{ secrets.AWS_S3_BUCKET_NAME }}
+          AWS_GLUE_CATALOG_ID: ${{ secrets.AWS_GLUE_CATALOG_ID }}
+        run: |
+          if [ -z "${AWS_S3_BUCKET_NAME}" ] || [ -z "${AWS_ACCESS_KEY_ID}" ] || [ -z "${AWS_SECRET_ACCESS_KEY}" ] || [ -z "${AWS_REGION}" ]; then
+            echo "AWS_S3_BUCKET_NAME, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION secrets are required for Glue/S3 integration tests"
+            exit 1
+          fi
+          aws --version
+          aws sts get-caller-identity
+          aws s3api head-bucket --bucket "${AWS_S3_BUCKET_NAME}"
+          glue_args=(--region "${AWS_REGION}" --max-results 1)
+          if [ -n "${AWS_GLUE_CATALOG_ID}" ]; then
+            glue_args+=(--catalog-id "${AWS_GLUE_CATALOG_ID}")
+          fi
+          aws glue get-databases "${glue_args[@]}" >/dev/null
       - name: Run Glue/S3 Docker integration tests
         env:
           TEST_BACKENDS: ${{ matrix.test-backends }}
@@ -126,13 +148,23 @@ jobs:
           AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
           AWS_S3_BUCKET_NAME: ${{ secrets.AWS_S3_BUCKET_NAME }}
           AWS_GLUE_CATALOG_ID: ${{ secrets.AWS_GLUE_CATALOG_ID }}
-          AWS_GLUE_ENDPOINT: ${{ secrets.AWS_GLUE_ENDPOINT }}
+          AWS_GLUE_ROOT: s3://${{ secrets.AWS_S3_BUCKET_NAME }}/lance_spark_glue_test_${{ github.run_id }}_${{ github.run_attempt }}_${{ matrix.spark-version }}_${{ matrix.scala-version }}
         run: |
-          if [ -z "${AWS_S3_BUCKET_NAME}" ] || [ -z "${AWS_ACCESS_KEY_ID}" ] || [ -z "${AWS_SECRET_ACCESS_KEY}" ] || [ -z "${AWS_REGION}" ]; then
-            echo "AWS_S3_BUCKET_NAME, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION secrets are required for Glue/S3 integration tests"
-            exit 1
-          fi
           make docker-test \
             SPARK_VERSION=${{ matrix.spark-version }} \
             SCALA_VERSION=${{ matrix.scala-version }} \
             TEST_BACKENDS=${{ matrix.test-backends }}
+      - name: Clean up Glue/S3 test data
+        if: always()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+          AWS_S3_BUCKET_NAME: ${{ secrets.AWS_S3_BUCKET_NAME }}
+          AWS_GLUE_ROOT: s3://${{ secrets.AWS_S3_BUCKET_NAME }}/lance_spark_glue_test_${{ github.run_id }}_${{ github.run_attempt }}_${{ matrix.spark-version }}_${{ matrix.scala-version }}
+        run: |
+          if [ -n "${AWS_S3_BUCKET_NAME}" ]; then
+            aws s3 rm "${AWS_GLUE_ROOT}" --recursive || true
+          fi

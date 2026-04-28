@@ -198,6 +198,14 @@ if AWS_S3_BUCKET_NAME:
 _backends = os.environ.get("TEST_BACKENDS", ",".join(_all_backends)).split(",")
 
 
+def pytest_report_header(config):
+    lines = [f"lance spark backends: {','.join(_backends)}"]
+    if "glue" in _backends:
+        lines.append(f"aws glue root: {AWS_GLUE_ROOT}")
+        lines.append(f"aws region: {AWS_REGION}")
+    return lines
+
+
 @pytest.fixture(scope="module", params=_backends)
 def spark(request):
     """Create a Spark session configured with Lance catalog.
