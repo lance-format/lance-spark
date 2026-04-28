@@ -19,7 +19,7 @@ on:
     paths-ignore:
       - 'docs/**'
       - 'README.md'
-  pull_request:
+  pull_request_target:
     types:
       - opened
       - synchronize
@@ -49,37 +49,23 @@ env:
 
 jobs:
   glue-s3-integration-test:
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
-    name: Glue/S3 Docker Test Spark ${{ matrix.spark-version }} / Scala ${{ matrix.scala-version }}
+    if: >
+      github.event_name != 'pull_request_target' ||
+      github.event.pull_request.author_association == 'OWNER' ||
+      github.event.pull_request.author_association == 'MEMBER' ||
+      github.event.pull_request.author_association == 'COLLABORATOR'
+    name: Glue/S3 Docker Test Spark 4.1 / Scala 2.13
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        include:
-          - spark-version: "3.4"
-            scala-version: "2.12"
-            test-backends: "glue"
-          - spark-version: "3.4"
-            scala-version: "2.13"
-            test-backends: "glue"
-          - spark-version: "3.5"
-            scala-version: "2.12"
-            test-backends: "glue"
-          - spark-version: "3.5"
-            scala-version: "2.13"
-            test-backends: "glue"
-          - spark-version: "4.0"
-            scala-version: "2.13"
-            test-backends: "glue"
-          - spark-version: "4.1"
-            scala-version: "2.13"
-            test-backends: "glue"
+    env:
+      SPARK_VERSION: "4.1"
+      SCALA_VERSION: "2.13"
+      TEST_BACKENDS: glue
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -90,7 +76,7 @@ jobs:
       - name: Resolve Docker build args
         id: docker-args
         run: |
-          make print-docker-build-args SPARK_VERSION=${{ matrix.spark-version }} SCALA_VERSION=${{ matrix.scala-version }} >> $GITHUB_OUTPUT
+          make print-docker-build-args SPARK_VERSION=${SPARK_VERSION} SCALA_VERSION=${SCALA_VERSION} >> $GITHUB_OUTPUT
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Build test-base image (cached)
@@ -99,22 +85,22 @@ jobs:
           context: docker
           file: docker/Dockerfile.test-base
           load: true
-          tags: lance-spark-test-base:${{ matrix.spark-version }}_${{ matrix.scala-version }}
+          tags: lance-spark-test-base:${{ env.SPARK_VERSION }}_${{ env.SCALA_VERSION }}
           build-args: |
             SPARK_DOWNLOAD_VERSION=${{ steps.docker-args.outputs.spark-download-version }}
-            SPARK_MAJOR_VERSION=${{ matrix.spark-version }}
-            SCALA_VERSION=${{ matrix.scala-version }}
+            SPARK_MAJOR_VERSION=${{ env.SPARK_VERSION }}
+            SCALA_VERSION=${{ env.SCALA_VERSION }}
             PY4J_VERSION=${{ steps.docker-args.outputs.py4j-version }}
             SPARK_SCALA_SUFFIX=${{ steps.docker-args.outputs.spark-scala-suffix }}
-          cache-from: type=gha,scope=test-base-${{ matrix.spark-version }}_${{ matrix.scala-version }}
-          cache-to: type=gha,mode=max,scope=test-base-${{ matrix.spark-version }}_${{ matrix.scala-version }}
+          cache-from: type=gha,scope=test-base-${{ env.SPARK_VERSION }}_${{ env.SCALA_VERSION }}
+          cache-to: type=gha,mode=max,scope=test-base-${{ env.SPARK_VERSION }}_${{ env.SCALA_VERSION }}
       - name: Build bundle
-        run: make bundle SPARK_VERSION=${{ matrix.spark-version }} SCALA_VERSION=${{ matrix.scala-version }}
+        run: make bundle SPARK_VERSION=${SPARK_VERSION} SCALA_VERSION=${SCALA_VERSION}
       - name: Build Glue/S3 test image
         run: |
           make docker-build-test \
-            SPARK_VERSION=${{ matrix.spark-version }} \
-            SCALA_VERSION=${{ matrix.scala-version }} \
+            SPARK_VERSION=${SPARK_VERSION} \
+            SCALA_VERSION=${SCALA_VERSION} \
             LANCE_NAMESPACE_IMPL_VERSION=${{ steps.docker-args.outputs.lance-namespace-impl-version }}
       - name: Verify AWS Glue/S3 targets
         env:
@@ -131,16 +117,18 @@ jobs:
             exit 1
           fi
           aws --version
+          echo "Verifying AWS STS identity"
           aws sts get-caller-identity
+          echo "Verifying real S3 bucket with aws s3api head-bucket"
           aws s3api head-bucket --bucket "${AWS_S3_BUCKET_NAME}"
           glue_args=(--region "${AWS_REGION}" --max-results 1)
           if [ -n "${AWS_GLUE_CATALOG_ID}" ]; then
             glue_args+=(--catalog-id "${AWS_GLUE_CATALOG_ID}")
           fi
+          echo "Verifying real AWS Glue catalog with aws glue get-databases"
           aws glue get-databases "${glue_args[@]}" >/dev/null
       - name: Run Glue/S3 Docker integration tests
         env:
-          TEST_BACKENDS: ${{ matrix.test-backends }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
@@ -148,12 +136,12 @@ jobs:
           AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
           AWS_S3_BUCKET_NAME: ${{ secrets.AWS_S3_BUCKET_NAME }}
           AWS_GLUE_CATALOG_ID: ${{ secrets.AWS_GLUE_CATALOG_ID }}
-          AWS_GLUE_ROOT: s3://${{ secrets.AWS_S3_BUCKET_NAME }}/lance_spark_glue_test_${{ github.run_id }}_${{ github.run_attempt }}_${{ matrix.spark-version }}_${{ matrix.scala-version }}
+          AWS_GLUE_ROOT: s3://${{ secrets.AWS_S3_BUCKET_NAME }}/lance_spark_glue_test_${{ github.run_id }}_${{ github.run_attempt }}_${{ env.SPARK_VERSION }}_${{ env.SCALA_VERSION }}
         run: |
           make docker-test \
-            SPARK_VERSION=${{ matrix.spark-version }} \
-            SCALA_VERSION=${{ matrix.scala-version }} \
-            TEST_BACKENDS=${{ matrix.test-backends }}
+            SPARK_VERSION=${SPARK_VERSION} \
+            SCALA_VERSION=${SCALA_VERSION} \
+            TEST_BACKENDS=${TEST_BACKENDS}
       - name: Clean up Glue/S3 test data
         if: always()
         env:
@@ -163,7 +151,7 @@ jobs:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
           AWS_S3_BUCKET_NAME: ${{ secrets.AWS_S3_BUCKET_NAME }}
-          AWS_GLUE_ROOT: s3://${{ secrets.AWS_S3_BUCKET_NAME }}/lance_spark_glue_test_${{ github.run_id }}_${{ github.run_attempt }}_${{ matrix.spark-version }}_${{ matrix.scala-version }}
+          AWS_GLUE_ROOT: s3://${{ secrets.AWS_S3_BUCKET_NAME }}/lance_spark_glue_test_${{ github.run_id }}_${{ github.run_attempt }}_${{ env.SPARK_VERSION }}_${{ env.SCALA_VERSION }}
         run: |
           if [ -n "${AWS_S3_BUCKET_NAME}" ]; then
             aws s3 rm "${AWS_GLUE_ROOT}" --recursive || true
