@@ -54,6 +54,7 @@ import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public abstract class BaseAddColumnsBackfillTest {
   protected String catalogName = "lance_test";
@@ -90,6 +91,23 @@ public abstract class BaseAddColumnsBackfillTest {
 
   protected void prepareDataset() {
     spark.sql(String.format("create table %s (id int, text string) using lance;", fullTable));
+    spark.sql(
+        String.format(
+            "insert into %s (id, text) values %s ;",
+            fullTable,
+            IntStream.range(0, 10)
+                .boxed()
+                .map(i -> String.format("(%d, 'text_%d')", i, i))
+                .collect(Collectors.joining(","))));
+  }
+
+  /** Same row count as prepareDataset() but with stable row IDs for CDF version columns. */
+  protected void prepareDatasetWithStableRowIds() {
+    spark.sql(
+        String.format(
+            "create table %s (id int, text string) using lance "
+                + "TBLPROPERTIES ('enable_stable_row_ids' = 'true')",
+            fullTable));
     spark.sql(
         String.format(
             "insert into %s (id, text) values %s ;",
@@ -200,6 +218,51 @@ public abstract class BaseAddColumnsBackfillTest {
       Row structCol = row.getStruct(1);
       Assertions.assertEquals(id, structCol.getInt(0));
       Assertions.assertEquals("name_" + id, structCol.getString(1));
+    }
+  }
+
+  /**
+   * With stable row IDs enabled, ADD COLUMNS FROM should advance _row_last_updated_at_version for
+   * rewritten rows and leave _row_created_at_version unchanged.
+   */
+  @Test
+  public void testAddColumnsPreservesCreatedAtAndAdvancesLastUpdatedWithStableRowIds() {
+    prepareDatasetWithStableRowIds();
+
+    List<Row> before =
+        spark
+            .sql(
+                String.format(
+                    "SELECT id, _row_created_at_version, _row_last_updated_at_version FROM %s ORDER BY id",
+                    fullTable))
+            .collectAsList();
+
+    spark.sql(
+        String.format(
+            "CREATE TEMPORARY VIEW tmp_view_cdf AS SELECT _rowaddr, _fragid, id * 100 AS new_col1 FROM %s",
+            fullTable));
+    spark.sql(String.format("ALTER TABLE %s ADD COLUMNS new_col1 FROM tmp_view_cdf", fullTable));
+
+    List<Row> after =
+        spark
+            .sql(
+                String.format(
+                    "SELECT id, _row_created_at_version, _row_last_updated_at_version FROM %s ORDER BY id",
+                    fullTable))
+            .collectAsList();
+
+    assertEquals(before.size(), after.size());
+    for (int i = 0; i < before.size(); i++) {
+      Row b = before.get(i);
+      Row a = after.get(i);
+      assertEquals(b.getInt(0), a.getInt(0));
+      assertEquals(
+          b.getLong(1),
+          a.getLong(1),
+          "_row_created_at_version must be unchanged for id=" + b.getInt(0));
+      assertTrue(
+          a.getLong(2) > b.getLong(2),
+          "_row_last_updated_at_version should advance after ADD COLUMNS for id=" + a.getInt(0));
     }
   }
 
