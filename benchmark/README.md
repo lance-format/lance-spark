@@ -123,7 +123,7 @@ spark-submit \
   --master local[*] \
   --driver-memory 8g \
   --jars path/to/lance-spark-bundle-3.5_2.12-*.jar \
-  --conf spark.sql.extensions=org.lance.spark.LanceSparkSessionExtension \
+  --conf spark.sql.extensions=org.lance.spark.extensions.LanceSparkSessionExtensions \
   --conf spark.hadoop.fs.s3a.access.key=YOUR_KEY \
   --conf spark.hadoop.fs.s3a.secret.key=YOUR_SECRET \
   benchmark/target/lance-spark-benchmark-*.jar \
@@ -151,7 +151,7 @@ spark-submit \
   --executor-cores 4 \
   --num-executors 8 \
   --jars path/to/lance-spark-bundle-3.5_2.12-*.jar \
-  --conf spark.sql.extensions=org.lance.spark.LanceSparkSessionExtension \
+  --conf spark.sql.extensions=org.lance.spark.extensions.LanceSparkSessionExtensions \
   --conf spark.sql.adaptive.enabled=true \
   --conf spark.hadoop.fs.s3a.access.key=YOUR_KEY \
   --conf spark.hadoop.fs.s3a.secret.key=YOUR_SECRET \

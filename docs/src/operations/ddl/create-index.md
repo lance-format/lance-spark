@@ -35,10 +35,12 @@ The `CREATE INDEX` command supports options via the `WITH` clause to control ind
 
 For the `btree` method, the following options are supported:
 
-| Option      | Type   | Description                                  |
-|-------------|--------|----------------------------------------------|
-| `zone_size` | Long   | The number of rows per zone in the B-tree index. |
-| `build_mode`| String | Index building mode: 'fragment' builds indexes in parallel by fragment; 'range' sorts data by indexed columns first, then partitions and builds indexes in parallel by partition. Default is 'fragment'.|
+| Option           | Type   | Description                                                                                                                                                                                              |
+|------------------|--------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `zone_size`      | Long   | The number of rows per zone in the B-tree index.                                                                                                                                                         |
+| `build_mode`     | String | Index building mode: 'fragment' builds indexes in parallel by fragment; 'range' sorts data by indexed columns first, then partitions and builds indexes in parallel by partition. Default is 'fragment'. |
+| `rows_per_range` | Long   | The number of rows per range when built using range mode. Default is 1000000.                                                                                                                            |
+
 
 ### FTS Options
 
@@ -56,6 +58,19 @@ For the `fts` method, the following options are required:
 | `with_position`    | Boolean | Enable phrase queries. Increases index size.                   |
 
 For advanced tokenizer configuration, refer to the [Lance FTS documentation](https://lance.org/format/table/index/scalar/fts/#tokenizers).
+
+### FTS Format Version
+
+Lance FTS index format v2 is selected by the Lance runtime environment variable `LANCE_FTS_FORMAT_VERSION=2`. Configure it on both the Spark driver and executors before creating the index.
+
+=== "spark-submit"
+    ```bash
+    LANCE_FTS_FORMAT_VERSION=2 spark-submit \
+        --conf spark.executorEnv.LANCE_FTS_FORMAT_VERSION=2 \
+        ...
+    ```
+
+Spark SQL currently does not expose a per-index `fts_version` option. Use `USING fts` with the normal FTS options shown above; Spark records the index details and version returned by Lance.
 
 ## Examples
 
@@ -103,6 +118,7 @@ Create an FTS index on a text column:
         with_position = true
     );
     ```
+
 ## Output
 
 The `CREATE INDEX` command returns the following information about the operation:

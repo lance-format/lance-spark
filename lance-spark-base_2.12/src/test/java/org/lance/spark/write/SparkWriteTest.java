@@ -24,6 +24,9 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.spark.sql.connector.distributions.ClusteredDistribution;
+import org.apache.spark.sql.connector.distributions.Distribution;
+import org.apache.spark.sql.connector.expressions.SortOrder;
 import org.apache.spark.sql.connector.write.BatchWrite;
 import org.apache.spark.sql.connector.write.Write;
 import org.apache.spark.sql.types.StructType;
@@ -35,6 +38,8 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -68,7 +73,8 @@ public class SparkWriteTest {
         null,
         Collections.emptyMap(),
         Arrays.asList("default", "test_table"),
-        false);
+        false,
+        Collections.emptyMap());
   }
 
   @Test
@@ -108,9 +114,97 @@ public class SparkWriteTest {
             null,
             Collections.emptyMap(),
             null,
-            false);
+            false,
+            Collections.emptyMap());
     assertSame(builder, builder.truncate());
     BatchWrite batchWrite = builder.build().toBatch();
     assertInstanceOf(LanceBatchWrite.class, batchWrite);
+  }
+
+  @Test
+  public void testTruncatePreservesUseLargeVarTypes(TestInfo testInfo) {
+    String datasetUri = createDataset(testInfo.getTestMethod().get().getName());
+    LanceSparkWriteOptions writeOptions =
+        LanceSparkWriteOptions.builder()
+            .datasetUri(datasetUri)
+            .writeMode(WriteParams.WriteMode.APPEND)
+            .useLargeVarTypes(true)
+            .build();
+    SparkWrite.SparkWriteBuilder builder =
+        new SparkWrite.SparkWriteBuilder(
+            SPARK_SCHEMA,
+            writeOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            null,
+            false,
+            Collections.emptyMap());
+    builder.truncate();
+    SparkWrite sparkWrite = (SparkWrite) builder.build();
+    assertTrue(
+        sparkWrite.getWriteOptions().isUseLargeVarTypes(),
+        "useLargeVarTypes should be preserved after truncate()");
+  }
+
+  // --- requiredDistribution / requiredOrdering tests ---
+
+  private SparkWrite createWriteWithTableProperties(
+      String datasetUri, Map<String, String> tableProps) {
+    LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
+    SparkWrite.SparkWriteBuilder builder =
+        new SparkWrite.SparkWriteBuilder(
+            SPARK_SCHEMA,
+            writeOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            Arrays.asList("default", "test_table"),
+            false,
+            tableProps);
+    return (SparkWrite) builder.build();
+  }
+
+  @Test
+  public void testRequiredDistributionWithPartitionColumn(TestInfo testInfo) {
+    String datasetUri = createDataset(testInfo.getTestMethod().get().getName());
+    Map<String, String> props = new HashMap<>();
+    props.put("lance.partition.columns", "name");
+    SparkWrite write = createWriteWithTableProperties(datasetUri, props);
+
+    Distribution dist = write.requiredDistribution();
+    assertInstanceOf(ClusteredDistribution.class, dist);
+    ClusteredDistribution clustered = (ClusteredDistribution) dist;
+    assertEquals(1, clustered.clustering().length);
+  }
+
+  @Test
+  public void testRequiredDistributionWithoutPartitionColumn(TestInfo testInfo) {
+    String datasetUri = createDataset(testInfo.getTestMethod().get().getName());
+    SparkWrite write = createWriteWithTableProperties(datasetUri, Collections.emptyMap());
+
+    Distribution dist = write.requiredDistribution();
+    // Unspecified distribution — no clustering required
+    assertFalse(dist instanceof ClusteredDistribution);
+  }
+
+  @Test
+  public void testRequiredOrderingWithPartitionColumn(TestInfo testInfo) {
+    String datasetUri = createDataset(testInfo.getTestMethod().get().getName());
+    Map<String, String> props = new HashMap<>();
+    props.put("lance.partition.columns", "name");
+    SparkWrite write = createWriteWithTableProperties(datasetUri, props);
+
+    SortOrder[] ordering = write.requiredOrdering();
+    assertEquals(1, ordering.length);
+  }
+
+  @Test
+  public void testRequiredOrderingWithoutPartitionColumn(TestInfo testInfo) {
+    String datasetUri = createDataset(testInfo.getTestMethod().get().getName());
+    SparkWrite write = createWriteWithTableProperties(datasetUri, Collections.emptyMap());
+
+    SortOrder[] ordering = write.requiredOrdering();
+    assertEquals(0, ordering.length);
   }
 }

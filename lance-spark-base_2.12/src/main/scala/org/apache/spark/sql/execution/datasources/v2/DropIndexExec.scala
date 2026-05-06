@@ -18,8 +18,8 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
 import org.apache.spark.sql.catalyst.plans.logical.LanceDropIndexOutputType
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.unsafe.types.UTF8String
-import org.lance.Dataset
-import org.lance.spark.{LanceDataset, LanceRuntime, LanceSparkReadOptions}
+import org.lance.spark.LanceDataset
+import org.lance.spark.utils.Utils
 
 /**
  * Physical execution of DROP INDEX for Lance datasets.
@@ -43,7 +43,7 @@ case class LanceDropIndexExec(
 
     val readOptions = lanceDataset.readOptions()
 
-    val dataset = openDataset(readOptions)
+    val dataset = Utils.openDatasetBuilder(readOptions).build()
     try {
       dataset.dropIndex(indexName)
     } finally {
@@ -53,22 +53,5 @@ case class LanceDropIndexExec(
     Seq(new GenericInternalRow(Array[Any](
       UTF8String.fromString(indexName),
       UTF8String.fromString("dropped"))))
-  }
-
-  private def openDataset(readOptions: LanceSparkReadOptions): Dataset = {
-    if (readOptions.hasNamespace) {
-      Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .namespaceClient(readOptions.getNamespace)
-        .readOptions(readOptions.toReadOptions())
-        .tableId(readOptions.getTableId)
-        .build()
-    } else {
-      Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .uri(readOptions.getDatasetUri)
-        .readOptions(readOptions.toReadOptions())
-        .build()
-    }
   }
 }

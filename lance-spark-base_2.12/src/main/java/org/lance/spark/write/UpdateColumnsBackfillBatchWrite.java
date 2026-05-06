@@ -81,7 +81,11 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
       Map<String, String> namespaceProperties,
       List<String> tableId) {
     this.schema = schema;
-    this.writeOptions = writeOptions;
+    try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
+      this.writeOptions = writeOptions.withVersion(ds.version());
+      logger.debug(
+          "Resolved dataset version for UPDATE COLUMNS: {}", this.writeOptions.getVersion());
+    }
     this.updateColumns = updateColumns;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
@@ -133,24 +137,26 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
     Set<Integer> updatedFragmentIds =
         updatedFragments.stream().map(FragmentMetadata::getId).collect(Collectors.toSet());
 
-    try (Dataset dataset = Utils.openDataset(writeOptions)) {
+    try (Dataset dataset = Utils.openDatasetBuilder(writeOptions).build()) {
       // Add unmodified fragments back
       dataset.getFragments().stream()
           .filter(f -> !updatedFragmentIds.contains(f.getId()))
           .map(Fragment::metadata)
           .forEach(updatedFragments::add);
-    }
 
-    // Commit update operation using CommitBuilder
-    try (Dataset dataset = Utils.openDataset(writeOptions)) {
+      // Commit update operation using CommitBuilder
       Update update =
           Update.builder()
               .updatedFragments(updatedFragments)
               .fieldsModified(fieldsModified)
               .updateMode(Optional.of(Update.UpdateMode.RewriteColumns))
               .build();
+      long version =
+          Objects.requireNonNull(
+              writeOptions.getVersion(),
+              "version must be set (resolved in UpdateColumnsBackfillBatchWrite constructor)");
       try (Transaction txn =
-              new Transaction.Builder().readVersion(dataset.version()).operation(update).build();
+              new Transaction.Builder().readVersion(version).operation(update).build();
           Dataset committed =
               new CommitBuilder(dataset)
                   .writeParams(writeOptions.getStorageOptions())

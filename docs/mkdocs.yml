@@ -3,7 +3,7 @@ site_description: The Apache Spark Connector for Lance allows Apache Spark to ef
 site_url: https://lance.org/integrations/spark/
 docs_dir: src
 
-repo_name: lancedb/lance-spark
+repo_name: lance-format/lance-spark
 repo_url: https://github.com/lance-format/lance-spark
 
 theme:

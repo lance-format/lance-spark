@@ -80,8 +80,8 @@ public class TpcdsQueryRunner {
 
         String status = result.isSuccess() ? "OK" : "FAIL";
         System.out.printf(
-            "  [%s] %s iter=%d time=%dms rows=%d%n",
-            status, queryName, i, result.getElapsedMs(), result.getRowCount());
+            "  [%s] %s iter=%d time=%dms%n",
+            status, queryName, i, result.getElapsedMs());
         if (result.getMetrics() != null) {
           System.out.println("       Metrics: " + result.getMetrics().toSummaryString());
         }
@@ -129,19 +129,18 @@ public class TpcdsQueryRunner {
 
     long start = System.currentTimeMillis();
     try {
-      long rowCount = 0;
       for (String stmt : statements) {
         String trimmed = stmt.trim();
         if (trimmed.isEmpty()) {
           continue;
         }
         Dataset<Row> result = spark.sql(trimmed);
-        rowCount = result.count();
+        result.write().format("noop").mode("overwrite").save();
       }
       long elapsed = System.currentTimeMillis() - start;
 
       QueryMetrics metrics = metricsListener != null ? metricsListener.getMetrics() : null;
-      return BenchmarkResult.success(queryName, format, iteration, elapsed, rowCount, metrics);
+      return BenchmarkResult.success(queryName, format, iteration, elapsed, metrics);
     } catch (Exception e) {
       long elapsed = System.currentTimeMillis() - start;
       String msg = e.getMessage();

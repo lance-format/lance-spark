@@ -26,6 +26,7 @@ import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.unsafe.types.UTF8String;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -83,10 +84,11 @@ public class QueuedArrowBatchWriteBufferTest {
                         new GenericInternalRow(new Object[] {rowsWritten.incrementAndGet()});
                     writeBuffer.write(row);
                   }
-                  writeBuffer.setFinished();
                 } catch (Throwable e) {
                   writerError.set(e);
                   e.printStackTrace();
+                } finally {
+                  writeBuffer.setFinished();
                 }
               });
 
@@ -577,6 +579,254 @@ public class QueuedArrowBatchWriteBufferTest {
 
       assertEquals(batchSize, rowsWritten.get());
       assertEquals(batchSize, rowsRead.get());
+      writeBuffer.close();
+    }
+  }
+
+  // ========== Byte-based flush tests ==========
+
+  private Schema createStringSchema() {
+    Field field =
+        new Field(
+            "data",
+            FieldType.nullable(org.apache.arrow.vector.types.Types.MinorType.VARCHAR.getType()),
+            null);
+    return new Schema(Collections.singletonList(field));
+  }
+
+  private StructType createStringSparkSchema() {
+    return new StructType(
+        new StructField[] {DataTypes.createStructField("data", DataTypes.StringType, true)});
+  }
+
+  /** Generate a string of approximately the given size in bytes. */
+  private UTF8String generateLargeString(int sizeBytes) {
+    byte[] data = new byte[sizeBytes];
+    java.util.Arrays.fill(data, (byte) 'A');
+    return UTF8String.fromBytes(data);
+  }
+
+  @Test
+  public void testByteBasedFlush() throws Exception {
+    // Each row is ~100KB. With batchSize=1000 (would be 100MB), but maxBatchBytes=256KB,
+    // we should see batches flush after ~2-3 rows instead of waiting for 1000.
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Schema schema = createStringSchema();
+      StructType sparkSchema = createStringSparkSchema();
+
+      final int totalRows = 20;
+      final int batchSize = 1000; // High row limit - should never be reached
+      final long maxBatchBytes = 256 * 1024; // 256KB - should trigger flush after ~2 rows
+      final int rowSizeBytes = 100 * 1024; // ~100KB per row
+      final int queueDepth = 4;
+      final QueuedArrowBatchWriteBuffer writeBuffer =
+          new QueuedArrowBatchWriteBuffer(
+              allocator, schema, sparkSchema, batchSize, queueDepth, maxBatchBytes);
+
+      AtomicInteger rowsWritten = new AtomicInteger(0);
+      AtomicInteger rowsRead = new AtomicInteger(0);
+      AtomicInteger batchCount = new AtomicInteger(0);
+      AtomicInteger maxRowsInBatch = new AtomicInteger(0);
+      AtomicReference<Throwable> writerError = new AtomicReference<>();
+      AtomicReference<Throwable> readerError = new AtomicReference<>();
+
+      Thread writerThread =
+          new Thread(
+              () -> {
+                try {
+                  for (int i = 0; i < totalRows; i++) {
+                    UTF8String largeValue = generateLargeString(rowSizeBytes);
+                    InternalRow row = new GenericInternalRow(new Object[] {largeValue});
+                    writeBuffer.write(row);
+                    rowsWritten.incrementAndGet();
+                  }
+                } catch (Throwable e) {
+                  writerError.set(e);
+                  e.printStackTrace();
+                } finally {
+                  writeBuffer.setFinished();
+                }
+              });
+
+      Thread readerThread =
+          new Thread(
+              () -> {
+                try {
+                  while (writeBuffer.loadNextBatch()) {
+                    VectorSchemaRoot root = writeBuffer.getVectorSchemaRoot();
+                    int rowCount = root.getRowCount();
+                    rowsRead.addAndGet(rowCount);
+                    batchCount.incrementAndGet();
+                    maxRowsInBatch.updateAndGet(prev -> Math.max(prev, rowCount));
+                  }
+                } catch (Throwable e) {
+                  readerError.set(e);
+                  e.printStackTrace();
+                }
+              });
+
+      writerThread.start();
+      readerThread.start();
+      writerThread.join();
+      readerThread.join();
+
+      assertNull(writerError.get(), "Writer thread should not have errors");
+      assertNull(readerError.get(), "Reader thread should not have errors");
+      assertEquals(totalRows, rowsWritten.get());
+      assertEquals(totalRows, rowsRead.get());
+      // With 100KB rows and 256KB limit, each batch should have at most ~3 rows.
+      // Without byte-based flush, we'd get 1 batch of 20 rows (since batchSize=1000).
+      assertTrue(
+          batchCount.get() > 1,
+          "Should have multiple batches due to byte-based flushing, but got " + batchCount.get());
+      assertTrue(
+          maxRowsInBatch.get() < batchSize,
+          "Max rows per batch ("
+              + maxRowsInBatch.get()
+              + ") should be less than batchSize ("
+              + batchSize
+              + ") due to byte-based flushing");
+      writeBuffer.close();
+    }
+  }
+
+  @Test
+  public void testByteBasedFlushWithSmallRows() throws Exception {
+    // With small rows, the row count limit should be reached before byte limit.
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Schema schema = createIntSchema();
+      StructType sparkSchema = createIntSparkSchema();
+
+      final int totalRows = 100;
+      final int batchSize = 25;
+      final long maxBatchBytes = 100 * 1024 * 1024; // 100MB - should never be reached
+      final int queueDepth = 4;
+      final QueuedArrowBatchWriteBuffer writeBuffer =
+          new QueuedArrowBatchWriteBuffer(
+              allocator, schema, sparkSchema, batchSize, queueDepth, maxBatchBytes);
+
+      AtomicInteger rowsWritten = new AtomicInteger(0);
+      AtomicInteger rowsRead = new AtomicInteger(0);
+      AtomicInteger batchCount = new AtomicInteger(0);
+      AtomicReference<Throwable> writerError = new AtomicReference<>();
+      AtomicReference<Throwable> readerError = new AtomicReference<>();
+
+      Thread writerThread =
+          new Thread(
+              () -> {
+                try {
+                  for (int i = 0; i < totalRows; i++) {
+                    InternalRow row =
+                        new GenericInternalRow(new Object[] {rowsWritten.incrementAndGet()});
+                    writeBuffer.write(row);
+                  }
+                } catch (Throwable e) {
+                  writerError.set(e);
+                  e.printStackTrace();
+                } finally {
+                  writeBuffer.setFinished();
+                }
+              });
+
+      Thread readerThread =
+          new Thread(
+              () -> {
+                try {
+                  while (writeBuffer.loadNextBatch()) {
+                    VectorSchemaRoot root = writeBuffer.getVectorSchemaRoot();
+                    rowsRead.addAndGet(root.getRowCount());
+                    batchCount.incrementAndGet();
+                  }
+                } catch (Throwable e) {
+                  readerError.set(e);
+                  e.printStackTrace();
+                }
+              });
+
+      writerThread.start();
+      readerThread.start();
+      writerThread.join();
+      readerThread.join();
+
+      assertNull(writerError.get(), "Writer thread should not have errors");
+      assertNull(readerError.get(), "Reader thread should not have errors");
+      assertEquals(totalRows, rowsWritten.get());
+      assertEquals(totalRows, rowsRead.get());
+      // Should have exactly 4 batches of 25 rows (row-count based flushing)
+      assertEquals(4, batchCount.get());
+      writeBuffer.close();
+    }
+  }
+
+  @Test
+  public void testByteBasedFlushSingleLargeRow() throws Exception {
+    // A single row exceeds maxBatchBytes - should flush after each row.
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Schema schema = createStringSchema();
+      StructType sparkSchema = createStringSparkSchema();
+
+      final int totalRows = 5;
+      final int batchSize = 1000;
+      final long maxBatchBytes = 1024; // 1KB - each row will exceed this
+      final int rowSizeBytes = 10 * 1024; // 10KB per row
+      final int queueDepth = 4;
+      final QueuedArrowBatchWriteBuffer writeBuffer =
+          new QueuedArrowBatchWriteBuffer(
+              allocator, schema, sparkSchema, batchSize, queueDepth, maxBatchBytes);
+
+      AtomicInteger rowsWritten = new AtomicInteger(0);
+      AtomicInteger rowsRead = new AtomicInteger(0);
+      AtomicInteger batchCount = new AtomicInteger(0);
+      AtomicReference<Throwable> writerError = new AtomicReference<>();
+      AtomicReference<Throwable> readerError = new AtomicReference<>();
+
+      Thread writerThread =
+          new Thread(
+              () -> {
+                try {
+                  for (int i = 0; i < totalRows; i++) {
+                    UTF8String largeValue = generateLargeString(rowSizeBytes);
+                    InternalRow row = new GenericInternalRow(new Object[] {largeValue});
+                    writeBuffer.write(row);
+                    rowsWritten.incrementAndGet();
+                  }
+                } catch (Throwable e) {
+                  writerError.set(e);
+                  e.printStackTrace();
+                } finally {
+                  writeBuffer.setFinished();
+                }
+              });
+
+      Thread readerThread =
+          new Thread(
+              () -> {
+                try {
+                  while (writeBuffer.loadNextBatch()) {
+                    VectorSchemaRoot root = writeBuffer.getVectorSchemaRoot();
+                    rowsRead.addAndGet(root.getRowCount());
+                    batchCount.incrementAndGet();
+                  }
+                } catch (Throwable e) {
+                  readerError.set(e);
+                  e.printStackTrace();
+                }
+              });
+
+      writerThread.start();
+      readerThread.start();
+      writerThread.join();
+      readerThread.join();
+
+      assertNull(writerError.get(), "Writer thread should not have errors");
+      assertNull(readerError.get(), "Reader thread should not have errors");
+      assertEquals(totalRows, rowsWritten.get());
+      assertEquals(totalRows, rowsRead.get());
+      // Each row should produce its own batch since each exceeds the byte limit
+      assertEquals(
+          totalRows,
+          batchCount.get(),
+          "Each row should be its own batch when row size exceeds maxBatchBytes");
       writeBuffer.close();
     }
   }

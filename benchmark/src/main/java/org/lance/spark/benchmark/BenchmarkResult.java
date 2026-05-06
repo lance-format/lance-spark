@@ -19,7 +19,6 @@ public class BenchmarkResult {
   private final String format;
   private final int iteration;
   private final long elapsedMs;
-  private final long rowCount;
   private final boolean success;
   private final String errorMessage;
   private final QueryMetrics metrics;
@@ -29,7 +28,6 @@ public class BenchmarkResult {
       String format,
       int iteration,
       long elapsedMs,
-      long rowCount,
       boolean success,
       String errorMessage,
       QueryMetrics metrics) {
@@ -37,32 +35,24 @@ public class BenchmarkResult {
     this.format = format;
     this.iteration = iteration;
     this.elapsedMs = elapsedMs;
-    this.rowCount = rowCount;
     this.success = success;
     this.errorMessage = errorMessage;
     this.metrics = metrics;
   }
 
   public static BenchmarkResult success(
-      String queryName, String format, int iteration, long elapsedMs, long rowCount) {
-    return new BenchmarkResult(queryName, format, iteration, elapsedMs, rowCount, true, null, null);
+      String queryName, String format, int iteration, long elapsedMs) {
+    return new BenchmarkResult(queryName, format, iteration, elapsedMs, true, null, null);
   }
 
   public static BenchmarkResult success(
-      String queryName,
-      String format,
-      int iteration,
-      long elapsedMs,
-      long rowCount,
-      QueryMetrics metrics) {
-    return new BenchmarkResult(
-        queryName, format, iteration, elapsedMs, rowCount, true, null, metrics);
+      String queryName, String format, int iteration, long elapsedMs, QueryMetrics metrics) {
+    return new BenchmarkResult(queryName, format, iteration, elapsedMs, true, null, metrics);
   }
 
   public static BenchmarkResult failure(
       String queryName, String format, int iteration, long elapsedMs, String errorMessage) {
-    return new BenchmarkResult(
-        queryName, format, iteration, elapsedMs, -1, false, errorMessage, null);
+    return new BenchmarkResult(queryName, format, iteration, elapsedMs, false, errorMessage, null);
   }
 
   public String getQueryName() {
@@ -79,10 +69,6 @@ public class BenchmarkResult {
 
   public long getElapsedMs() {
     return elapsedMs;
-  }
-
-  public long getRowCount() {
-    return rowCount;
   }
 
   public boolean isSuccess() {
@@ -105,7 +91,6 @@ public class BenchmarkResult {
             format,
             String.valueOf(iteration),
             String.valueOf(elapsedMs),
-            String.valueOf(rowCount),
             String.valueOf(success),
             errorMessage == null ? "" : "\"" + errorMessage.replace("\"", "\"\"") + "\"");
     if (metrics != null) {
@@ -115,7 +100,7 @@ public class BenchmarkResult {
   }
 
   public static String csvHeader() {
-    return "query,format,iteration,elapsed_ms,row_count,success,error";
+    return "query,format,iteration,elapsed_ms,success,error";
   }
 
   public static String csvHeaderWithMetrics() {

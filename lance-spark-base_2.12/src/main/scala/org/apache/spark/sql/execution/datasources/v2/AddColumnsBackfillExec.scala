@@ -59,11 +59,11 @@ case class AddColumnsBackfillExec(
       new LanceDataset(
         originalTable.readOptions(),
         actualQuery.schema,
-        null,
-        null,
-        null,
-        false,
-        originalTable.getFileFormatVersion()),
+        originalTable.getInitialStorageOptions,
+        originalTable.getNamespaceImpl,
+        originalTable.getNamespaceProperties,
+        originalTable.getManagedVersioning,
+        originalTable.getFileFormatVersion),
       Some(catalog),
       Some(ident))
 

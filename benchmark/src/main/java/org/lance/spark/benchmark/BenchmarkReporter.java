@@ -51,17 +51,11 @@ public class BenchmarkReporter {
 
     // Compute median time per query per format
     Map<String, Map<String, Long>> medianTimes = new LinkedHashMap<>();
-    Map<String, Map<String, Long>> rowCounts = new LinkedHashMap<>();
 
     for (BenchmarkResult r : results) {
       medianTimes
           .computeIfAbsent(r.getQueryName(), k -> new LinkedHashMap<>())
           .merge(r.getFormat(), r.getElapsedMs(), Long::min);
-      if (r.isSuccess()) {
-        rowCounts
-            .computeIfAbsent(r.getQueryName(), k -> new LinkedHashMap<>())
-            .put(r.getFormat(), r.getRowCount());
-      }
     }
 
     // Compute per-query median across iterations
@@ -189,30 +183,6 @@ public class BenchmarkReporter {
     }
 
     System.out.printf("Queries passed: %d, partial/failed: %d%n", passCount, failCount);
-
-    // Row count validation
-    if (formats.size() >= 2) {
-      int mismatchCount = 0;
-      for (Map.Entry<String, Map<String, Long>> entry : rowCounts.entrySet()) {
-        Map<String, Long> counts = entry.getValue();
-        if (counts.size() >= 2) {
-          Long first = null;
-          for (Long c : counts.values()) {
-            if (first == null) {
-              first = c;
-            } else if (!first.equals(c)) {
-              mismatchCount++;
-              System.out.println(
-                  "  ROW COUNT MISMATCH: " + entry.getKey() + " -> " + counts);
-              break;
-            }
-          }
-        }
-      }
-      if (mismatchCount == 0) {
-        System.out.println("Row count validation: all matching");
-      }
-    }
   }
 
   private QueryMetrics findMetricsForQuery(String queryName) {

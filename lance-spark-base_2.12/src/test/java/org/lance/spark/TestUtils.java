@@ -90,7 +90,8 @@ public class TestUtils {
               "test" /* scanId */,
               null /* initialStorageOptions */,
               null /* namespaceImpl */,
-              null /* namespaceProperties */);
+              null /* namespaceProperties */,
+              null /* partitionKeyRow */);
     }
   }
 

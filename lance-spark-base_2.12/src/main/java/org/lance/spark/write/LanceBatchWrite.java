@@ -32,16 +32,21 @@ import org.apache.spark.sql.connector.write.PhysicalWriteInfo;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 public class LanceBatchWrite implements BatchWrite {
+  private static final Logger logger = LoggerFactory.getLogger(LanceBatchWrite.class);
+
   private final StructType schema;
-  private final LanceSparkWriteOptions writeOptions;
+  private LanceSparkWriteOptions writeOptions;
   private final boolean overwrite;
 
   /**
@@ -57,13 +62,13 @@ public class LanceBatchWrite implements BatchWrite {
   private final List<String> tableId;
   private final boolean managedVersioning;
 
-  /**
-   * Dataset opened at start for existing tables to ensure version consistency. Empty for staged
-   * operations (the dataset is managed by StagedCommit).
-   */
-  private final Optional<Dataset> dataset;
-
   private final StagedCommit stagedCommit;
+
+  /**
+   * Partition column names — fragments will be rolled at transitions so each fragment contains
+   * exactly one partition value. Empty when no partitioning is requested.
+   */
+  private final List<String> partitionColumns;
 
   public LanceBatchWrite(
       StructType schema,
@@ -75,8 +80,31 @@ public class LanceBatchWrite implements BatchWrite {
       List<String> tableId,
       boolean managedVersioning,
       StagedCommit stagedCommit) {
+    this(
+        schema,
+        writeOptions,
+        overwrite,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        tableId,
+        managedVersioning,
+        stagedCommit,
+        Collections.emptyList());
+  }
+
+  public LanceBatchWrite(
+      StructType schema,
+      LanceSparkWriteOptions writeOptions,
+      boolean overwrite,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      List<String> tableId,
+      boolean managedVersioning,
+      StagedCommit stagedCommit,
+      List<String> partitionColumns) {
     this.schema = schema;
-    this.writeOptions = writeOptions;
     this.overwrite = overwrite;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
@@ -84,17 +112,31 @@ public class LanceBatchWrite implements BatchWrite {
     this.tableId = tableId;
     this.managedVersioning = managedVersioning;
     this.stagedCommit = stagedCommit;
+    this.partitionColumns = partitionColumns == null ? Collections.emptyList() : partitionColumns;
 
     // For staged operations, the dataset is managed by StagedCommit.
-    // For non-staged operations, open to capture version for commit.
-    this.dataset =
-        (stagedCommit != null) ? Optional.empty() : Optional.of(Utils.openDataset(writeOptions));
+    // For non-staged operations, pin the dataset version for OCC.
+    if (stagedCommit != null) {
+      this.writeOptions = writeOptions;
+    } else {
+      try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
+        this.writeOptions = writeOptions.withVersion(ds.version());
+        logger.debug(
+            "Resolved dataset version for batch write: {}", this.writeOptions.getVersion());
+      }
+    }
   }
 
   @Override
   public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
     return new LanceDataWriter.WriterFactory(
-        schema, writeOptions, initialStorageOptions, namespaceImpl, namespaceProperties, tableId);
+        schema,
+        writeOptions,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        tableId,
+        partitionColumns);
   }
 
   @Override
@@ -111,7 +153,8 @@ public class LanceBatchWrite implements BatchWrite {
             .flatMap(List::stream)
             .collect(Collectors.toList());
 
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", true);
+    Schema arrowSchema =
+        LanceArrowUtils.toArrowSchema(schema, "UTC", true, writeOptions.isUseLargeVarTypes());
     boolean isOverwrite = overwrite || writeOptions.isOverwrite();
 
     // Boxed: null means unset (inherit in lance-core); see LanceSparkWriteOptions.
@@ -127,8 +170,11 @@ public class LanceBatchWrite implements BatchWrite {
       }
     } else {
       // For non-staged tables, commit immediately
-      Dataset ds = dataset.get();
-      try {
+      long version =
+          Objects.requireNonNull(
+              writeOptions.getVersion(),
+              "version must be set (resolved in LanceBatchWrite constructor)");
+      try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
         Operation operation;
         if (isOverwrite) {
           operation = Overwrite.builder().fragments(fragments).schema(arrowSchema).build();
@@ -150,12 +196,10 @@ public class LanceBatchWrite implements BatchWrite {
           commitBuilder.namespaceClient(namespace).tableId(tableId);
         }
         try (Transaction txn =
-                new Transaction.Builder().readVersion(ds.version()).operation(operation).build();
+                new Transaction.Builder().readVersion(version).operation(operation).build();
             Dataset committed = commitBuilder.execute(txn)) {
           // auto-close txn and committed dataset
         }
-      } finally {
-        ds.close();
       }
     }
   }
@@ -163,10 +207,7 @@ public class LanceBatchWrite implements BatchWrite {
   @Override
   public void abort(WriterCommitMessage[] messages) {
     // For staged tables, the dataset is managed by StagedCommit (via abortStagedChanges)
-    // For non-staged tables, close it here
-    if (stagedCommit == null) {
-      dataset.ifPresent(Dataset::close);
-    }
+    // For non-staged tables, no resources to clean up (dataset opened fresh at commit time)
   }
 
   @Override

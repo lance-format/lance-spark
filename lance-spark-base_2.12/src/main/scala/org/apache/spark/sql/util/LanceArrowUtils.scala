@@ -23,13 +23,12 @@ package org.apache.spark.sql.util
  * It has been modified by the Lance developers to fit the needs of the Lance project.
  */
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import org.apache.arrow.vector.complex.MapVector
 import org.apache.arrow.vector.types.{DateUnit, FloatingPointPrecision, IntervalUnit, TimeUnit}
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.apache.spark.{SparkException, SparkUnsupportedOperationException}
 import org.apache.spark.sql.types._
-import org.json4s.{DefaultFormats, Formats}
-import org.json4s.JsonAST.{JObject, JString}
 import org.lance.spark.LanceConstant
 import org.lance.spark.utils.{BlobUtils, Float16Utils, LargeVarCharUtils, VectorUtils}
 
@@ -39,6 +38,9 @@ import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.JavaConverters._
 
 object LanceArrowUtils {
+
+  private val mapper = new ObjectMapper()
+
   val ARROW_FIXED_SIZE_LIST_SIZE_KEY = VectorUtils.ARROW_FIXED_SIZE_LIST_SIZE_KEY
   val ARROW_FLOAT16_KEY = Float16Utils.ARROW_FLOAT16_KEY
   val ENCODING_BLOB = BlobUtils.LANCE_ENCODING_BLOB_KEY
@@ -101,6 +103,9 @@ object LanceArrowUtils {
           case DateUnit.DAY => DateType
           case DateUnit.MILLISECOND => DateType
         }
+      case ts: ArrowType.Timestamp =>
+        if (ts.getTimezone != null && ts.getTimezone.nonEmpty) TimestampType
+        else TimestampNTZType
       case l: ArrowType.List =>
         val children = field.getChildren
         if (children.isEmpty) {
@@ -154,8 +159,8 @@ object LanceArrowUtils {
           new MetadataBuilder()
             .putString(ARROW_LARGE_VAR_CHAR_KEY, "true")
             .build()
-        case _ => Metadata.fromJObject(
-            JObject(field.getMetadata.asScala.map { case (k, v) => (k, JString(v)) }.toList))
+        case _ => Metadata.fromJson(
+            mapper.writeValueAsString(field.getMetadata))
       }
       StructField(field.getName, dt, field.isNullable, metadata)
     }.toArray)
@@ -165,13 +170,22 @@ object LanceArrowUtils {
       schema: StructType,
       timeZoneId: String,
       errorOnDuplicatedFieldNames: Boolean): Schema = {
+    toArrowSchema(schema, timeZoneId, errorOnDuplicatedFieldNames, largeVarTypes = false)
+  }
+
+  def toArrowSchema(
+      schema: StructType,
+      timeZoneId: String,
+      errorOnDuplicatedFieldNames: Boolean,
+      largeVarTypes: Boolean): Schema = {
     new Schema(schema.map { field =>
       toArrowField(
         field.name,
         deduplicateFieldNames(field.dataType, errorOnDuplicatedFieldNames),
         field.nullable,
         timeZoneId,
-        field.metadata)
+        field.metadata,
+        largeVarTypes)
     }.asJava)
   }
 
@@ -180,8 +194,9 @@ object LanceArrowUtils {
       dt: DataType,
       nullable: Boolean,
       timeZoneId: String,
-      metadata: org.apache.spark.sql.types.Metadata = null): Field = {
-    var large: Boolean = false
+      metadata: org.apache.spark.sql.types.Metadata = null,
+      largeVarTypes: Boolean = false): Field = {
+    var large: Boolean = largeVarTypes
     var meta: Map[String, String] = Map.empty
 
     if (metadata != null) {
@@ -194,10 +209,9 @@ object LanceArrowUtils {
         large = true
       }
 
-      implicit val formats: Formats = DefaultFormats
-      meta = metadata.jsonValue.extract[Map[String, Object]].map { case (k, v) =>
-        (k, String.valueOf(v))
-      }
+      meta = mapper
+        .readValue(metadata.json, classOf[java.util.LinkedHashMap[_, _]])
+        .asScala.map { case (k, v) => (k.toString, String.valueOf(v)) }.toMap
     }
 
     dt match {
@@ -222,7 +236,12 @@ object LanceArrowUtils {
                 null),
               Seq.empty[Field].asJava)
           } else {
-            toArrowField("element", elementType, containsNull, timeZoneId)
+            toArrowField(
+              "element",
+              elementType,
+              containsNull,
+              timeZoneId,
+              largeVarTypes = largeVarTypes)
           }
           new Field(
             name,
@@ -234,7 +253,12 @@ object LanceArrowUtils {
             name,
             fieldType,
             Seq(
-              toArrowField("element", elementType, containsNull, timeZoneId)).asJava)
+              toArrowField(
+                "element",
+                elementType,
+                containsNull,
+                timeZoneId,
+                largeVarTypes = largeVarTypes)).asJava)
         }
       case StructType(fields) =>
         val fieldType = new FieldType(nullable, ArrowType.Struct.INSTANCE, null, meta.asJava)
@@ -242,7 +266,13 @@ object LanceArrowUtils {
           name,
           fieldType,
           fields.map { field =>
-            toArrowField(field.name, field.dataType, field.nullable, timeZoneId)
+            toArrowField(
+              field.name,
+              field.dataType,
+              field.nullable,
+              timeZoneId,
+              field.metadata,
+              largeVarTypes)
           }.toSeq.asJava)
       case MapType(keyType, valueType, valueContainsNull) =>
         val mapType = new FieldType(nullable, new ArrowType.Map(false), null, meta.asJava)
@@ -256,9 +286,10 @@ object LanceArrowUtils {
               .add(MapVector.KEY_NAME, keyType, nullable = false)
               .add(MapVector.VALUE_NAME, valueType, nullable = valueContainsNull),
             nullable = false,
-            timeZoneId)).asJava)
+            timeZoneId,
+            largeVarTypes = largeVarTypes)).asJava)
       case udt: UserDefinedType[_] =>
-        toArrowField(name, udt.sqlType, nullable, timeZoneId)
+        toArrowField(name, udt.sqlType, nullable, timeZoneId, largeVarTypes = largeVarTypes)
       case dataType =>
         val fieldType =
           new FieldType(nullable, toArrowType(dataType, timeZoneId, large, name), null, meta.asJava)

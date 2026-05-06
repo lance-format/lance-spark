@@ -14,6 +14,9 @@
 package org.lance.spark.update;
 
 import org.lance.index.Index;
+import org.lance.index.IndexCriteria;
+import org.lance.index.IndexDescription;
+import org.lance.index.IndexType;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
@@ -227,6 +230,32 @@ public abstract class BaseAddIndexTest {
   }
 
   @Test
+  public void testCreateBTreeIndexWithRowsPerRange() {
+    prepareDataset();
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index test_index_btree_param using btree (id) "
+                    + "with (zone_size=2048, build_mode='range', rows_per_range=2)",
+                fullTable));
+    Assertions.assertEquals(
+        "StructType(StructField(fragments_indexed,LongType,true),StructField(index_name,StringType,true))",
+        result.schema().toString());
+    Row row = result.collectAsList().get(0);
+    long fragmentsIndexed = row.getLong(0);
+    String indexName = row.getString(1);
+    Assertions.assertTrue(fragmentsIndexed >= 2, "Expected at least 2 fragments to be indexed");
+    Assertions.assertEquals("test_index_btree_param", indexName);
+    checkIndex("test_index_btree_param");
+    // Verify query using the indexed field with zone_size parameter
+    Dataset<Row> query = spark.sql(String.format("select * from %s where id=15", fullTable));
+    Assertions.assertEquals(1L, query.count());
+    Row r = query.collectAsList().get(0);
+    Assertions.assertEquals(15, r.getInt(0));
+    Assertions.assertEquals("text_15", r.getString(1));
+  }
+
+  @Test
   public void testCreateBTreeIndexWithFragmentMode() {
     prepareDataset();
 
@@ -300,7 +329,7 @@ public abstract class BaseAddIndexTest {
     Assertions.assertEquals("test_fts_index", indexName);
 
     // Check index is created successfully
-    checkIndex("test_fts_index");
+    checkFtsIndex("test_fts_index");
 
     // Verify query using the text column
     Dataset<Row> query =
@@ -342,7 +371,7 @@ public abstract class BaseAddIndexTest {
     Assertions.assertTrue(fragmentsIndexed >= 2, "Expected at least 2 fragments to be indexed");
     Assertions.assertEquals("test_fts_stem", indexName);
 
-    checkIndex("test_fts_stem");
+    checkFtsIndex("test_fts_stem");
   }
 
   @Test
@@ -375,7 +404,7 @@ public abstract class BaseAddIndexTest {
     Assertions.assertEquals("test_fts_repeat", indexName1);
 
     // Check index is created successfully
-    checkIndex("test_fts_repeat");
+    checkFtsIndex("test_fts_repeat");
 
     // Second FTS index creation with same name (should replace)
     Dataset<Row> result2 =
@@ -393,7 +422,7 @@ public abstract class BaseAddIndexTest {
     Assertions.assertEquals("test_fts_repeat", indexName2);
 
     // Check index still exists after replacement
-    checkIndex("test_fts_repeat");
+    checkFtsIndex("test_fts_repeat");
   }
 
   @Test
@@ -449,7 +478,100 @@ public abstract class BaseAddIndexTest {
     Assertions.assertEquals(1L, query.count());
   }
 
-  private void checkIndex(String indexName) {
+  @Test
+  public void testBTreeIndexHasIndexDetails() {
+    prepareDataset();
+    spark.sql(
+        String.format("alter table %s create index idx_details_btree using btree (id)", fullTable));
+    verifyIndexDetails("idx_details_btree", "BTREE");
+  }
+
+  @Test
+  public void testRangeBTreeIndexHasIndexDetails() {
+    prepareDataset();
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_details_range using btree (id) with (build_mode='range')",
+            fullTable));
+    verifyIndexDetails("idx_details_range", "BTREE");
+  }
+
+  @Test
+  public void testFtsIndexHasIndexDetails() {
+    prepareDataset();
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_details_fts using fts (text) with ("
+                + "base_tokenizer='simple', "
+                + "language='English', "
+                + "max_token_length=40, "
+                + "lower_case=true, "
+                + "stem=false, "
+                + "remove_stop_words=false, "
+                + "ascii_folding=false, "
+                + "with_position=true"
+                + ")",
+            fullTable));
+    verifyIndexDetails("idx_details_fts", "INVERTED");
+  }
+
+  /** Checks index_details is populated and both describeIndices overloads work. */
+  private void verifyIndexDetails(String indexName, String expectedIndexType) {
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      List<Index> indexList = lanceDataset.getIndexes();
+      Index index =
+          indexList.stream()
+              .filter(i -> indexName.equals(i.name()))
+              .findFirst()
+              .orElseThrow(
+                  () -> new AssertionError("Index '" + indexName + "' not found in dataset"));
+      Assertions.assertTrue(
+          index.indexDetails().isPresent(),
+          "index_details should be populated for index '" + indexName + "'");
+      Assertions.assertTrue(
+          index.indexDetails().get().length > 0,
+          "index_details should not be empty for index '" + indexName + "'");
+      Assertions.assertEquals(
+          IndexType.valueOf(expectedIndexType.toUpperCase()),
+          index.indexType(),
+          "Index type mismatch for '" + indexName + "'");
+      if (index.indexType() == IndexType.INVERTED) {
+        Assertions.assertTrue(index.indexVersion() > 0, "FTS index version should be positive");
+        if ("2".equals(System.getenv("LANCE_FTS_FORMAT_VERSION"))) {
+          Assertions.assertEquals(2, index.indexVersion());
+        }
+      }
+
+      // criteria-based overload
+      IndexCriteria criteria = new IndexCriteria.Builder().build();
+      List<IndexDescription> descriptions = lanceDataset.describeIndices(criteria);
+      Assertions.assertFalse(
+          descriptions.isEmpty(), "describeIndices(criteria) should return at least one index");
+      IndexDescription desc =
+          descriptions.stream()
+              .filter(d -> indexName.equals(d.getName()))
+              .findFirst()
+              .orElseThrow(
+                  () -> new AssertionError("Index description for '" + indexName + "' not found"));
+      Assertions.assertEquals(
+          expectedIndexType.toUpperCase(),
+          desc.getIndexType().toUpperCase(),
+          "Index type mismatch for '" + indexName + "'");
+
+      // no-arg overload
+      List<IndexDescription> noArgDescriptions = lanceDataset.describeIndices();
+      Assertions.assertFalse(
+          noArgDescriptions.isEmpty(), "describeIndices() no-arg should succeed");
+      Assertions.assertTrue(
+          noArgDescriptions.stream().anyMatch(d -> indexName.equals(d.getName())),
+          "describeIndices() no-arg should contain index '" + indexName + "'");
+    } finally {
+      lanceDataset.close();
+    }
+  }
+
+  private Index checkIndex(String indexName) {
     // Check index is created successfully
     org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
     try {
@@ -457,8 +579,26 @@ public abstract class BaseAddIndexTest {
       Assertions.assertTrue(indexList.size() >= 1);
       Set<String> indexNames = indexList.stream().map(Index::name).collect(Collectors.toSet());
       Assertions.assertTrue(indexNames.contains(indexName));
+      Index index =
+          indexList.stream()
+              .filter(i -> indexName.equals(i.name()))
+              .findFirst()
+              .orElseThrow(() -> new AssertionError("Index not found: " + indexName));
+      Assertions.assertTrue(index.indexDetails().isPresent(), "Index details should be present");
+      Assertions.assertTrue(
+          index.indexDetails().get().length > 0, "Index details should not be empty");
+      return index;
     } finally {
       lanceDataset.close();
+    }
+  }
+
+  private void checkFtsIndex(String indexName) {
+    Index index = checkIndex(indexName);
+    Assertions.assertEquals(IndexType.INVERTED, index.indexType());
+    Assertions.assertTrue(index.indexVersion() > 0, "FTS index version should be positive");
+    if ("2".equals(System.getenv("LANCE_FTS_FORMAT_VERSION"))) {
+      Assertions.assertEquals(2, index.indexVersion());
     }
   }
 }

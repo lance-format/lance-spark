@@ -42,6 +42,7 @@ import java.nio.file.Path;
 import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class LanceBatchWriteTest {
   @TempDir static Path tempDir;
@@ -101,6 +102,48 @@ public class LanceBatchWriteTest {
           }
         }
       }
+    }
+  }
+
+  /**
+   * Two overwrite writers both pin the same table version at construction. After the first driver
+   * commit advances the version, the second commit must fail (OCC), not apply a stale overwrite.
+   */
+  @Test
+  public void testConcurrentWriteConflict(TestInfo testInfo) throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
+      Schema schema = new Schema(Collections.singletonList(field));
+      Dataset.create(allocator, datasetUri, schema, new WriteParams.Builder().build()).close();
+
+      LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
+      StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
+
+      LanceBatchWrite writerA =
+          new LanceBatchWrite(sparkSchema, writeOptions, true, null, null, null, null, false, null);
+      LanceBatchWrite writerB =
+          new LanceBatchWrite(sparkSchema, writeOptions, true, null, null, null, null, false, null);
+
+      WriterCommitMessage messageA = writeRows(writerA, sparkSchema, 10, 0);
+      WriterCommitMessage messageB = writeRows(writerB, sparkSchema, 10, 100);
+
+      writerA.commit(new WriterCommitMessage[] {messageA});
+      assertThrows(Exception.class, () -> writerB.commit(new WriterCommitMessage[] {messageB}));
+    }
+  }
+
+  private static WriterCommitMessage writeRows(
+      LanceBatchWrite batchWrite, StructType sparkSchema, int numRows, int startValue)
+      throws Exception {
+    DataWriterFactory factory = batchWrite.createBatchWriterFactory(() -> 1);
+    try (DataWriter<InternalRow> writer = factory.createWriter(0, 0)) {
+      for (int i = 0; i < numRows; i++) {
+        InternalRow row = new GenericInternalRow(new Object[] {startValue + i});
+        writer.write(row);
+      }
+      return writer.commit();
     }
   }
 }

@@ -78,6 +78,11 @@ class LanceSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserInt
    * Parse a string to a LogicalPlan.
    */
   override def parsePlan(sqlText: String): LogicalPlan = {
+    if (sqlText.trim.toUpperCase.startsWith("CREATE INDEX")) {
+      throw new UnsupportedOperationException(
+        "Lance does not support standard CREATE INDEX syntax. " +
+          "Use: ALTER TABLE <table> CREATE INDEX <name> USING <method> (<columns>)")
+    }
     try {
       delegate.parsePlan(sqlText)
     } catch {

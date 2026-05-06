@@ -254,6 +254,10 @@ public class LanceDataset
     return namespaceProperties;
   }
 
+  public boolean getManagedVersioning() {
+    return managedVersioning;
+  }
+
   public String getFileFormatVersion() {
     return fileFormatVersion;
   }
@@ -274,7 +278,12 @@ public class LanceDataset
               .build();
     }
     return new LanceScanBuilder(
-        sparkSchema, scanOptions, initialStorageOptions, namespaceImpl, namespaceProperties);
+        sparkSchema,
+        scanOptions,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        tableProperties);
   }
 
   @Override
@@ -289,7 +298,12 @@ public class LanceDataset
 
   @Override
   public Map<String, String> properties() {
-    return tableProperties;
+    // Spark's DescribeTableExec iterates TABLE_RESERVED_PROPERTIES and emits a capitalized row for
+    // each key present here (e.g. "location" -> col_name "Location"). Without this entry the
+    // physical URI is invisible to DESCRIBE EXTENDED and to any tooling that relies on it.
+    Map<String, String> props = new HashMap<>(tableProperties);
+    props.put("location", readOptions.getDatasetUri());
+    return props;
   }
 
   @Override
@@ -359,7 +373,8 @@ public class LanceDataset
             namespaceImpl,
             namespaceProperties,
             readOptions.getTableId(),
-            managedVersioning);
+            managedVersioning,
+            tableProperties);
 
     if (stagedCommit != null) {
       builder.setStagedCommit(stagedCommit);

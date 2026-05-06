@@ -23,7 +23,9 @@ import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.LanceSparkWriteOptions;
 
 import java.time.Instant;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 public class Utils {
 
@@ -50,42 +52,124 @@ public class Utils {
     return versionID;
   }
 
-  /** Opens a dataset via namespace path with read options (storage credentials, etc.). */
-  private static Dataset openDataset(
-      LanceNamespace namespace, List<String> tableId, ReadOptions readOptions) {
-    return Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .namespaceClient(namespace)
-        .tableId(tableId)
-        .readOptions(readOptions)
-        .build();
+  /** Returns a new builder for opening a dataset from read options. */
+  public static OpenDatasetBuilder openDatasetBuilder(LanceSparkReadOptions readOptions) {
+    return new OpenDatasetBuilder(readOptions);
   }
 
-  /** Opens a dataset via URI with the given read options. */
-  public static Dataset openDataset(String uri, ReadOptions readOptions) {
-    return Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .uri(uri)
-        .readOptions(readOptions)
-        .build();
+  /** Returns a new builder for opening a dataset from write options. */
+  public static OpenDatasetBuilder openDatasetBuilder(LanceSparkWriteOptions writeOptions) {
+    return new OpenDatasetBuilder(writeOptions);
   }
 
-  /** Opens a dataset using read options, dispatching to namespace or URI path. */
-  public static Dataset openDataset(LanceSparkReadOptions readOptions) {
-    if (readOptions.hasNamespace()) {
-      return openDataset(
-          readOptions.getNamespace(), readOptions.getTableId(), readOptions.toReadOptions());
+  /**
+   * Builder for dataset opens that merge driver-side {@code initialStorageOptions} into the base
+   * storage options and attach a managed {@link LanceRuntime} session.
+   */
+  public static class OpenDatasetBuilder {
+    private final String uri;
+    private final LanceNamespace namespace;
+    private final List<String> tableId;
+    private final Map<String, String> storageOptions;
+    private final String catalogName;
+    private final Long version;
+    private final Integer blockSize;
+    private final Integer indexCacheSize;
+    private final Integer metadataCacheSize;
+
+    private Map<String, String> initialStorageOptions;
+    private String runtimeNamespaceImpl;
+    private Map<String, String> runtimeNamespaceProperties;
+    private List<String> runtimeTableId;
+
+    private OpenDatasetBuilder(LanceSparkReadOptions opts) {
+      this.uri = opts.getDatasetUri();
+      this.storageOptions = opts.getStorageOptions();
+      this.version = opts.getVersion() != null ? opts.getVersion().longValue() : null;
+      this.catalogName = opts.getCatalogName();
+      this.namespace = opts.getNamespace();
+      this.tableId = opts.getTableId();
+      this.blockSize = opts.getBlockSize();
+      this.indexCacheSize = opts.getIndexCacheSize();
+      this.metadataCacheSize = opts.getMetadataCacheSize();
     }
-    return openDataset(readOptions.getDatasetUri(), readOptions.toReadOptions());
-  }
 
-  /** Opens a dataset using write options, dispatching to namespace or URI path. */
-  public static Dataset openDataset(LanceSparkWriteOptions writeOptions) {
-    if (writeOptions.hasNamespace()) {
-      return openDataset(
-          writeOptions.getNamespace(), writeOptions.getTableId(), writeOptions.toReadOptions());
+    private OpenDatasetBuilder(LanceSparkWriteOptions opts) {
+      this.uri = opts.getDatasetUri();
+      this.storageOptions = opts.getStorageOptions();
+      this.namespace = opts.getNamespace();
+      this.tableId = opts.getTableId();
+      this.catalogName = null;
+      this.version = opts.getVersion();
+      this.blockSize = null;
+      this.indexCacheSize = null;
+      this.metadataCacheSize = null;
     }
-    return openDataset(writeOptions.getDatasetUri(), writeOptions.toReadOptions());
+
+    /** Sets initial storage options from {@code describeTable()}. */
+    public OpenDatasetBuilder initialStorageOptions(Map<String, String> initialStorageOptions) {
+      this.initialStorageOptions = initialStorageOptions;
+      return this;
+    }
+
+    /** Reconnects a namespace when this builder is used after options deserialization. */
+    public OpenDatasetBuilder runtimeNamespace(
+        String namespaceImpl, Map<String, String> namespaceProperties, List<String> tableId) {
+      this.runtimeNamespaceImpl = namespaceImpl;
+      this.runtimeNamespaceProperties = namespaceProperties;
+      this.runtimeTableId = tableId;
+      return this;
+    }
+
+    public Dataset build() {
+      Map<String, String> base = storageOptions != null ? storageOptions : Collections.emptyMap();
+      Map<String, String> merged = LanceRuntime.mergeStorageOptions(base, initialStorageOptions);
+
+      ReadOptions.Builder roBuilder =
+          new ReadOptions.Builder()
+              .setStorageOptions(merged)
+              .setSession(
+                  catalogName != null ? LanceRuntime.session(catalogName) : LanceRuntime.session());
+      if (version != null) {
+        roBuilder.setVersion(version);
+      }
+      if (blockSize != null) {
+        roBuilder.setBlockSize(blockSize);
+      }
+      if (indexCacheSize != null) {
+        roBuilder.setIndexCacheSize(indexCacheSize);
+      }
+      if (metadataCacheSize != null) {
+        roBuilder.setMetadataCacheSize(metadataCacheSize);
+      }
+
+      if (namespace != null && tableId != null) {
+        return Dataset.open()
+            .allocator(LanceRuntime.allocator())
+            .namespaceClient(namespace)
+            .tableId(tableId)
+            .readOptions(roBuilder.build())
+            .build();
+      }
+      if (runtimeNamespaceImpl != null) {
+        LanceNamespace runtimeNamespace =
+            LanceRuntime.getOrCreateNamespace(runtimeNamespaceImpl, runtimeNamespaceProperties);
+        List<String> effectiveTableId = runtimeTableId != null ? runtimeTableId : tableId;
+        if (runtimeNamespace != null && effectiveTableId != null) {
+          return Dataset.open()
+              .allocator(LanceRuntime.allocator())
+              .namespaceClient(runtimeNamespace)
+              .tableId(effectiveTableId)
+              .readOptions(roBuilder.build())
+              .build();
+        }
+      }
+      return Dataset.open()
+          .allocator(LanceRuntime.allocator())
+          .uri(uri)
+          .readOptions(roBuilder.build())
+          .build();
+    }
   }
 
   /**

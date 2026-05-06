@@ -26,6 +26,92 @@ requires_update_or_merge = pytest.mark.skipif(
     reason="UPDATE/MERGE require Spark 3.5+ (row-level rewrite rules not available in 3.4)"
 )
 
+LANCE_CATALOG = "lance"
+
+
+def _java_hash_map(spark, values):
+    java_map = spark._jvm.java.util.HashMap()
+    for key, value in values.items():
+        if value is not None:
+            java_map.put(key, value)
+    return java_map
+
+
+def _lance_storage_options(spark):
+    prefix = f"spark.sql.catalog.{LANCE_CATALOG}.storage."
+    return {
+        key[len(prefix) :]: value
+        for key, value in spark.sparkContext.getConf().getAll()
+        if key.startswith(prefix)
+    }
+
+
+def _table_location(spark, table_name):
+    rows = (
+        spark.sql(f"DESCRIBE EXTENDED {table_name}")
+        .filter("col_name == 'Location'")
+        .collect()
+    )
+    assert rows, f"DESCRIBE EXTENDED did not return a Location row for {table_name}"
+    return rows[0].data_type
+
+
+def _read_options_builder(jvm):
+    try:
+        return jvm.org.lance.ReadOptions.Builder()
+    except Exception:
+        return getattr(jvm.org.lance, "ReadOptions$Builder")()
+
+
+def _lance_index_metadata(spark, table_name, index_name):
+    if getattr(spark, "_lance_backend", None) == "lancedb":
+        return None
+
+    jvm = spark._jvm
+    storage_options = _java_hash_map(spark, _lance_storage_options(spark))
+    read_options = (
+        _read_options_builder(jvm)
+        .setStorageOptions(storage_options)
+        .setSession(jvm.org.lance.spark.LanceRuntime.session(LANCE_CATALOG))
+        .build()
+    )
+    dataset = (
+        jvm.org.lance.Dataset.open()
+        .allocator(jvm.org.lance.spark.LanceRuntime.allocator())
+        .uri(_table_location(spark, table_name))
+        .readOptions(read_options)
+        .build()
+    )
+    try:
+        indexes = dataset.getIndexes()
+        for pos in range(indexes.size()):
+            index = indexes.get(pos)
+            if index.name() == index_name:
+                index_details = index.indexDetails()
+                return {
+                    "name": index.name(),
+                    "index_type": index.indexType().name(),
+                    "index_version": index.indexVersion(),
+                    "index_details_present": index_details.isPresent(),
+                    "index_details_length": (
+                        len(index_details.get()) if index_details.isPresent() else 0
+                    ),
+                }
+    finally:
+        dataset.close()
+
+    pytest.fail(f"Index {index_name} not found in {table_name}")
+
+
+def _assert_lance_index_metadata(spark, table_name, index_name, expected_type):
+    metadata = _lance_index_metadata(spark, table_name, index_name)
+    if metadata is None:
+        return None
+    assert metadata["index_type"] == expected_type
+    assert metadata["index_details_present"]
+    assert metadata["index_details_length"] > 0
+    return metadata
+
 
 # =============================================================================
 # DDL (Data Definition Language) Tests
@@ -491,6 +577,134 @@ class TestDDLAlterTableProperties:
         assert props["team"] == "data-eng"
 
 
+class TestDDLColumnCompression:
+    """Test per-column compression TBLPROPERTIES → Arrow field metadata pipeline."""
+
+    def test_create_table_with_compression(self, spark):
+        """Table with compression TBLPROPERTIES can be created and written to."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id BIGINT,
+                payload STRING,
+                ts BIGINT
+            ) USING lance
+            TBLPROPERTIES (
+                'payload.lance.compression'       = 'zstd',
+                'payload.lance.compression-level' = '3',
+                'ts.lance.compression'            = 'none'
+            )
+        """)
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'hello', 1000)")
+        result = spark.sql("SELECT * FROM default.test_table").collect()
+        assert len(result) == 1
+        assert result[0].payload == "hello"
+
+    def test_all_supported_compression_tblproperties(self, spark):
+        """All five connector-supported compression TBLPROPERTIES can be set without error."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id BIGINT,
+                payload STRING,
+                ts BIGINT
+            ) USING lance
+            TBLPROPERTIES (
+                'ts.lance.compression'          = 'lz4',
+                'ts.lance.compression-level'    = '1',
+                'ts.lance.structural-encoding'  = 'miniblock',
+                'ts.lance.rle-threshold'        = '0.5',
+                'ts.lance.bss'                  = 'auto'
+            )
+        """)
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'hello', 1000)")
+        result = spark.sql("SELECT id, ts FROM default.test_table").collect()
+        assert result[0].ts == 1000
+
+    def test_invalid_compression_scheme_rejected(self, spark):
+        """Invalid compression scheme raises an error at table creation time."""
+        with pytest.raises(Exception, match=r"invalid compression scheme"):
+            spark.sql("""
+                CREATE TABLE default.test_table (
+                    id BIGINT,
+                    payload STRING
+                ) USING lance
+                TBLPROPERTIES (
+                    'payload.lance.compression' = 'gzip'
+                )
+            """)
+
+    def test_invalid_structural_encoding_rejected(self, spark):
+        """Invalid structural-encoding value raises an error at table creation time."""
+        with pytest.raises(Exception, match=r"invalid structural-encoding"):
+            spark.sql("""
+                CREATE TABLE default.test_table (
+                    id BIGINT,
+                    ts BIGINT
+                ) USING lance
+                TBLPROPERTIES (
+                    'ts.lance.structural-encoding' = 'rle'
+                )
+            """)
+
+    def test_deferred_dict_key_ignored(self, spark):
+        """Deferred dict-divisor TBLPROPERTY does not cause an error (silently ignored)."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id BIGINT,
+                payload STRING
+            ) USING lance
+            TBLPROPERTIES (
+                'payload.lance.dict-divisor' = '4'
+            )
+        """)
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'ok')")
+        result = spark.sql("SELECT payload FROM default.test_table").collect()
+        assert result[0].payload == "ok"
+
+    def test_compression_metadata_reaches_lance_file(self, spark):
+        """Arrow field metadata with lance-encoding keys is present in the written Lance file.
+
+        Opens the dataset directly with lance-python and inspects the schema to verify
+        that the connector correctly wired the TBLPROPERTIES into Arrow field metadata
+        consumed by the Rust encoder.
+        """
+        lance = pytest.importorskip("lance", reason="lance-python not installed")
+        if spark._lance_backend != "local":
+            pytest.skip("lance-python file inspection only supported on local backend")
+
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id BIGINT,
+                payload STRING,
+                ts BIGINT
+            ) USING lance
+            TBLPROPERTIES (
+                'payload.lance.compression'       = 'zstd',
+                'payload.lance.compression-level' = '3',
+                'ts.lance.compression'            = 'none'
+            )
+        """)
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'hello', 1000)")
+
+        location = (
+            spark.sql("DESCRIBE EXTENDED default.test_table")
+            .filter("col_name == 'Location'")
+            .collect()[0]
+            .data_type
+        )
+        ds = lance.dataset(location)
+        schema = ds.schema
+
+        payload_meta = schema.field("payload").metadata
+        assert payload_meta.get(b"lance-encoding:compression") == b"zstd"
+        assert payload_meta.get(b"lance-encoding:compression-level") == b"3"
+
+        ts_meta = schema.field("ts").metadata
+        assert ts_meta.get(b"lance-encoding:compression") == b"none"
+
+        id_meta = schema.field("id").metadata
+        assert b"lance-encoding:compression" not in (id_meta or {})
+
+
 class TestDDLIndex:
     """Test DDL index operations: CREATE INDEX (BTree, FTS)."""
 
@@ -525,6 +739,7 @@ class TestDDLIndex:
         """).collect()
         assert len(query_result) == 1
         assert query_result[0].id == 50
+        _assert_lance_index_metadata(spark, "default.test_table", "idx_id", "BTREE")
 
     def test_create_btree_index_on_string(self, spark):
         """Test CREATE INDEX with BTree on string column."""
@@ -561,6 +776,7 @@ class TestDDLIndex:
             SELECT * FROM default.employees WHERE department = 'Engineering'
         """).collect()
         assert len(query_result) == 3
+        _assert_lance_index_metadata(spark, "default.employees", "idx_dept", "BTREE")
 
     def test_create_fts_index(self, spark):
         """Test CREATE INDEX with full-text search (FTS)."""
@@ -591,6 +807,46 @@ class TestDDLIndex:
 
         assert len(result) == 1
         assert result[0][1] == "idx_content_fts"
+        metadata = _assert_lance_index_metadata(
+            spark, "default.test_table", "idx_content_fts", "INVERTED"
+        )
+        if metadata is not None:
+            assert metadata["index_version"] > 0
+            if os.environ.get("LANCE_FTS_FORMAT_VERSION") == "2":
+                assert metadata["index_version"] == 2
+
+    def test_create_fts_index_honors_format_version_v2(self, spark):
+        """Test FTS v2 when the Docker test process enables the Lance runtime flag."""
+        if os.environ.get("LANCE_FTS_FORMAT_VERSION") != "2":
+            pytest.skip("run with LANCE_FTS_FORMAT_VERSION=2")
+        if getattr(spark, "_lance_backend", None) == "lancedb":
+            pytest.skip("direct JVM dataset inspection is not configured for REST-backed tables")
+
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                content STRING
+            )
+        """)
+
+        data = [
+            (1, "distributed indexing records metadata"),
+            (2, "full text search v2"),
+            (3, "lance spark integration"),
+        ]
+        df = spark.createDataFrame(data, ["id", "content"])
+        df.writeTo("default.test_table").append()
+
+        spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX idx_content_fts_v2 USING fts (content)
+            WITH ( base_tokenizer = 'simple', language = 'English' )
+        """)
+
+        metadata = _assert_lance_index_metadata(
+            spark, "default.test_table", "idx_content_fts_v2", "INVERTED"
+        )
+        assert metadata["index_version"] == 2
 
     def test_create_index_empty_table(self, spark):
         """Test CREATE INDEX on empty table."""

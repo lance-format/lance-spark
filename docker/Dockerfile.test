@@ -6,11 +6,13 @@
 
 ARG SPARK_MAJOR_VERSION=4.0
 ARG SCALA_VERSION=2.13
+ARG LANCE_NAMESPACE_IMPL_VERSION=0.3.0
 FROM lance-spark-test-base:${SPARK_MAJOR_VERSION}_${SCALA_VERSION}
 
 # Re-declare ARGs needed after FROM
 ARG SPARK_MAJOR_VERSION=4.0
 ARG SCALA_VERSION=2.13
+ARG LANCE_NAMESPACE_IMPL_VERSION=0.3.0
 
 # --- Uncached layers: bundle JAR ---
 
@@ -18,6 +20,9 @@ ARG SCALA_VERSION=2.13
 ADD "https://www.random.org/cgi-bin/randbyte?nbytes=10&format=h" skipcache
 
 COPY lance-spark-bundle-${SPARK_MAJOR_VERSION}_${SCALA_VERSION}/target/lance-spark-bundle-${SPARK_MAJOR_VERSION}_${SCALA_VERSION}-*.jar ${SPARK_HOME}/jars/
+RUN curl -fL \
+      "https://repo1.maven.org/maven2/org/lance/lance-namespace-glue/${LANCE_NAMESPACE_IMPL_VERSION}/lance-namespace-glue-${LANCE_NAMESPACE_IMPL_VERSION}-bundle.jar" \
+      -o "${SPARK_HOME}/jars/lance-namespace-glue-${LANCE_NAMESPACE_IMPL_VERSION}-bundle.jar"
 
 # Spark configuration and entrypoint
 COPY docker/spark-defaults.conf ${SPARK_HOME}/conf/

@@ -13,7 +13,6 @@
  */
 package org.lance.spark;
 
-import org.lance.ReadOptions;
 import org.lance.WriteParams;
 import org.lance.WriteParams.WriteMode;
 import org.lance.namespace.LanceNamespace;
@@ -56,12 +55,19 @@ public class LanceSparkWriteOptions implements Serializable {
   public static final String CONFIG_QUEUE_DEPTH = "queue_depth";
   public static final String CONFIG_BATCH_SIZE = "batch_size";
   public static final String CONFIG_ENABLE_STABLE_ROW_IDS = "enable_stable_row_ids";
+  public static final String CONFIG_USE_LARGE_VAR_TYPES = "use_large_var_types";
+  public static final String CONFIG_MAX_BATCH_BYTES = "max_batch_bytes";
+  public static final String CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD = "blob_pack_file_size_threshold";
 
   private static final WriteMode DEFAULT_WRITE_MODE = WriteMode.APPEND;
   private static final boolean DEFAULT_USE_QUEUED_WRITE_BUFFER = false;
   private static final int DEFAULT_QUEUE_DEPTH = 8;
   // Changed from 512 to 8192 for better write performance consistency with read path
   private static final int DEFAULT_BATCH_SIZE = 8192;
+  private static final boolean DEFAULT_USE_LARGE_VAR_TYPES = false;
+  // Default max bytes per batch (256MB). Batches flush when either row count or byte size
+  // is reached, whichever comes first. This prevents OOM when rows are very large.
+  public static final long DEFAULT_MAX_BATCH_BYTES = 256L * 1024 * 1024;
 
   private final String datasetUri;
   private final WriteMode writeMode;
@@ -75,6 +81,10 @@ public class LanceSparkWriteOptions implements Serializable {
   // Boxed so we can represent "unset" (null): when null, callers omit the flag and lance-core
   // inherits from the manifest (e.g. append without re-specifying). Staged commit uses primitives.
   private final Boolean enableStableRowIds;
+  private final boolean useLargeVarTypes;
+  private final long maxBatchBytes;
+  // Boxed: null means "unset" so lance-core uses its own default (1 GiB as of 6.0.0-beta.1).
+  private final Long blobPackFileSizeThreshold;
   private final Map<String, String> storageOptions;
 
   /** The namespace for credential vending. Transient as LanceNamespace is not serializable. */
@@ -82,6 +92,9 @@ public class LanceSparkWriteOptions implements Serializable {
 
   /** The table identifier within the namespace, used for credential refresh. */
   private final List<String> tableId;
+
+  /** Use this version to open the dataset and apply write if set. */
+  private final Long version;
 
   private LanceSparkWriteOptions(Builder builder) {
     this.datasetUri = builder.datasetUri;
@@ -94,9 +107,13 @@ public class LanceSparkWriteOptions implements Serializable {
     this.queueDepth = builder.queueDepth;
     this.batchSize = builder.batchSize;
     this.enableStableRowIds = builder.enableStableRowIds;
+    this.useLargeVarTypes = builder.useLargeVarTypes;
+    this.maxBatchBytes = builder.maxBatchBytes;
+    this.blobPackFileSizeThreshold = builder.blobPackFileSizeThreshold;
     this.storageOptions = new HashMap<>(builder.storageOptions);
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
+    this.version = builder.version;
   }
 
   /** Creates a new builder for LanceSparkWriteOptions. */
@@ -168,6 +185,19 @@ public class LanceSparkWriteOptions implements Serializable {
     return enableStableRowIds;
   }
 
+  public boolean isUseLargeVarTypes() {
+    return useLargeVarTypes;
+  }
+
+  public long getMaxBatchBytes() {
+    return maxBatchBytes;
+  }
+
+  /** Nullable: when unset, lance-core uses its own default for blob v2 pack sidecar size. */
+  public Long getBlobPackFileSizeThreshold() {
+    return blobPackFileSizeThreshold;
+  }
+
   public Map<String, String> getStorageOptions() {
     return storageOptions;
   }
@@ -178,6 +208,37 @@ public class LanceSparkWriteOptions implements Serializable {
 
   public List<String> getTableId() {
     return tableId;
+  }
+
+  public Long getVersion() {
+    return version;
+  }
+
+  /** Returns a builder pre-populated with all fields from this instance. */
+  public Builder toBuilder() {
+    return builder()
+        .datasetUri(datasetUri)
+        .writeMode(writeMode)
+        .maxRowsPerFile(maxRowsPerFile)
+        .maxRowsPerGroup(maxRowsPerGroup)
+        .maxBytesPerFile(maxBytesPerFile)
+        .fileFormatVersion(fileFormatVersion)
+        .useQueuedWriteBuffer(useQueuedWriteBuffer)
+        .queueDepth(queueDepth)
+        .batchSize(batchSize)
+        .maxBatchBytes(maxBatchBytes)
+        .enableStableRowIds(enableStableRowIds)
+        .useLargeVarTypes(useLargeVarTypes)
+        .blobPackFileSizeThreshold(blobPackFileSizeThreshold)
+        .storageOptions(storageOptions)
+        .namespace(namespace)
+        .tableId(tableId)
+        .version(version);
+  }
+
+  /** Returns a copy of these options with version set to the given version. */
+  public LanceSparkWriteOptions withVersion(long version) {
+    return toBuilder().version(version).build();
   }
 
   public boolean hasNamespace() {
@@ -203,38 +264,20 @@ public class LanceSparkWriteOptions implements Serializable {
   }
 
   /**
-   * Converts this to Lance ReadOptions for opening existing datasets.
-   *
-   * @return ReadOptions with storage options, session, and credential provider
-   */
-  public ReadOptions toReadOptions() {
-    ReadOptions.Builder builder =
-        new ReadOptions.Builder()
-            .setStorageOptions(storageOptions)
-            .setSession(LanceRuntime.session());
-    return builder.build();
-  }
-
-  /**
-   * Converts this to Lance ReadOptions for worker-side operations.
-   *
-   * @param initialStorageOptions initial storage options from describeTable on the driver
-   * @return ReadOptions with merged storage options and session
-   */
-  public ReadOptions toReadOptions(Map<String, String> initialStorageOptions) {
-    Map<String, String> merged =
-        LanceRuntime.mergeStorageOptions(storageOptions, initialStorageOptions);
-    ReadOptions.Builder builder =
-        new ReadOptions.Builder().setStorageOptions(merged).setSession(LanceRuntime.session());
-    return builder.build();
-  }
-
-  /**
    * Converts this to Lance WriteParams for the native library.
    *
    * @return WriteParams for the Lance native library
    */
   public WriteParams toWriteParams() {
+    return toWriteParams(null);
+  }
+
+  /**
+   * Converts this to Lance {@link WriteParams}, merging driver-side {@code initialStorageOptions}
+   * into the base storage options. Pass {@code null} for driver-side callers that do not have
+   * describeTable() credentials.
+   */
+  public WriteParams toWriteParams(Map<String, String> initialStorageOptions) {
     WriteParams.Builder builder = new WriteParams.Builder();
     builder.withMode(writeMode);
     if (maxRowsPerFile != null) {
@@ -252,8 +295,13 @@ public class LanceSparkWriteOptions implements Serializable {
     if (enableStableRowIds != null) {
       builder.withEnableStableRowIds(enableStableRowIds);
     }
-    if (!storageOptions.isEmpty()) {
-      builder.withStorageOptions(storageOptions);
+    if (blobPackFileSizeThreshold != null) {
+      builder.withBlobPackFileSizeThreshold(blobPackFileSizeThreshold);
+    }
+    Map<String, String> merged =
+        LanceRuntime.mergeStorageOptions(storageOptions, initialStorageOptions);
+    if (!merged.isEmpty()) {
+      builder.withStorageOptions(merged);
     }
     return builder.build();
   }
@@ -265,6 +313,8 @@ public class LanceSparkWriteOptions implements Serializable {
     return useQueuedWriteBuffer == that.useQueuedWriteBuffer
         && queueDepth == that.queueDepth
         && batchSize == that.batchSize
+        && useLargeVarTypes == that.useLargeVarTypes
+        && maxBatchBytes == that.maxBatchBytes
         && Objects.equals(datasetUri, that.datasetUri)
         && writeMode == that.writeMode
         && Objects.equals(maxRowsPerFile, that.maxRowsPerFile)
@@ -272,8 +322,10 @@ public class LanceSparkWriteOptions implements Serializable {
         && Objects.equals(maxBytesPerFile, that.maxBytesPerFile)
         && Objects.equals(fileFormatVersion, that.fileFormatVersion)
         && Objects.equals(enableStableRowIds, that.enableStableRowIds)
+        && Objects.equals(blobPackFileSizeThreshold, that.blobPackFileSizeThreshold)
         && Objects.equals(storageOptions, that.storageOptions)
-        && Objects.equals(tableId, that.tableId);
+        && Objects.equals(tableId, that.tableId)
+        && Objects.equals(version, that.version);
   }
 
   @Override
@@ -289,8 +341,12 @@ public class LanceSparkWriteOptions implements Serializable {
         queueDepth,
         batchSize,
         enableStableRowIds,
+        useLargeVarTypes,
+        maxBatchBytes,
+        blobPackFileSizeThreshold,
         storageOptions,
-        tableId);
+        tableId,
+        version);
   }
 
   /** Builder for creating LanceSparkWriteOptions instances. */
@@ -305,9 +361,13 @@ public class LanceSparkWriteOptions implements Serializable {
     private int queueDepth = DEFAULT_QUEUE_DEPTH;
     private int batchSize = DEFAULT_BATCH_SIZE;
     private Boolean enableStableRowIds;
+    private boolean useLargeVarTypes = DEFAULT_USE_LARGE_VAR_TYPES;
+    private long maxBatchBytes = DEFAULT_MAX_BATCH_BYTES;
+    private Long blobPackFileSizeThreshold;
     private Map<String, String> storageOptions = new HashMap<>();
     private LanceNamespace namespace;
     private List<String> tableId;
+    private Long version;
 
     private Builder() {}
 
@@ -361,6 +421,25 @@ public class LanceSparkWriteOptions implements Serializable {
       return this;
     }
 
+    public Builder useLargeVarTypes(boolean useLargeVarTypes) {
+      this.useLargeVarTypes = useLargeVarTypes;
+      return this;
+    }
+
+    public Builder maxBatchBytes(long maxBatchBytes) {
+      Preconditions.checkArgument(maxBatchBytes > 0, "maxBatchBytes must be positive");
+      this.maxBatchBytes = maxBatchBytes;
+      return this;
+    }
+
+    public Builder blobPackFileSizeThreshold(Long blobPackFileSizeThreshold) {
+      Preconditions.checkArgument(
+          blobPackFileSizeThreshold == null || blobPackFileSizeThreshold > 0,
+          "blobPackFileSizeThreshold must be positive");
+      this.blobPackFileSizeThreshold = blobPackFileSizeThreshold;
+      return this;
+    }
+
     public Builder storageOptions(Map<String, String> storageOptions) {
       this.storageOptions = new HashMap<>(storageOptions);
       return this;
@@ -373,6 +452,12 @@ public class LanceSparkWriteOptions implements Serializable {
 
     public Builder tableId(List<String> tableId) {
       this.tableId = tableId;
+      return this;
+    }
+
+    /** Pin opens to this dataset manifest version. */
+    public Builder version(Long version) {
+      this.version = version;
       return this;
     }
 
@@ -413,6 +498,19 @@ public class LanceSparkWriteOptions implements Serializable {
       }
       if (options.containsKey(CONFIG_ENABLE_STABLE_ROW_IDS)) {
         this.enableStableRowIds = Boolean.parseBoolean(options.get(CONFIG_ENABLE_STABLE_ROW_IDS));
+      }
+      if (options.containsKey(CONFIG_USE_LARGE_VAR_TYPES)) {
+        this.useLargeVarTypes = Boolean.parseBoolean(options.get(CONFIG_USE_LARGE_VAR_TYPES));
+      }
+      if (options.containsKey(CONFIG_MAX_BATCH_BYTES)) {
+        long parsedMaxBatchBytes = Long.parseLong(options.get(CONFIG_MAX_BATCH_BYTES));
+        Preconditions.checkArgument(parsedMaxBatchBytes > 0, "max_batch_bytes must be positive");
+        this.maxBatchBytes = parsedMaxBatchBytes;
+      }
+      if (options.containsKey(CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD)) {
+        long parsed = Long.parseLong(options.get(CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD));
+        Preconditions.checkArgument(parsed > 0, "blob_pack_file_size_threshold must be positive");
+        this.blobPackFileSizeThreshold = parsed;
       }
       return this;
     }

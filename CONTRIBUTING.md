@@ -1,6 +1,6 @@
 # Contributing to Spark Lance Connector
 
-The Spark Lance connector codebase is at [lancedb/lance-spark](https://github.com/lance-format/lance-spark).
+The Spark Lance connector codebase is at [lance-format/lance-spark](https://github.com/lance-format/lance-spark).
 
 ## Build Commands
 
@@ -18,9 +18,13 @@ make test SPARK_VERSION=4.0 SCALA_VERSION=2.13
 # Build (lint + install) for a specific version
 make build
 
-# Build the runtime bundle for a specific version
+# Build the runtime bundle for a specific version (incremental)
 make bundle
 make bundle SPARK_VERSION=3.5 SCALA_VERSION=2.13
+
+# Build the runtime bundle with a clean first (use when source changes are not picked up)
+make clean-bundle
+make clean-bundle SPARK_VERSION=3.5 SCALA_VERSION=2.13
 
 # Install all modules (without tests)
 make install-all

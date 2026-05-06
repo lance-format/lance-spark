@@ -92,7 +92,7 @@ ${SPARK_SUBMIT} \
   --driver-memory "${DRIVER_MEMORY:-4g}" \
   --executor-memory "${EXECUTOR_MEMORY:-4g}" \
   --jars "${BUNDLE_JAR}" \
-  --conf spark.sql.extensions=org.lance.spark.LanceSparkSessionExtension \
+  --conf spark.sql.extensions=org.lance.spark.extensions.LanceSparkSessionExtensions \
   --conf spark.driver.extraJavaOptions="-XX:+IgnoreUnrecognizedVMOptions --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED -Dio.netty.tryReflectionSetAccessible=true" \
   "${BENCHMARK_JAR}" \
   --data-dir "${DATA_DIR}" \

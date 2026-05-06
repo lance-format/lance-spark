@@ -14,11 +14,11 @@
 package org.lance.spark.read;
 
 import org.lance.Dataset;
-import org.lance.ReadOptions;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.utils.Utils;
 import org.lance.spark.vectorized.LanceArrowColumnVector;
 
 import com.google.common.collect.Lists;
@@ -33,7 +33,6 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
 
 import java.io.IOException;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Partition reader for pushed down aggregates. This reader computes the aggregate result directly
@@ -65,7 +64,10 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
     LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
     long totalCount = 0;
 
-    try (Dataset dataset = openDataset(readOptions)) {
+    try (Dataset dataset =
+        Utils.openDatasetBuilder(readOptions)
+            .initialStorageOptions(inputPartition.getInitialStorageOptions())
+            .build()) {
       List<Integer> fragmentIds = inputPartition.getLanceSplit().getFragments();
       if (fragmentIds.isEmpty()) {
         return 0;
@@ -90,26 +92,6 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
     }
 
     return totalCount;
-  }
-
-  private Dataset openDataset(LanceSparkReadOptions readOptions) {
-    Map<String, String> merged =
-        LanceRuntime.mergeStorageOptions(
-            readOptions.getStorageOptions(), inputPartition.getInitialStorageOptions());
-
-    ReadOptions.Builder builder =
-        new ReadOptions.Builder()
-            .setStorageOptions(merged)
-            .setSession(LanceRuntime.session(readOptions.getCatalogName()));
-    if (readOptions.getVersion() != null) {
-      builder.setVersion(readOptions.getVersion());
-    }
-
-    return Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .uri(readOptions.getDatasetUri())
-        .readOptions(builder.build())
-        .build();
   }
 
   private ColumnarBatch createCountResultBatch(long count, StructType resultSchema) {

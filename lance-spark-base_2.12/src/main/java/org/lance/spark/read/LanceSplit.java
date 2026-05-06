@@ -15,8 +15,8 @@ package org.lance.spark.read;
 
 import org.lance.Dataset;
 import org.lance.Fragment;
-import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.utils.Utils;
 
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -74,7 +74,7 @@ public class LanceSplit implements Serializable {
    * version. The resolved version should be passed to workers to ensure snapshot isolation.
    */
   public static ScanPlanResult planScan(LanceSparkReadOptions readOptions) {
-    try (Dataset dataset = openDataset(readOptions)) {
+    try (Dataset dataset = Utils.openDatasetBuilder(readOptions).build()) {
       List<Fragment> fragments = dataset.getFragments();
       List<LanceSplit> splits = new ArrayList<>(fragments.size());
       Map<Integer, Long> fragmentRowCounts = new HashMap<>(fragments.size());
@@ -94,22 +94,5 @@ public class LanceSplit implements Serializable {
   @Deprecated
   public static List<LanceSplit> generateLanceSplits(LanceSparkReadOptions readOptions) {
     return planScan(readOptions).getSplits();
-  }
-
-  private static Dataset openDataset(LanceSparkReadOptions readOptions) {
-    if (readOptions.hasNamespace()) {
-      return Dataset.open()
-          .allocator(LanceRuntime.allocator())
-          .namespaceClient(readOptions.getNamespace())
-          .tableId(readOptions.getTableId())
-          .readOptions(readOptions.toReadOptions())
-          .build();
-    } else {
-      return Dataset.open()
-          .allocator(LanceRuntime.allocator())
-          .uri(readOptions.getDatasetUri())
-          .readOptions(readOptions.toReadOptions())
-          .build();
-    }
   }
 }

@@ -16,10 +16,15 @@ package org.lance.spark.read;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.ManifestSummary;
+import org.lance.index.IndexCriteria;
+import org.lance.index.IndexDescription;
+import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
-import org.lance.spark.LanceRuntime;
+import org.lance.schema.LanceField;
+import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Optional;
+import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
@@ -38,13 +43,18 @@ import org.apache.spark.sql.connector.read.SupportsPushDownOffset;
 import org.apache.spark.sql.connector.read.SupportsPushDownRequiredColumns;
 import org.apache.spark.sql.connector.read.SupportsPushDownTopN;
 import org.apache.spark.sql.sources.Filter;
-import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataTypes;
-import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 public class LanceScanBuilder
@@ -54,7 +64,10 @@ public class LanceScanBuilder
         SupportsPushDownOffset,
         SupportsPushDownTopN,
         SupportsPushDownAggregates {
+  private static final Logger LOG = LoggerFactory.getLogger(LanceScanBuilder.class);
+
   private final LanceSparkReadOptions readOptions;
+  private final StructType fullSchema;
   private StructType schema;
 
   private Filter[] pushedFilters = new Filter[0];
@@ -78,17 +91,22 @@ public class LanceScanBuilder
 
   private final java.util.Map<String, String> namespaceProperties;
 
+  private final java.util.Map<String, String> tableProperties;
+
   public LanceScanBuilder(
       StructType schema,
       LanceSparkReadOptions readOptions,
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
-      java.util.Map<String, String> namespaceProperties) {
+      java.util.Map<String, String> namespaceProperties,
+      java.util.Map<String, String> tableProperties) {
+    this.fullSchema = schema;
     this.schema = schema;
     this.readOptions = readOptions;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
+    this.tableProperties = tableProperties != null ? tableProperties : Collections.emptyMap();
   }
 
   /**
@@ -97,22 +115,7 @@ public class LanceScanBuilder
    */
   private Dataset getOrOpenDataset() {
     if (lazyDataset == null) {
-      if (readOptions.hasNamespace()) {
-        lazyDataset =
-            Dataset.open()
-                .allocator(LanceRuntime.allocator())
-                .namespaceClient(readOptions.getNamespace())
-                .tableId(readOptions.getTableId())
-                .readOptions(readOptions.toReadOptions())
-                .build();
-      } else {
-        lazyDataset =
-            Dataset.open()
-                .allocator(LanceRuntime.allocator())
-                .uri(readOptions.getDatasetUri())
-                .readOptions(readOptions.toReadOptions())
-                .build();
-      }
+      lazyDataset = Utils.openDatasetBuilder(readOptions).build();
     }
     return lazyDataset;
   }
@@ -135,7 +138,77 @@ public class LanceScanBuilder
 
     // Get statistics from manifest summary before closing dataset
     ManifestSummary summary = getOrOpenDataset().getVersion().getManifestSummary();
-    LanceStatistics statistics = new LanceStatistics(summary);
+
+    // Collect all columns that need zonemap stats: filter columns + partition column (if declared).
+    Set<String> columnsToLoad = extractReferencedColumns(pushedFilters);
+    String partitionColumn = tableProperties.get(LanceConstant.TABLE_OPT_PARTITION_COLUMNS);
+    if (partitionColumn != null && !partitionColumn.trim().isEmpty()) {
+      partitionColumn = partitionColumn.trim();
+      columnsToLoad.add(partitionColumn);
+    } else {
+      partitionColumn = null;
+    }
+
+    // Load zonemap stats for all requested columns in one pass.
+    Map<String, List<ZoneStats>> zonemapStats = loadZonemapStats(getOrOpenDataset(), columnsToLoad);
+
+    // Detect partition-compatible columns, gated on lance.partition.columns table property.
+    // Currently a partitioned column is only valid if each fragment contains only a single
+    // value for that column (i.e., all zonemap zones have min == max with the same value).
+    ZonemapFragmentPruner.PartitionInfo partitionInfo = null;
+    if (partitionColumn != null) {
+      if (!zonemapStats.containsKey(partitionColumn)) {
+        LOG.warn(
+            "Partition column '{}' declared in {} has no zonemap index or stats;"
+                + " partition detection disabled",
+            partitionColumn,
+            LanceConstant.TABLE_OPT_PARTITION_COLUMNS);
+      } else {
+        Map<Integer, Comparable<?>> partValues =
+            ZonemapFragmentPruner.computeFragmentPartitionValues(zonemapStats.get(partitionColumn))
+                .orElse(null);
+        if (partValues != null) {
+          partitionInfo = new ZonemapFragmentPruner.PartitionInfo(partitionColumn, partValues);
+          LOG.info(
+              "Detected partition-compatible column '{}' with {} fragments",
+              partitionColumn,
+              partValues.size());
+        }
+      }
+    }
+
+    // Pre-compute fragment pruning so we can (a) estimate post-pruning statistics for
+    // JoinSelection (BroadcastHashJoin vs SortMergeJoin) and (b) pass the cached result
+    // to LanceScan to avoid re-computing during planInputPartitions().
+    Set<Integer> survivingFragmentIds = null;
+    if (pushedFilters.length > 0 && !zonemapStats.isEmpty()) {
+      survivingFragmentIds =
+          ZonemapFragmentPruner.pruneFragments(pushedFilters, zonemapStats).orElse(null);
+    }
+
+    // Scale rows and full size by the zonemap fragment-pruning ratio first, then let
+    // LanceStatistics.estimateProjected apply the column-width ratio on top
+    // (when the projected schema is narrower than the full schema).
+    long projectedRows = summary.getTotalRows();
+    long projectedFullSize = summary.getTotalFilesSize();
+    if (survivingFragmentIds != null && summary.getTotalFragments() > 0) {
+      double ratio = (double) survivingFragmentIds.size() / summary.getTotalFragments();
+      projectedRows = (long) (projectedRows * ratio);
+      projectedFullSize = (long) (projectedFullSize * ratio);
+    }
+    LanceStatistics statistics =
+        LanceStatistics.estimateProjected(projectedRows, projectedFullSize, fullSchema, schema);
+    if (survivingFragmentIds != null) {
+      LOG.debug(
+          "Scan statistics after pruning: {} of {} fragments survive,"
+              + " estimatedSize={}, estimatedRows={} (full: size={}, rows={})",
+          survivingFragmentIds.size(),
+          summary.getTotalFragments(),
+          statistics.sizeInBytes(),
+          statistics.numRows(),
+          summary.getTotalFilesSize(),
+          summary.getTotalRows());
+    }
 
     // Close the lazily opened dataset - it's no longer needed after build
     closeLazyDataset();
@@ -151,6 +224,9 @@ public class LanceScanBuilder
         pushedAggregation,
         pushedFilters,
         statistics,
+        zonemapStats,
+        survivingFragmentIds,
+        partitionInfo,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties);
@@ -164,20 +240,6 @@ public class LanceScanBuilder
   @Override
   public Filter[] pushFilters(Filter[] filters) {
     if (!readOptions.isPushDownFilters()) {
-      return filters;
-    }
-    // remove the code after fix this issue https://github.com/lance-format/lance/issues/3578
-    boolean hasNestedField = false;
-    for (StructField field : this.schema.fields()) {
-      if (field.dataType() instanceof ArrayType) {
-        ArrayType fieldType = (ArrayType) field.dataType();
-        if (fieldType.elementType() instanceof StructType) {
-          hasNestedField = true;
-          break;
-        }
-      }
-    }
-    if (hasNestedField) {
       return filters;
     }
     Filter[][] processFilters = FilterPushDown.processFilters(filters);
@@ -274,5 +336,78 @@ public class LanceScanBuilder
     } catch (Exception e) {
       return Optional.empty();
     }
+  }
+
+  /**
+   * Loads zonemap statistics for the requested columns. Only loads stats for columns that have a
+   * zonemap index.
+   */
+  private Map<String, List<ZoneStats>> loadZonemapStats(Dataset dataset, Set<String> columns) {
+    if (columns.isEmpty()) {
+      return Collections.emptyMap();
+    }
+
+    Set<String> zonemapColumns = findZonemapIndexedColumns(dataset);
+    if (zonemapColumns.isEmpty()) {
+      return Collections.emptyMap();
+    }
+
+    Map<String, List<ZoneStats>> result = new HashMap<>();
+    for (String col : columns) {
+      if (zonemapColumns.contains(col)) {
+        try {
+          List<ZoneStats> stats = dataset.getZonemapStats(col);
+          if (!stats.isEmpty()) {
+            result.put(col, stats);
+            LOG.debug("Loaded {} zonemap zones for column '{}'", stats.size(), col);
+          }
+        } catch (Exception e) {
+          LOG.debug("Failed to load zonemap stats for column '{}': {}", col, e.getMessage());
+        }
+      }
+    }
+
+    if (!result.isEmpty()) {
+      LOG.debug("Loaded zonemap stats for {} columns: {}", result.size(), result.keySet());
+    }
+
+    return result;
+  }
+
+  private Set<String> findZonemapIndexedColumns(Dataset dataset) {
+    Set<String> columns = new HashSet<>();
+    try {
+      Map<Integer, String> fieldIdToName = new HashMap<>();
+      for (LanceField field : dataset.getLanceSchema().fields()) {
+        fieldIdToName.put(field.getId(), field.getName());
+      }
+
+      // Use the criteria-based overload so that indexes missing index_details
+      // (created by older versions) are silently skipped instead of causing errors.
+      IndexCriteria criteria = new IndexCriteria.Builder().build();
+      for (IndexDescription idx : dataset.describeIndices(criteria)) {
+        if ("ZONEMAP".equalsIgnoreCase(idx.getIndexType())) {
+          for (int fieldId : idx.getFieldIds()) {
+            String name = fieldIdToName.get(fieldId);
+            if (name != null) {
+              columns.add(name);
+            }
+          }
+        }
+      }
+    } catch (Exception e) {
+      LOG.warn("Failed to query zonemap indexes: {}", e.getMessage());
+    }
+    return columns;
+  }
+
+  private static Set<String> extractReferencedColumns(Filter[] filters) {
+    Set<String> columns = new HashSet<>();
+    for (Filter filter : filters) {
+      for (String attr : filter.references()) {
+        columns.add(attr);
+      }
+    }
+    return columns;
   }
 }

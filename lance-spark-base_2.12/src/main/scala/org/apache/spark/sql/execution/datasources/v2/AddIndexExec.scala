@@ -13,9 +13,11 @@
  */
 package org.apache.spark.sql.execution.datasources.v2
 
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.node.ObjectNode
 import org.apache.arrow.c.{ArrowArrayStream, Data}
 import org.apache.arrow.vector.VectorSchemaRoot
-import org.apache.arrow.vector.ipc.{ArrowStreamReader, ArrowStreamWriter}
+import org.apache.arrow.vector.ipc.ArrowReader
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
 import org.apache.spark.sql.catalyst.plans.logical.{AddIndexOutputType, LanceNamedArgument}
@@ -24,17 +26,16 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.LanceArrowUtils
 import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
 import org.apache.spark.unsafe.types.UTF8String
-import org.json4s.JsonAST._
-import org.json4s.jackson.JsonMethods.{compact, render}
-import org.lance.{CommitBuilder, Dataset, ReadOptions, Transaction}
+import org.lance.{CommitBuilder, Dataset, Transaction}
 import org.lance.index.{Index, IndexOptions, IndexParams, IndexType}
 import org.lance.index.scalar.{BTreeIndexParams, ScalarIndexParams}
 import org.lance.operation.{CreateIndex => AddIndexOperation}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceRuntime, LanceSparkReadOptions}
 import org.lance.spark.arrow.LanceArrowWriter
-import org.lance.spark.utils.CloseableUtil
+import org.lance.spark.utils.{CloseableUtil, Utils}
+import org.lance.spark.write.SingleBatchArrowReader
 
-import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
+import java.time.Instant
 import java.util.{Collections, Optional, UUID}
 
 import scala.collection.JavaConverters._
@@ -68,7 +69,7 @@ case class AddIndexExec(
 
     // Get all fragment id list from dataset
     val fragmentIds = {
-      val ds = openDataset(readOptions)
+      val ds = Utils.openDatasetBuilder(readOptions).build()
       try {
         ds.getFragments.asScala.map(_.getId).map(Integer.valueOf).toList
       } finally {
@@ -84,30 +85,38 @@ case class AddIndexExec(
     val uuid = UUID.randomUUID()
     val indexType = IndexUtils.buildIndexType(method)
 
-    // Create distributed index job and run it
-    createIndexJob(lanceDataset, readOptions, uuid.toString, fragmentIds).run()
+    val dataset = Utils.openDatasetBuilder(readOptions).build()
 
-    val dataset = openDataset(readOptions)
+    val indexBuildResult =
+      createIndexJob(dataset, lanceDataset, readOptions, uuid.toString, fragmentIds).run()
+
     try {
       // Merge index metadata after all fragments are indexed
       dataset.mergeIndexMetadata(uuid.toString, indexType, Optional.empty())
 
-      val fieldIds = dataset.getLanceSchema.fields().asScala
-        .filter(f => columns.contains(f.getName))
-        .map(_.getId)
-        .toList
+      val fieldIdByName = dataset.getLanceSchema.fields().asScala
+        .map(f => f.getName -> f.getId)
+        .toMap
+      val fieldIds = columns.map { column =>
+        fieldIdByName.getOrElse(
+          column,
+          throw new IllegalArgumentException(s"Cannot find index column in Lance schema: $column"))
+      }.toList
 
       val datasetVersion = dataset.version()
 
-      val index = Index
+      val indexBuilder = Index
         .builder()
         .uuid(uuid)
         .name(indexName)
         .fields(fieldIds.map(java.lang.Integer.valueOf).asJava)
         .datasetVersion(datasetVersion)
-        .indexVersion(0)
+        .indexDetails(indexBuildResult.indexDetails)
+        .indexVersion(indexBuildResult.indexVersion)
+        .indexType(indexBuildResult.indexType)
         .fragments(fragmentIds.asJava)
-        .build()
+      indexBuildResult.createdAt.foreach(indexBuilder.createdAt)
+      val index = indexBuilder.build()
 
       // Find existing indices with the same name to mark as removed (for replace)
       val removedIndices = dataset.getIndexes.asScala
@@ -139,24 +148,8 @@ case class AddIndexExec(
       UTF8String.fromString(indexName))))
   }
 
-  private def openDataset(readOptions: LanceSparkReadOptions): Dataset = {
-    if (readOptions.hasNamespace) {
-      Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .namespaceClient(readOptions.getNamespace)
-        .readOptions(readOptions.toReadOptions)
-        .tableId(readOptions.getTableId)
-        .build()
-    } else {
-      Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .uri(readOptions.getDatasetUri)
-        .readOptions(readOptions.toReadOptions)
-        .build()
-    }
-  }
-
   private def createIndexJob(
+      dataset: Dataset,
       lanceDataset: LanceDataset,
       readOptions: LanceSparkReadOptions,
       uuid: String,
@@ -188,7 +181,8 @@ case class AddIndexExec(
               nsImpl,
               nsProps,
               tableId,
-              initialStorageOpts)
+              initialStorageOpts,
+              dataset.getVersion.getManifestSummary.getTotalRows)
 
           case Some("fragment") | None =>
             new FragmentBasedIndexJob(
@@ -224,8 +218,16 @@ case class AddIndexExec(
  * Interface for index job to implement different indexing strategies.
  */
 trait IndexJob extends Serializable {
-  def run(): Unit
+
+  /** @return index metadata returned by workers. */
+  def run(): IndexBuildResult
 }
+
+case class IndexBuildResult(
+    indexDetails: Array[Byte],
+    indexVersion: Int,
+    createdAt: Option[Instant],
+    indexType: IndexType) extends Serializable
 
 /**
  * A job implementation for creating indexes on fragments of a dataset in parallel.
@@ -251,13 +253,13 @@ class FragmentBasedIndexJob(
     tableId: Option[List[String]],
     initialStorageOpts: Option[Map[String, String]]) extends IndexJob {
 
-  override def run(): Unit = {
+  override def run(): IndexBuildResult = {
     val encodedReadOptions = encode(readOptions)
     val columns = addIndexExec.columns.toList
     val argsJson = IndexUtils.toJson(addIndexExec.args)
 
     // Build per-fragment tasks
-    val tasks = fragmentIds.map { fid =>
+    val tasks = fragmentIds.zipWithIndex.map { case (fid, pos) =>
       FragmentIndexTask(
         encodedReadOptions,
         columns,
@@ -269,13 +271,16 @@ class FragmentBasedIndexJob(
         nsImpl,
         nsProps,
         tableId,
-        initialStorageOpts)
+        initialStorageOpts,
+        returnBuildResult = pos == 0)
     }.toSeq
 
-    addIndexExec.session.sparkContext
+    val results = addIndexExec.session.sparkContext
       .parallelize(tasks, tasks.size)
       .map(t => t.execute())
       .collect()
+
+    IndexUtils.collectIndexBuildResult(results, IndexUtils.buildIndexType(addIndexExec.method))
   }
 }
 
@@ -294,6 +299,7 @@ class FragmentBasedIndexJob(
  * @param namespaceProperties   Properties of the namespace
  * @param tableId               Identifier for the table within the namespace
  * @param initialStorageOptions Initial storage configuration options
+ * @param returnBuildResult     Whether this task should return commit metadata to the driver
  */
 case class FragmentIndexTask(
     encodedReadOptions: String,
@@ -306,13 +312,16 @@ case class FragmentIndexTask(
     namespaceImpl: Option[String],
     namespaceProperties: Option[Map[String, String]],
     tableId: Option[List[String]],
-    initialStorageOptions: Option[Map[String, String]]) extends Serializable {
+    initialStorageOptions: Option[Map[String, String]],
+    returnBuildResult: Boolean) extends Serializable {
 
   def execute(): String = {
     val readOptions = decode[LanceSparkReadOptions](encodedReadOptions)
     val indexType = IndexUtils.buildIndexType(method)
     val params = IndexParams.builder()
-      .setScalarIndexParams(ScalarIndexParams.create(method, argsJson))
+      .setScalarIndexParams(ScalarIndexParams.create(
+        IndexUtils.buildScalarIndexParamType(method),
+        argsJson))
       .build()
 
     val indexOptions = IndexOptions
@@ -323,20 +332,24 @@ case class FragmentIndexTask(
       .withFragmentIds(Collections.singletonList(fragmentId))
       .build()
 
-    val dataset = IndexUtils.openDatasetWithOptions(
-      readOptions,
-      initialStorageOptions,
-      namespaceImpl,
-      namespaceProperties,
-      tableId)
+    val dataset = Utils.openDatasetBuilder(readOptions)
+      .initialStorageOptions(initialStorageOptions.map(_.asJava).orNull)
+      .runtimeNamespace(
+        namespaceImpl.orNull,
+        namespaceProperties.map(_.asJava).orNull,
+        tableId.map(_.asJava).orNull)
+      .build()
 
     try {
-      dataset.createIndex(indexOptions)
+      val createdIndex = dataset.createIndex(indexOptions)
+      if (returnBuildResult) {
+        encode(Some(IndexUtils.extractIndexBuildResult(createdIndex)))
+      } else {
+        encode(None: Option[IndexBuildResult])
+      }
     } finally {
       dataset.close()
     }
-
-    encode("OK")
   }
 }
 
@@ -352,6 +365,7 @@ case class FragmentIndexTask(
  * @param nsProps            Optional namespace properties for credential vending
  * @param tableId            Optional table identifier for credential vending
  * @param initialStorageOpts Optional initial storage options for the dataset
+ * @param totalRows          Total number of rows in the dataset
  */
 class RangeBasedBTreeIndexJob(
     addIndexExec: AddIndexExec,
@@ -360,11 +374,13 @@ class RangeBasedBTreeIndexJob(
     nsImpl: Option[String],
     nsProps: Option[Map[String, String]],
     tableId: Option[List[String]],
-    initialStorageOpts: Option[Map[String, String]]) extends IndexJob {
+    initialStorageOpts: Option[Map[String, String]],
+    totalRows: Long) extends IndexJob {
 
   private val VALUE_COLUMN_NAME = "value"
+  private val DEFAULT_ROWS_PER_RANGE = 1000000L
 
-  override def run(): Unit = {
+  override def run(): IndexBuildResult = {
     if (addIndexExec.columns.size != 1) {
       throw new UnsupportedOperationException(
         "Range-based BTree index currently supports a single column only")
@@ -392,11 +408,15 @@ class RangeBasedBTreeIndexJob(
       df.select(df.col(columns.head).as(VALUE_COLUMN_NAME), df.col(LanceDataset.ROW_ID_COLUMN.name))
 
     // Repartition the data to numRanges and sort by indexed column
+    val rowsPerRange = addIndexExec.args.find(_.name == "rows_per_range").map(
+      _.value.asInstanceOf[Long]).getOrElse(DEFAULT_ROWS_PER_RANGE)
+    val numRange = Math.max(1L, totalRows / rowsPerRange.longValue())
+
     val rangeDf = selectDf
       .repartitionByRange(
-        session.sessionState.conf.numShufflePartitions,
+        numRange.intValue(),
         selectDf.col(VALUE_COLUMN_NAME).asc)
-      .sortWithinPartitions(VALUE_COLUMN_NAME)
+      .sortWithinPartitions(selectDf.col(VALUE_COLUMN_NAME).asc)
 
     val indexBuilder = RangeBTreeIndexBuilder(
       encode(readOptions),
@@ -410,9 +430,11 @@ class RangeBasedBTreeIndexJob(
       initialStorageOpts,
       rangeDf.schema)
 
-    rangeDf.queryExecution.toRdd.mapPartitionsWithIndex { case (rangeId, rowsIter) =>
+    val results = rangeDf.queryExecution.toRdd.mapPartitionsWithIndex { case (rangeId, rowsIter) =>
       indexBuilder.buildForRange(rangeId, rowsIter)
     }.collect()
+
+    IndexUtils.collectIndexBuildResult(results, IndexType.BTREE)
   }
 
 }
@@ -444,7 +466,7 @@ case class RangeBTreeIndexBuilder(
     initialStorageOptions: Option[Map[String, String]],
     schema: StructType) extends Serializable {
 
-  def buildForRange(rangeId: Int, rowsIter: Iterator[InternalRow]): Iterator[Unit] = {
+  def buildForRange(rangeId: Int, rowsIter: Iterator[InternalRow]): Iterator[String] = {
     // Initialize writer to write data to arrow stream
     val allocator = LanceRuntime.allocator()
     val data =
@@ -472,37 +494,25 @@ case class RangeBTreeIndexBuilder(
     // No rows are written
     if (data.getRowCount == 0) {
       data.close()
-      return Iterator.empty
+      return Iterator(encode(None: Option[IndexBuildResult]))
     }
 
-    // Serialize the arrow stream to byte array
-    val out = new ByteArrayOutputStream()
-    val streamWriter = new ArrowStreamWriter(data, null, out)
-    try {
-      streamWriter.start()
-      streamWriter.writeBatch()
-      streamWriter.end()
-    } finally {
-      CloseableUtil.closeQuietly(streamWriter)
-      CloseableUtil.closeQuietly(data)
-    }
-
-    val arrowData = out.toByteArray()
-    val in = new ByteArrayInputStream(arrowData)
-
-    // Export data to lance
-    val reader = new ArrowStreamReader(in, allocator)
-    val stream = ArrowArrayStream.allocateNew(allocator)
-
+    var stream: ArrowArrayStream = null
+    var reader: ArrowReader = null
     var dataset: Dataset = null
 
     try {
-      dataset = IndexUtils.openDatasetWithOptions(
-        decode[LanceSparkReadOptions](encodedReadOptions),
-        initialStorageOptions,
-        namespaceImpl,
-        namespaceProperties,
-        tableId)
+      stream = ArrowArrayStream.allocateNew(allocator)
+      reader = new SingleBatchArrowReader(allocator, data)
+
+      dataset = Utils.openDatasetBuilder(
+        decode[LanceSparkReadOptions](encodedReadOptions))
+        .initialStorageOptions(initialStorageOptions.map(_.asJava).orNull)
+        .runtimeNamespace(
+          namespaceImpl.orNull,
+          namespaceProperties.map(_.asJava).orNull,
+          tableId.map(_.asJava).orNull)
+        .build()
 
       Data.exportArrayStream(allocator, reader, stream)
 
@@ -523,17 +533,14 @@ case class RangeBTreeIndexBuilder(
         .withPreprocessedData(stream)
         .build()
 
-      dataset.createIndex(indexOptions)
+      val createdIndex = dataset.createIndex(indexOptions)
+      Iterator(encode(Some(IndexUtils.extractIndexBuildResult(createdIndex))))
     } finally {
       CloseableUtil.closeQuietly(stream)
       CloseableUtil.closeQuietly(reader)
-
-      if (dataset != null) {
-        CloseableUtil.closeQuietly(dataset)
-      }
+      CloseableUtil.closeQuietly(data)
+      CloseableUtil.closeQuietly(dataset)
     }
-
-    Iterator.empty
   }
 }
 
@@ -541,6 +548,8 @@ case class RangeBTreeIndexBuilder(
  * Utility methods for working with index types.
  */
 object IndexUtils {
+
+  private val jsonMapper = new ObjectMapper()
 
   /**
    * Build an [[IndexType]] from the given index method string.
@@ -550,66 +559,82 @@ object IndexUtils {
    * @throws UnsupportedOperationException if the method is not supported
    */
   def buildIndexType(method: String): IndexType = {
-    method match {
+    method.toLowerCase match {
       case "btree" => IndexType.BTREE
       case "fts" => IndexType.INVERTED
       case other => throw new UnsupportedOperationException(s"Unsupported index method: $other")
     }
   }
 
+  def buildScalarIndexParamType(method: String): String = {
+    method.toLowerCase match {
+      case "btree" => "btree"
+      case "fts" => "inverted"
+      case other => throw new UnsupportedOperationException(s"Unsupported index method: $other")
+    }
+  }
+
+  /** Extracts the commit metadata from a newly created Index. */
+  def extractIndexBuildResult(index: Index): IndexBuildResult = {
+    val details = index.indexDetails()
+    if (!details.isPresent || details.get().isEmpty) {
+      throw new IllegalStateException(
+        s"Index ${index.name()} was created without index details")
+    }
+    val indexType = Option(index.indexType()).getOrElse {
+      throw new IllegalStateException(s"Index ${index.name()} was created without index type")
+    }
+    IndexBuildResult(
+      details.get().clone(),
+      index.indexVersion(),
+      Option(index.createdAt().orElse(null)),
+      indexType)
+  }
+
+  /** Returns the first index metadata from serialized worker results. */
+  def collectIndexBuildResult(
+      encodedResults: Array[String],
+      expectedType: IndexType): IndexBuildResult = {
+    val first = encodedResults.iterator
+      .map(encoded => decode[Option[IndexBuildResult]](encoded))
+      .collectFirst { case Some(result) => result }
+      .getOrElse(throw new IllegalStateException("No per-task index metadata was returned"))
+
+    if (first.indexType != expectedType) {
+      throw new IllegalStateException(
+        s"Expected index type $expectedType but worker returned ${first.indexType}")
+    }
+    if (first.indexDetails.isEmpty) {
+      throw new IllegalStateException("Per-task index metadata is missing index details")
+    }
+
+    first
+  }
+
   def toJson(args: Seq[LanceNamedArgument]): String = {
     if (args.isEmpty) {
       "{}"
     } else {
-      val fields = args.map { a =>
-        val jv = a.value match {
-          case null => JNull
+      val node: ObjectNode = jsonMapper.createObjectNode()
+      args.foreach { a =>
+        a.value match {
+          case null => node.putNull(a.name)
           case s: java.lang.String =>
             val trimmed = s.stripPrefix("\"").stripSuffix("\"").stripPrefix("'").stripSuffix("'")
-            JString(trimmed)
-          case b: java.lang.Boolean => JBool(b.booleanValue())
-          case c: java.lang.Character => JString(String.valueOf(c))
-          case by: java.lang.Byte => JInt(BigInt(by.intValue()))
-          case sh: java.lang.Short => JInt(BigInt(sh.intValue()))
-          case i: java.lang.Integer => JInt(BigInt(i.intValue()))
-          case l: java.lang.Long => JInt(BigInt(l.longValue()))
-          case f: java.lang.Float => JDouble(f.doubleValue())
-          case d: java.lang.Double => JDouble(d.doubleValue())
-          case other => JString(String.valueOf(other))
+            node.put(a.name, trimmed)
+          case b: java.lang.Boolean => node.put(a.name, b.booleanValue())
+          case c: java.lang.Character => node.put(a.name, String.valueOf(c))
+          case by: java.lang.Byte => node.put(a.name, by.intValue())
+          case sh: java.lang.Short => node.put(a.name, sh.intValue())
+          case i: java.lang.Integer => node.put(a.name, i.intValue())
+          case l: java.lang.Long => node.put(a.name, l.longValue())
+          case f: java.lang.Float => node.put(a.name, f.doubleValue())
+          case d: java.lang.Double => node.put(a.name, d.doubleValue())
+          case other => node.put(a.name, String.valueOf(other))
         }
-        JField(a.name, jv)
       }
-      compact(render(JObject(fields.toList)))
+      jsonMapper.writeValueAsString(node)
     }
   }
 
-  /**
-   * Opens a dataset with merged storage options and credential refresh provider
-   *
-   * @param readOptions             Configuration for reading the dataset
-   * @param initialStorageOptions   Initial storage options to merge
-   * @param namespaceImpl           Optional namespace implementation class
-   * @param namespaceProperties     Optional namespace properties
-   * @param tableId                 Optional table identifier
-   * @return Opened Dataset instance
-   */
-  def openDatasetWithOptions(
-      readOptions: LanceSparkReadOptions,
-      initialStorageOptions: Option[Map[String, String]],
-      namespaceImpl: Option[String],
-      namespaceProperties: Option[Map[String, String]],
-      tableId: Option[List[String]]): Dataset = {
-    // Build ReadOptions with merged storage options
-    val merged = LanceRuntime.mergeStorageOptions(
-      readOptions.getStorageOptions,
-      initialStorageOptions.map(_.asJava).orNull)
-
-    val builder = new ReadOptions.Builder().setStorageOptions(merged)
-
-    Dataset.open()
-      .allocator(LanceRuntime.allocator())
-      .uri(readOptions.getDatasetUri)
-      .readOptions(builder.build())
-      .build()
-  }
 }

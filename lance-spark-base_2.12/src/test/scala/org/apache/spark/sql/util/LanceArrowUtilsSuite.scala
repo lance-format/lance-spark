@@ -154,6 +154,72 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
     assert(mapType.valueContainsNull)
   }
 
+  test("non-microsecond timestamp types") {
+    import org.apache.arrow.vector.types.TimeUnit
+
+    // Timestamp with timezone → TimestampType
+    for (unit <- Seq(TimeUnit.SECOND, TimeUnit.MILLISECOND, TimeUnit.NANOSECOND)) {
+      val field = new Field(
+        "ts",
+        new FieldType(true, new ArrowType.Timestamp(unit, "UTC"), null, null),
+        java.util.Collections.emptyList())
+      assert(
+        LanceArrowUtils.fromArrowField(field) === TimestampType,
+        s"Timestamp($unit, UTC) should map to TimestampType")
+    }
+
+    // Timestamp without timezone → TimestampNTZType
+    for (unit <- Seq(TimeUnit.SECOND, TimeUnit.MILLISECOND, TimeUnit.NANOSECOND)) {
+      val field = new Field(
+        "ts",
+        new FieldType(true, new ArrowType.Timestamp(unit, null), null, null),
+        java.util.Collections.emptyList())
+      assert(
+        LanceArrowUtils.fromArrowField(field) === TimestampNTZType,
+        s"Timestamp($unit, null) should map to TimestampNTZType")
+    }
+  }
+
+  test("nested non-microsecond timestamp types") {
+    import org.apache.arrow.vector.types.TimeUnit
+
+    // Timestamp(SECOND, UTC) inside a struct
+    val tsField = new Field(
+      "ts",
+      new FieldType(true, new ArrowType.Timestamp(TimeUnit.SECOND, "UTC"), null, null),
+      java.util.Collections.emptyList())
+    val structField = new Field(
+      "s",
+      new FieldType(true, ArrowType.Struct.INSTANCE, null, null),
+      java.util.Arrays.asList(tsField))
+
+    val structType =
+      LanceArrowUtils.fromArrowField(structField).asInstanceOf[StructType]
+    assert(structType("ts").dataType === TimestampType)
+
+    // Timestamp(NANOSECOND, null) as map value
+    val keyField = new Field(
+      "key",
+      new FieldType(false, ArrowType.Utf8.INSTANCE, null, null),
+      java.util.Collections.emptyList())
+    val valueField = new Field(
+      "value",
+      new FieldType(true, new ArrowType.Timestamp(TimeUnit.NANOSECOND, null), null, null),
+      java.util.Collections.emptyList())
+    val entriesField = new Field(
+      "entries",
+      new FieldType(false, ArrowType.Struct.INSTANCE, null, null),
+      java.util.Arrays.asList(keyField, valueField))
+    val mapField = new Field(
+      "m",
+      new FieldType(true, new ArrowType.Map(false), null, null),
+      java.util.Arrays.asList(entriesField))
+
+    val mapType = LanceArrowUtils.fromArrowField(mapField).asInstanceOf[MapType]
+    assert(mapType.keyType === StringType)
+    assert(mapType.valueType === TimestampNTZType)
+  }
+
   test("struct with duplicated field names") {
 
     def check(dt: DataType, expected: DataType): Unit = {

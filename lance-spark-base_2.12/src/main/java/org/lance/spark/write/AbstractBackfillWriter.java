@@ -15,25 +15,22 @@ package org.lance.spark.write;
 
 import org.lance.Dataset;
 import org.lance.Fragment;
-import org.lance.ReadOptions;
 import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.arrow.vector.ipc.ArrowStreamReader;
-import org.apache.arrow.vector.ipc.ArrowStreamWriter;
+import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.write.DataWriter;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
@@ -119,25 +116,16 @@ public abstract class AbstractBackfillWriter implements DataWriter<InternalRow> 
   private void flushFragment(int fragmentId, FragmentBuffer buffer) {
     try {
       buffer.writer.finish();
-
-      ByteArrayOutputStream out = new ByteArrayOutputStream();
-      try (ArrowStreamWriter streamWriter = new ArrowStreamWriter(buffer.data, null, out)) {
-        streamWriter.start();
-        streamWriter.writeBatch();
-        streamWriter.end();
-      } catch (IOException e) {
-        throw new RuntimeException("Cannot write schema root", e);
-      }
-
-      byte[] arrowData = out.toByteArray();
-      ByteArrayInputStream in = new ByteArrayInputStream(arrowData);
       BufferAllocator allocator = LanceRuntime.allocator();
 
-      try (ArrowStreamReader reader = new ArrowStreamReader(in, allocator);
-          ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator)) {
+      try (ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator);
+          ArrowReader reader = new SingleBatchArrowReader(allocator, buffer.data)) {
         Data.exportArrayStream(allocator, reader, stream);
 
-        try (Dataset dataset = openDatasetWithCredentialRefresh()) {
+        try (Dataset dataset =
+            Utils.openDatasetBuilder(writeOptions)
+                .initialStorageOptions(initialStorageOptions)
+                .build()) {
           Fragment fragment = new Fragment(dataset, fragmentId);
           processFragment(fragment, stream);
         }
@@ -176,19 +164,5 @@ public abstract class AbstractBackfillWriter implements DataWriter<InternalRow> 
       buffer.data.close();
     }
     buffers.clear();
-  }
-
-  private Dataset openDatasetWithCredentialRefresh() {
-    Map<String, String> merged =
-        LanceRuntime.mergeStorageOptions(writeOptions.getStorageOptions(), initialStorageOptions);
-
-    ReadOptions.Builder builder =
-        new ReadOptions.Builder().setStorageOptions(merged).setSession(LanceRuntime.session());
-
-    return Dataset.open()
-        .allocator(LanceRuntime.allocator())
-        .uri(writeOptions.getDatasetUri())
-        .readOptions(builder.build())
-        .build();
   }
 }

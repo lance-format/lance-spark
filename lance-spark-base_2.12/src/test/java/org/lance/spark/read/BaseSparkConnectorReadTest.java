@@ -545,4 +545,94 @@ public abstract class BaseSparkConnectorReadTest {
     scala.collection.Seq<?> arr = (scala.collection.Seq<?>) selectRows.get(0).get(0);
     assertEquals(3, arr.size());
   }
+
+  /** Test filter pushdown with deeply nested struct > list&lt;struct&gt; > struct schema. */
+  @Test
+  public void testFilterWithArrayOfStructColumn() {
+    // third_sub_obj: struct<int_val: int>
+    StructType thirdSubObj = new StructType().add("int_val", DataTypes.IntegerType, true);
+
+    // list element: struct<str_val: string, third_sub_obj: struct<int_val: int>>
+    StructType listElement =
+        new StructType()
+            .add("str_val", DataTypes.StringType, true)
+            .add("third_sub_obj", thirdSubObj, true);
+
+    // sub_obj: struct<second_sub_obj: array<listElement>>
+    StructType subObj =
+        new StructType().add("second_sub_obj", DataTypes.createArrayType(listElement), true);
+
+    StructType schema =
+        new StructType().add("item", DataTypes.StringType, false).add("sub_obj", subObj, true);
+
+    List<Row> testData =
+        Arrays.asList(
+            RowFactory.create(
+                "test",
+                RowFactory.create(
+                    JavaConverters.asScalaBuffer(
+                            Arrays.asList(RowFactory.create("val1", RowFactory.create(1))))
+                        .toSeq())),
+            RowFactory.create(
+                "other",
+                RowFactory.create(
+                    JavaConverters.asScalaBuffer(
+                            Arrays.asList(
+                                RowFactory.create("val2", RowFactory.create(2)),
+                                RowFactory.create("val3", RowFactory.create(3))))
+                        .toSeq())),
+            RowFactory.create(
+                "test",
+                RowFactory.create(
+                    JavaConverters.asScalaBuffer(
+                            Arrays.asList(RowFactory.create("val4", RowFactory.create(4))))
+                        .toSeq())));
+
+    Dataset<Row> df = spark.createDataFrame(testData, schema);
+
+    String datasetPath = tempDir.toString() + "/nested_array_struct_filter_test";
+    df.write().format(LanceDataSource.name).save(datasetPath);
+
+    // Read without filter — baseline
+    Dataset<Row> lanceData = spark.read().format(LanceDataSource.name).load(datasetPath);
+    assertEquals(3, lanceData.count());
+
+    // Read with filter on top-level "item" column
+    List<Row> filtered = lanceData.filter("item = 'test'").collectAsList();
+    assertEquals(2, filtered.size());
+
+    // Verify nested struct fields are NOT dropped after filter pushdown.
+    for (Row row : filtered) {
+      assertEquals("test", row.getString(0));
+      Row subObjRow = row.getStruct(1);
+      scala.collection.Seq<?> arr = (scala.collection.Seq<?>) subObjRow.get(0);
+      assertTrue(arr.size() > 0, "second_sub_obj array should not be empty");
+      Row element = (Row) arr.apply(0);
+      // str_val must be present and non-null
+      assertFalse(element.isNullAt(0), "str_val should not be null");
+      assertTrue(
+          element.getString(0).startsWith("val"),
+          "str_val should start with 'val', got: " + element.getString(0));
+      // third_sub_obj.int_val must be present
+      Row thirdRow = element.getStruct(1);
+      assertFalse(thirdRow.isNullAt(0), "third_sub_obj.int_val should not be null");
+    }
+
+    // Verify specific values to ensure correct rows are returned
+    filtered.sort(
+        (a, b) -> {
+          Row aEl = (Row) ((scala.collection.Seq<?>) a.getStruct(1).get(0)).apply(0);
+          Row bEl = (Row) ((scala.collection.Seq<?>) b.getStruct(1).get(0)).apply(0);
+          return Integer.compare(aEl.getStruct(1).getInt(0), bEl.getStruct(1).getInt(0));
+        });
+    Row first = filtered.get(0);
+    Row firstElement = (Row) ((scala.collection.Seq<?>) first.getStruct(1).get(0)).apply(0);
+    assertEquals("val1", firstElement.getString(0));
+    assertEquals(1, firstElement.getStruct(1).getInt(0));
+
+    Row second = filtered.get(1);
+    Row secondElement = (Row) ((scala.collection.Seq<?>) second.getStruct(1).get(0)).apply(0);
+    assertEquals("val4", secondElement.getString(0));
+    assertEquals(4, secondElement.getStruct(1).getInt(0));
+  }
 }

@@ -51,6 +51,7 @@ public class LanceScanBuilderTest {
         TestUtils.TestTable1Config.readOptions,
         Collections.emptyMap(),
         null,
+        Collections.emptyMap(),
         Collections.emptyMap());
   }
 
@@ -122,7 +123,7 @@ public class LanceScanBuilderTest {
             Collections.singletonMap(LanceSparkReadOptions.CONFIG_PUSH_DOWN_FILTERS, "false"),
             TestUtils.TestTable1Config.datasetUri);
     LanceScanBuilder builder =
-        new LanceScanBuilder(TEST_SCHEMA, options, Collections.emptyMap(), null, null);
+        new LanceScanBuilder(TEST_SCHEMA, options, Collections.emptyMap(), null, null, null);
     Filter[] filters = new Filter[] {new GreaterThan("x", 1L)};
     Filter[] result = builder.pushFilters(filters);
     assertEquals(1, result.length);
@@ -130,8 +131,8 @@ public class LanceScanBuilderTest {
   }
 
   @Test
-  public void testPushFiltersSkipsNestedArrayOfStruct() {
-    // Workaround for https://github.com/lance-format/lance/issues/3578
+  public void testPushFiltersWithNestedArrayOfStruct() {
+    // Filters on non-Array<Struct> columns should be pushed down normally.
     StructType nestedSchema =
         new StructType(
             new StructField[] {
@@ -152,11 +153,12 @@ public class LanceScanBuilderTest {
             TestUtils.TestTable1Config.readOptions,
             Collections.emptyMap(),
             null,
+            Collections.emptyMap(),
             Collections.emptyMap());
     Filter[] filters = new Filter[] {new GreaterThan("id", 1L)};
     Filter[] result = builder.pushFilters(filters);
-    assertEquals(1, result.length);
-    assertEquals(0, builder.pushedFilters().length);
+    assertEquals(0, result.length);
+    assertEquals(1, builder.pushedFilters().length);
   }
 
   // --- pushLimit ---
@@ -198,7 +200,7 @@ public class LanceScanBuilderTest {
             Collections.singletonMap(LanceSparkReadOptions.CONFIG_TOP_N_PUSH_DOWN, "false"),
             TestUtils.TestTable1Config.datasetUri);
     LanceScanBuilder builder =
-        new LanceScanBuilder(TEST_SCHEMA, options, Collections.emptyMap(), null, null);
+        new LanceScanBuilder(TEST_SCHEMA, options, Collections.emptyMap(), null, null, null);
     SortOrder order = new TestSortOrder("x", SortDirection.ASCENDING, NullOrdering.NULLS_FIRST);
     assertFalse(builder.pushTopN(new SortOrder[] {order}, 10));
   }

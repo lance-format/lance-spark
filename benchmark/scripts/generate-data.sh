@@ -42,6 +42,15 @@ echo "Spark master:    ${SPARK_MASTER}"
 echo "Spark version:   ${SPARK_VERSION}"
 echo "Scala version:   ${SCALA_VERSION}"
 echo "Data dir:        ${DATA_DIR}"
+if [ -n "${FILE_FORMAT_VERSION:-}" ]; then
+  echo "File format version: ${FILE_FORMAT_VERSION}"
+fi
+if [ -n "${MAX_BYTES_PER_FILE:-}" ]; then
+  echo "Max bytes/file:  ${MAX_BYTES_PER_FILE}"
+fi
+if [ -n "${MAX_ROWS_PER_FILE:-}" ]; then
+  echo "Max rows/file:   ${MAX_ROWS_PER_FILE}"
+fi
 echo ""
 
 # Step 1: Build benchmark jar if needed
@@ -77,12 +86,14 @@ ${SPARK_SUBMIT} \
   --driver-memory "${DRIVER_MEMORY:-4g}" \
   --executor-memory "${EXECUTOR_MEMORY:-4g}" \
   --jars "${BUNDLE_JAR}" \
-  --conf spark.sql.extensions=org.lance.spark.LanceSparkSessionExtension \
+  --conf spark.sql.extensions=org.lance.spark.extensions.LanceSparkSessionExtensions \
   --conf spark.driver.extraJavaOptions="-XX:+IgnoreUnrecognizedVMOptions --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED -Dio.netty.tryReflectionSetAccessible=true" \
+  ${MAX_BYTES_PER_FILE:+ --conf spark.sql.catalog.lance_default.max_bytes_per_file="${MAX_BYTES_PER_FILE}"} \
+  ${MAX_ROWS_PER_FILE:+ --conf spark.sql.catalog.lance_default.max_row_per_file="${MAX_ROWS_PER_FILE}"} \
   "${BENCHMARK_JAR}" \
   --data-dir "${DATA_DIR}" \
   --scale-factor "${SCALE_FACTOR}" \
-  --formats "${FORMATS}"
+  --formats "${FORMATS}"${FILE_FORMAT_VERSION:+ --file-format-version "${FILE_FORMAT_VERSION}"}
 
 echo ""
 echo "=== Data generation complete ==="

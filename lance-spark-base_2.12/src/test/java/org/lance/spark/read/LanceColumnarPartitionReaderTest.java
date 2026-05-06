@@ -45,7 +45,8 @@ public class LanceColumnarPartitionReaderTest {
             "test" /* scanId */,
             null /* initialStorageOptions */,
             null /* namespaceImpl */,
-            null /* namespaceProperties */);
+            null /* namespaceProperties */,
+            null /* partitionKeyRow */);
     try (LanceColumnarPartitionReader reader = new LanceColumnarPartitionReader(partition)) {
       List<List<Long>> expectedValues = TestUtils.TestTable1Config.expectedValues;
       int rowIndex = 0;
@@ -87,7 +88,8 @@ public class LanceColumnarPartitionReaderTest {
             "testOffsetAndLimit" /* scanId */,
             null /* initialStorageOptions */,
             null /* namespaceImpl */,
-            null /* namespaceProperties */);
+            null /* namespaceProperties */,
+            null /* partitionKeyRow */);
     try (LanceColumnarPartitionReader reader = new LanceColumnarPartitionReader(partition)) {
       List<List<Long>> expectedValues = TestUtils.TestTable1Config.expectedValues;
       int rowIndex = 1;
@@ -131,7 +133,8 @@ public class LanceColumnarPartitionReaderTest {
             "testTopN" /* scanId */,
             null /* initialStorageOptions */,
             null /* namespaceImpl */,
-            null /* namespaceProperties */);
+            null /* namespaceProperties */,
+            null /* partitionKeyRow */);
     try (LanceColumnarPartitionReader reader = new LanceColumnarPartitionReader(partition)) {
       List<List<Long>> expectedValues = TestUtils.TestTable1Config.expectedValues;
 

@@ -11,6 +11,7 @@ automatically exercised against all available backends.
 import os
 import subprocess
 import time
+import uuid
 import urllib.request
 import urllib.error
 
@@ -176,11 +177,33 @@ LANCEDB_DB = os.environ.get("LANCEDB_DB")
 LANCEDB_API_KEY = os.environ.get("LANCEDB_API_KEY")
 LANCEDB_HOST_OVERRIDE = os.environ.get("LANCEDB_HOST_OVERRIDE")
 LANCEDB_REGION = os.environ.get("LANCEDB_REGION", "us-east-1")
+AWS_S3_BUCKET_NAME = os.environ.get("AWS_S3_BUCKET_NAME")
+AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
+AWS_GLUE_CATALOG_ID = os.environ.get("AWS_GLUE_CATALOG_ID")
+AWS_GLUE_ENDPOINT = os.environ.get("AWS_GLUE_ENDPOINT")
+AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY")
+AWS_SESSION_TOKEN = os.environ.get("AWS_SESSION_TOKEN")
+AWS_GLUE_ROOT = os.environ.get("AWS_GLUE_ROOT") or (
+    f"s3://{AWS_S3_BUCKET_NAME}/lance_spark_glue_test_{uuid.uuid4().hex[:8]}"
+    if AWS_S3_BUCKET_NAME
+    else None
+)
 
 _all_backends = ["local", "azurite", "minio"]
 if LANCEDB_DB and LANCEDB_API_KEY:
     _all_backends.append("lancedb")
+if AWS_S3_BUCKET_NAME:
+    _all_backends.append("glue")
 _backends = os.environ.get("TEST_BACKENDS", ",".join(_all_backends)).split(",")
+
+
+def pytest_report_header(config):
+    lines = [f"lance spark backends: {','.join(_backends)}"]
+    if "glue" in _backends:
+        lines.append(f"aws glue root: {AWS_GLUE_ROOT}")
+        lines.append(f"aws region: {AWS_REGION}")
+    return lines
 
 
 @pytest.fixture(scope="module", params=_backends)
@@ -195,6 +218,9 @@ def spark(request):
     - **minio** – S3-compatible storage via the MinIO emulator
     - **lancedb** – LanceDB Cloud via REST API (requires ``LANCEDB_DB`` and
       ``LANCEDB_API_KEY`` env vars; skipped otherwise)
+    - **glue** – AWS Glue Data Catalog with S3 storage (requires
+      ``AWS_S3_BUCKET_NAME`` and AWS credentials from the default AWS provider
+      chain)
     """
     backend = request.param
 
@@ -226,6 +252,40 @@ def spark(request):
                 f"spark.sql.catalog.{CATALOG}.headers.x-lancedb-database", LANCEDB_DB,
             )
         )
+    elif backend == "glue":
+        if not AWS_S3_BUCKET_NAME or not AWS_GLUE_ROOT:
+            pytest.skip("AWS_S3_BUCKET_NAME is required for Glue backend")
+
+        builder = (
+            builder
+            .config(f"spark.sql.catalog.{CATALOG}.impl", "glue")
+            .config(f"spark.sql.catalog.{CATALOG}.root", AWS_GLUE_ROOT)
+            .config(f"spark.sql.catalog.{CATALOG}.region", AWS_REGION)
+            .config(f"spark.sql.catalog.{CATALOG}.storage.region", AWS_REGION)
+        )
+
+        if AWS_GLUE_CATALOG_ID:
+            builder = builder.config(
+                f"spark.sql.catalog.{CATALOG}.catalog_id", AWS_GLUE_CATALOG_ID,
+            )
+        if AWS_GLUE_ENDPOINT:
+            builder = builder.config(
+                f"spark.sql.catalog.{CATALOG}.endpoint", AWS_GLUE_ENDPOINT,
+            )
+        if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
+            builder = (
+                builder
+                .config(f"spark.sql.catalog.{CATALOG}.access_key_id", AWS_ACCESS_KEY_ID)
+                .config(f"spark.sql.catalog.{CATALOG}.secret_access_key", AWS_SECRET_ACCESS_KEY)
+                .config(f"spark.sql.catalog.{CATALOG}.storage.access_key_id", AWS_ACCESS_KEY_ID)
+                .config(f"spark.sql.catalog.{CATALOG}.storage.secret_access_key", AWS_SECRET_ACCESS_KEY)
+            )
+        if AWS_SESSION_TOKEN:
+            builder = (
+                builder
+                .config(f"spark.sql.catalog.{CATALOG}.session_token", AWS_SESSION_TOKEN)
+                .config(f"spark.sql.catalog.{CATALOG}.storage.session_token", AWS_SESSION_TOKEN)
+            )
     else:
         builder = builder.config(f"spark.sql.catalog.{CATALOG}.impl", "dir")
 

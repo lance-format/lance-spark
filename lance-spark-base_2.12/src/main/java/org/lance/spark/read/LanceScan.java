@@ -13,12 +13,15 @@
  */
 package org.lance.spark.read;
 
+import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Optional;
 
 import org.apache.arrow.util.Preconditions;
 import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.connector.expressions.Expression;
+import org.apache.spark.sql.connector.expressions.FieldReference;
 import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
 import org.apache.spark.sql.connector.expressions.aggregate.CountStar;
@@ -28,7 +31,11 @@ import org.apache.spark.sql.connector.read.PartitionReader;
 import org.apache.spark.sql.connector.read.PartitionReaderFactory;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.read.Statistics;
+import org.apache.spark.sql.connector.read.SupportsReportPartitioning;
 import org.apache.spark.sql.connector.read.SupportsReportStatistics;
+import org.apache.spark.sql.connector.read.partitioning.KeyGroupedPartitioning;
+import org.apache.spark.sql.connector.read.partitioning.Partitioning;
+import org.apache.spark.sql.connector.read.partitioning.UnknownPartitioning;
 import org.apache.spark.sql.internal.connector.SupportsMetadata;
 import org.apache.spark.sql.sources.Filter;
 import org.apache.spark.sql.types.StructType;
@@ -39,14 +46,21 @@ import scala.collection.immutable.Map;
 
 import java.io.Serializable;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 public class LanceScan
-    implements Batch, Scan, SupportsMetadata, SupportsReportStatistics, Serializable {
+    implements Batch,
+        Scan,
+        SupportsMetadata,
+        SupportsReportStatistics,
+        SupportsReportPartitioning,
+        Serializable {
   private static final long serialVersionUID = 947284762748623947L;
   private static final Logger LOG = LoggerFactory.getLogger(LanceScan.class);
 
@@ -60,6 +74,28 @@ public class LanceScan
   private final Filter[] pushedFilters;
   private final LanceStatistics statistics;
   private final String scanId = UUID.randomUUID().toString();
+
+  /**
+   * Per-column zonemap statistics loaded on the driver during scan building. Used for
+   * fragment-level pruning in {@link #planInputPartitions()}.
+   */
+  private final java.util.Map<String, List<ZoneStats>> zonemapStats;
+
+  /**
+   * Pre-computed surviving fragment IDs from zonemap pruning in LanceScanBuilder. When non-null,
+   * {@link #pruneByZonemapStats} skips re-computing and uses these directly.
+   */
+  private final Set<Integer> cachedSurvivingFragmentIds;
+
+  /** Number of partitions after pruning, set during {@link #planInputPartitions()}. */
+  private transient int numPartitions = -1;
+
+  /**
+   * Partition info detected from zonemap stats. When present, enables storage-partitioned joins
+   * (SPJ) by reporting the partition column as the output partitioning key instead of {@code
+   * _fragid}. Null when no partition-compatible column is detected.
+   */
+  private final ZonemapFragmentPruner.PartitionInfo partitionInfo;
 
   /**
    * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
@@ -82,6 +118,9 @@ public class LanceScan
       Optional<Aggregation> pushedAggregation,
       Filter[] pushedFilters,
       LanceStatistics statistics,
+      java.util.Map<String, List<ZoneStats>> zonemapStats,
+      Set<Integer> survivingFragmentIds,
+      ZonemapFragmentPruner.PartitionInfo partitionInfo,
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
       java.util.Map<String, String> namespaceProperties) {
@@ -95,6 +134,9 @@ public class LanceScan
     this.pushedFilters =
         pushedFilters != null ? Arrays.copyOf(pushedFilters, pushedFilters.length) : new Filter[0];
     this.statistics = statistics;
+    this.zonemapStats = zonemapStats != null ? zonemapStats : Collections.emptyMap();
+    this.cachedSurvivingFragmentIds = survivingFragmentIds;
+    this.partitionInfo = partitionInfo;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
@@ -109,6 +151,11 @@ public class LanceScan
   public InputPartition[] planInputPartitions() {
     LanceSplit.ScanPlanResult planResult = LanceSplit.planScan(readOptions);
     List<LanceSplit> prunedSplits = pruneByRowAddrFilters(planResult.getSplits());
+
+    // Zonemap-based fragment pruning: uses per-column min/max/null_count
+    // statistics to eliminate fragments that provably cannot match
+    // pushed filters.
+    prunedSplits = pruneByZonemapStats(prunedSplits);
 
     // Limit-based split pruning: when a LIMIT is pushed down without filters or TopN sort,
     // use per-fragment row counts to plan only enough splits to satisfy the limit.
@@ -126,23 +173,32 @@ public class LanceScan
     InputPartition[] result =
         IntStream.range(0, finalSplits.size())
             .mapToObj(
-                i ->
-                    new LanceInputPartition(
-                        schema,
-                        i,
-                        finalSplits.get(i),
-                        resolvedReadOptions,
-                        whereConditions,
-                        limit,
-                        offset,
-                        topNSortOrders,
-                        pushedAggregation,
-                        scanId,
-                        initialStorageOptions,
-                        namespaceImpl,
-                        namespaceProperties))
+                i -> {
+                  LanceSplit split = finalSplits.get(i);
+                  InternalRow partKeyRow = null;
+                  if (partitionInfo != null) {
+                    int fragId = split.getFragments().get(0);
+                    partKeyRow = partitionInfo.partitionKeyForFragment(fragId);
+                  }
+                  return new LanceInputPartition(
+                      schema,
+                      i,
+                      split,
+                      resolvedReadOptions,
+                      whereConditions,
+                      limit,
+                      offset,
+                      topNSortOrders,
+                      pushedAggregation,
+                      scanId,
+                      initialStorageOptions,
+                      namespaceImpl,
+                      namespaceProperties,
+                      partKeyRow);
+                })
             .toArray(InputPartition[]::new);
 
+    this.numPartitions = result.length;
     return result;
   }
 
@@ -260,6 +316,69 @@ public class LanceScan
     return pruned;
   }
 
+  /**
+   * Prunes splits based on zonemap index statistics — using per-column min/max/null_count to
+   * eliminate fragments that provably cannot match the pushed filters.
+   *
+   * <p>This is analogous to partition pruning in Hive/Iceberg: fragments whose zones all fail the
+   * predicate are skipped entirely, avoiding fragment opens, scan setup, and task scheduling.
+   */
+  private List<LanceSplit> pruneByZonemapStats(List<LanceSplit> allSplits) {
+    // Use cached result from LanceScanBuilder if available, otherwise compute.
+    Set<Integer> allowedIds;
+    if (cachedSurvivingFragmentIds != null) {
+      allowedIds = cachedSurvivingFragmentIds;
+    } else if (!zonemapStats.isEmpty()) {
+      allowedIds = ZonemapFragmentPruner.pruneFragments(pushedFilters, zonemapStats).orElse(null);
+    } else {
+      return allSplits;
+    }
+
+    if (allowedIds == null) {
+      return allSplits;
+    }
+    List<LanceSplit> pruned =
+        allSplits.stream()
+            .filter(split -> split.getFragments().stream().anyMatch(allowedIds::contains))
+            .collect(Collectors.toList());
+
+    if (pruned.size() < allSplits.size()) {
+      LOG.debug(
+          "Zonemap pruning: {} of {} splits retained," + " allowed fragment IDs: {}",
+          pruned.size(),
+          allSplits.size(),
+          allowedIds);
+    }
+
+    return pruned;
+  }
+
+  /**
+   * Reports the output partitioning to Spark's optimizer.
+   *
+   * <p>When a partition-compatible column is detected via zonemap stats (every fragment has a
+   * single distinct value for that column), we report the data column as the partition key. This
+   * enables Spark's storage-partitioned join (SPJ) protocol — allowing shuffle-free joins between
+   * Lance tables or between Lance and other data sources (e.g., Iceberg) that share the same
+   * partition column.
+   *
+   * <p>When no partition column is detected, returns {@link UnknownPartitioning}.
+   */
+  @Override
+  public Partitioning outputPartitioning() {
+    if (partitionInfo != null) {
+      // Use partition info fragment count — available before
+      // planInputPartitions() is called. This allows
+      // V2ScanPartitioningAndOrdering to see the partitioning
+      // early enough for SPJ.
+      int partCount =
+          numPartitions >= 0 ? numPartitions : partitionInfo.getFragmentPartitionValues().size();
+      Expression[] keys = new Expression[] {FieldReference.apply(partitionInfo.getColumnName())};
+      return new KeyGroupedPartitioning(keys, partCount);
+    }
+    return new UnknownPartitioning(numPartitions >= 0 ? numPartitions : 0);
+  }
+
   @Override
   public PartitionReaderFactory createReaderFactory() {
     return new LanceReaderFactory();
@@ -289,6 +408,84 @@ public class LanceScan
   @Override
   public Statistics estimateStatistics() {
     return statistics;
+  }
+
+  /**
+   * Required for Spark's ReusedExchange: {@code BatchScanExec.equals()} compares {@code batch}
+   * objects, which delegate to this method since LanceScan implements Batch.
+   *
+   * <p>Excludes {@code scanId} (per-instance tracing UUID, not scan identity).
+   */
+  @Override
+  public boolean equals(Object o) {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    LanceScan that = (LanceScan) o;
+    return Objects.equals(schema, that.schema)
+        && Objects.equals(readOptions, that.readOptions)
+        && Objects.equals(whereConditions, that.whereConditions)
+        && Objects.equals(limit, that.limit)
+        && Objects.equals(offset, that.offset)
+        && Objects.equals(topNSortOrders.toString(), that.topNSortOrders.toString())
+        && aggregationEquals(pushedAggregation, that.pushedAggregation)
+        && equivalentFilters(pushedFilters, that.pushedFilters);
+  }
+
+  @Override
+  public int hashCode() {
+    int result =
+        Objects.hash(
+            schema, readOptions, whereConditions, limit, offset, topNSortOrders.toString());
+    result = 31 * result + Arrays.hashCode(sortedByHash(pushedFilters));
+    result = 31 * result + aggregationHashCode(pushedAggregation);
+    return result;
+  }
+
+  /**
+   * Compares two Optional&lt;Aggregation&gt; by value. {@code Aggregation}'s auto-generated {@code
+   * equals()} uses reference identity for its array components, so we sort by hashCode and compare
+   * element-wise — following {@code AggregatePushDownUtils.equivalentAggregations()}.
+   */
+  private static boolean aggregationEquals(Optional<Aggregation> a, Optional<Aggregation> b) {
+    if (a.isPresent() != b.isPresent()) {
+      return false;
+    }
+    if (!a.isPresent()) {
+      return true;
+    }
+    Aggregation agg1 = a.get();
+    Aggregation agg2 = b.get();
+    return Arrays.equals(
+            sortedByHash(agg1.aggregateExpressions()), sortedByHash(agg2.aggregateExpressions()))
+        && Arrays.equals(
+            sortedByHash(agg1.groupByExpressions()), sortedByHash(agg2.groupByExpressions()));
+  }
+
+  private static int aggregationHashCode(Optional<Aggregation> agg) {
+    if (!agg.isPresent()) {
+      return 0;
+    }
+    return Objects.hash(
+        Arrays.hashCode(sortedByHash(agg.get().aggregateExpressions())),
+        Arrays.hashCode(sortedByHash(agg.get().groupByExpressions())));
+  }
+
+  /**
+   * Returns whether two filter arrays are equivalent regardless of order. Follows Spark's {@code
+   * FileScan.equivalentFilters()}: sort by hashCode, then compare element-wise.
+   */
+  private static boolean equivalentFilters(Filter[] a, Filter[] b) {
+    return Arrays.equals(sortedByHash(a), sortedByHash(b));
+  }
+
+  private static <T> T[] sortedByHash(T[] arr) {
+    T[] copy = Arrays.copyOf(arr, arr.length);
+    Arrays.sort(copy, (x, y) -> Integer.compare(x.hashCode(), y.hashCode()));
+    return copy;
   }
 
   private static class LanceReaderFactory implements PartitionReaderFactory {

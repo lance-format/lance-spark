@@ -72,6 +72,33 @@ df.write \
     .saveAsTable("my_table")
 ```
 
+### Max Batch Bytes
+
+Set via Spark write option `max_batch_bytes` (default: 268435456, i.e. 256MB).
+
+Controls the maximum in-memory size of each Arrow batch before it is flushed.
+Batches are flushed when either the row count reaches `batch_size` or the allocated memory
+reaches `max_batch_bytes`, whichever comes first.
+
+This prevents OOM when writing tables with very large rows — wide schemas, large binary/string
+columns, or high-dimensional vector embeddings — where even a modest number of rows can exhaust
+memory before the row-count threshold is reached.
+
+Small-row workloads are unaffected because the row-count limit is hit first.
+
+!!!note
+      When using the queued write buffer, total in-flight Arrow memory can be roughly
+      `queue_depth * max_batch_bytes`. You may need to tune `queue_depth` and `max_batch_bytes`
+      together to stay within memory limits.
+
+```python
+df.write \
+    .format("lance") \
+    .option("max_batch_bytes", "134217728") \
+    .mode("append") \
+    .saveAsTable("my_table")  # 128MB per batch
+```
+
 ### Max Rows Per File
 
 Set via Spark write option `max_row_per_file` (default: 1,000,000).
@@ -91,6 +118,31 @@ df.write \
     .mode("append") \
     .saveAsTable("my_table")
 ```
+
+### Large Var Types
+
+Set via Spark write option `use_large_var_types` (default: false).
+
+Switches all string and binary columns to use 64-bit offset Arrow vectors
+(`LargeVarCharVector` / `LargeVarBinaryVector`) instead of the default 32-bit offset vectors.
+This removes the 2GB-per-batch data buffer limit that can cause `OversizedAllocationException`
+when writing rows with very large string or binary values.
+
+Use this when your rows contain large values (hundreds of KB or more per row) and you
+hit the 2GB overflow error. There is no meaningful performance overhead -- the only
+difference is 8 bytes per row for the offset buffer instead of 4.
+
+```python
+df.write \
+    .format("lance") \
+    .option("use_large_var_types", "true") \
+    .mode("append") \
+    .saveAsTable("my_table")
+```
+
+!!!note
+    For per-column control at table creation time, see the
+    [`arrow.large_var_char` table property](operations/ddl/create-table.md#large-string-columns).
 
 ## Read Performance
 

@@ -41,6 +41,7 @@ endif
 # Example: make docker-build-test-base DOCKER_CACHE_FROM="type=gha" DOCKER_CACHE_TO="type=gha,mode=max"
 DOCKER_CACHE_FROM ?=
 DOCKER_CACHE_TO ?=
+LANCE_NAMESPACE_IMPL_VERSION ?= $(shell sed -n 's:.*<lance-namespace-impl.version>\(.*\)</lance-namespace-impl.version>.*:\1:p' pom.xml | head -n 1)
 
 DOCKER_COMPOSE := $(shell \
 	if docker compose version >/dev/null 2>&1; then \
@@ -73,6 +74,10 @@ clean-module:
 .PHONY: bundle
 bundle:
 	./mvnw install -pl $(BUNDLE_MODULE) -am -DskipTests
+
+.PHONY: clean-bundle
+clean-bundle:
+	./mvnw clean install -pl $(BUNDLE_MODULE) -am -DskipTests
 
 .PHONY: install-base
 install-base:
@@ -145,6 +150,7 @@ print-docker-build-args:
 	@echo "spark-download-version=$(SPARK_DOWNLOAD_VERSION)"
 	@echo "py4j-version=$(PY4J_VERSION)"
 	@echo "spark-scala-suffix=$(SPARK_SCALA_SUFFIX)"
+	@echo "lance-namespace-impl-version=$(LANCE_NAMESPACE_IMPL_VERSION)"
 
 .PHONY: docker-build-test-base
 docker-build-test-base:
@@ -168,6 +174,7 @@ docker-build-test:
 	docker build --no-cache \
 		--build-arg SPARK_MAJOR_VERSION=$(SPARK_VERSION) \
 		--build-arg SCALA_VERSION=$(SCALA_VERSION) \
+		--build-arg LANCE_NAMESPACE_IMPL_VERSION=$(LANCE_NAMESPACE_IMPL_VERSION) \
 		-f docker/Dockerfile.test \
 		-t lance-spark-test:$(SPARK_VERSION)_$(SCALA_VERSION) \
 		.
@@ -184,6 +191,18 @@ docker-test:
 		$(if $(LANCEDB_HOST_OVERRIDE),-e LANCEDB_HOST_OVERRIDE=$(LANCEDB_HOST_OVERRIDE)) \
 		$(if $(LANCEDB_REGION),-e LANCEDB_REGION=$(LANCEDB_REGION)) \
 		$(if $(TEST_BACKENDS),-e TEST_BACKENDS=$(TEST_BACKENDS)) \
+		$(if $(LANCE_FTS_FORMAT_VERSION),-e LANCE_FTS_FORMAT_VERSION=$(LANCE_FTS_FORMAT_VERSION)) \
+		$(if $(AWS_REGION),-e AWS_REGION=$(AWS_REGION)) \
+		$(if $(AWS_DEFAULT_REGION),-e AWS_DEFAULT_REGION=$(AWS_DEFAULT_REGION)) \
+		$(if $(AWS_S3_BUCKET_NAME),-e AWS_S3_BUCKET_NAME=$(AWS_S3_BUCKET_NAME)) \
+		$(if $(AWS_GLUE_ROOT),-e AWS_GLUE_ROOT=$(AWS_GLUE_ROOT)) \
+		$(if $(AWS_GLUE_CATALOG_ID),-e AWS_GLUE_CATALOG_ID=$(AWS_GLUE_CATALOG_ID)) \
+		$(if $(AWS_GLUE_ENDPOINT),-e AWS_GLUE_ENDPOINT=$(AWS_GLUE_ENDPOINT)) \
+		$(if $(AWS_ACCESS_KEY_ID),-e AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID)) \
+		$(if $(AWS_SECRET_ACCESS_KEY),-e AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY)) \
+		$(if $(AWS_SESSION_TOKEN),-e AWS_SESSION_TOKEN=$(AWS_SESSION_TOKEN)) \
+		$(if $(AWS_PROFILE),-e AWS_PROFILE=$(AWS_PROFILE)) \
+		$(if $(AWS_PROFILE),-v $(HOME)/.aws:/root/.aws:ro) \
 		lance-spark-test:$(SPARK_VERSION)_$(SCALA_VERSION) \
 		"pytest /home/lance/tests/ -v --timeout=180"
 
@@ -241,7 +260,8 @@ help:
 	@echo "  test           - Run tests for module"
 	@echo "  build          - Lint and install module"
 	@echo "  clean-module   - Clean module"
-	@echo "  bundle         - Build bundle module"
+	@echo "  bundle         - Build bundle module (incremental)"
+	@echo "  clean-bundle   - Clean then build bundle module (use when source changes are not picked up)"
 	@echo "  install-base   - Install base module"
 	@echo ""
 	@echo "Global commands (all modules):"
