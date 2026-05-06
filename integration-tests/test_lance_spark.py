@@ -2624,10 +2624,10 @@ class TestStableRowIds:
         """).collect()
 
         assert len(batch2) == 2
-        # Alice was updated in v3 — fragment rewrite recalculates created_at to 1
+        # Alice was updated in v3 — stable row ID preserves original created_at (v2)
         alice = [r for r in batch2 if r.id == 1][0]
         assert alice.value == 150
-        assert alice._row_created_at_version == 1
+        assert alice._row_created_at_version == 2
         assert alice._row_last_updated_at_version == 3
         # David was inserted in v4
         david = [r for r in batch2 if r.id == 4][0]

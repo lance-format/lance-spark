@@ -171,7 +171,6 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
               if (rowIndexes.isEmpty()) {
                 return;
               }
-              rowIndexes.sort(Integer::compareTo);
               FragmentMetadata updatedFragment =
                   dataset.getFragment(fragmentId).deleteRows(ImmutableList.copyOf(rowIndexes));
               if (updatedFragment != null) {

@@ -80,6 +80,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
+  private final boolean hasStableRowIds;
 
   public SparkPositionDeltaWrite(
       StructType sparkSchema,
@@ -91,6 +92,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     this.sparkSchema = sparkSchema;
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
       this.writeOptions = writeOptions.withVersion(ds.version());
+      this.hasStableRowIds = ds.hasStableRowIds();
       LOG.debug(
           "Resolved dataset version for position delta write: {}", this.writeOptions.getVersion());
     }
@@ -126,10 +128,6 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
     @Override
     public DeltaWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
-      boolean stableRowIds;
-      try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
-        stableRowIds = ds.hasStableRowIds();
-      }
       return new PositionDeltaWriteFactory(
           sparkSchema,
           writeOptions,
@@ -137,7 +135,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
           namespaceImpl,
           namespaceProperties,
           tableId,
-          stableRowIds);
+          hasStableRowIds);
     }
 
     @Override
@@ -177,7 +175,6 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
               if (rowIndexes.isEmpty()) {
                 return;
               }
-              rowIndexes.sort(Integer::compareTo);
               FragmentMetadata updatedFragment =
                   dataset.getFragment(fragmentId).deleteRows(ImmutableList.copyOf(rowIndexes));
               if (updatedFragment != null) {
@@ -318,6 +315,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       this.hasStableRowIds = hasStableRowIds;
     }
 
+    // id row positions are determined by the physical scan order in LanceFragmentScanner
+    // (METADATA_COLUMNS: _rowid at index 0, _rowaddr at index 1), not by rowId() array order.
     @Override
     public void delete(InternalRow metadata, InternalRow id) throws IOException {
       long rowAddr = id.getLong(1);
