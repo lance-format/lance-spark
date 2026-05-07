@@ -30,7 +30,7 @@ import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.apache.spark.{SparkException, SparkUnsupportedOperationException}
 import org.apache.spark.sql.types._
 import org.lance.spark.LanceConstant
-import org.lance.spark.utils.{BlobUtils, Float16Utils, LargeVarCharUtils, VectorUtils}
+import org.lance.spark.utils.{BlobUtils, Float16Utils, LanceEncodingUtils, LargeVarCharUtils, VectorUtils}
 
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
@@ -45,6 +45,59 @@ object LanceArrowUtils {
   val ARROW_FLOAT16_KEY = Float16Utils.ARROW_FLOAT16_KEY
   val ENCODING_BLOB = BlobUtils.LANCE_ENCODING_BLOB_KEY
   val ARROW_LARGE_VAR_CHAR_KEY = LargeVarCharUtils.ARROW_LARGE_VAR_CHAR_KEY
+
+  private val LANCE_NESTED_PREFIX = LanceEncodingUtils.LANCE_NESTED_PREFIX
+  private val LANCE_ENCODING_KEY_MARKER = ".lance-encoding:"
+
+  /**
+   * A nested-encoding metadata assignment threaded through the recursive `toArrowField` call.
+   * `subPath` lists the remaining role-segments (`element`/`key`/`value`) from the current level
+   * to the target child whose Arrow `FieldType.metadata` should carry `arrowKey -> value`.
+   */
+  private case class NestedAssignment(subPath: List[String], arrowKey: String, value: String)
+
+  private def parseLanceNestedKey(key: String): Option[(List[String], String)] = {
+    if (!key.startsWith(LANCE_NESTED_PREFIX)) return None
+    val withoutPrefix = key.substring(LANCE_NESTED_PREFIX.length)
+    val sepIdx = withoutPrefix.indexOf(LANCE_ENCODING_KEY_MARKER)
+    if (sepIdx <= 0) return None
+    val subPathStr = withoutPrefix.substring(0, sepIdx)
+    // marker is ".lance-encoding:"; sepIdx points at the leading dot, +1 advances past it,
+    // leaving "lance-encoding:<key>".
+    val arrowKey = withoutPrefix.substring(sepIdx + 1)
+    // `subPathStr` is non-empty here (sepIdx > 0), so `split('.').toList` is non-empty too.
+    // Reject malformed shapes (empty segment from leading/consecutive dots, unknown role) — the
+    // Java writer never emits these, so this is defensive against corrupted/hand-edited Metadata.
+    val subPath = subPathStr.split('.').toList
+    if (subPath.exists(s => s.isEmpty || (s != "element" && s != "key" && s != "value"))) {
+      return None
+    }
+    Some((subPath, arrowKey))
+  }
+
+  private def buildAssignmentMetadata(applyHere: List[NestedAssignment]): Metadata = {
+    if (applyHere.isEmpty) {
+      null
+    } else {
+      val mb = new MetadataBuilder()
+      applyHere.foreach(a => mb.putString(a.arrowKey, a.value))
+      mb.build()
+    }
+  }
+
+  /**
+   * Same payload as `buildAssignmentMetadata` but returned as a `java.util.Map[String, String]`
+   * suitable for direct use in `FieldType.metadata`. Used by the FixedSizeList float16 inline
+   * branch which constructs a `FieldType` without recursing through `toArrowField`.
+   */
+  private def assignmentsToArrowMap(
+      applyHere: List[NestedAssignment]): java.util.Map[String, String] = {
+    if (applyHere.isEmpty) {
+      java.util.Collections.emptyMap[String, String]()
+    } else {
+      applyHere.map(a => a.arrowKey -> a.value).toMap.asJava
+    }
+  }
 
   def fromArrowField(field: Field): DataType = {
     field.getType match {
@@ -196,8 +249,20 @@ object LanceArrowUtils {
       timeZoneId: String,
       metadata: org.apache.spark.sql.types.Metadata = null,
       largeVarTypes: Boolean = false): Field = {
+    toArrowField(name, dt, nullable, timeZoneId, metadata, largeVarTypes, List.empty)
+  }
+
+  private def toArrowField(
+      name: String,
+      dt: DataType,
+      nullable: Boolean,
+      timeZoneId: String,
+      metadata: org.apache.spark.sql.types.Metadata,
+      largeVarTypes: Boolean,
+      nestedAssignments: List[NestedAssignment]): Field = {
     var large: Boolean = largeVarTypes
     var meta: Map[String, String] = Map.empty
+    var carriedAssignments: List[NestedAssignment] = nestedAssignments
 
     if (metadata != null) {
       if (metadata.contains(ENCODING_BLOB)
@@ -209,13 +274,28 @@ object LanceArrowUtils {
         large = true
       }
 
-      meta = mapper
+      val rawMeta = mapper
         .readValue(metadata.json, classOf[java.util.LinkedHashMap[_, _]])
         .asScala.map { case (k, v) => (k.toString, String.valueOf(v)) }.toMap
+
+      val (nestedRaw, others) =
+        rawMeta.partition { case (k, _) => k.startsWith(LANCE_NESTED_PREFIX) }
+      meta = others
+
+      val parsedFromMeta = nestedRaw.toList.flatMap { case (k, v) =>
+        parseLanceNestedKey(k).map { case (sp, ak) => NestedAssignment(sp, ak, v) }
+      }
+      carriedAssignments = carriedAssignments ++ parsedFromMeta
     }
 
     dt match {
       case ArrayType(elementType, containsNull) =>
+        val (forElement, _) =
+          carriedAssignments.partition(_.subPath.headOption.contains("element"))
+        val (applyAtEl, deeperAtEl) = forElement.partition(_.subPath.size == 1)
+        val elMeta = buildAssignmentMetadata(applyAtEl)
+        val deeperEl = deeperAtEl.map(a => a.copy(subPath = a.subPath.tail))
+
         if (shouldBeFixedSizeList(metadata, elementType)) {
           val listSize = metadata.getLong(ARROW_FIXED_SIZE_LIST_SIZE_KEY).toInt
           val fieldType =
@@ -233,7 +313,8 @@ object LanceArrowUtils {
               new FieldType(
                 containsNull,
                 new ArrowType.FloatingPoint(FloatingPointPrecision.HALF),
-                null),
+                null,
+                assignmentsToArrowMap(applyAtEl)),
               Seq.empty[Field].asJava)
           } else {
             toArrowField(
@@ -241,7 +322,9 @@ object LanceArrowUtils {
               elementType,
               containsNull,
               timeZoneId,
-              largeVarTypes = largeVarTypes)
+              elMeta,
+              largeVarTypes,
+              deeperEl)
           }
           new Field(
             name,
@@ -258,9 +341,13 @@ object LanceArrowUtils {
                 elementType,
                 containsNull,
                 timeZoneId,
-                largeVarTypes = largeVarTypes)).asJava)
+                elMeta,
+                largeVarTypes,
+                deeperEl)).asJava)
         }
       case StructType(fields) =>
+        // Carried assignments should normally be empty here — struct-child metadata flows
+        // natively via `field.metadata`. Drop any leftover defensively.
         val fieldType = new FieldType(nullable, ArrowType.Struct.INSTANCE, null, meta.asJava)
         new Field(
           name,
@@ -275,19 +362,44 @@ object LanceArrowUtils {
               largeVarTypes)
           }.toSeq.asJava)
       case MapType(keyType, valueType, valueContainsNull) =>
+        val (forKey, restAfterKey) =
+          carriedAssignments.partition(_.subPath.headOption.contains("key"))
+        val (forValue, _) = restAfterKey.partition(_.subPath.headOption.contains("value"))
+        val (applyAtKey, deeperAtKey) = forKey.partition(_.subPath.size == 1)
+        val (applyAtVal, deeperAtVal) = forValue.partition(_.subPath.size == 1)
+        val keyMeta = buildAssignmentMetadata(applyAtKey)
+        val valMeta = buildAssignmentMetadata(applyAtVal)
+        val deeperKey = deeperAtKey.map(a => a.copy(subPath = a.subPath.tail))
+        val deeperVal = deeperAtVal.map(a => a.copy(subPath = a.subPath.tail))
+
+        // Build key/value entries directly so per-child metadata + assignments can be plumbed
+        // through. The synthesized entries struct has no metadata of its own.
+        val keyField = toArrowField(
+          MapVector.KEY_NAME,
+          keyType,
+          nullable = false,
+          timeZoneId,
+          keyMeta,
+          largeVarTypes,
+          deeperKey)
+        val valueField = toArrowField(
+          MapVector.VALUE_NAME,
+          valueType,
+          valueContainsNull,
+          timeZoneId,
+          valMeta,
+          largeVarTypes,
+          deeperVal)
+        val entriesField = new Field(
+          MapVector.DATA_VECTOR_NAME,
+          new FieldType(
+            false,
+            ArrowType.Struct.INSTANCE,
+            null,
+            java.util.Collections.emptyMap[String, String]()),
+          Seq(keyField, valueField).asJava)
         val mapType = new FieldType(nullable, new ArrowType.Map(false), null, meta.asJava)
-        // Note: Map Type struct can not be null, Struct Type key field can not be null
-        new Field(
-          name,
-          mapType,
-          Seq(toArrowField(
-            MapVector.DATA_VECTOR_NAME,
-            new StructType()
-              .add(MapVector.KEY_NAME, keyType, nullable = false)
-              .add(MapVector.VALUE_NAME, valueType, nullable = valueContainsNull),
-            nullable = false,
-            timeZoneId,
-            largeVarTypes = largeVarTypes)).asJava)
+        new Field(name, mapType, Seq(entriesField).asJava)
       case udt: UserDefinedType[_] =>
         toArrowField(name, udt.sqlType, nullable, timeZoneId, largeVarTypes = largeVarTypes)
       case dataType =>

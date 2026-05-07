@@ -423,26 +423,71 @@ To create a table with large string columns, use the table property pattern `<co
 
 ## Column Compression
 
-Lance supports per-column compression and encoding tuning via table properties. These properties
-map `<column>.lance.<key>` TBLPROPERTIES to `lance-encoding:<key>` Arrow field metadata, which the
-Lance Rust encoder reads at write time.
+Lance supports per-column compression and encoding tuning via table properties, mapped onto
+`lance-encoding:<key>` Arrow field metadata, which the Lance Rust encoder reads at write time.
+Two key formats are accepted:
+
+| Format | Shape | Targets |
+|---|---|---|
+| Legacy | `<column>.lance.<key>` | top-level columns only |
+| New | `lance.<key>.column.<segment1>.<segment2>...` | top-level **and** nested fields |
+
+When both formats target the same field, the new format wins (an invalid stale legacy value is
+not validated when the new format covers the same path). The legacy format remains supported
+indefinitely.
+
+If one literal property key is both a valid legacy key for an existing top-level column and a
+valid new-format key for a different nested path, the legacy interpretation is used to preserve
+backward compatibility for top-level column names that begin with `lance.<key>.column.`.
+More generally, keys ending in a supported legacy suffix such as `.lance.compression` are
+reserved for legacy parsing and are not interpreted as new-format nested paths.
 
 ### Supported keys (Spark connector)
 
-These five `<column>.lance.*` properties are mapped to Arrow field metadata by the connector. Other
-`lance.*` keys are ignored until implemented.
+These five encoding keys are mapped to Arrow field metadata by the connector. Other `lance.*` keys
+are ignored until implemented.
 
-| TBLPROPERTIES key | Arrow field metadata key | Valid values |
+| Encoding key | Arrow field metadata key | Valid values | Notes |
+|---|---|---|---|
+| `compression` | `lance-encoding:compression` | `zstd`, `lz4`, `fsst`, `none` | `zstd` general-purpose high ratio; `lz4` general-purpose fast; `fsst` strings/binary; `none` disables compression |
+| `compression-level` | `lance-encoding:compression-level` | integer string (codec-specific upper bound) | honored by `zstd` (other codecs may silently ignore) |
+| `structural-encoding` | `lance-encoding:structural-encoding` | `miniblock`, `fullzip` | controls Lance's structural layout |
+| `rle-threshold` | `lance-encoding:rle-threshold` | float string in `(0.0, 1.0]` | run-length encoding cutoff |
+| `bss` | `lance-encoding:bss` | `off`, `on`, `auto` | byte-stream-split for floats |
+
+Invalid values produce a clear `IllegalArgumentException` at table-creation time.
+
+### Nested field addressing (new format only)
+
+The dotted path after `.column.` navigates through Spark types:
+
+| Spark node | Path segment | Example key |
 |---|---|---|
-| `<col>.lance.compression` | `lance-encoding:compression` | `zstd`, `lz4`, `fsst`, `none` |
-| `<col>.lance.compression-level` | `lance-encoding:compression-level` | integer string (codec-specific) |
-| `<col>.lance.structural-encoding` | `lance-encoding:structural-encoding` | `miniblock`, `fullzip` |
-| `<col>.lance.rle-threshold` | `lance-encoding:rle-threshold` | float string in `(0.0, 1.0]` |
-| `<col>.lance.bss` | `lance-encoding:bss` | `off`, `on`, `auto` |
+| Struct child | child name | `lance.compression.column.events.payload` |
+| Array element | literal `element` | `lance.compression.column.tags.element` |
+| FixedSizeList element | literal `element` | `lance.compression.column.embeddings.element` |
+| Map key | literal `key` | `lance.compression.column.props.key` |
+| Map value | literal `value` | `lance.compression.column.props.value` |
 
-Invalid values produce a clear `IllegalArgumentException` at table creation time.
+Roles compose for chained array/map nesting:
 
-**Scope**: only top-level columns are supported. Nested field addressing is deferred.
+```text
+lance.compression.column.items.element.value   = zstd   # ARRAY<MAP<.., V>> — value of map inside array
+lance.compression.column.m.value.element       = lz4    # MAP<.., ARRAY<..>> — element of array inside map value
+```
+
+Path resolution is type-guided: the current Spark node decides how the next segment is interpreted,
+so a struct child literally named `element` / `key` / `value` is unambiguous (one extra segment to
+reach it). Path depth is bounded at 16 segments (matches `LanceEncodingUtils.MAX_PATH_DEPTH`).
+Top-level columns whose names contain a literal dot remain reachable via the legacy format only;
+nested fields whose names contain a dot are unreachable in this revision (follow-up).
+
+Unrecognised keys, paths that don't resolve to any field, and unknown role segments are silently
+ignored — consistent with the other connector property passes (`addVectorMetadata`, etc.).
+Malformed new-format keys with an empty path are rejected with `IllegalArgumentException` at
+table-creation time. Empty-segment or over-depth keys are also rejected unless the same literal key
+is a legacy-shaped `<column>.lance.<key>` property. Those keys keep legacy behavior: they are
+applied to the top-level column when it exists, or ignored when that legacy column does not exist.
 
 ### Deferred keys (not wired in Spark yet)
 
@@ -533,5 +578,57 @@ of previously written data. Compression properties are applied only when the tab
         .tableProperty("payload.lance.compression", "zstd")
         .tableProperty("payload.lance.compression-level", "3")
         .tableProperty("ts.lance.compression", "none")
+        .createOrReplace();
+    ```
+
+### Nested example
+
+=== "SQL"
+    ```sql
+    CREATE TABLE orders (
+        customer STRUCT<address: STRUCT<street: STRING, city: STRING>>,
+        items    ARRAY<STRUCT<sku: STRING, qty: INT>>,
+        tags     ARRAY<STRING>,
+        metadata MAP<STRING, STRING>
+    ) USING lance
+    TBLPROPERTIES (
+        'lance.compression.column.customer.address.street'       = 'zstd',
+        'lance.compression-level.column.customer.address.street' = '3',
+        'lance.compression.column.items.element.sku'             = 'fsst',
+        'lance.compression.column.tags.element'                  = 'lz4',
+        'lance.compression.column.metadata.value'                = 'zstd'
+    );
+    ```
+
+=== "Python"
+    ```python
+    df.writeTo("orders") \
+        .tableProperty("lance.compression.column.customer.address.street", "zstd") \
+        .tableProperty("lance.compression-level.column.customer.address.street", "3") \
+        .tableProperty("lance.compression.column.items.element.sku", "fsst") \
+        .tableProperty("lance.compression.column.tags.element", "lz4") \
+        .tableProperty("lance.compression.column.metadata.value", "zstd") \
+        .createOrReplace()
+    ```
+
+=== "Scala"
+    ```scala
+    df.writeTo("orders")
+      .tableProperty("lance.compression.column.customer.address.street", "zstd")
+      .tableProperty("lance.compression-level.column.customer.address.street", "3")
+      .tableProperty("lance.compression.column.items.element.sku", "fsst")
+      .tableProperty("lance.compression.column.tags.element", "lz4")
+      .tableProperty("lance.compression.column.metadata.value", "zstd")
+      .createOrReplace()
+    ```
+
+=== "Java"
+    ```java
+    df.writeTo("orders")
+        .tableProperty("lance.compression.column.customer.address.street", "zstd")
+        .tableProperty("lance.compression-level.column.customer.address.street", "3")
+        .tableProperty("lance.compression.column.items.element.sku", "fsst")
+        .tableProperty("lance.compression.column.tags.element", "lz4")
+        .tableProperty("lance.compression.column.metadata.value", "zstd")
         .createOrReplace();
     ```

@@ -18,13 +18,19 @@ import org.apache.spark.sql.types.BinaryType;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DoubleType;
 import org.apache.spark.sql.types.FloatType;
+import org.apache.spark.sql.types.MapType;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StringType;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.lance.spark.utils.BlobUtils.LANCE_ENCODING_BLOB_KEY;
 import static org.lance.spark.utils.BlobUtils.LANCE_ENCODING_BLOB_VALUE;
@@ -292,22 +298,29 @@ public class SchemaConverter {
   }
 
   /**
-   * Adds Lance compression metadata to top-level fields based on connector-supported TBLPROPERTIES.
-   * Keys matching {@code <column>.lance.<key>} are validated and written as {@code
-   * lance-encoding:<key>} Arrow field metadata. Invalid values throw {@link
-   * IllegalArgumentException} at call time.
+   * Attaches Lance compression metadata at any field depth, parsed from connector-supported
+   * TBLPROPERTIES (both the legacy {@code <column>.lance.<key>} and the new {@code
+   * lance.<key>.column.<path>} formats — see {@link LanceEncodingUtils} for the format spec and
+   * smuggling protocol).
    *
-   * <p>Silent-ignore cases (no exception, no metadata written):
+   * <p>Throws {@link IllegalArgumentException} for:
    *
    * <ul>
-   *   <li>TBLPROPERTIES keys whose {@code <column>} segment does not match any top-level field —
-   *       consistent with the behavior of the other {@code addX} methods in this class.
-   *   <li>Unrecognised {@code lance.*} key suffixes (e.g. deferred dict/minichunk keys).
-   *   <li>Type-incompatible combinations (e.g. {@code fsst} on a numeric column) — semantic
-   *       validation is left to the Lance Rust encoder.
+   *   <li>An invalid value on a key whose path resolves in the schema. Validation runs only after
+   *       path resolution, so a bad value on an unresolved path is silently ignored.
+   *   <li>A new-format key whose path is empty, contains an empty segment, or exceeds {@link
+   *       LanceEncodingUtils#MAX_PATH_DEPTH} segments. (Keys ending in a legacy suffix are reserved
+   *       for legacy parsing and never reach this throw branch.)
    * </ul>
    *
-   * <p>Only top-level fields are processed; nested column paths are not supported yet.
+   * <p>Silently ignored:
+   *
+   * <ul>
+   *   <li>Paths that don't resolve in the schema — matches the other {@code addX} methods.
+   *   <li>Unrecognised {@code lance.*} suffixes (e.g. deferred dict/minichunk keys).
+   *   <li>Unknown role tokens after an array/map (not {@code element}/{@code key}/{@code value}).
+   *   <li>Type-incompatible combinations (e.g. {@code fsst} on numeric) — left to the Rust encoder.
+   * </ul>
    *
    * @param sparkSchema the Spark StructType (already processed by earlier steps)
    * @param properties table properties that may contain compression metadata
@@ -319,30 +332,274 @@ public class SchemaConverter {
       return sparkSchema;
     }
 
-    StructField[] newFields = new StructField[sparkSchema.fields().length];
-    for (int i = 0; i < sparkSchema.fields().length; i++) {
-      StructField field = sparkSchema.fields()[i];
-      MetadataBuilder builder = new MetadataBuilder().withMetadata(field.metadata());
-      boolean modified = false;
+    List<LanceEncodingUtils.ParsedEncodingKey> legacy = LanceEncodingUtils.parseLegacy(properties);
+    List<LanceEncodingUtils.ParsedEncodingKey> newFormat =
+        LanceEncodingUtils.parseNewFormat(properties);
 
-      for (LanceEncodingUtils.EncodingPropertyRule rule :
-          LanceEncodingUtils.getSupportedEncodingPropertyRules()) {
-        String propertyKey = rule.createPropertyKey(field.name());
-        if (!properties.containsKey(propertyKey)) {
-          continue;
-        }
-        String value = properties.get(propertyKey);
-        rule.validate(field.name(), value);
-        builder.putString(rule.getArrowMetadataKey(), value);
-        modified = true;
+    // New-format wins on (path, rule) collisions. Drop the colliding legacy entry BEFORE
+    // validation, so a stale invalid legacy value doesn't throw after migration.
+    List<LanceEncodingUtils.ParsedEncodingKey> parsed =
+        new ArrayList<>(legacy.size() + newFormat.size());
+    if (!legacy.isEmpty()) {
+      Set<List<Object>> overrides = new HashSet<>(newFormat.size() * 2);
+      for (LanceEncodingUtils.ParsedEncodingKey pek : newFormat) {
+        overrides.add(pek.identityKey());
       }
-
-      newFields[i] =
-          modified
-              ? new StructField(field.name(), field.dataType(), field.nullable(), builder.build())
-              : field;
+      for (LanceEncodingUtils.ParsedEncodingKey pek : legacy) {
+        if (!overrides.contains(pek.identityKey())) {
+          parsed.add(pek);
+        }
+      }
+    }
+    parsed.addAll(newFormat);
+    if (parsed.isEmpty()) {
+      return sparkSchema;
     }
 
-    return new StructType(newFields);
+    AttachResult result = attachMetadataAtPaths(sparkSchema, parsed, Collections.emptyList());
+    return (StructType) result.type;
+  }
+
+  /**
+   * Recursive walker that attaches encoding metadata at the paths described by {@code keys}.
+   * Struct-child targets get metadata written directly to {@link StructField#metadata()}. Targets
+   * reached only through {@link ArrayType} / {@link MapType} (which have no per-element {@code
+   * StructField}) bubble up as {@code lance-nested.*} keys to the nearest enclosing {@code
+   * StructField}, with a sub-path of role names ({@code element} / {@code key} / {@code value}).
+   * Top-level returns always have empty {@link AttachResult#bubbleUp}.
+   */
+  private static AttachResult attachMetadataAtPaths(
+      DataType dt, List<LanceEncodingUtils.ParsedEncodingKey> keys, List<String> currentPath) {
+    if (keys.isEmpty()) {
+      return new AttachResult(dt, Collections.emptyList());
+    }
+
+    if (dt instanceof StructType) {
+      return attachOnStruct((StructType) dt, keys, currentPath);
+    }
+    if (dt instanceof ArrayType) {
+      return attachOnArray((ArrayType) dt, keys, currentPath);
+    }
+    if (dt instanceof MapType) {
+      return attachOnMap((MapType) dt, keys, currentPath);
+    }
+    // Scalar / unsupported leaf — any keys reaching here with more segments are silently
+    // dropped (path-not-found policy).
+    return new AttachResult(dt, Collections.emptyList());
+  }
+
+  private static AttachResult attachOnStruct(
+      StructType st, List<LanceEncodingUtils.ParsedEncodingKey> keys, List<String> currentPath) {
+    StructField[] children = st.fields();
+    StructField[] newChildren = new StructField[children.length];
+    boolean anyChange = false;
+
+    for (int i = 0; i < children.length; i++) {
+      StructField f = children[i];
+      List<String> childPath = appendSegment(currentPath, f.name());
+
+      List<LanceEncodingUtils.ParsedEncodingKey> directKeys = new ArrayList<>();
+      List<LanceEncodingUtils.ParsedEncodingKey> deeperKeys = new ArrayList<>();
+      for (LanceEncodingUtils.ParsedEncodingKey pek : keys) {
+        List<String> p = pek.getPathSegments();
+        if (p.equals(childPath)) {
+          directKeys.add(pek);
+        } else if (startsWith(p, childPath)) {
+          deeperKeys.add(pek);
+        }
+      }
+
+      MetadataBuilder builder = new MetadataBuilder().withMetadata(f.metadata());
+      boolean fieldChanged = false;
+
+      for (LanceEncodingUtils.ParsedEncodingKey pek : directKeys) {
+        String dotted = String.join(".", childPath);
+        pek.getRule().validate(dotted, pek.getValue());
+        builder.putString(pek.getRule().getArrowMetadataKey(), pek.getValue());
+        fieldChanged = true;
+      }
+
+      DataType newChildType = f.dataType();
+      if (!deeperKeys.isEmpty()) {
+        AttachResult r = attachMetadataAtPaths(f.dataType(), deeperKeys, childPath);
+        if (r.type != f.dataType()) {
+          newChildType = r.type;
+          fieldChanged = true;
+        }
+        for (NestedAssignment na : r.bubbleUp) {
+          builder.putString(buildNestedMetadataKey(na.subPath, na.arrowKey), na.value);
+          fieldChanged = true;
+        }
+      }
+
+      newChildren[i] =
+          fieldChanged ? new StructField(f.name(), newChildType, f.nullable(), builder.build()) : f;
+      if (fieldChanged) {
+        anyChange = true;
+      }
+    }
+
+    StructType newType = anyChange ? new StructType(newChildren) : st;
+    return new AttachResult(newType, Collections.emptyList());
+  }
+
+  private static AttachResult attachOnArray(
+      ArrayType at, List<LanceEncodingUtils.ParsedEncodingKey> keys, List<String> currentPath) {
+    List<String> elementPath = appendSegment(currentPath, "element");
+
+    List<NestedAssignment> bubbleUp = new ArrayList<>();
+    List<LanceEncodingUtils.ParsedEncodingKey> deeperKeys = new ArrayList<>();
+
+    for (LanceEncodingUtils.ParsedEncodingKey pek : keys) {
+      List<String> p = pek.getPathSegments();
+      if (!startsWith(p, elementPath)) {
+        // Silent ignore — segment after currentPath is not the array's role.
+        continue;
+      }
+      if (p.equals(elementPath)) {
+        bubbleUp.add(validateAndBuildLeafBubble("element", pek));
+      } else {
+        deeperKeys.add(pek);
+      }
+    }
+
+    DataType newElType = at.elementType();
+    if (!deeperKeys.isEmpty()) {
+      AttachResult r = attachMetadataAtPaths(at.elementType(), deeperKeys, elementPath);
+      newElType = r.type;
+      bubbleUp.addAll(prependRole("element", r.bubbleUp));
+    }
+
+    DataType newType =
+        newElType == at.elementType() ? at : new ArrayType(newElType, at.containsNull());
+    return new AttachResult(newType, bubbleUp);
+  }
+
+  private static AttachResult attachOnMap(
+      MapType mt, List<LanceEncodingUtils.ParsedEncodingKey> keys, List<String> currentPath) {
+    List<String> keyPath = appendSegment(currentPath, "key");
+    List<String> valuePath = appendSegment(currentPath, "value");
+
+    List<NestedAssignment> bubbleUp = new ArrayList<>();
+    List<LanceEncodingUtils.ParsedEncodingKey> keyDeeper = new ArrayList<>();
+    List<LanceEncodingUtils.ParsedEncodingKey> valueDeeper = new ArrayList<>();
+
+    for (LanceEncodingUtils.ParsedEncodingKey pek : keys) {
+      List<String> p = pek.getPathSegments();
+      if (p.equals(keyPath)) {
+        bubbleUp.add(validateAndBuildLeafBubble("key", pek));
+      } else if (p.equals(valuePath)) {
+        bubbleUp.add(validateAndBuildLeafBubble("value", pek));
+      } else if (startsWith(p, keyPath)) {
+        keyDeeper.add(pek);
+      } else if (startsWith(p, valuePath)) {
+        valueDeeper.add(pek);
+      }
+      // else: silent ignore (next segment is not key/value).
+    }
+
+    DataType newKeyType = mt.keyType();
+    DataType newValueType = mt.valueType();
+
+    if (!keyDeeper.isEmpty()) {
+      AttachResult r = attachMetadataAtPaths(mt.keyType(), keyDeeper, keyPath);
+      newKeyType = r.type;
+      bubbleUp.addAll(prependRole("key", r.bubbleUp));
+    }
+    if (!valueDeeper.isEmpty()) {
+      AttachResult r = attachMetadataAtPaths(mt.valueType(), valueDeeper, valuePath);
+      newValueType = r.type;
+      bubbleUp.addAll(prependRole("value", r.bubbleUp));
+    }
+
+    DataType newType =
+        (newKeyType == mt.keyType() && newValueType == mt.valueType())
+            ? mt
+            : new MapType(newKeyType, newValueType, mt.valueContainsNull());
+    return new AttachResult(newType, bubbleUp);
+  }
+
+  private static String buildNestedMetadataKey(List<String> subPath, String arrowKey) {
+    return LanceEncodingUtils.LANCE_NESTED_PREFIX + String.join(".", subPath) + "." + arrowKey;
+  }
+
+  /**
+   * Validate the value of a parsed key whose target lands at an Array element / Map key / Map value
+   * at the current level, and return the leaf bubble-up assignment. {@code role} is one of {@code
+   * element} / {@code key} / {@code value}.
+   */
+  private static NestedAssignment validateAndBuildLeafBubble(
+      String role, LanceEncodingUtils.ParsedEncodingKey pek) {
+    String dotted = String.join(".", pek.getPathSegments());
+    pek.getRule().validate(dotted, pek.getValue());
+    return new NestedAssignment(
+        Collections.singletonList(role), pek.getRule().getArrowMetadataKey(), pek.getValue());
+  }
+
+  /**
+   * Returns a copy of {@code bubbles} with each assignment's {@code subPath} prefixed by {@code
+   * role}. Used by {@code attachOnArray} / {@code attachOnMap} to compose role names as assignments
+   * climb to the nearest enclosing {@link StructField}.
+   */
+  private static List<NestedAssignment> prependRole(String role, List<NestedAssignment> bubbles) {
+    if (bubbles.isEmpty()) {
+      return Collections.emptyList();
+    }
+    List<NestedAssignment> out = new ArrayList<>(bubbles.size());
+    for (NestedAssignment na : bubbles) {
+      List<String> newSub = new ArrayList<>(na.subPath.size() + 1);
+      newSub.add(role);
+      newSub.addAll(na.subPath);
+      out.add(new NestedAssignment(newSub, na.arrowKey, na.value));
+    }
+    return out;
+  }
+
+  private static List<String> appendSegment(List<String> base, String seg) {
+    List<String> r = new ArrayList<>(base.size() + 1);
+    r.addAll(base);
+    r.add(seg);
+    return r;
+  }
+
+  /**
+   * Returns true if {@code a} has {@code b} as a prefix (segment-wise). Equal-length lists with
+   * equal elements return true — call sites that need <i>strict</i> prefix-of check {@code
+   * a.equals(b)} separately.
+   */
+  private static boolean startsWith(List<String> a, List<String> b) {
+    if (a.size() < b.size()) {
+      return false;
+    }
+    for (int i = 0; i < b.size(); i++) {
+      if (!a.get(i).equals(b.get(i))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** A metadata assignment bubbling up to be stamped on the nearest enclosing StructField. */
+  private static final class NestedAssignment {
+    private final List<String> subPath;
+    private final String arrowKey;
+    private final String value;
+
+    NestedAssignment(List<String> subPath, String arrowKey, String value) {
+      this.subPath = List.copyOf(subPath);
+      this.arrowKey = arrowKey;
+      this.value = value;
+    }
+  }
+
+  /** Result of {@link #attachMetadataAtPaths}: the rewritten type, plus pending bubble-ups. */
+  private static final class AttachResult {
+    private final DataType type;
+    private final List<NestedAssignment> bubbleUp;
+
+    AttachResult(DataType type, List<NestedAssignment> bubbleUp) {
+      this.type = type;
+      this.bubbleUp = List.copyOf(bubbleUp);
+    }
   }
 }
