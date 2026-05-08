@@ -131,7 +131,6 @@ public abstract class BaseAddIndexTest {
 
     // Check index is created successfully
     checkIndex("test_index");
-    assertSegmentedIndexCoverage("test_index");
   }
 
   @Test
@@ -153,7 +152,6 @@ public abstract class BaseAddIndexTest {
 
     // Check index is created successfully
     checkIndex("test_index_repeat");
-    assertSegmentedIndexCoverage("test_index_repeat");
 
     Dataset<Row> result2 =
         spark.sql(
@@ -170,7 +168,6 @@ public abstract class BaseAddIndexTest {
 
     // Check index is created successfully
     checkIndex("test_index_repeat");
-    assertSegmentedIndexCoverage("test_index_repeat");
   }
 
   @Test
@@ -387,7 +384,6 @@ public abstract class BaseAddIndexTest {
     Assertions.assertEquals("test_index_btree_fragment", indexName);
 
     checkIndex("test_index_btree_fragment");
-    assertSegmentedIndexCoverage("test_index_btree_fragment");
 
     Dataset<Row> query = spark.sql(String.format("select * from %s where id=15", fullTable));
     Assertions.assertEquals(1L, query.count());

@@ -47,7 +47,7 @@ For the `btree` method, the following options are supported:
 | Option      | Type   | Description                                  |
 |-------------|--------|----------------------------------------------|
 | `zone_size` | Long   | The number of rows per zone in the B-tree index. |
-| `build_mode`| String | Index building mode: `'fragment'` builds BTREE segments in parallel across fragment batches and commits them as one logical index for single-column BTREE builds; `'range'` sorts data by indexed columns first, then partitions and builds indexes in parallel by partition. Default is `'fragment'`.| 
+| `build_mode`| String | Index building mode: `'fragment'` builds indexes in parallel by fragment; `'range'` sorts data by indexed columns first, then partitions and builds indexes in parallel by partition. Default is `'fragment'`.| 
 
 ### FTS Options
 
@@ -151,7 +151,7 @@ Consider creating an index when:
 
 The `CREATE INDEX` command operates as follows:
 
-1.  **Index Build Execution**: Lance Spark chooses an execution path based on the index method. Methods such as `btree`, `fts`, and `zonemap` can build physical index segments in parallel across fragments. Single-column fragment-mode `btree` and `zonemap` publish those segments directly as one logical index. Range-mode `btree` uses Spark repartitioning and sorted preprocessed data.
+1.  **Index Build Execution**: Lance Spark chooses an execution path based on the index method. Methods such as `btree`, `fts`, and `zonemap` can build physical index segments in parallel across fragments. `zonemap` publishes those segments directly as one logical index. Range-mode `btree` uses Spark repartitioning and sorted preprocessed data.
 2.  **Metadata Finalization**: Lance Spark merges or commits the resulting index metadata on the driver so the new logical index becomes visible atomically.
 3.  **Transactional Commit**: A new table version is committed with the new index information. The operation is atomic and ensures that concurrent reads are not affected.
 

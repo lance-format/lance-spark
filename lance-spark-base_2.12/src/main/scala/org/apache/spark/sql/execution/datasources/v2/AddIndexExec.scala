@@ -44,8 +44,8 @@ import scala.collection.JavaConverters._
  *
  * <ul>
  * <li>For BTREE index, range mode redistributes and sorts data across partitions, creates indexes for each range in parallel, and finally merges them into a global index structure.
- * <li>For single-column BTREE fragment mode and zonemap, it builds uncommitted index segments in parallel and commits the logical index on the driver.
- * <li>For other fragment-trainable scalar index types, it processes each fragment independently in parallel, merges index metadata and commits an index-creation transaction.
+ * <li>For zonemap index, it builds uncommitted index segments in parallel and commits the logical index on the driver.
+ * <li>For fragment-trainable scalar index types (BTREE fragment mode, FTS, etc.), it processes each fragment independently in parallel, merges index metadata and commits an index-creation transaction.
  * </ul>
  */
 case class AddIndexExec(
@@ -90,8 +90,7 @@ case class AddIndexExec(
     }
 
     val btreeBuildMode = IndexUtils.btreeBuildMode(indexType, args)
-    val useLogicalSegmentCommit =
-      IndexUtils.useLogicalSegmentCommit(indexType, columns, btreeBuildMode)
+    val useLogicalSegmentCommit = IndexUtils.useLogicalSegmentCommit(indexType)
 
     // Create distributed index job and run it
     val createdSegments = createIndexJob(
@@ -633,15 +632,8 @@ object IndexUtils {
     }
   }
 
-  def useLogicalSegmentCommit(
-      indexType: IndexType,
-      columns: Seq[String],
-      btreeBuildMode: Option[String]): Boolean = {
-    indexType match {
-      case IndexType.ZONEMAP => true
-      case IndexType.BTREE => btreeBuildMode != Some("range") && columns.size == 1
-      case _ => false
-    }
+  def useLogicalSegmentCommit(indexType: IndexType): Boolean = {
+    indexType == IndexType.ZONEMAP
   }
 
   def toJson(args: Seq[LanceNamedArgument]): String = {
