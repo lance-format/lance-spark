@@ -131,6 +131,7 @@ public abstract class BaseAddIndexTest {
 
     // Check index is created successfully
     checkIndex("test_index");
+    assertSegmentedIndexCoverage("test_index");
   }
 
   @Test
@@ -152,6 +153,7 @@ public abstract class BaseAddIndexTest {
 
     // Check index is created successfully
     checkIndex("test_index_repeat");
+    assertSegmentedIndexCoverage("test_index_repeat");
 
     Dataset<Row> result2 =
         spark.sql(
@@ -168,6 +170,7 @@ public abstract class BaseAddIndexTest {
 
     // Check index is created successfully
     checkIndex("test_index_repeat");
+    assertSegmentedIndexCoverage("test_index_repeat");
   }
 
   @Test
@@ -227,8 +230,7 @@ public abstract class BaseAddIndexTest {
     org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
     try {
       int fragmentCount = lanceDataset.getFragments().size();
-      int expectedSegmentCount =
-          Math.min(fragmentCount, spark.sparkContext().defaultParallelism());
+      int expectedSegmentCount = Math.min(fragmentCount, spark.sparkContext().defaultParallelism());
       List<Index> zonemapSegments =
           lanceDataset.getIndexes().stream()
               .filter(index -> "test_index_zonemap".equals(index.name()))
@@ -245,11 +247,13 @@ public abstract class BaseAddIndexTest {
           "Expected distributed zonemap build to batch fragments into bounded segment count");
       Assertions.assertTrue(
           zonemapSegments.stream()
-              .allMatch(index -> index.fragments().isPresent() && !index.fragments().get().isEmpty()),
+              .allMatch(
+                  index -> index.fragments().isPresent() && !index.fragments().get().isEmpty()),
           "Expected each zonemap segment to cover at least one fragment");
       Assertions.assertTrue(
           zonemapSegments.stream()
-              .anyMatch(index -> index.fragments().isPresent() && index.fragments().get().size() > 1),
+              .anyMatch(
+                  index -> index.fragments().isPresent() && index.fragments().get().size() > 1),
           "Expected zonemap batching to create at least one multi-fragment segment");
       Assertions.assertEquals(
           fragmentCount,
@@ -305,8 +309,7 @@ public abstract class BaseAddIndexTest {
     org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
     try {
       int fragmentCount = lanceDataset.getFragments().size();
-      int expectedSegmentCount =
-          Math.min(fragmentCount, spark.sparkContext().defaultParallelism());
+      int expectedSegmentCount = Math.min(fragmentCount, spark.sparkContext().defaultParallelism());
       List<Index> zonemapSegments =
           lanceDataset.getIndexes().stream()
               .filter(index -> "test_index_zonemap_repeat".equals(index.name()))
@@ -323,7 +326,8 @@ public abstract class BaseAddIndexTest {
           "Expected recreated zonemap index to replace existing batched segments instead of duplicating them");
       Assertions.assertTrue(
           zonemapSegments.stream()
-              .allMatch(index -> index.fragments().isPresent() && !index.fragments().get().isEmpty()),
+              .allMatch(
+                  index -> index.fragments().isPresent() && !index.fragments().get().isEmpty()),
           "Expected recreated zonemap segments to keep non-empty fragment coverage");
       Assertions.assertEquals(
           fragmentCount,
@@ -383,6 +387,13 @@ public abstract class BaseAddIndexTest {
     Assertions.assertEquals("test_index_btree_fragment", indexName);
 
     checkIndex("test_index_btree_fragment");
+    assertSegmentedIndexCoverage("test_index_btree_fragment");
+
+    Dataset<Row> query = spark.sql(String.format("select * from %s where id=15", fullTable));
+    Assertions.assertEquals(1L, query.count());
+    Row r = query.collectAsList().get(0);
+    Assertions.assertEquals(15, r.getInt(0));
+    Assertions.assertEquals("text_15", r.getString(1));
   }
 
   @Test
@@ -634,6 +645,46 @@ public abstract class BaseAddIndexTest {
       Assertions.assertTrue(indexList.size() >= 1);
       Set<String> indexNames = indexList.stream().map(Index::name).collect(Collectors.toSet());
       Assertions.assertTrue(indexNames.contains(indexName));
+    } finally {
+      lanceDataset.close();
+    }
+  }
+
+  private void assertSegmentedIndexCoverage(String indexName) {
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int fragmentCount = lanceDataset.getFragments().size();
+      int expectedSegmentCount = Math.min(fragmentCount, spark.sparkContext().defaultParallelism());
+      List<Index> segments =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> indexName.equals(index.name()))
+              .collect(Collectors.toList());
+      int coveredFragments =
+          segments.stream()
+              .map(index -> index.fragments().orElse(Collections.emptyList()).size())
+              .mapToInt(Integer::intValue)
+              .sum();
+
+      Assertions.assertEquals(
+          expectedSegmentCount,
+          segments.size(),
+          "Expected segmented index build to batch fragments into bounded segment count");
+      Assertions.assertTrue(
+          segments.stream()
+              .allMatch(
+                  index -> index.fragments().isPresent() && !index.fragments().get().isEmpty()),
+          "Expected each index segment to cover at least one fragment");
+      if (fragmentCount > expectedSegmentCount) {
+        Assertions.assertTrue(
+            segments.stream()
+                .anyMatch(
+                    index -> index.fragments().isPresent() && index.fragments().get().size() > 1),
+            "Expected batched segment build to create at least one multi-fragment segment");
+      }
+      Assertions.assertEquals(
+          fragmentCount,
+          coveredFragments,
+          "Expected committed segments to cover all fragments exactly once");
     } finally {
       lanceDataset.close();
     }
