@@ -93,6 +93,11 @@ public class LanceScanBuilder
 
   private final java.util.Map<String, String> tableProperties;
 
+  static final String CONF_REPORTING_ENABLED = "spark.lance.partition.reporting.enabled";
+  static final String CONF_REPORTING_MAX_PARTITIONS =
+      "spark.lance.partition.reporting.maxPartitions";
+  static final int DEFAULT_REPORTING_MAX_PARTITIONS = 10_000;
+
   public LanceScanBuilder(
       StructType schema,
       LanceSparkReadOptions readOptions,
@@ -136,100 +141,98 @@ public class LanceScanBuilder
       return localScan;
     }
 
-    // Get statistics from manifest summary before closing dataset
-    ManifestSummary summary = getOrOpenDataset().getVersion().getManifestSummary();
+    try {
+      // Get statistics from manifest summary before closing dataset
+      ManifestSummary summary = getOrOpenDataset().getVersion().getManifestSummary();
 
-    // Collect all columns that need zonemap stats: filter columns + partition column (if declared).
-    Set<String> columnsToLoad = extractReferencedColumns(pushedFilters);
-    String partitionColumn = tableProperties.get(LanceConstant.TABLE_OPT_PARTITION_COLUMNS);
-    if (partitionColumn != null && !partitionColumn.trim().isEmpty()) {
-      partitionColumn = partitionColumn.trim();
-      columnsToLoad.add(partitionColumn);
-    } else {
-      partitionColumn = null;
-    }
+      // Parse and validate partition columns from TBLPROPERTIES. Nested paths and non-whitelisted
+      // types are rejected here with a WARN; detection falls through to null PartitionInfo.
+      List<String> partitionColumns =
+          parsePartitionColumns(tableProperties.get(LanceConstant.TABLE_OPT_PARTITION_COLUMNS));
 
-    // Load zonemap stats for all requested columns in one pass.
-    Map<String, List<ZoneStats>> zonemapStats = loadZonemapStats(getOrOpenDataset(), columnsToLoad);
+      // Collect all columns that need zonemap stats: filter columns + declared partition columns.
+      Set<String> columnsToLoad = extractReferencedColumns(pushedFilters);
+      columnsToLoad.addAll(partitionColumns);
 
-    // Detect partition-compatible columns, gated on lance.partition.columns table property.
-    // Currently a partitioned column is only valid if each fragment contains only a single
-    // value for that column (i.e., all zonemap zones have min == max with the same value).
-    ZonemapFragmentPruner.PartitionInfo partitionInfo = null;
-    if (partitionColumn != null) {
-      if (!zonemapStats.containsKey(partitionColumn)) {
-        LOG.warn(
-            "Partition column '{}' declared in {} has no zonemap index or stats;"
-                + " partition detection disabled",
-            partitionColumn,
-            LanceConstant.TABLE_OPT_PARTITION_COLUMNS);
-      } else {
-        Map<Integer, Comparable<?>> partValues =
-            ZonemapFragmentPruner.computeFragmentPartitionValues(zonemapStats.get(partitionColumn))
-                .orElse(null);
-        if (partValues != null) {
-          partitionInfo = new ZonemapFragmentPruner.PartitionInfo(partitionColumn, partValues);
-          LOG.info(
-              "Detected partition-compatible column '{}' with {} fragments",
-              partitionColumn,
-              partValues.size());
+      // Load zonemap stats for all requested columns in one pass.
+      Map<String, List<ZoneStats>> zonemapStats =
+          loadZonemapStats(getOrOpenDataset(), columnsToLoad);
+
+      // Reject-all policy: if any declared column fails detection (missing stats, non-constant
+      // values, coverage mismatch), the whole scan falls back to UnknownPartitioning so SPJ
+      // symmetry with the joined counterpart is preserved.
+      ZonemapFragmentPruner.PartitionInfo partitionInfo =
+          detectPartitioning(partitionColumns, zonemapStats);
+
+      // Pre-compute fragment pruning so we can (a) estimate post-pruning statistics for
+      // JoinSelection (BroadcastHashJoin vs SortMergeJoin) and (b) pass the cached result
+      // to LanceScan to avoid re-computing during planInputPartitions().
+      Set<Integer> survivingFragmentIds = null;
+      if (pushedFilters.length > 0 && !zonemapStats.isEmpty()) {
+        survivingFragmentIds =
+            ZonemapFragmentPruner.pruneFragments(pushedFilters, zonemapStats).orElse(null);
+      }
+
+      // Filter pushdown may have narrowed the surviving fragment set; restrict PartitionInfo so
+      // the partition count reported via SPJ matches the post-pushdown size. restrictTo clears
+      // the softCapped flag (cap is size-dependent) — re-apply if the restricted size still
+      // exceeds the cap.
+      if (partitionInfo != null && survivingFragmentIds != null) {
+        partitionInfo = partitionInfo.restrictTo(survivingFragmentIds);
+        if (partitionInfo.size() == 0) {
+          partitionInfo = null;
+        } else if (partitionInfo.size() > readMaxReportedPartitionsConf()) {
+          partitionInfo = partitionInfo.withSoftCapped();
         }
       }
-    }
 
-    // Pre-compute fragment pruning so we can (a) estimate post-pruning statistics for
-    // JoinSelection (BroadcastHashJoin vs SortMergeJoin) and (b) pass the cached result
-    // to LanceScan to avoid re-computing during planInputPartitions().
-    Set<Integer> survivingFragmentIds = null;
-    if (pushedFilters.length > 0 && !zonemapStats.isEmpty()) {
-      survivingFragmentIds =
-          ZonemapFragmentPruner.pruneFragments(pushedFilters, zonemapStats).orElse(null);
-    }
+      // Scale rows and full size by the zonemap fragment-pruning ratio first, then let
+      // LanceStatistics.estimateProjected apply the column-width ratio on top
+      // (when the projected schema is narrower than the full schema).
+      long projectedRows = summary.getTotalRows();
+      long projectedFullSize = summary.getTotalFilesSize();
+      if (survivingFragmentIds != null && summary.getTotalFragments() > 0) {
+        double ratio = (double) survivingFragmentIds.size() / summary.getTotalFragments();
+        projectedRows = (long) (projectedRows * ratio);
+        projectedFullSize = (long) (projectedFullSize * ratio);
+      }
+      LanceStatistics statistics =
+          LanceStatistics.estimateProjected(projectedRows, projectedFullSize, fullSchema, schema);
+      if (survivingFragmentIds != null) {
+        LOG.debug(
+            "Scan statistics after pruning: {} of {} fragments survive,"
+                + " estimatedSize={}, estimatedRows={} (full: size={}, rows={})",
+            survivingFragmentIds.size(),
+            summary.getTotalFragments(),
+            statistics.sizeInBytes(),
+            statistics.numRows(),
+            summary.getTotalFilesSize(),
+            summary.getTotalRows());
+      }
 
-    // Scale rows and full size by the zonemap fragment-pruning ratio first, then let
-    // LanceStatistics.estimateProjected apply the column-width ratio on top
-    // (when the projected schema is narrower than the full schema).
-    long projectedRows = summary.getTotalRows();
-    long projectedFullSize = summary.getTotalFilesSize();
-    if (survivingFragmentIds != null && summary.getTotalFragments() > 0) {
-      double ratio = (double) survivingFragmentIds.size() / summary.getTotalFragments();
-      projectedRows = (long) (projectedRows * ratio);
-      projectedFullSize = (long) (projectedFullSize * ratio);
+      Optional<String> whereCondition =
+          FilterPushDown.compileFiltersToSqlWhereClause(pushedFilters);
+      return new LanceScan(
+          schema,
+          readOptions,
+          whereCondition,
+          limit,
+          offset,
+          topNSortOrders,
+          pushedAggregation,
+          pushedFilters,
+          statistics,
+          zonemapStats,
+          survivingFragmentIds,
+          partitionInfo,
+          initialStorageOptions,
+          namespaceImpl,
+          namespaceProperties);
+    } finally {
+      // Always close the lazily opened dataset, including on exception paths, so we don't leak
+      // the JNI handle when parsing/detection/pruning helpers throw.
+      closeLazyDataset();
     }
-    LanceStatistics statistics =
-        LanceStatistics.estimateProjected(projectedRows, projectedFullSize, fullSchema, schema);
-    if (survivingFragmentIds != null) {
-      LOG.debug(
-          "Scan statistics after pruning: {} of {} fragments survive,"
-              + " estimatedSize={}, estimatedRows={} (full: size={}, rows={})",
-          survivingFragmentIds.size(),
-          summary.getTotalFragments(),
-          statistics.sizeInBytes(),
-          statistics.numRows(),
-          summary.getTotalFilesSize(),
-          summary.getTotalRows());
-    }
-
-    // Close the lazily opened dataset - it's no longer needed after build
-    closeLazyDataset();
-
-    Optional<String> whereCondition = FilterPushDown.compileFiltersToSqlWhereClause(pushedFilters);
-    return new LanceScan(
-        schema,
-        readOptions,
-        whereCondition,
-        limit,
-        offset,
-        topNSortOrders,
-        pushedAggregation,
-        pushedFilters,
-        statistics,
-        zonemapStats,
-        survivingFragmentIds,
-        partitionInfo,
-        initialStorageOptions,
-        namespaceImpl,
-        namespaceProperties);
   }
 
   @Override
@@ -409,5 +412,216 @@ public class LanceScanBuilder
       }
     }
     return columns;
+  }
+
+  /**
+   * Tokenizes {@code lance.partition.columns} on {@code ,}, trims, drops empties, deduplicates,
+   * rejects nested paths, and validates each column's Spark type against the whitelist. Returns an
+   * empty list if the property is absent, empty, or any column fails validation (reject-all).
+   */
+  // Package-private so LanceScanBuilderTest can assert dedup / ordering directly.
+  List<String> parsePartitionColumns(String raw) {
+    // Treat null, empty, whitespace-only, and pure-delimiter values (",", ", ,", ...) all as
+    // "property not set" — these are the no-op cases; returning quietly avoids a spurious WARN.
+    if (raw == null || raw.replace(",", "").trim().isEmpty()) {
+      return Collections.emptyList();
+    }
+    List<String> tokens = new ArrayList<>();
+    Set<String> seen = new HashSet<>();
+    for (String part : raw.split(",")) {
+      String trimmed = part.trim();
+      if (trimmed.isEmpty()) {
+        continue;
+      }
+      if (!seen.add(trimmed)) {
+        LOG.warn(
+            "{} contains duplicate column '{}' (dropped)",
+            LanceConstant.TABLE_OPT_PARTITION_COLUMNS,
+            trimmed);
+        continue;
+      }
+      if (trimmed.contains(".")) {
+        LOG.warn("partition column '{}' has nested path; nested paths not supported", trimmed);
+        return Collections.emptyList();
+      }
+      if (!isSupportedPartitionType(trimmed)) {
+        return Collections.emptyList();
+      }
+      tokens.add(trimmed);
+    }
+    return tokens;
+  }
+
+  /**
+   * Looks up the column's type on the full read schema and returns true iff it is in the partition
+   * whitelist. Uses {@link #fullSchema} rather than {@link #schema} so column pruning does not
+   * remove partition columns from the lookup; returns false with a WARN if the column is missing or
+   * has an unsupported type.
+   */
+  private boolean isSupportedPartitionType(String columnName) {
+    int idx;
+    try {
+      idx = fullSchema.fieldIndex(columnName);
+    } catch (IllegalArgumentException e) {
+      LOG.warn(
+          "partition column '{}' is not in the table schema; partition detection disabled",
+          columnName);
+      return false;
+    }
+    org.apache.spark.sql.types.DataType type = fullSchema.fields()[idx].dataType();
+    // Whitelist types that PartitionInfo.toSparkValue can encode into Spark's InternalRow.
+    // ZoneStats always returns Long for integral Arrow widths (int8/16/32 too) and for
+    // Date (epoch-days) / Timestamp (epoch-micros); toSparkValue narrows/wraps appropriately.
+    // Use .equals() rather than == so a DataType materialized from a deserialized schema
+    // (e.g. JSON/Avro round-trip) still matches the singleton constants.
+    if (DataTypes.BooleanType.equals(type)
+        || DataTypes.ByteType.equals(type)
+        || DataTypes.ShortType.equals(type)
+        || DataTypes.IntegerType.equals(type)
+        || DataTypes.LongType.equals(type)
+        || DataTypes.StringType.equals(type)
+        || DataTypes.DateType.equals(type)
+        || DataTypes.TimestampType.equals(type)) {
+      return true;
+    }
+    LOG.warn(
+        "partition column '{}' has unsupported type {}: whitelist is"
+            + " Boolean/Byte/Short/Int/Long/String/Date/Timestamp",
+        columnName,
+        type.typeName());
+    return false;
+  }
+
+  /**
+   * Runs per-column zone-constancy detection, verifies that every declared column covers the same
+   * fragment-id set, and assembles per-fragment partition tuples in declaration order. Returns null
+   * when any column fails — reject-all, so SPJ symmetry is preserved on the joined counterpart.
+   */
+  // Package-private for unit-test access to the multi-column detection logic.
+  ZonemapFragmentPruner.PartitionInfo detectPartitioning(
+      List<String> partitionColumns, Map<String, List<ZoneStats>> zonemapStats) {
+    if (partitionColumns.isEmpty()) {
+      return null;
+    }
+    Map<String, Map<Integer, Comparable<?>>> perColumnMaps = new HashMap<>();
+    for (String name : partitionColumns) {
+      if (!zonemapStats.containsKey(name)) {
+        LOG.warn("partition column '{}' has no zonemap stats; partition detection disabled", name);
+        return null;
+      }
+      Map<Integer, Comparable<?>> values =
+          ZonemapFragmentPruner.computeFragmentPartitionValues(zonemapStats.get(name)).orElse(null);
+      if (values == null || values.isEmpty()) {
+        LOG.warn(
+            "partition column '{}' has non-constant or null values; partition detection disabled",
+            name);
+        return null;
+      }
+      perColumnMaps.put(name, values);
+    }
+
+    // Require every declared partition column to cover the same fragment-id set. A strict-subset
+    // intersection would leave splits for uncovered fragments with a phantom null-key tuple —
+    // wrong input to Spark's SPJ. Iterate in declaration order so the mismatched-column WARN is
+    // deterministic across runs.
+    Set<Integer> intersection = null;
+    for (String name : partitionColumns) {
+      Set<Integer> columnFragments = perColumnMaps.get(name).keySet();
+      if (intersection == null) {
+        intersection = new HashSet<>(columnFragments);
+      } else if (!intersection.equals(columnFragments)) {
+        LOG.warn(
+            "partition columns {} have mismatched fragment-id coverage (column '{}' differs);"
+                + " partition detection disabled",
+            partitionColumns,
+            name);
+        return null;
+      }
+    }
+    if (intersection == null || intersection.isEmpty()) {
+      LOG.warn(
+          "partition columns {} have no covered fragments; partition detection disabled",
+          partitionColumns);
+      return null;
+    }
+
+    // Assemble tuples in declaration order, and resolve per-column Spark types from the full
+    // read schema so PartitionInfo can encode each value into the right InternalRow slot
+    // (narrowing Long -> byte/short/int for Byte/Short/Int/Date columns, pass-through otherwise).
+    int width = partitionColumns.size();
+    Map<Integer, Comparable<?>[]> tuples = new HashMap<>();
+    for (Integer fragId : intersection) {
+      Comparable<?>[] tuple = new Comparable<?>[width];
+      for (int i = 0; i < width; i++) {
+        tuple[i] = perColumnMaps.get(partitionColumns.get(i)).get(fragId);
+      }
+      tuples.put(fragId, tuple);
+    }
+    List<org.apache.spark.sql.types.DataType> columnTypes = new java.util.ArrayList<>(width);
+    for (String name : partitionColumns) {
+      columnTypes.add(fullSchema.fields()[fullSchema.fieldIndex(name)].dataType());
+    }
+    ZonemapFragmentPruner.PartitionInfo info =
+        new ZonemapFragmentPruner.PartitionInfo(partitionColumns, columnTypes, tuples);
+
+    // Apply soft cap based on session conf (if available) or the default. When the cap fires,
+    // the scan will report UnknownPartitioning — log that branch separately so operators don't
+    // see a success-looking "detected N fragments" INFO immediately after the soft-cap WARN.
+    int cap = readMaxReportedPartitionsConf();
+    if (info.size() > cap) {
+      LOG.warn(
+          "partition count {} exceeds {}={}; reporting UnknownPartitioning",
+          info.size(),
+          CONF_REPORTING_MAX_PARTITIONS,
+          cap);
+      return info.withSoftCapped();
+    }
+    LOG.info(
+        "lance.partition.detect cols={} columnCount={} fragments={}",
+        partitionColumns,
+        partitionColumns.size(),
+        info.size());
+    return info;
+  }
+
+  private static int readMaxReportedPartitionsConf() {
+    String val = null;
+    try {
+      org.apache.spark.sql.SparkSession session = org.apache.spark.sql.SparkSession.active();
+      val = session.conf().get(CONF_REPORTING_MAX_PARTITIONS, null);
+    } catch (Exception e) {
+      // No active SparkSession (e.g. unit-test / offline builder usage); log at DEBUG so real
+      // session-level misconfiguration is diagnosable, and fall through to the default.
+      LOG.debug(
+          "Could not read {}: {}; using default", CONF_REPORTING_MAX_PARTITIONS, e.toString());
+      return DEFAULT_REPORTING_MAX_PARTITIONS;
+    }
+    if (val == null) {
+      return DEFAULT_REPORTING_MAX_PARTITIONS;
+    }
+    try {
+      return Integer.parseInt(val.trim());
+    } catch (NumberFormatException e) {
+      LOG.warn(
+          "Could not parse {}='{}' as an integer; using default {}",
+          CONF_REPORTING_MAX_PARTITIONS,
+          val,
+          DEFAULT_REPORTING_MAX_PARTITIONS);
+      return DEFAULT_REPORTING_MAX_PARTITIONS;
+    }
+  }
+
+  static boolean readReportingEnabledConf() {
+    try {
+      org.apache.spark.sql.SparkSession session = org.apache.spark.sql.SparkSession.active();
+      String val = session.conf().get(CONF_REPORTING_ENABLED, null);
+      if (val != null) {
+        return !"false".equalsIgnoreCase(val.trim());
+      }
+    } catch (Exception e) {
+      // No active SparkSession; log at DEBUG and default to enabled.
+      LOG.debug("Could not read {}: {}; defaulting to true", CONF_REPORTING_ENABLED, e.toString());
+    }
+    return true;
   }
 }

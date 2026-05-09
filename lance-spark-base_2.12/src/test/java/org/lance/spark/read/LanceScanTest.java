@@ -199,7 +199,8 @@ public class LanceScanTest {
     fragValues.put(0, "east");
     fragValues.put(1, "west");
     ZonemapFragmentPruner.PartitionInfo partInfo =
-        new ZonemapFragmentPruner.PartitionInfo("region", fragValues);
+        ZonemapFragmentPruner.PartitionInfo.forSingleColumn(
+            "region", org.apache.spark.sql.types.DataTypes.StringType, fragValues);
 
     LanceScan scan =
         new LanceScan(
@@ -241,6 +242,75 @@ public class LanceScanTest {
     scan.planInputPartitions();
     Partitioning partitioning = scan.outputPartitioning();
     assertInstanceOf(UnknownPartitioning.class, partitioning);
+  }
+
+  private LanceScan buildScanWithPartitionInfo(ZonemapFragmentPruner.PartitionInfo info) {
+    return new LanceScan(
+        TEST_SCHEMA,
+        TestUtils.TestTable1Config.readOptions,
+        org.lance.spark.utils.Optional.empty(),
+        org.lance.spark.utils.Optional.empty(),
+        org.lance.spark.utils.Optional.empty(),
+        org.lance.spark.utils.Optional.empty(),
+        org.lance.spark.utils.Optional.empty(),
+        new Filter[0],
+        null,
+        Collections.emptyMap(),
+        null,
+        info,
+        Collections.emptyMap(),
+        null,
+        Collections.emptyMap());
+  }
+
+  /** On a Spark version that supports multi-key SPJ (3.5+), N keys are reported in order. */
+  @Test
+  public void testOutputPartitioningMultiColumn() {
+    java.util.Map<Integer, Comparable<?>[]> tuples = new HashMap<>();
+    tuples.put(0, new Comparable<?>[] {"us", 2024L});
+    tuples.put(1, new Comparable<?>[] {"eu", 2025L});
+    ZonemapFragmentPruner.PartitionInfo info =
+        new ZonemapFragmentPruner.PartitionInfo(
+            java.util.Arrays.asList("region", "year"),
+            java.util.Arrays.asList(
+                org.apache.spark.sql.types.DataTypes.StringType,
+                org.apache.spark.sql.types.DataTypes.LongType),
+            tuples);
+
+    LanceScan scan = buildScanWithPartitionInfo(info);
+    scan.planInputPartitions();
+    Partitioning partitioning = scan.outputPartitioning();
+
+    // Gated off on 3.4 — skip the KGP assertion when the gate is closed.
+    if (!SparkVersionUtil.supportsMultiKeySpj()) {
+      assertInstanceOf(UnknownPartitioning.class, partitioning);
+      return;
+    }
+
+    assertInstanceOf(KeyGroupedPartitioning.class, partitioning);
+    KeyGroupedPartitioning kgp = (KeyGroupedPartitioning) partitioning;
+    Expression[] keys = kgp.keys();
+    assertEquals(2, keys.length);
+    assertEquals("region", ((FieldReference) keys[0]).fieldNames()[0]);
+    assertEquals("year", ((FieldReference) keys[1]).fieldNames()[0]);
+  }
+
+  /** A soft-capped PartitionInfo must cause outputPartitioning to report Unknown. */
+  @Test
+  public void testOutputPartitioningSoftCappedReturnsUnknown() {
+    java.util.Map<Integer, Comparable<?>[]> tuples = new HashMap<>();
+    tuples.put(0, new Comparable<?>[] {"us"});
+    ZonemapFragmentPruner.PartitionInfo info =
+        new ZonemapFragmentPruner.PartitionInfo(
+                java.util.Collections.singletonList("region"),
+                java.util.Collections.singletonList(
+                    org.apache.spark.sql.types.DataTypes.StringType),
+                tuples)
+            .withSoftCapped();
+
+    LanceScan scan = buildScanWithPartitionInfo(info);
+    scan.planInputPartitions();
+    assertInstanceOf(UnknownPartitioning.class, scan.outputPartitioning());
   }
 
   // --- equals / hashCode (required for ReusedExchange) ---

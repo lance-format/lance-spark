@@ -368,17 +368,21 @@ public class LanceScan
    */
   @Override
   public Partitioning outputPartitioning() {
-    if (partitionInfo != null) {
-      // Use partition info fragment count — available before
-      // planInputPartitions() is called. This allows
-      // V2ScanPartitioningAndOrdering to see the partitioning
-      // early enough for SPJ.
-      int partCount =
-          numPartitions >= 0 ? numPartitions : partitionInfo.getFragmentPartitionValues().size();
-      Expression[] keys = new Expression[] {FieldReference.apply(partitionInfo.getColumnName())};
-      return new KeyGroupedPartitioning(keys, partCount);
+    if (partitionInfo == null
+        || partitionInfo.isSoftCapped()
+        || !LanceScanBuilder.readReportingEnabledConf()) {
+      return new UnknownPartitioning(numPartitions >= 0 ? numPartitions : 0);
     }
-    return new UnknownPartitioning(numPartitions >= 0 ? numPartitions : 0);
+    List<String> colNames = partitionInfo.getColumnNames();
+    if (colNames.size() > 1 && !SparkVersionUtil.supportsMultiKeySpj()) {
+      return new UnknownPartitioning(numPartitions >= 0 ? numPartitions : 0);
+    }
+    int partCount = numPartitions >= 0 ? numPartitions : partitionInfo.size();
+    Expression[] keys = new Expression[colNames.size()];
+    for (int i = 0; i < colNames.size(); i++) {
+      keys[i] = FieldReference.apply(colNames.get(i));
+    }
+    return new KeyGroupedPartitioning(keys, partCount);
   }
 
   @Override

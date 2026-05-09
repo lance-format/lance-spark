@@ -29,6 +29,8 @@ import org.apache.spark.sql.sources.LessThan;
 import org.apache.spark.sql.sources.LessThanOrEqual;
 import org.apache.spark.sql.sources.Not;
 import org.apache.spark.sql.sources.Or;
+import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.unsafe.types.UTF8String;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -343,47 +345,174 @@ public final class ZonemapFragmentPruner {
   }
 
   /**
-   * Result of partition detection: the partition column name and a map from fragment ID to the
-   * partition value for that fragment.
+   * Result of partition detection: the ordered list of partition column names, a parallel list of
+   * Spark {@link DataType}s (used to encode each fragment's tuple into an {@link InternalRow}), and
+   * a map from fragment ID to the partition tuple (one value per declared column, in declaration
+   * order).
+   *
+   * <p>Width invariants (enforced by the constructor): {@code columnTypes.size()} equals {@code
+   * columnNames.size()}; every tuple has length {@code columnNames.size()}; column names are
+   * distinct and non-empty.
    */
   public static final class PartitionInfo implements Serializable {
-    private static final long serialVersionUID = 1L;
+    // Bumped from the single-column shape (1L on upstream main): adds columnTypes and uses
+    // tuple storage (Map<Integer, Comparable<?>[]>) for multi-column type-aware encoding.
+    private static final long serialVersionUID = 2L;
 
-    private final String columnName;
-    private final Map<Integer, Comparable<?>> fragmentPartitionValues;
+    private final List<String> columnNames;
+    private final List<DataType> columnTypes;
+    private final Map<Integer, Comparable<?>[]> fragmentPartitionKeys;
+    private final boolean softCapped;
 
-    public PartitionInfo(String columnName, Map<Integer, Comparable<?>> fragmentPartitionValues) {
-      this.columnName = columnName;
-      this.fragmentPartitionValues = Collections.unmodifiableMap(fragmentPartitionValues);
+    public PartitionInfo(
+        List<String> columnNames,
+        List<DataType> columnTypes,
+        Map<Integer, Comparable<?>[]> fragmentPartitionKeys) {
+      this(columnNames, columnTypes, fragmentPartitionKeys, false);
     }
 
-    public String getColumnName() {
-      return columnName;
-    }
-
-    public Map<Integer, Comparable<?>> getFragmentPartitionValues() {
-      return fragmentPartitionValues;
+    public PartitionInfo(
+        List<String> columnNames,
+        List<DataType> columnTypes,
+        Map<Integer, Comparable<?>[]> fragmentPartitionKeys,
+        boolean softCapped) {
+      if (columnNames == null || columnNames.isEmpty()) {
+        throw new IllegalArgumentException("columnNames must be non-empty");
+      }
+      if (columnTypes == null || columnTypes.size() != columnNames.size()) {
+        throw new IllegalArgumentException("columnTypes must have the same size as columnNames");
+      }
+      if (new HashSet<>(columnNames).size() != columnNames.size()) {
+        throw new IllegalArgumentException("columnNames must be distinct: " + columnNames);
+      }
+      int width = columnNames.size();
+      Map<Integer, Comparable<?>[]> copy = new HashMap<>();
+      for (Map.Entry<Integer, Comparable<?>[]> e : fragmentPartitionKeys.entrySet()) {
+        Comparable<?>[] tuple = e.getValue();
+        if (tuple == null || tuple.length != width) {
+          throw new IllegalArgumentException(
+              "tuple for fragment " + e.getKey() + " must have length " + width);
+        }
+        copy.put(e.getKey(), tuple.clone());
+      }
+      this.columnNames = Collections.unmodifiableList(new java.util.ArrayList<>(columnNames));
+      this.columnTypes = Collections.unmodifiableList(new java.util.ArrayList<>(columnTypes));
+      this.fragmentPartitionKeys = Collections.unmodifiableMap(copy);
+      this.softCapped = softCapped;
     }
 
     /**
-     * Returns a partition key {@link InternalRow} for the given fragment ID. The row contains a
-     * single column with the partition value, converted to a Spark-compatible type.
+     * Factory for the single-column case. Wraps each scalar partition value into a length-1 tuple
+     * and delegates to the list-form constructor.
      */
-    public InternalRow partitionKeyForFragment(int fragmentId) {
-      Comparable<?> value = fragmentPartitionValues.get(fragmentId);
-      Object sparkValue = toSparkValue(value);
-      return new GenericInternalRow(new Object[] {sparkValue});
+    public static PartitionInfo forSingleColumn(
+        String columnName, DataType columnType, Map<Integer, Comparable<?>> valueByFragment) {
+      Map<Integer, Comparable<?>[]> tupleMap = new HashMap<>();
+      for (Map.Entry<Integer, Comparable<?>> e : valueByFragment.entrySet()) {
+        tupleMap.put(e.getKey(), new Comparable<?>[] {e.getValue()});
+      }
+      return new PartitionInfo(
+          Collections.singletonList(columnName), Collections.singletonList(columnType), tupleMap);
     }
 
-    private static Object toSparkValue(Comparable<?> value) {
+    public List<String> getColumnNames() {
+      return columnNames;
+    }
+
+    public List<DataType> getColumnTypes() {
+      return columnTypes;
+    }
+
+    /**
+     * Returns the fragment-id → tuple map as an unmodifiable snapshot; each tuple array is
+     * defensively cloned on every call so mutating the returned arrays cannot corrupt internal
+     * state. Prefer {@link #partitionKeyForFragment(int)} for hot paths — this getter exists for
+     * inspection, equality checks, and serialization round-trip tests.
+     */
+    public Map<Integer, Comparable<?>[]> getFragmentPartitionKeys() {
+      Map<Integer, Comparable<?>[]> snapshot = new HashMap<>(fragmentPartitionKeys.size());
+      for (Map.Entry<Integer, Comparable<?>[]> e : fragmentPartitionKeys.entrySet()) {
+        snapshot.put(e.getKey(), e.getValue().clone());
+      }
+      return Collections.unmodifiableMap(snapshot);
+    }
+
+    public int size() {
+      return fragmentPartitionKeys.size();
+    }
+
+    public boolean isSoftCapped() {
+      return softCapped;
+    }
+
+    /**
+     * Returns a new PartitionInfo restricted to the given fragment-id set. Preserves column order
+     * and tuple shape. The {@code softCapped} flag is NOT carried over because the cap decision is
+     * a function of size; if the restricted size still exceeds the cap, the caller must re-apply it
+     * via {@link #withSoftCapped()}. Used after filter pushdown narrows the surviving fragment set.
+     */
+    public PartitionInfo restrictTo(Set<Integer> survivingFragmentIds) {
+      Map<Integer, Comparable<?>[]> restricted = new HashMap<>();
+      for (Map.Entry<Integer, Comparable<?>[]> e : fragmentPartitionKeys.entrySet()) {
+        if (survivingFragmentIds.contains(e.getKey())) {
+          restricted.put(e.getKey(), e.getValue());
+        }
+      }
+      return new PartitionInfo(columnNames, columnTypes, restricted, false);
+    }
+
+    /** Marks this info as soft-capped, returning a new instance (immutability preserved). */
+    public PartitionInfo withSoftCapped() {
+      return new PartitionInfo(columnNames, columnTypes, fragmentPartitionKeys, true);
+    }
+
+    /**
+     * Returns a partition key {@link InternalRow} for the given fragment ID. The row contains one
+     * or more columns (in declaration order), each converted to a Spark-compatible type.
+     */
+    public InternalRow partitionKeyForFragment(int fragmentId) {
+      Comparable<?>[] tuple = fragmentPartitionKeys.get(fragmentId);
+      int width = columnNames.size();
+      Object[] out = new Object[width];
+      if (tuple == null) {
+        return new GenericInternalRow(out);
+      }
+      for (int i = 0; i < width; i++) {
+        out[i] = toSparkValue(tuple[i], columnTypes.get(i));
+      }
+      return new GenericInternalRow(out);
+    }
+
+    /**
+     * Converts a ZoneStats value to the exact Java class Spark's {@link InternalRow} expects for
+     * the target slot. ZoneStats returns {@code Long} for every integral Arrow width (int8/16/32
+     * included) and for Date (epoch-days) / Timestamp (epoch-micros); those need explicit narrowing
+     * to match {@code getByte}/{@code getShort}/{@code getInt} accessors. Boolean is already typed;
+     * Strings are wrapped in {@link UTF8String}.
+     */
+    private static Object toSparkValue(Comparable<?> value, DataType type) {
       if (value == null) {
         return null;
       }
-      if (value instanceof String) {
+      if (DataTypes.BooleanType.equals(type)) {
+        return value;
+      }
+      if (DataTypes.ByteType.equals(type)) {
+        return ((Number) value).byteValue();
+      }
+      if (DataTypes.ShortType.equals(type)) {
+        return ((Number) value).shortValue();
+      }
+      if (DataTypes.IntegerType.equals(type) || DataTypes.DateType.equals(type)) {
+        return ((Number) value).intValue();
+      }
+      if (DataTypes.LongType.equals(type) || DataTypes.TimestampType.equals(type)) {
+        return ((Number) value).longValue();
+      }
+      if (DataTypes.StringType.equals(type)) {
         return UTF8String.fromString((String) value);
       }
-      // Long, Double, Boolean, Integer are already compatible
-      return value;
+      throw new IllegalArgumentException("Unsupported partition column type: " + type);
     }
   }
 
