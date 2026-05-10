@@ -41,6 +41,7 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
   private final LanceFragmentScanner fragmentScanner;
   private final ArrowReader arrowReader;
   private ColumnarBatch currentColumnarBatch;
+  private long lastBatchLoadTimeNs;
 
   public LanceFragmentColumnarBatchScanner(
       LanceFragmentScanner fragmentScanner, ArrowReader arrowReader) {
@@ -55,8 +56,13 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
   }
 
   public boolean loadNextBatch() throws IOException {
-    if (arrowReader.loadNextBatch()) {
+    long start = System.nanoTime();
+    boolean hasNext = arrowReader.loadNextBatch();
+    lastBatchLoadTimeNs = System.nanoTime() - start;
+
+    if (hasNext) {
       VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
+
       List<ColumnVector> fieldVectors =
           root.getFieldVectors().stream()
               .map(LanceArrowColumnVector::new)
@@ -84,6 +90,18 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
    */
   public ColumnarBatch getCurrentBatch() {
     return currentColumnarBatch;
+  }
+
+  public long getLastBatchLoadTimeNs() {
+    return lastBatchLoadTimeNs;
+  }
+
+  public long getDatasetOpenTimeNs() {
+    return fragmentScanner.getDatasetOpenTimeNs();
+  }
+
+  public long getScannerCreateTimeNs() {
+    return fragmentScanner.getScannerCreateTimeNs();
   }
 
   @Override

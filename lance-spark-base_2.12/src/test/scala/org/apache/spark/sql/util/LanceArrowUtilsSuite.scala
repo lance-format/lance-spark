@@ -24,7 +24,7 @@ package org.apache.spark.sql.util
  */
 
 import org.apache.arrow.vector.types.DateUnit
-import org.apache.arrow.vector.types.pojo.{Field, FieldType}
+import org.apache.arrow.vector.types.pojo.{Field, FieldType, Schema}
 import org.apache.arrow.vector.types.pojo.ArrowType
 import org.apache.spark.SparkUnsupportedOperationException
 import org.apache.spark.sql.types._
@@ -266,5 +266,64 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
     // Large string with metadata should use LargeUtf8
     val largeField = arrowSchema.findField("large_string")
     assert(largeField.getType === ArrowType.LargeUtf8.INSTANCE)
+  }
+
+  test("date millisecond metadata preserved in fromArrowSchema") {
+    val dateMilliField = new Field(
+      "dt",
+      new FieldType(true, new ArrowType.Date(DateUnit.MILLISECOND), null, null),
+      java.util.Collections.emptyList())
+    val schema = new Schema(java.util.Arrays.asList(dateMilliField))
+    val sparkSchema = LanceArrowUtils.fromArrowSchema(schema)
+    assert(sparkSchema("dt").dataType === DateType)
+    assert(sparkSchema("dt").metadata.contains(LanceArrowUtils.ARROW_DATE_MILLISECOND_KEY))
+    assert(
+      sparkSchema("dt").metadata.getString(
+        LanceArrowUtils.ARROW_DATE_MILLISECOND_KEY) === "true")
+  }
+
+  test("date millisecond metadata produces Date(MILLISECOND) arrow type") {
+    val dayCol = StructField("day_col", DateType, nullable = true)
+    val milliMeta = new MetadataBuilder()
+      .putString(LanceArrowUtils.ARROW_DATE_MILLISECOND_KEY, "true")
+      .build()
+    val milliCol = StructField("milli_col", DateType, nullable = true, milliMeta)
+    val sparkSchema = StructType(Seq(dayCol, milliCol))
+    val arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false)
+    assert(arrowSchema.findField("day_col").getType === new ArrowType.Date(DateUnit.DAY))
+    assert(
+      arrowSchema.findField("milli_col").getType === new ArrowType.Date(DateUnit.MILLISECOND))
+  }
+
+  test("date millisecond roundtrip Arrow -> Spark -> Arrow") {
+    val dateMilliField = new Field(
+      "dt",
+      new FieldType(true, new ArrowType.Date(DateUnit.MILLISECOND), null, null),
+      java.util.Collections.emptyList())
+    val arrowSchema = new Schema(java.util.Arrays.asList(dateMilliField))
+    val sparkSchema = LanceArrowUtils.fromArrowSchema(arrowSchema)
+    val arrowSchemaBack = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false)
+    assert(
+      arrowSchemaBack.findField("dt").getType === new ArrowType.Date(DateUnit.MILLISECOND))
+  }
+
+  test("date millisecond metadata preserved in nested struct") {
+    val dateMilliChild = new Field(
+      "nested_dt",
+      new FieldType(true, new ArrowType.Date(DateUnit.MILLISECOND), null, null),
+      java.util.Collections.emptyList())
+    val structField = new Field(
+      "s",
+      new FieldType(true, ArrowType.Struct.INSTANCE, null, null),
+      java.util.Arrays.asList(dateMilliChild))
+    val schema = new Schema(java.util.Arrays.asList(structField))
+    val sparkSchema = LanceArrowUtils.fromArrowSchema(schema)
+    val structType = sparkSchema("s").dataType.asInstanceOf[StructType]
+    assert(structType("nested_dt").dataType === DateType)
+    assert(
+      structType("nested_dt").metadata.contains(LanceArrowUtils.ARROW_DATE_MILLISECOND_KEY))
+    assert(
+      structType("nested_dt").metadata.getString(
+        LanceArrowUtils.ARROW_DATE_MILLISECOND_KEY) === "true")
   }
 }

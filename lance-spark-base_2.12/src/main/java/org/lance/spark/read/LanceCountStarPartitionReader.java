@@ -18,6 +18,7 @@ import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.read.metric.LanceReadMetricsTracker;
 import org.lance.spark.utils.Utils;
 import org.lance.spark.vectorized.LanceArrowColumnVector;
 
@@ -26,6 +27,7 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowReader;
+import org.apache.spark.sql.connector.metric.CustomTaskMetric;
 import org.apache.spark.sql.connector.read.PartitionReader;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
@@ -43,6 +45,7 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
   private final BufferAllocator allocator;
   private boolean finished = false;
   private ColumnarBatch currentBatch;
+  private final LanceReadMetricsTracker metricsTracker = new LanceReadMetricsTracker();
 
   public LanceCountStarPartitionReader(LanceInputPartition inputPartition) {
     this.inputPartition = inputPartition;
@@ -64,14 +67,18 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
     LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
     long totalCount = 0;
 
+    long dsOpenStart = System.nanoTime();
     try (Dataset dataset =
         Utils.openDatasetBuilder(readOptions)
             .initialStorageOptions(inputPartition.getInitialStorageOptions())
             .build()) {
+      metricsTracker.addDatasetOpenTimeNs(System.nanoTime() - dsOpenStart);
+
       List<Integer> fragmentIds = inputPartition.getLanceSplit().getFragments();
       if (fragmentIds.isEmpty()) {
         return 0;
       }
+      metricsTracker.addNumFragmentsScanned(fragmentIds.size());
 
       ScanOptions.Builder scanOptionsBuilder = new ScanOptions.Builder();
       if (inputPartition.getWhereCondition().isPresent()) {
@@ -80,10 +87,23 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
       scanOptionsBuilder.withRowId(true);
       scanOptionsBuilder.columns(Lists.newArrayList());
       scanOptionsBuilder.fragmentIds(fragmentIds);
+
+      long scanCreateStart = System.nanoTime();
       try (LanceScanner scanner = dataset.newScan(scanOptionsBuilder.build())) {
+        metricsTracker.addScannerCreateTimeNs(System.nanoTime() - scanCreateStart);
         try (ArrowReader reader = scanner.scanBatches()) {
-          while (reader.loadNextBatch()) {
-            totalCount += reader.getVectorSchemaRoot().getRowCount();
+          while (true) {
+            long batchStart = System.nanoTime();
+            boolean hasNext = reader.loadNextBatch();
+            long batchTimeNs = System.nanoTime() - batchStart;
+            if (!hasNext) {
+              break;
+            }
+            metricsTracker.addBatchLoadTimeNs(batchTimeNs);
+            long rowCount = reader.getVectorSchemaRoot().getRowCount();
+            totalCount += rowCount;
+            metricsTracker.addNumBatchesLoaded(1);
+            metricsTracker.addNumRowsScanned(rowCount);
           }
         }
       } catch (Exception e) {
@@ -118,11 +138,18 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
 
   @Override
   public ColumnarBatch get() {
-    long rowCount = computeCount();
-    StructType countSchema =
-        new StructType().add("count", org.apache.spark.sql.types.DataTypes.LongType);
-    currentBatch = createCountResultBatch(rowCount, countSchema);
+    if (currentBatch == null) {
+      long rowCount = computeCount();
+      StructType countSchema =
+          new StructType().add("count", org.apache.spark.sql.types.DataTypes.LongType);
+      currentBatch = createCountResultBatch(rowCount, countSchema);
+    }
     return currentBatch;
+  }
+
+  @Override
+  public CustomTaskMetric[] currentMetricsValues() {
+    return metricsTracker.currentMetricsValues();
   }
 
   @Override

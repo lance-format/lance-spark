@@ -23,6 +23,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
 public class LanceSparkReadOptionsSerializationTest {
 
@@ -105,5 +108,122 @@ public class LanceSparkReadOptionsSerializationTest {
     Assertions.assertTrue(
         deserializedOptionsTrue.getNearest().isUseIndex(),
         "useIndex should remain true after serialization/deserialization");
+  }
+
+  @Test
+  public void testExecutorCredentialRefreshDefaultsToTrue() {
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder().datasetUri("s3://bucket/path").build();
+    Assertions.assertTrue(
+        options.isExecutorCredentialRefresh(),
+        "executor_credential_refresh must default to true to preserve existing behavior");
+  }
+
+  @Test
+  public void testExecutorCredentialRefreshParsedFromOptions() {
+    LanceSparkReadOptions optionsFalse =
+        LanceSparkReadOptions.from(
+            Collections.singletonMap(
+                LanceSparkReadOptions.CONFIG_EXECUTOR_CREDENTIAL_REFRESH, "false"),
+            "s3://bucket/path");
+    Assertions.assertFalse(optionsFalse.isExecutorCredentialRefresh());
+
+    LanceSparkReadOptions optionsTrue =
+        LanceSparkReadOptions.from(
+            Collections.singletonMap(
+                LanceSparkReadOptions.CONFIG_EXECUTOR_CREDENTIAL_REFRESH, "true"),
+            "s3://bucket/path");
+    Assertions.assertTrue(optionsTrue.isExecutorCredentialRefresh());
+  }
+
+  @Test
+  public void testExecutorCredentialRefreshSurvivesSerialization()
+      throws IOException, ClassNotFoundException {
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder()
+            .datasetUri("s3://bucket/path")
+            .executorCredentialRefresh(false)
+            .build();
+    Assertions.assertFalse(options.isExecutorCredentialRefresh());
+
+    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+    try (ObjectOutputStream oos = new ObjectOutputStream(baos)) {
+      oos.writeObject(options);
+    }
+    ByteArrayInputStream bais = new ByteArrayInputStream(baos.toByteArray());
+    LanceSparkReadOptions deserialized;
+    try (ObjectInputStream ois = new ObjectInputStream(bais)) {
+      deserialized = (LanceSparkReadOptions) ois.readObject();
+    }
+
+    Assertions.assertFalse(
+        deserialized.isExecutorCredentialRefresh(),
+        "executor_credential_refresh must survive Java serialization (driver -> executor handoff)");
+  }
+
+  @Test
+  public void testExecutorCredentialRefreshPreservedByWithVersion() {
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder()
+            .datasetUri("s3://bucket/path")
+            .executorCredentialRefresh(false)
+            .build();
+
+    LanceSparkReadOptions pinned = options.withVersion(7);
+    Assertions.assertFalse(
+        pinned.isExecutorCredentialRefresh(),
+        "withVersion() must propagate the executor_credential_refresh flag");
+  }
+
+  /**
+   * Catalog-level config (set via {@code --conf spark.sql.catalog.<name>.<key>}) is the only route
+   * available to SQL DML (DELETE / UPDATE / MERGE INTO), which has no per-statement {@code
+   * .option(...)} attach point. This test guards the catalog-conf path.
+   */
+  @Test
+  public void testExecutorCredentialRefreshFromCatalogDefaults() {
+    Map<String, String> catalogOpts = new HashMap<>();
+    catalogOpts.put(LanceSparkReadOptions.CONFIG_EXECUTOR_CREDENTIAL_REFRESH, "false");
+    LanceSparkCatalogConfig catalogConfig = LanceSparkCatalogConfig.from(catalogOpts);
+
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder()
+            .datasetUri("s3://bucket/path")
+            .withCatalogDefaults(catalogConfig)
+            .build();
+
+    Assertions.assertFalse(
+        options.isExecutorCredentialRefresh(),
+        "executor_credential_refresh set at catalog level must land in the typed field "
+            + "so it takes effect for SELECT without .option(...) and for SQL DML");
+  }
+
+  /**
+   * Spark's scan-time options (via {@code spark.read.option(...)}) go through a second {@code
+   * fromOptions(mergedMap)} rebuild in {@code LanceDataset.newScanBuilder}. Per-read settings must
+   * win over catalog-level defaults.
+   */
+  @Test
+  public void testPerReadOptionOverridesCatalogDefaults() {
+    Map<String, String> catalogOpts = new HashMap<>();
+    catalogOpts.put(LanceSparkReadOptions.CONFIG_EXECUTOR_CREDENTIAL_REFRESH, "false");
+    LanceSparkCatalogConfig catalogConfig = LanceSparkCatalogConfig.from(catalogOpts);
+
+    // Simulate the rebuild path in LanceDataset.newScanBuilder: the builder starts by applying
+    // the catalog defaults, then fromOptions() replays against the merged (catalog + per-read)
+    // map where the per-read value wins.
+    Map<String, String> merged = new HashMap<>(catalogConfig.getStorageOptions());
+    merged.put(LanceSparkReadOptions.CONFIG_EXECUTOR_CREDENTIAL_REFRESH, "true");
+
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder()
+            .datasetUri("s3://bucket/path")
+            .withCatalogDefaults(catalogConfig)
+            .fromOptions(merged)
+            .build();
+
+    Assertions.assertTrue(
+        options.isExecutorCredentialRefresh(),
+        "per-read .option(...) must override the catalog-level default");
   }
 }
