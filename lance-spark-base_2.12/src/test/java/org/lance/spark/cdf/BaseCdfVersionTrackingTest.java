@@ -93,7 +93,7 @@ public abstract class BaseCdfVersionTrackingTest {
     helper.checkWithVersions(
         Arrays.asList(
             CdfRow.ofWithVersions(1, "Alice", 110, 1L, 3L),
-            CdfRow.ofWithVersions(2, "Bob", 200, 1L, 1L)));
+            CdfRow.ofWithVersions(2, "Bob", 200, 2L, 2L)));
   }
 
   @Test
@@ -135,7 +135,7 @@ public abstract class BaseCdfVersionTrackingTest {
 
     helper.checkWithVersions(
         Arrays.asList(
-            CdfRow.ofWithVersions(1, "Alice", 100, 1L, 1L),
+            CdfRow.ofWithVersions(1, "Alice", 100, 2L, 2L),
             CdfRow.ofWithVersions(2, "Bob", 201, 1L, 3L),
             CdfRow.ofWithVersions(3, "Charlie", 301, 1L, 3L)));
   }
@@ -168,13 +168,13 @@ public abstract class BaseCdfVersionTrackingTest {
         Arrays.asList(
             CdfRow.of(1, "Alice", 100), CdfRow.of(2, "Bob", 200), CdfRow.of(3, "Charlie", 300)));
 
-    // v3: Delete one row - remaining rows in the same fragment get version metadata recalculated
+    // v3: Delete one row - remaining rows report their actual insert version (v2)
     helper.delete("id = 2");
 
     helper.checkWithVersions(
         Arrays.asList(
-            CdfRow.ofWithVersions(1, "Alice", 100, 1L, 1L),
-            CdfRow.ofWithVersions(3, "Charlie", 300, 1L, 1L)));
+            CdfRow.ofWithVersions(1, "Alice", 100, 2L, 2L),
+            CdfRow.ofWithVersions(3, "Charlie", 300, 2L, 2L)));
   }
 
   @Test

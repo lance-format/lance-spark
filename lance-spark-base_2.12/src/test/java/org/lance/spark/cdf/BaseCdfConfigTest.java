@@ -81,12 +81,12 @@ public abstract class BaseCdfConfigTest {
       assertEquals(1L, alice.getLong(3)); // created
       assertEquals(3L, alice.getLong(4)); // updated
 
-      // Bob: untouched after fragment rewrite
+      // Bob: untouched after fragment rewrite — reports actual insert version (v2)
       Row bob = rows.get(1);
       assertEquals(2, bob.getInt(0));
       assertEquals(200, bob.getInt(2));
-      assertEquals(1L, bob.getLong(3)); // created
-      assertEquals(1L, bob.getLong(4)); // updated
+      assertEquals(2L, bob.getLong(3)); // created
+      assertEquals(2L, bob.getLong(4)); // updated
     } finally {
       spark.stop();
     }
@@ -142,12 +142,12 @@ public abstract class BaseCdfConfigTest {
       assertEquals(1L, alice.getLong(3)); // created
       assertEquals(3L, alice.getLong(4)); // updated
 
-      // Bob: untouched after fragment rewrite
+      // Bob: untouched after fragment rewrite — reports actual insert version (v2)
       Row bob = rows.get(1);
       assertEquals(2, bob.getInt(0));
       assertEquals(200, bob.getInt(2));
-      assertEquals(1L, bob.getLong(3)); // created
-      assertEquals(1L, bob.getLong(4)); // updated
+      assertEquals(2L, bob.getLong(3)); // created
+      assertEquals(2L, bob.getLong(4)); // updated
     } finally {
       spark.stop();
     }
