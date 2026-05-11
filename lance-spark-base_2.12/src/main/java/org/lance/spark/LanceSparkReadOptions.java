@@ -59,12 +59,48 @@ public class LanceSparkReadOptions implements Serializable {
   public static final String CONFIG_TOP_N_PUSH_DOWN = "topN_push_down";
 
   public static final String CONFIG_NEAREST = "nearest";
+
+  /**
+   * Whether executors should rebuild the namespace client and re-fetch storage options via {@code
+   * namespace.describeTable()} when opening a dataset for fragment scans.
+   *
+   * <p>When {@code true} (the default), executors reconstruct the namespace client and route the
+   * dataset open through the namespace path. This keeps the Rust-side storage-options provider
+   * attached so that short-lived vended credentials returned by {@code describeTable()} (e.g. STS
+   * tokens from Iceberg REST, Polaris, Unity) can be refreshed mid-scan.
+   *
+   * <p>When {@code false}, executors open the dataset directly by URI using the storage options the
+   * driver already obtained (passed in via {@code initialStorageOptions}). This skips the eager
+   * {@code describeTable()} RPC on every fragment scan, which is required for catalogs whose
+   * backing service authenticates per-call (e.g. Hive Metastore over Kerberos): executors typically
+   * do not have a Kerberos TGT and the call would otherwise fail with {@code GSS initiate failed}.
+   *
+   * <p>Whether disabling this option actually costs anything depends on the namespace impl:
+   *
+   * <ul>
+   *   <li>{@code Hive2Namespace} / {@code Hive3Namespace}: {@code describeTable()} returns only the
+   *       table location, never storage options. The refresh callback is a no-op, so setting this
+   *       option to {@code false} has no downside. The underlying object-store credentials (e.g.
+   *       IAM-role / {@code hive-site.xml} / env-vars on the executor) are rotated by the storage
+   *       client SDK independently of Lance.
+   *   <li>{@code GlueNamespace}: storage options come from a static {@code
+   *       config.getStorageOptions()} and are typically not time-bound; setting {@code false} is
+   *       usually safe unless you rely on LakeFormation-vended temporary credentials.
+   *   <li>{@code IcebergNamespace} (REST), {@code PolarisNamespace}, {@code UnityNamespace}: {@code
+   *       describeTable()} commonly returns vended temporary credentials. Leave this option at the
+   *       default ({@code true}) unless every scan is guaranteed to finish within the credential
+   *       TTL.
+   * </ul>
+   */
+  public static final String CONFIG_EXECUTOR_CREDENTIAL_REFRESH = "executor_credential_refresh";
+
   public static final String LANCE_FILE_SUFFIX = ".lance";
 
   private static final boolean DEFAULT_PUSH_DOWN_FILTERS = true;
   // Changed from 512 to 8192 for better OLAP scan performance (33x improvement)
   private static final int DEFAULT_BATCH_SIZE = 8192;
   private static final boolean DEFAULT_TOP_N_PUSH_DOWN = true;
+  private static final boolean DEFAULT_EXECUTOR_CREDENTIAL_REFRESH = true;
 
   private final String datasetUri;
   private final String dbPath;
@@ -88,6 +124,12 @@ public class LanceSparkReadOptions implements Serializable {
   /** The catalog name for cache isolation when multiple catalogs are configured. */
   private final String catalogName;
 
+  /**
+   * Whether executors should rebuild the namespace client for credential refresh. See {@link
+   * #CONFIG_EXECUTOR_CREDENTIAL_REFRESH} for details.
+   */
+  private final boolean executorCredentialRefresh;
+
   private LanceSparkReadOptions(Builder builder) {
     this.datasetUri = builder.datasetUri;
     String[] paths = extractDbPathAndDatasetName(datasetUri);
@@ -105,6 +147,7 @@ public class LanceSparkReadOptions implements Serializable {
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
     this.catalogName = builder.catalogName;
+    this.executorCredentialRefresh = builder.executorCredentialRefresh;
   }
 
   /** Creates a new builder for LanceSparkReadOptions. */
@@ -239,6 +282,15 @@ public class LanceSparkReadOptions implements Serializable {
     return catalogName;
   }
 
+  /**
+   * Returns whether executors should rebuild the namespace client and route the dataset open
+   * through the namespace path (for credential refresh). See {@link
+   * #CONFIG_EXECUTOR_CREDENTIAL_REFRESH}.
+   */
+  public boolean isExecutorCredentialRefresh() {
+    return executorCredentialRefresh;
+  }
+
   public boolean hasNamespace() {
     return namespace != null && tableId != null;
   }
@@ -275,6 +327,7 @@ public class LanceSparkReadOptions implements Serializable {
         .namespace(this.namespace)
         .tableId(this.tableId)
         .catalogName(this.catalogName)
+        .executorCredentialRefresh(this.executorCredentialRefresh)
         .build();
   }
 
@@ -324,6 +377,7 @@ public class LanceSparkReadOptions implements Serializable {
     return pushDownFilters == that.pushDownFilters
         && batchSize == that.batchSize
         && topNPushDown == that.topNPushDown
+        && executorCredentialRefresh == that.executorCredentialRefresh
         && Objects.equals(nearest, that.nearest)
         && Objects.equals(datasetUri, that.datasetUri)
         && Objects.equals(blockSize, that.blockSize)
@@ -347,7 +401,8 @@ public class LanceSparkReadOptions implements Serializable {
         nearest,
         topNPushDown,
         storageOptions,
-        tableId);
+        tableId,
+        executorCredentialRefresh);
   }
 
   /** Builder for creating LanceSparkReadOptions instances. */
@@ -365,6 +420,7 @@ public class LanceSparkReadOptions implements Serializable {
     private LanceNamespace namespace;
     private List<String> tableId;
     private String catalogName;
+    private boolean executorCredentialRefresh = DEFAULT_EXECUTOR_CREDENTIAL_REFRESH;
 
     private Builder() {}
 
@@ -442,6 +498,11 @@ public class LanceSparkReadOptions implements Serializable {
       return this;
     }
 
+    public Builder executorCredentialRefresh(boolean executorCredentialRefresh) {
+      this.executorCredentialRefresh = executorCredentialRefresh;
+      return this;
+    }
+
     /**
      * Parses options from a map, extracting read-specific settings.
      *
@@ -450,38 +511,17 @@ public class LanceSparkReadOptions implements Serializable {
      */
     public Builder fromOptions(Map<String, String> options) {
       this.storageOptions = new HashMap<>(options);
-      if (options.containsKey(CONFIG_PUSH_DOWN_FILTERS)) {
-        this.pushDownFilters = Boolean.parseBoolean(options.get(CONFIG_PUSH_DOWN_FILTERS));
-      }
-      if (options.containsKey(CONFIG_BLOCK_SIZE)) {
-        this.blockSize = Integer.parseInt(options.get(CONFIG_BLOCK_SIZE));
-      }
-      if (options.containsKey(CONFIG_VERSION)) {
-        this.version = Integer.parseInt(options.get(CONFIG_VERSION));
-      }
-      if (options.containsKey(CONFIG_INDEX_CACHE_SIZE)) {
-        this.indexCacheSize = Integer.parseInt(options.get(CONFIG_INDEX_CACHE_SIZE));
-      }
-      if (options.containsKey(CONFIG_METADATA_CACHE_SIZE)) {
-        this.metadataCacheSize = Integer.parseInt(options.get(CONFIG_METADATA_CACHE_SIZE));
-      }
-      if (options.containsKey(CONFIG_BATCH_SIZE)) {
-        int parsedBatchSize = Integer.parseInt(options.get(CONFIG_BATCH_SIZE));
-        Preconditions.checkArgument(parsedBatchSize > 0, "batch_size must be positive");
-        this.batchSize = parsedBatchSize;
-      }
-      if (options.containsKey(CONFIG_TOP_N_PUSH_DOWN)) {
-        this.topNPushDown = Boolean.parseBoolean(options.get(CONFIG_TOP_N_PUSH_DOWN));
-      }
-      if (options.containsKey(CONFIG_NEAREST)) {
-        String json = options.get(CONFIG_NEAREST);
-        nearest(json);
-      }
+      parseTypedFlags(options);
       return this;
     }
 
     /**
      * Merges catalog config options as defaults (read options override).
+     *
+     * <p>Also promotes recognized typed flags from the catalog config into their corresponding
+     * Builder fields so that catalog-level settings (e.g. {@code spark.sql.catalog.<name>.<key>})
+     * take effect on paths that do not later go through {@link #fromOptions(Map)} — notably SQL DML
+     * (DELETE / UPDATE / MERGE INTO) and plain SELECT without per-read {@code .option(...)}.
      *
      * @param catalogConfig the catalog config
      * @return this builder
@@ -490,8 +530,45 @@ public class LanceSparkReadOptions implements Serializable {
       // Merge storage options: catalog options are defaults, current options override
       Map<String, String> merged = new HashMap<>(catalogConfig.getStorageOptions());
       merged.putAll(this.storageOptions);
-      this.storageOptions = merged;
-      return this;
+      return fromOptions(merged);
+    }
+
+    /**
+     * Applies typed-flag parsing for every known read option present in {@code opts}. Shared by
+     * {@link #fromOptions(Map)} and {@link #withCatalogDefaults(LanceSparkCatalogConfig)} so that
+     * both call sites stay in sync and catalog-level configs reach the typed fields.
+     */
+    private void parseTypedFlags(Map<String, String> opts) {
+      if (opts.containsKey(CONFIG_PUSH_DOWN_FILTERS)) {
+        this.pushDownFilters = Boolean.parseBoolean(opts.get(CONFIG_PUSH_DOWN_FILTERS));
+      }
+      if (opts.containsKey(CONFIG_BLOCK_SIZE)) {
+        this.blockSize = Integer.parseInt(opts.get(CONFIG_BLOCK_SIZE));
+      }
+      if (opts.containsKey(CONFIG_VERSION)) {
+        this.version = Integer.parseInt(opts.get(CONFIG_VERSION));
+      }
+      if (opts.containsKey(CONFIG_INDEX_CACHE_SIZE)) {
+        this.indexCacheSize = Integer.parseInt(opts.get(CONFIG_INDEX_CACHE_SIZE));
+      }
+      if (opts.containsKey(CONFIG_METADATA_CACHE_SIZE)) {
+        this.metadataCacheSize = Integer.parseInt(opts.get(CONFIG_METADATA_CACHE_SIZE));
+      }
+      if (opts.containsKey(CONFIG_BATCH_SIZE)) {
+        int parsedBatchSize = Integer.parseInt(opts.get(CONFIG_BATCH_SIZE));
+        Preconditions.checkArgument(parsedBatchSize > 0, "batch_size must be positive");
+        this.batchSize = parsedBatchSize;
+      }
+      if (opts.containsKey(CONFIG_TOP_N_PUSH_DOWN)) {
+        this.topNPushDown = Boolean.parseBoolean(opts.get(CONFIG_TOP_N_PUSH_DOWN));
+      }
+      if (opts.containsKey(CONFIG_NEAREST)) {
+        nearest(opts.get(CONFIG_NEAREST));
+      }
+      if (opts.containsKey(CONFIG_EXECUTOR_CREDENTIAL_REFRESH)) {
+        this.executorCredentialRefresh =
+            Boolean.parseBoolean(opts.get(CONFIG_EXECUTOR_CREDENTIAL_REFRESH));
+      }
     }
 
     public LanceSparkReadOptions build() {

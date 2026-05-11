@@ -14,7 +14,9 @@
 package org.lance.spark.read;
 
 import org.lance.spark.internal.LanceFragmentColumnarBatchScanner;
+import org.lance.spark.read.metric.LanceReadMetricsTracker;
 
+import org.apache.spark.sql.connector.metric.CustomTaskMetric;
 import org.apache.spark.sql.connector.read.PartitionReader;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 
@@ -25,6 +27,7 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
   private int fragmentIndex;
   private LanceFragmentColumnarBatchScanner fragmentReader;
   private ColumnarBatch currentBatch;
+  private final LanceReadMetricsTracker metricsTracker = new LanceReadMetricsTracker();
 
   public LanceColumnarPartitionReader(LanceInputPartition inputPartition) {
     this.inputPartition = inputPartition;
@@ -44,6 +47,9 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
           LanceFragmentColumnarBatchScanner.create(
               inputPartition.getLanceSplit().getFragments().get(fragmentIndex), inputPartition);
       fragmentIndex++;
+      metricsTracker.addNumFragmentsScanned(1);
+      metricsTracker.addDatasetOpenTimeNs(fragmentReader.getDatasetOpenTimeNs());
+      metricsTracker.addScannerCreateTimeNs(fragmentReader.getScannerCreateTimeNs());
       if (loadNextBatchFromCurrentReader()) {
         return true;
       }
@@ -52,8 +58,14 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
   }
 
   private boolean loadNextBatchFromCurrentReader() throws IOException {
-    if (fragmentReader != null && fragmentReader.loadNextBatch()) {
+    if (fragmentReader == null) {
+      return false;
+    }
+    if (fragmentReader.loadNextBatch()) {
       currentBatch = fragmentReader.getCurrentBatch();
+      metricsTracker.addNumBatchesLoaded(1);
+      metricsTracker.addNumRowsScanned(currentBatch.numRows());
+      metricsTracker.addBatchLoadTimeNs(fragmentReader.getLastBatchLoadTimeNs());
       return true;
     }
     return false;
@@ -62,6 +74,11 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
   @Override
   public ColumnarBatch get() {
     return currentBatch;
+  }
+
+  @Override
+  public CustomTaskMetric[] currentMetricsValues() {
+    return metricsTracker.currentMetricsValues();
   }
 
   @Override

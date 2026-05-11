@@ -91,6 +91,7 @@ object LanceArrowWriter {
       case (BinaryType, vector: VarBinaryVector) => new BinaryWriter(vector)
       case (BinaryType, vector: LargeVarBinaryVector) => new LargeBinaryWriter(vector)
       case (DateType, vector: DateDayVector) => new DateWriter(vector)
+      case (DateType, vector: DateMilliVector) => new DateMilliWriter(vector)
       case (TimestampType, vector: TimeStampMicroTZVector) => new TimestampWriter(vector)
       case (TimestampNTZType, vector: TimeStampMicroVector) => new TimestampNTZWriter(vector)
       case (MapType(_, _, _), vector: MapVector) =>
@@ -324,6 +325,15 @@ private[arrow] class DateWriter(val valueVector: DateDayVector) extends LanceArr
   override def setNull(): Unit = {}
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
     valueVector.setSafe(count, input.getInt(ordinal))
+  }
+}
+
+private[arrow] class DateMilliWriter(val valueVector: DateMilliVector)
+  extends LanceArrowFieldWriter {
+  private val MILLIS_PER_DAY = 86400000L
+  override def setNull(): Unit = {}
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    valueVector.setSafe(count, input.getInt(ordinal).toLong * MILLIS_PER_DAY)
   }
 }
 

@@ -38,25 +38,43 @@ public class LanceFragmentScanner implements AutoCloseable {
   private final int fragmentId;
   private final boolean withFragemtId;
   private final LanceInputPartition inputPartition;
+  private final long datasetOpenTimeNs;
+  private final long scannerCreateTimeNs;
 
   private LanceFragmentScanner(
       Dataset dataset,
       LanceScanner scanner,
       int fragmentId,
       boolean withFragmentId,
-      LanceInputPartition inputPartition) {
+      LanceInputPartition inputPartition,
+      long datasetOpenTimeNs,
+      long scannerCreateTimeNs) {
     this.dataset = dataset;
     this.scanner = scanner;
     this.fragmentId = fragmentId;
     this.withFragemtId = withFragmentId;
     this.inputPartition = inputPartition;
+    this.datasetOpenTimeNs = datasetOpenTimeNs;
+    this.scannerCreateTimeNs = scannerCreateTimeNs;
   }
 
   public static LanceFragmentScanner create(int fragmentId, LanceInputPartition inputPartition) {
     Dataset dataset = null;
+    LanceScanner lanceScanner = null;
     try {
       LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
-      if (inputPartition.getNamespaceImpl() != null) {
+      // Optionally rebuild the namespace client on the executor so the dataset open routes through
+      // Utils.OpenDatasetBuilder's namespaceClient branch. This preserves the storage options
+      // provider on the Rust side, which refreshes short-lived vended credentials (e.g. STS
+      // tokens) during long-running scans. The price is an eager describeTable() RPC against the
+      // namespace on every fragment open.
+      //
+      // For catalogs whose backing service authenticates per-call (e.g. Hive Metastore over
+      // Kerberos) executors typically lack a TGT and that RPC fails with "GSS initiate failed".
+      // Setting LanceSparkReadOptions.CONFIG_EXECUTOR_CREDENTIAL_REFRESH=false makes executors
+      // skip the rebuild and open the dataset by URI using the initialStorageOptions the driver
+      // already obtained, at the cost of losing the Rust-side credential refresh callback.
+      if (inputPartition.getNamespaceImpl() != null && readOptions.isExecutorCredentialRefresh()) {
         if (LanceRuntime.useNamespaceOnWorkers(inputPartition.getNamespaceImpl())) {
           readOptions.setNamespace(
               LanceRuntime.getOrCreateNamespace(
@@ -65,10 +83,12 @@ public class LanceFragmentScanner implements AutoCloseable {
           readOptions.setNamespace(null);
         }
       }
+      long dsOpenStart = System.nanoTime();
       dataset =
           Utils.openDatasetBuilder(readOptions)
               .initialStorageOptions(inputPartition.getInitialStorageOptions())
               .build();
+      long dsOpenTimeNs = System.nanoTime() - dsOpenStart;
       Fragment fragment = dataset.getFragment(fragmentId);
       if (fragment == null) {
         throw new IllegalStateException(
@@ -113,13 +133,25 @@ public class LanceFragmentScanner implements AutoCloseable {
       }
       boolean withFragmentId =
           inputPartition.getSchema().getFieldIndex(LanceConstant.FRAGMENT_ID).nonEmpty();
+      long scanCreateStart = System.nanoTime();
+      lanceScanner = fragment.newScan(scanOptions.build());
+      long scanCreateTimeNs = System.nanoTime() - scanCreateStart;
       return new LanceFragmentScanner(
           dataset,
-          fragment.newScan(scanOptions.build()),
+          lanceScanner,
           fragmentId,
           withFragmentId,
-          inputPartition);
+          inputPartition,
+          dsOpenTimeNs,
+          scanCreateTimeNs);
     } catch (Throwable throwable) {
+      if (lanceScanner != null) {
+        try {
+          lanceScanner.close();
+        } catch (Throwable closeError) {
+          throwable.addSuppressed(closeError);
+        }
+      }
       if (dataset != null) {
         try {
           dataset.close();
@@ -183,6 +215,14 @@ public class LanceFragmentScanner implements AutoCloseable {
 
   public LanceInputPartition getInputPartition() {
     return inputPartition;
+  }
+
+  public long getDatasetOpenTimeNs() {
+    return datasetOpenTimeNs;
+  }
+
+  public long getScannerCreateTimeNs() {
+    return scannerCreateTimeNs;
   }
 
   /**
