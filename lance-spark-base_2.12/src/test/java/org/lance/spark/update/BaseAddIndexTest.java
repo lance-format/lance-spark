@@ -336,6 +336,53 @@ public abstract class BaseAddIndexTest {
   }
 
   @Test
+  public void testCreateZonemapIndexWithNumSegments() {
+    prepareDataset();
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index test_index_zonemap_segments using zonemap (id) with (num_segments = 3)",
+                fullTable));
+
+    Row row = result.collectAsList().get(0);
+    long fragmentsIndexed = row.getLong(0);
+    String indexName = row.getString(1);
+
+    Assertions.assertTrue(fragmentsIndexed >= 2, "Expected at least 2 fragments to be indexed");
+    Assertions.assertEquals("test_index_zonemap_segments", indexName);
+
+    // Verify the number of segments matches the requested num_segments
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int fragmentCount = lanceDataset.getFragments().size();
+      int expectedSegmentCount = Math.min(fragmentCount, 3);
+      List<Index> segments =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> "test_index_zonemap_segments".equals(index.name()))
+              .collect(Collectors.toList());
+
+      Assertions.assertEquals(
+          expectedSegmentCount,
+          segments.size(),
+          "Expected num_segments=3 to produce exactly 3 segments (or fewer if fragment count < 3)");
+
+      int coveredFragments =
+          segments.stream()
+              .map(index -> index.fragments().orElse(Collections.emptyList()).size())
+              .mapToInt(Integer::intValue)
+              .sum();
+      Assertions.assertEquals(
+          fragmentCount,
+          coveredFragments,
+          "Expected committed segments to cover all fragments exactly once");
+    } finally {
+      lanceDataset.close();
+    }
+  }
+
+
+  @Test
   public void testCreateBTreeIndexWithRangeMode() {
     prepareDataset();
 

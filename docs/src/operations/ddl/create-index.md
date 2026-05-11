@@ -39,6 +39,7 @@ For the `zonemap` method, the following options are supported:
 | Option          | Type | Description                                  |
 |-----------------|------|----------------------------------------------|
 | `rows_per_zone` | Long | The approximate number of rows per zonemap zone. |
+| `num_segments` | Integer | Number of index segments to create. Each segment covers a batch of fragments. Defaults to `min(fragment_count, spark.default.parallelism)`. |
 
 ### BTree Options
 

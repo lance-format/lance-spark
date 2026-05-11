@@ -92,6 +92,12 @@ case class AddIndexExec(
     val btreeBuildMode = IndexUtils.btreeBuildMode(indexType, args)
     val useLogicalSegmentCommit = IndexUtils.useLogicalSegmentCommit(indexType)
 
+    val numSegmentsOpt = args.find(_.name == "num_segments")
+    if (numSegmentsOpt.isDefined && !useLogicalSegmentCommit) {
+      throw new IllegalArgumentException(
+        "num_segments option is only supported for index types that use segmented builds (e.g., zonemap)")
+    }
+
     // Create distributed index job and run it
     val createdSegments = createIndexJob(
       lanceDataset,
@@ -317,8 +323,9 @@ class FragmentBasedIndexJob(
     val encodedReadOptions = encode(readOptions)
     val columns = addIndexExec.columns.toList
     val argsJson = IndexUtils.toJson(addIndexExec.args)
+    val numSegments = addIndexExec.args.find(_.name == "num_segments").map(_.value.asInstanceOf[Number].intValue())
     val fragmentBatches = if (groupFragmentsIntoSegments) {
-      batchFragments(fragmentIds)
+      batchFragments(fragmentIds, numSegments)
     } else {
       fragmentIds.map(fid => List(fid))
     }
@@ -346,9 +353,11 @@ class FragmentBasedIndexJob(
       .toSeq
   }
 
-  private def batchFragments(fragmentIds: List[Integer]): Seq[List[Integer]] = {
-    val targetTasks =
-      math.max(1, math.min(fragmentIds.size, addIndexExec.session.sparkContext.defaultParallelism))
+  private def batchFragments(fragmentIds: List[Integer], numSegments: Option[Int] = None): Seq[List[Integer]] = {
+    val targetTasks = numSegments match {
+      case Some(n) => math.max(1, math.min(fragmentIds.size, n))
+      case None => math.max(1, math.min(fragmentIds.size, addIndexExec.session.sparkContext.defaultParallelism))
+    }
     val batchSize = math.ceil(fragmentIds.size.toDouble / targetTasks.toDouble).toInt
     fragmentIds.grouped(batchSize).map(_.toList).toSeq
   }
