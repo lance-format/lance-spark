@@ -157,6 +157,43 @@ For large scans, increasing this to match your CPU core count enables more concu
 export LANCE_IO_THREADS=128
 ```
 
+### Custom Read Metrics
+
+Lance Spark reports per-task custom metrics on the Spark UI Scan node, viewable in the SQL tab's
+physical plan. These are useful for diagnosing read-path performance — pruning effectiveness, JNI
+overhead, and where time is being spent.
+
+Naming conventions:
+
+- Counters use the `num*` prefix.
+- Durations use the `*TimeNs` suffix and are displayed in the UI as formatted strings
+  (e.g. `1.2 s`, `350 ms`, `47 us`) rather than raw nanoseconds.
+
+| Metric | Type | Description |
+|---|---|---|
+| `numFragmentsScanned` | counter | Lance fragments actually opened by this task. Compare against the table fragment count to verify pruning is working. |
+| `numBatchesLoaded` | counter | Arrow batches returned from the JNI scanner. |
+| `numRowsScanned` | counter | Rows read from storage before filter evaluation. Pair with Spark's built-in `numOutputRows` to compute filter selectivity (`numOutputRows / numRowsScanned`). |
+| `datasetOpenTimeNs` | duration | Time spent in `Dataset.open(...)` — manifest load, namespace lookup, credential fetch. High values indicate catalog or metadata cache misses. |
+| `scannerCreateTimeNs` | duration | Time spent in `fragment.newScan(...)` — scan planning, predicate compilation, index lookup setup. |
+| `batchLoadTimeNs` | duration | Wall-clock time inside `loadNextBatch` — JNI crossing, IO, and Arrow IPC deserialization. Divide by `numBatchesLoaded` to get per-batch cost. |
+
+How to read these together:
+
+- **Pushdown verification**: a low `numRowsScanned / numOutputRows` ratio means filters are being
+  pushed down effectively. A 1:1 ratio means every row is being scanned and filtered in Spark —
+  check whether your predicate is supported for pushdown.
+- **Per-batch JNI cost**: `batchLoadTimeNs / numBatchesLoaded` gives the average cost of one batch
+  crossing JNI. If this is high relative to total query time, consider increasing
+  `LanceSparkReadOptions.batchSize` to amortize JNI overhead over more rows.
+- **Catalog overhead**: `datasetOpenTimeNs` accumulates per fragment opened. If many fragments are
+  opened per task, this can dominate; metadata cache size and namespace caching matter most here.
+
+!!!note
+      Additional metrics covering bytes read, fragments pruned, index lookups, and IO/decode
+      time breakdown require new APIs in `lance-jni` and will be added once that surface is
+      available upstream.
+
 ## Caching
 
 Lance Spark uses a multi-level caching strategy to minimize redundant I/O and improve query performance.

@@ -14,6 +14,7 @@
 package org.lance.spark.read;
 
 import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.connector.metric.CustomTaskMetric;
 import org.apache.spark.sql.connector.read.PartitionReader;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 
@@ -61,5 +62,10 @@ public class LanceRowPartitionReader implements PartitionReader<InternalRow> {
   @Override
   public void close() throws IOException {
     reader.close();
+  }
+
+  @Override
+  public CustomTaskMetric[] currentMetricsValues() {
+    return reader.currentMetricsValues();
   }
 }

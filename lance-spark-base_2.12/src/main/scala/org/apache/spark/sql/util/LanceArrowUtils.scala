@@ -30,7 +30,7 @@ import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.apache.spark.{SparkException, SparkUnsupportedOperationException}
 import org.apache.spark.sql.types._
 import org.lance.spark.LanceConstant
-import org.lance.spark.utils.{BlobUtils, Float16Utils, LargeVarCharUtils, VectorUtils}
+import org.lance.spark.utils.{BlobUtils, DateMilliUtils, Float16Utils, LargeVarCharUtils, VectorUtils}
 
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
@@ -45,6 +45,7 @@ object LanceArrowUtils {
   val ARROW_FLOAT16_KEY = Float16Utils.ARROW_FLOAT16_KEY
   val ENCODING_BLOB = BlobUtils.LANCE_ENCODING_BLOB_KEY
   val ARROW_LARGE_VAR_CHAR_KEY = LargeVarCharUtils.ARROW_LARGE_VAR_CHAR_KEY
+  val ARROW_DATE_MILLISECOND_KEY = DateMilliUtils.ARROW_DATE_MILLISECOND_KEY
 
   def fromArrowField(field: Field): DataType = {
     field.getType match {
@@ -80,7 +81,16 @@ object LanceArrowUtils {
               LongType
             case _ => fromArrowField(childField)
           }
-          StructField(childField.getName, childType, childField.isNullable)
+          val baseMeta = Metadata.fromJson(mapper.writeValueAsString(childField.getMetadata))
+          val childMeta = childField.getType match {
+            case d: ArrowType.Date if d.getUnit == DateUnit.MILLISECOND =>
+              new MetadataBuilder()
+                .withMetadata(baseMeta)
+                .putString(ARROW_DATE_MILLISECOND_KEY, DateMilliUtils.ARROW_DATE_MILLISECOND_VALUE)
+                .build()
+            case _ => baseMeta
+          }
+          StructField(childField.getName, childType, childField.isNullable, childMeta)
         }.toArray
         StructType(fields)
       case largeBinary: ArrowType.LargeBinary if isBlobField(field) =>
@@ -138,6 +148,14 @@ object LanceArrowUtils {
           if fp.getPrecision == FloatingPointPrecision.HALF =>
         // Widen float16 to float32 for Spark (Spark has no native float16 type)
         FloatType
+      case d: ArrowType.Decimal if d.getBitWidth == 256 =>
+        // Spark only supports 128-bit decimal (precision <= 38).
+        // Throw at schema time rather than a cryptic UnsupportedOperationException
+        // when LanceArrowColumnVector tries to read the data.
+        throw unsupportedDataTypeError(
+          s"DECIMAL256(${d.getPrecision}, ${d.getScale}) in column '${field.getName}'." +
+            " Lance-Spark only supports 128-bit decimal (precision <= 38)." +
+            " Consider converting the column to a compatible DECIMAL type before reading.")
       case _ => ArrowUtils.fromArrowField(field)
     }
   }
@@ -158,6 +176,12 @@ object LanceArrowUtils {
           // Preserve LargeUtf8 type info so subsequent writes use LargeVarCharVector
           new MetadataBuilder()
             .putString(ARROW_LARGE_VAR_CHAR_KEY, "true")
+            .build()
+        case date: ArrowType.Date if date.getUnit == DateUnit.MILLISECOND =>
+          val base = Metadata.fromJson(mapper.writeValueAsString(field.getMetadata))
+          new MetadataBuilder()
+            .withMetadata(base)
+            .putString(ARROW_DATE_MILLISECOND_KEY, DateMilliUtils.ARROW_DATE_MILLISECOND_VALUE)
             .build()
         case _ => Metadata.fromJson(
             mapper.writeValueAsString(field.getMetadata))
@@ -290,6 +314,13 @@ object LanceArrowUtils {
             largeVarTypes = largeVarTypes)).asJava)
       case udt: UserDefinedType[_] =>
         toArrowField(name, udt.sqlType, nullable, timeZoneId, largeVarTypes = largeVarTypes)
+      case DateType if DateMilliUtils.hasDateMilliMetadata(metadata) =>
+        val fieldType = new FieldType(
+          nullable,
+          new ArrowType.Date(DateUnit.MILLISECOND),
+          null,
+          meta.asJava)
+        new Field(name, fieldType, Seq.empty[Field].asJava)
       case dataType =>
         val fieldType =
           new FieldType(nullable, toArrowType(dataType, timeZoneId, large, name), null, meta.asJava)
@@ -384,6 +415,13 @@ object LanceArrowUtils {
     new SparkUnsupportedOperationException(
       errorClass = "UNSUPPORTED_DATATYPE",
       messageParameters = Map("typeName" -> ("\"" + typeName.sql.toUpperCase(Locale.ROOT) + "\"")))
+  }
+
+  /* For unsupported Arrow types where a DataType cannot be constructed (e.g. DECIMAL256) */
+  private def unsupportedDataTypeError(typeName: String): SparkUnsupportedOperationException = {
+    new SparkUnsupportedOperationException(
+      errorClass = "UNSUPPORTED_DATATYPE",
+      messageParameters = Map("typeName" -> ("\"" + typeName + "\"")))
   }
 
   /* Copy from copy of org.apache.spark.sql.errors.ExecutionErrors for Spark version compatibility */

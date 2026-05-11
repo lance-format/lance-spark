@@ -38,22 +38,29 @@ public class LanceFragmentScanner implements AutoCloseable {
   private final int fragmentId;
   private final boolean withFragemtId;
   private final LanceInputPartition inputPartition;
+  private final long datasetOpenTimeNs;
+  private final long scannerCreateTimeNs;
 
   private LanceFragmentScanner(
       Dataset dataset,
       LanceScanner scanner,
       int fragmentId,
       boolean withFragmentId,
-      LanceInputPartition inputPartition) {
+      LanceInputPartition inputPartition,
+      long datasetOpenTimeNs,
+      long scannerCreateTimeNs) {
     this.dataset = dataset;
     this.scanner = scanner;
     this.fragmentId = fragmentId;
     this.withFragemtId = withFragmentId;
     this.inputPartition = inputPartition;
+    this.datasetOpenTimeNs = datasetOpenTimeNs;
+    this.scannerCreateTimeNs = scannerCreateTimeNs;
   }
 
   public static LanceFragmentScanner create(int fragmentId, LanceInputPartition inputPartition) {
     Dataset dataset = null;
+    LanceScanner lanceScanner = null;
     try {
       LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
       // Optionally rebuild the namespace client on the executor so the dataset open routes through
@@ -76,10 +83,12 @@ public class LanceFragmentScanner implements AutoCloseable {
           readOptions.setNamespace(null);
         }
       }
+      long dsOpenStart = System.nanoTime();
       dataset =
           Utils.openDatasetBuilder(readOptions)
               .initialStorageOptions(inputPartition.getInitialStorageOptions())
               .build();
+      long dsOpenTimeNs = System.nanoTime() - dsOpenStart;
       Fragment fragment = dataset.getFragment(fragmentId);
       if (fragment == null) {
         throw new IllegalStateException(
@@ -124,13 +133,25 @@ public class LanceFragmentScanner implements AutoCloseable {
       }
       boolean withFragmentId =
           inputPartition.getSchema().getFieldIndex(LanceConstant.FRAGMENT_ID).nonEmpty();
+      long scanCreateStart = System.nanoTime();
+      lanceScanner = fragment.newScan(scanOptions.build());
+      long scanCreateTimeNs = System.nanoTime() - scanCreateStart;
       return new LanceFragmentScanner(
           dataset,
-          fragment.newScan(scanOptions.build()),
+          lanceScanner,
           fragmentId,
           withFragmentId,
-          inputPartition);
+          inputPartition,
+          dsOpenTimeNs,
+          scanCreateTimeNs);
     } catch (Throwable throwable) {
+      if (lanceScanner != null) {
+        try {
+          lanceScanner.close();
+        } catch (Throwable closeError) {
+          throwable.addSuppressed(closeError);
+        }
+      }
       if (dataset != null) {
         try {
           dataset.close();
@@ -194,6 +215,14 @@ public class LanceFragmentScanner implements AutoCloseable {
 
   public LanceInputPartition getInputPartition() {
     return inputPartition;
+  }
+
+  public long getDatasetOpenTimeNs() {
+    return datasetOpenTimeNs;
+  }
+
+  public long getScannerCreateTimeNs() {
+    return scannerCreateTimeNs;
   }
 
   /**
