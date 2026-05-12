@@ -81,7 +81,7 @@ public abstract class BaseCdfConfigTest {
       assertEquals(2L, alice.getLong(3)); // created
       assertEquals(3L, alice.getLong(4)); // updated
 
-      // Bob: untouched — retains original insert version from RowDatasetVersionMeta
+      // Bob: untouched after fragment rewrite — reports actual insert version (v2)
       Row bob = rows.get(1);
       assertEquals(2, bob.getInt(0));
       assertEquals(200, bob.getInt(2));
@@ -142,7 +142,7 @@ public abstract class BaseCdfConfigTest {
       assertEquals(2L, alice.getLong(3)); // created
       assertEquals(3L, alice.getLong(4)); // updated
 
-      // Bob: untouched — retains original insert version from RowDatasetVersionMeta
+      // Bob: untouched after fragment rewrite — reports actual insert version (v2)
       Row bob = rows.get(1);
       assertEquals(2, bob.getInt(0));
       assertEquals(200, bob.getInt(2));

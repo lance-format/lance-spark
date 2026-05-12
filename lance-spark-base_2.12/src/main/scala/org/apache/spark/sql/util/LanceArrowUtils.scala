@@ -148,6 +148,14 @@ object LanceArrowUtils {
           if fp.getPrecision == FloatingPointPrecision.HALF =>
         // Widen float16 to float32 for Spark (Spark has no native float16 type)
         FloatType
+      case d: ArrowType.Decimal if d.getBitWidth == 256 =>
+        // Spark only supports 128-bit decimal (precision <= 38).
+        // Throw at schema time rather than a cryptic UnsupportedOperationException
+        // when LanceArrowColumnVector tries to read the data.
+        throw unsupportedDataTypeError(
+          s"DECIMAL256(${d.getPrecision}, ${d.getScale}) in column '${field.getName}'." +
+            " Lance-Spark only supports 128-bit decimal (precision <= 38)." +
+            " Consider converting the column to a compatible DECIMAL type before reading.")
       case _ => ArrowUtils.fromArrowField(field)
     }
   }
@@ -407,6 +415,13 @@ object LanceArrowUtils {
     new SparkUnsupportedOperationException(
       errorClass = "UNSUPPORTED_DATATYPE",
       messageParameters = Map("typeName" -> ("\"" + typeName.sql.toUpperCase(Locale.ROOT) + "\"")))
+  }
+
+  /* For unsupported Arrow types where a DataType cannot be constructed (e.g. DECIMAL256) */
+  private def unsupportedDataTypeError(typeName: String): SparkUnsupportedOperationException = {
+    new SparkUnsupportedOperationException(
+      errorClass = "UNSUPPORTED_DATATYPE",
+      messageParameters = Map("typeName" -> ("\"" + typeName + "\"")))
   }
 
   /* Copy from copy of org.apache.spark.sql.errors.ExecutionErrors for Spark version compatibility */

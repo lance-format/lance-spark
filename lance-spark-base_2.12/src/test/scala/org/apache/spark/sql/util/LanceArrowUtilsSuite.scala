@@ -83,6 +83,20 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
     roundtrip(DayTimeIntervalType())
   }
 
+  test("decimal256 field throws SparkUnsupportedOperationException") {
+    val field = new Field(
+      "amount",
+      new FieldType(true, new ArrowType.Decimal(38, 5, 256), null, null),
+      java.util.Collections.emptyList())
+    val ex = intercept[SparkUnsupportedOperationException] {
+      LanceArrowUtils.fromArrowField(field)
+    }
+    assert(ex.getMessage.contains("amount"), s"field name missing: ${ex.getMessage}")
+    assert(ex.getMessage.contains("256"), s"bit-width missing: ${ex.getMessage}")
+    assert(ex.getMessage.contains("128"), s"128-bit hint missing: ${ex.getMessage}")
+    assert(ex.getMessage.contains("38"), s"precision limit hint missing: ${ex.getMessage}")
+  }
+
   test("timestamp") {
 
     def roundtripWithTz(timeZoneId: String): Unit = {
