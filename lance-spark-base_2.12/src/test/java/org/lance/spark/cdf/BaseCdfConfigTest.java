@@ -74,7 +74,7 @@ public abstract class BaseCdfConfigTest {
 
       assertEquals(2, rows.size());
 
-      // Alice: updated in v3 — created tracks original insert version via RowIdMeta
+      // Alice: updated in v3 — created tracks actual insert version (v2)
       Row alice = rows.get(0);
       assertEquals(1, alice.getInt(0));
       assertEquals(110, alice.getInt(2));
@@ -135,7 +135,7 @@ public abstract class BaseCdfConfigTest {
 
       assertEquals(2, rows.size());
 
-      // Alice: updated in v3 — created tracks original insert version via RowIdMeta
+      // Alice: updated in v3 — created tracks actual insert version (v2)
       Row alice = rows.get(0);
       assertEquals(1, alice.getInt(0));
       assertEquals(110, alice.getInt(2));

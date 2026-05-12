@@ -90,9 +90,10 @@ public abstract class BaseCdfVersionTrackingTest {
     // v3: Update one row
     helper.update("value = value + 10", "id = 1");
 
+    // Native UPDATE preserves actual insert version for _row_created_at_version
     helper.checkWithVersions(
         Arrays.asList(
-            CdfRow.ofWithVersions(1, "Alice", 110, 1L, 3L),
+            CdfRow.ofWithVersions(1, "Alice", 110, 2L, 3L),
             CdfRow.ofWithVersions(2, "Bob", 200, 2L, 2L)));
   }
 
@@ -104,7 +105,7 @@ public abstract class BaseCdfVersionTrackingTest {
     // v2: Initial insert
     helper.insert(Collections.singletonList(CdfRow.of(1, "Alice", 100)));
 
-    // v3: First update
+    // v3: First update — created stays at v2 (original insert)
     helper.update("value = value + 10", "id = 1");
     helper.checkWithVersions(
         Collections.singletonList(CdfRow.ofWithVersions(1, "Alice", 110, 2L, 3L)));
@@ -136,8 +137,8 @@ public abstract class BaseCdfVersionTrackingTest {
     helper.checkWithVersions(
         Arrays.asList(
             CdfRow.ofWithVersions(1, "Alice", 100, 2L, 2L),
-            CdfRow.ofWithVersions(2, "Bob", 201, 1L, 3L),
-            CdfRow.ofWithVersions(3, "Charlie", 301, 1L, 3L)));
+            CdfRow.ofWithVersions(2, "Bob", 201, 2L, 3L),
+            CdfRow.ofWithVersions(3, "Charlie", 301, 2L, 3L)));
   }
 
   @Test
@@ -200,6 +201,7 @@ public abstract class BaseCdfVersionTrackingTest {
     // v7: Update remaining rows += 1
     helper.update("value = value + 1", "id IN (1, 3)");
 
+    // created tracks actual insert version: Alice at v2, Charlie at v4
     helper.checkWithVersions(
         Arrays.asList(
             CdfRow.ofWithVersions(1, "Alice", 151, 2L, 7L),
