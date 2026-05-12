@@ -223,6 +223,57 @@ public class UpdateRowIdStabilityTest {
     verifyDataValues(Map.of(1, 11, 2, 21, 3, 31));
   }
 
+  /**
+   * After an update, rows move to new fragments so _rowaddr changes while _rowid is preserved via
+   * RowIdMeta. A second update must use the NEW _rowaddr (for fragment deletion) and the ORIGINAL
+   * _rowid (for RowIdMeta attachment). This test exercises the case where _rowid != _rowaddr,
+   * verifying the id InternalRow column ordering (ID_COL_ROW_ID vs ID_COL_ROW_ADDR) is correct.
+   */
+  @Test
+  public void testRepeatedUpdatesMultiFragmentPreservesRowId() {
+    spark.sql(
+        "CREATE TABLE "
+            + fullTableName
+            + " (id INT NOT NULL, name STRING, value INT)"
+            + " TBLPROPERTIES ('enable_stable_row_ids' = 'true')");
+
+    // Two separate inserts create two fragments with different fragment IDs.
+    // Fragment 0: rows (1,2,3) with _rowaddr = (0<<32)|{0,1,2} and _rowid = {0,1,2}
+    // Fragment 1: rows (4,5,6) with _rowaddr = (1<<32)|{0,1,2} and _rowid = {3,4,5}
+    spark.sql("INSERT INTO " + fullTableName + " VALUES (1, 'A', 10), (2, 'B', 20), (3, 'C', 30)");
+    spark.sql("INSERT INTO " + fullTableName + " VALUES (4, 'D', 40), (5, 'E', 50), (6, 'F', 60)");
+
+    Map<Integer, Long> originalRowIds = readRowIds();
+    assertEquals(6, originalRowIds.size());
+
+    // First update: moves rows to new fragments. After this, _rowaddr values change
+    // (rows are in new fragments) but _rowid values are preserved via RowIdMeta.
+    spark.sql("UPDATE " + fullTableName + " SET value = value + 1 WHERE id IN (2, 5)");
+
+    Map<Integer, Long> afterFirstUpdate = readRowIds();
+    for (Map.Entry<Integer, Long> entry : originalRowIds.entrySet()) {
+      assertEquals(
+          entry.getValue(),
+          afterFirstUpdate.get(entry.getKey()),
+          "rowId changed after first update for id=" + entry.getKey());
+    }
+
+    // Second update on the SAME rows: now _rowid != _rowaddr for the previously updated rows.
+    // If the id column ordering is wrong (e.g. using _rowid as _rowaddr for deletion), this
+    // would attempt to delete from the wrong fragment and either corrupt data or fail.
+    spark.sql("UPDATE " + fullTableName + " SET value = value + 1 WHERE id IN (2, 5)");
+
+    Map<Integer, Long> afterSecondUpdate = readRowIds();
+    for (Map.Entry<Integer, Long> entry : originalRowIds.entrySet()) {
+      assertEquals(
+          entry.getValue(),
+          afterSecondUpdate.get(entry.getKey()),
+          "rowId changed after second update for id=" + entry.getKey());
+    }
+
+    verifyDataValues(Map.of(1, 10, 2, 22, 3, 30, 4, 40, 5, 52, 6, 60));
+  }
+
   private Map<Integer, Long> readRowIds() {
     Dataset<Row> df = spark.sql("SELECT id, _rowid FROM " + fullTableName + " ORDER BY id");
     List<Row> rows = df.collectAsList();

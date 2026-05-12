@@ -63,6 +63,8 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.FutureTask;
 import java.util.stream.Collectors;
 
+import static org.lance.spark.join.FragmentAwareJoinUtils.*;
+
 public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistributionAndOrdering {
   private static final Logger logger = LoggerFactory.getLogger(SparkPositionDeltaWrite.class);
 
@@ -302,8 +304,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     public void delete(InternalRow metadata, InternalRow id) throws IOException {
       long rowAddr = id.getLong(0);
       deletionMap
-          .computeIfAbsent(fragmentIdFromRowAddr(rowAddr), k -> new RoaringBitmap())
-          .add(rowOffsetFromRowAddr(rowAddr));
+          .computeIfAbsent(extractFragmentId(rowAddr), fragmentId -> new RoaringBitmap())
+          .add(extractRowIndex(rowAddr));
     }
 
     @Override
@@ -332,14 +334,6 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     public void close() throws IOException {
       writer.close();
     }
-  }
-
-  private static int fragmentIdFromRowAddr(long rowAddr) {
-    return (int) (rowAddr >>> 32);
-  }
-
-  private static int rowOffsetFromRowAddr(long rowAddr) {
-    return (int) (rowAddr & 0xFFFFFFFFL);
   }
 
   /**

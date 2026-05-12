@@ -65,8 +65,22 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.FutureTask;
 import java.util.stream.Collectors;
 
+import static org.lance.spark.join.FragmentAwareJoinUtils.*;
+
 public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistributionAndOrdering {
   private static final Logger LOG = LoggerFactory.getLogger(SparkPositionDeltaWrite.class);
+
+  // ---- id InternalRow column indices ----
+  // The `id` InternalRow passed to delete()/update() is a ProjectingInternalRow whose column
+  // positions are resolved by Spark's buildWriteDeltaProjections against the plan output schema.
+  // The plan output inherits the scan schema ordering from LanceDataset.METADATA_COLUMNS, which
+  // places _rowid before _rowaddr. This means the id row follows METADATA_COLUMNS order, NOT the
+  // order declared by rowId() in LancePositionDeltaOperation.
+  //
+  // METADATA_COLUMNS order: _rowid (index 0), _rowaddr (index 1), ...
+  // rowId() declaration:    {_rowaddr, _rowid}  (different order — does NOT control id layout)
+  private static final int ID_COL_ROW_ID = 0;
+  private static final int ID_COL_ROW_ADDR = 1;
 
   private final StructType sparkSchema;
   private final LanceSparkWriteOptions writeOptions;
@@ -313,27 +327,25 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       this.hasStableRowIds = hasStableRowIds;
     }
 
-    // id row positions are determined by the physical scan order in LanceFragmentScanner
-    // (METADATA_COLUMNS: _rowid at index 0, _rowaddr at index 1), not by rowId() array order.
     @Override
     public void delete(InternalRow metadata, InternalRow id) throws IOException {
-      recordDeletion(id.getLong(1));
+      recordDeletion(id.getLong(ID_COL_ROW_ADDR));
     }
 
     @Override
     public void update(InternalRow metadata, InternalRow id, InternalRow row) throws IOException {
-      long rowId = id.getLong(0);
+      long rowId = id.getLong(ID_COL_ROW_ID);
       if (hasStableRowIds) {
         capturedRowIds.add(rowId);
       }
-      recordDeletion(id.getLong(1));
+      recordDeletion(id.getLong(ID_COL_ROW_ADDR));
       writer.write(row);
     }
 
     private void recordDeletion(long rowAddr) {
       deletionMap
-          .computeIfAbsent(fragmentIdFromRowAddr(rowAddr), k -> new RoaringBitmap())
-          .add(rowOffsetFromRowAddr(rowAddr));
+          .computeIfAbsent(extractFragmentId(rowAddr), fragmentId -> new RoaringBitmap())
+          .add(extractRowIndex(rowAddr));
     }
 
     @Override
@@ -354,7 +366,9 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
         } else {
           LOG.warn(
               "Skipping RowIdMeta attachment: captured {} row IDs but new fragments have {}"
-                  + " physical rows (expected in MERGE scenarios with mixed update+insert rows)",
+                  + " physical rows. This is unexpected in the native UPDATE path where only"
+                  + " update() calls produce rows; it may indicate a bug or a future code path"
+                  + " mixing update and insert rows in the same task.",
               capturedRowIds.size(),
               totalPhysicalRows);
         }
@@ -372,14 +386,6 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     public void close() throws IOException {
       writer.close();
     }
-  }
-
-  private static int fragmentIdFromRowAddr(long rowAddr) {
-    return (int) (rowAddr >>> 32);
-  }
-
-  private static int rowOffsetFromRowAddr(long rowAddr) {
-    return (int) (rowAddr & 0xFFFFFFFFL);
   }
 
   /**
