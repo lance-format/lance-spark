@@ -2747,5 +2747,59 @@ class TestStableRowIds:
                 print(f"Failed to clean up {catalog_name}.default.test_table: {e}")
 
 
+    @requires_update_or_merge
+    def test_update_preserves_row_ids(self, spark):
+        """Test that UPDATE preserves _rowid values when stable row IDs are enabled.
+
+        Verifies the native DeltaWriter.update() path with RowIdMeta attachment
+        keeps row IDs stable across updates, including multi-fragment scenarios.
+        """
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING,
+                value INT
+            ) TBLPROPERTIES ('enable_stable_row_ids' = 'true')
+        """)
+
+        # Insert across two fragments
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (1, 'Alice', 100),
+            (2, 'Bob', 200),
+            (3, 'Charlie', 300)
+        """)
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (4, 'Dave', 400),
+            (5, 'Eve', 500)
+        """)
+
+        # Capture row IDs before update
+        before = spark.sql("""
+            SELECT id, _rowid FROM default.test_table ORDER BY id
+        """).collect()
+        row_ids_before = {row.id: row._rowid for row in before}
+        assert len(row_ids_before) == 5
+
+        # Update rows spanning both fragments
+        spark.sql("UPDATE default.test_table SET value = value + 1 WHERE value >= 200")
+
+        # Capture row IDs after update
+        after = spark.sql("""
+            SELECT id, _rowid, value FROM default.test_table ORDER BY id
+        """).collect()
+        row_ids_after = {row.id: row._rowid for row in after}
+
+        # Verify row IDs are preserved for all rows
+        for row_id_key in row_ids_before:
+            assert row_ids_before[row_id_key] == row_ids_after[row_id_key], \
+                f"_rowid changed for id={row_id_key}"
+
+        # Verify data correctness
+        values = {row.id: row.value for row in after}
+        assert values == {1: 100, 2: 201, 3: 301, 4: 401, 5: 501}
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

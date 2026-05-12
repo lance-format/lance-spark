@@ -54,6 +54,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -62,6 +63,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Callable;
 import java.util.concurrent.FutureTask;
+import java.util.stream.Collectors;
 
 public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistributionAndOrdering {
   private static final Logger LOG = LoggerFactory.getLogger(SparkPositionDeltaWrite.class);
@@ -144,45 +146,41 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       Map<Integer, RoaringBitmap> aggregatedDeletions = new HashMap<>();
 
       for (WriterCommitMessage msg : messages) {
-        DeltaWriteTaskCommit m = (DeltaWriteTaskCommit) msg;
-        newFragments.addAll(m.newFragments());
-        m.deletionMap()
+        DeltaWriteTaskCommit taskCommit = (DeltaWriteTaskCommit) msg;
+        newFragments.addAll(taskCommit.newFragments());
+        taskCommit
+            .deletionMap()
             .forEach(
                 (fragId, bitmap) ->
                     aggregatedDeletions.merge(
                         fragId,
-                        bitmap,
+                        bitmap.clone(),
                         (existing, incoming) -> {
                           existing.or(incoming);
                           return existing;
                         }));
       }
 
-      List<Long> removedFragmentIds = new ArrayList<>();
-      List<FragmentMetadata> updatedFragments = new ArrayList<>();
       long version =
           Objects.requireNonNull(
               writeOptions.getVersion(),
               "version must be set (resolved in SparkPositionDeltaWrite constructor)");
       try (Dataset dataset = Utils.openDatasetBuilder(writeOptions).build()) {
-        aggregatedDeletions.forEach(
-            (fragmentId, bitmap) -> {
-              List<Integer> rowIndexes = new ArrayList<>();
-              IntIterator it = bitmap.getIntIterator();
-              while (it.hasNext()) {
-                rowIndexes.add(it.next());
-              }
-              if (rowIndexes.isEmpty()) {
-                return;
-              }
-              FragmentMetadata updatedFragment =
-                  dataset.getFragment(fragmentId).deleteRows(ImmutableList.copyOf(rowIndexes));
-              if (updatedFragment != null) {
-                updatedFragments.add(updatedFragment);
-              } else {
-                removedFragmentIds.add(Long.valueOf(fragmentId));
-              }
-            });
+        List<Map.Entry<Integer, FragmentMetadata>> deletionResults =
+            aggregatedDeletions.entrySet().parallelStream()
+                .filter(entry -> !entry.getValue().isEmpty())
+                .map(entry -> deleteFragmentRows(dataset, entry.getKey(), entry.getValue()))
+                .collect(Collectors.toList());
+
+        List<Long> removedFragmentIds = new ArrayList<>();
+        List<FragmentMetadata> updatedFragments = new ArrayList<>();
+        for (Map.Entry<Integer, FragmentMetadata> deletionResult : deletionResults) {
+          if (deletionResult.getValue() != null) {
+            updatedFragments.add(deletionResult.getValue());
+          } else {
+            removedFragmentIds.add(Long.valueOf(deletionResult.getKey()));
+          }
+        }
 
         Update update =
             Update.builder()
@@ -319,23 +317,23 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     // (METADATA_COLUMNS: _rowid at index 0, _rowaddr at index 1), not by rowId() array order.
     @Override
     public void delete(InternalRow metadata, InternalRow id) throws IOException {
-      long rowAddr = id.getLong(1);
-      deletionMap
-          .computeIfAbsent(fragmentIdFromRowAddr(rowAddr), k -> new RoaringBitmap())
-          .add(rowOffsetFromRowAddr(rowAddr));
+      recordDeletion(id.getLong(1));
     }
 
     @Override
     public void update(InternalRow metadata, InternalRow id, InternalRow row) throws IOException {
       long rowId = id.getLong(0);
-      long rowAddr = id.getLong(1);
       if (hasStableRowIds) {
         capturedRowIds.add(rowId);
       }
+      recordDeletion(id.getLong(1));
+      writer.write(row);
+    }
+
+    private void recordDeletion(long rowAddr) {
       deletionMap
           .computeIfAbsent(fragmentIdFromRowAddr(rowAddr), k -> new RoaringBitmap())
           .add(rowOffsetFromRowAddr(rowAddr));
-      writer.write(row);
     }
 
     @Override
@@ -382,6 +380,22 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
   private static int rowOffsetFromRowAddr(long rowAddr) {
     return (int) (rowAddr & 0xFFFFFFFFL);
+  }
+
+  /**
+   * Writes deletion metadata for a single fragment. Returns the fragment ID paired with the updated
+   * fragment metadata, or {@code null} if all rows were deleted (fragment removed).
+   */
+  private static Map.Entry<Integer, FragmentMetadata> deleteFragmentRows(
+      Dataset dataset, int fragmentId, RoaringBitmap bitmap) {
+    List<Integer> rowIndexes = new ArrayList<>();
+    IntIterator it = bitmap.getIntIterator();
+    while (it.hasNext()) {
+      rowIndexes.add(it.next());
+    }
+    FragmentMetadata updatedFragment =
+        dataset.getFragment(fragmentId).deleteRows(ImmutableList.copyOf(rowIndexes));
+    return new AbstractMap.SimpleEntry<>(fragmentId, updatedFragment);
   }
 
   // ---------------------------------------------------------------------------
