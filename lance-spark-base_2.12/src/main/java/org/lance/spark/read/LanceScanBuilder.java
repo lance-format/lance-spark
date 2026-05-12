@@ -29,6 +29,7 @@ import org.lance.spark.utils.Utils;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.connector.expressions.FieldReference;
+import org.apache.spark.sql.connector.expressions.NamedReference;
 import org.apache.spark.sql.connector.expressions.NullOrdering;
 import org.apache.spark.sql.connector.expressions.SortDirection;
 import org.apache.spark.sql.connector.expressions.SortOrder;
@@ -42,6 +43,7 @@ import org.apache.spark.sql.connector.read.SupportsPushDownLimit;
 import org.apache.spark.sql.connector.read.SupportsPushDownOffset;
 import org.apache.spark.sql.connector.read.SupportsPushDownRequiredColumns;
 import org.apache.spark.sql.connector.read.SupportsPushDownTopN;
+import org.apache.spark.sql.connector.read.colstats.ColumnStatistics;
 import org.apache.spark.sql.sources.Filter;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
@@ -52,6 +54,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -142,14 +146,27 @@ public class LanceScanBuilder
     // Get statistics from manifest summary before closing dataset
     ManifestSummary summary = getOrOpenDataset().getVersion().getManifestSummary();
 
-    // Collect all columns that need zonemap stats: filter columns + partition column (if declared).
-    Set<String> columnsToLoad = extractReferencedColumns(pushedFilters);
+    // Collect all columns that need zonemap stats: filter columns + partition column (if declared)
+    // + projected columns (for CBO column-stats reporting). The cap on projected columns
+    // bounds driver-side I/O / memory; filter+partition columns are always loaded since they
+    // already drive fragment pruning.
+    Set<String> columnsToLoad = new LinkedHashSet<>(extractReferencedColumns(pushedFilters));
     String partitionColumn = tableProperties.get(LanceConstant.TABLE_OPT_PARTITION_COLUMNS);
     if (partitionColumn != null && !partitionColumn.trim().isEmpty()) {
       partitionColumn = partitionColumn.trim();
       columnsToLoad.add(partitionColumn);
     } else {
       partitionColumn = null;
+    }
+    boolean cboColumnStatsEnabled = resolveCboColumnStatsEnabled(readOptions);
+    if (cboColumnStatsEnabled) {
+      int cap = resolveCboColumnStatsMaxColumns(readOptions);
+      for (org.apache.spark.sql.types.StructField f : schema.fields()) {
+        if (columnsToLoad.size() >= cap) {
+          break;
+        }
+        columnsToLoad.add(f.name());
+      }
     }
 
     // Load zonemap stats for all requested columns in one pass.
@@ -199,8 +216,14 @@ public class LanceScanBuilder
       projectedRows = (long) (projectedRows * ratio);
       projectedFullSize = (long) (projectedFullSize * ratio);
     }
+    Map<NamedReference, ColumnStatistics> aggregatedColumnStats =
+        cboColumnStatsEnabled
+            ? aggregateProjectedColumnStats(zonemapStats, schema)
+            : Collections.emptyMap();
+
     LanceStatistics statistics =
-        LanceStatistics.estimateProjected(projectedRows, projectedFullSize, fullSchema, schema);
+        LanceStatistics.estimateProjected(
+            projectedRows, projectedFullSize, fullSchema, schema, aggregatedColumnStats);
     if (survivingFragmentIds != null) {
       LOG.debug(
           "Scan statistics after pruning: {} of {} fragments survive,"
@@ -387,9 +410,17 @@ public class LanceScanBuilder
 
       // Use the criteria-based overload so that indexes missing index_details
       // (created by older versions) are silently skipped instead of causing errors.
+      // Accept both BTREE and ZONEMAP indexes — Lance's btree implementation embeds
+      // a zonemap, so getZonemapStats() returns valid per-zone stats for either type.
+      // Loading later filters out columns whose stats are empty, so over-including
+      // is cheap.
       IndexCriteria criteria = new IndexCriteria.Builder().build();
       for (IndexDescription idx : dataset.describeIndices(criteria)) {
-        if ("ZONEMAP".equalsIgnoreCase(idx.getIndexType())) {
+        String type = idx.getIndexType();
+        if (type == null) {
+          continue;
+        }
+        if ("ZONEMAP".equalsIgnoreCase(type) || "BTREE".equalsIgnoreCase(type)) {
           for (int fieldId : idx.getFieldIds()) {
             String name = fieldIdToName.get(fieldId);
             if (name != null) {
@@ -402,6 +433,83 @@ public class LanceScanBuilder
       LOG.warn("Failed to query zonemap indexes: {}", e.getMessage());
     }
     return columns;
+  }
+
+  /**
+   * Resolve the column-stats kill-switch using two-level lookup. The SparkConf key {@code
+   * spark.lance.cbo.column.stats.enabled} acts as a global kill-switch: when set, it overrides the
+   * per-scan {@link LanceSparkReadOptions#isCboColumnStatsEnabled()} value. When unset, the
+   * per-scan option (default {@code true}) wins. This makes a single session-level config able to
+   * disable the feature everywhere for safe rollback.
+   */
+  private static boolean resolveCboColumnStatsEnabled(LanceSparkReadOptions readOptions) {
+    try {
+      org.apache.spark.sql.SparkSession session = org.apache.spark.sql.SparkSession.active();
+      String key = "spark.lance.cbo.column.stats.enabled";
+      if (session.conf().contains(key)) {
+        return Boolean.parseBoolean(session.conf().get(key));
+      }
+    } catch (Exception ignored) {
+      // No active session (e.g., unit tests) — fall through to per-scan option.
+    }
+    return readOptions.isCboColumnStatsEnabled();
+  }
+
+  /**
+   * Resolve the column-stats max-columns cap. SparkConf {@code
+   * spark.lance.cbo.column.stats.max.columns} overrides the per-scan value when set, mirroring the
+   * {@link #resolveCboColumnStatsEnabled} pattern. Used to cap driver-side I/O — loading zonemap
+   * stats for many columns is the dominant per-scan cost and the primary regression source on
+   * wide-projection queries.
+   */
+  private static int resolveCboColumnStatsMaxColumns(LanceSparkReadOptions readOptions) {
+    try {
+      org.apache.spark.sql.SparkSession session = org.apache.spark.sql.SparkSession.active();
+      String key = "spark.lance.cbo.column.stats.max.columns";
+      if (session.conf().contains(key)) {
+        int parsed = Integer.parseInt(session.conf().get(key));
+        if (parsed >= 0) {
+          return parsed;
+        }
+      }
+    } catch (Exception ignored) {
+      // Fall through.
+    }
+    return readOptions.getCboColumnStatsMaxColumns();
+  }
+
+  /**
+   * Aggregate per-column zonemap stats into Spark DSv2 {@link ColumnStatistics} keyed by {@link
+   * NamedReference}. Restricted to columns that appear in the projected schema — Spark would ignore
+   * stats for non-projected columns anyway, and including them risks exposing predicate- only
+   * columns to optimizer rules that don't expect them.
+   */
+  private static Map<NamedReference, ColumnStatistics> aggregateProjectedColumnStats(
+      Map<String, List<ZoneStats>> zonemapStats, StructType projectedSchema) {
+    if (zonemapStats == null || zonemapStats.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    Set<String> projected = new HashSet<>();
+    for (org.apache.spark.sql.types.StructField f : projectedSchema.fields()) {
+      projected.add(f.name());
+    }
+    Map<NamedReference, ColumnStatistics> result = new LinkedHashMap<>();
+    for (Map.Entry<String, List<ZoneStats>> e : zonemapStats.entrySet()) {
+      if (!projected.contains(e.getKey())) {
+        continue;
+      }
+      ColumnStatsAggregator.aggregate(e.getValue())
+          .ifPresent(stats -> result.put(FieldReference.column(e.getKey()), stats));
+    }
+    LOG.warn(
+        "DBG: zonemap.keys={} projected={} result.size={}",
+        zonemapStats.keySet(),
+        projected,
+        result.size());
+    if (!result.isEmpty()) {
+      LOG.debug("Reporting column stats for {} columns: {}", result.size(), result.keySet());
+    }
+    return result;
   }
 
   private static Set<String> extractReferencedColumns(Filter[] filters) {

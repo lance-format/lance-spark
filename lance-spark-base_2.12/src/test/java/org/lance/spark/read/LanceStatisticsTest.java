@@ -13,10 +13,18 @@
  */
 package org.lance.spark.read;
 
+import org.apache.spark.sql.connector.expressions.FieldReference;
+import org.apache.spark.sql.connector.expressions.NamedReference;
+import org.apache.spark.sql.connector.read.colstats.ColumnStatistics;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalLong;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -171,5 +179,93 @@ public class LanceStatisticsTest {
     // 10 bytes × 8 / 108 = 0.74 → (long) cast → 0 → clamp → 1.
     LanceStatistics stats = LanceStatistics.estimateProjected(1000, 10L, full, projected);
     assertEquals(1L, stats.sizeInBytes().getAsLong());
+  }
+
+  @Test
+  public void testColumnStatsDefaultEmpty() {
+    LanceStatistics stats = new LanceStatistics(1000, 50000);
+    assertNotNull(stats.columnStats());
+    assertTrue(stats.columnStats().isEmpty());
+  }
+
+  @Test
+  public void testColumnStatsNullMapTreatedAsEmpty() {
+    LanceStatistics stats = new LanceStatistics(1000, 50000, null);
+    assertTrue(stats.columnStats().isEmpty());
+  }
+
+  @Test
+  public void testColumnStatsExposedThroughExplicitConstructor() {
+    NamedReference colA = FieldReference.column("a");
+    Map<NamedReference, ColumnStatistics> input = new LinkedHashMap<>();
+    input.put(colA, new TestColumnStats(1L, 100L, 5L));
+
+    LanceStatistics stats = new LanceStatistics(200, 1234L, input);
+    assertEquals(1, stats.columnStats().size());
+    assertSame(input.get(colA), stats.columnStats().get(colA));
+  }
+
+  @Test
+  public void testColumnStatsMapIsDefensivelyCopied() {
+    NamedReference colA = FieldReference.column("a");
+    Map<NamedReference, ColumnStatistics> mutable = new LinkedHashMap<>();
+    mutable.put(colA, new TestColumnStats(1L, 100L, 5L));
+
+    LanceStatistics stats = new LanceStatistics(200, 1234L, mutable);
+    mutable.put(FieldReference.column("b"), new TestColumnStats(2L, 200L, 0L));
+
+    // External mutation must not leak into Spark's view of the stats.
+    assertEquals(1, stats.columnStats().size());
+    assertTrue(stats.columnStats().containsKey(colA));
+  }
+
+  @Test
+  public void testEstimateProjectedFiveArgPropagatesColumnStats() {
+    StructType full =
+        new StructType(new StructField[] {new StructField("a", DataTypes.LongType, true, null)});
+    NamedReference colA = FieldReference.column("a");
+    Map<NamedReference, ColumnStatistics> cols = new LinkedHashMap<>();
+    cols.put(colA, new TestColumnStats(1L, 100L, 0L));
+
+    LanceStatistics stats = LanceStatistics.estimateProjected(500, 1024L, full, full, cols);
+    assertEquals(1, stats.columnStats().size());
+    assertEquals(1L, stats.columnStats().get(colA).min().get());
+    assertEquals(100L, stats.columnStats().get(colA).max().get());
+  }
+
+  @Test
+  public void testEstimateProjectedFourArgYieldsEmptyColumnStats() {
+    StructType full =
+        new StructType(new StructField[] {new StructField("a", DataTypes.LongType, true, null)});
+    LanceStatistics stats = LanceStatistics.estimateProjected(500, 1024L, full, full);
+    assertTrue(stats.columnStats().isEmpty());
+  }
+
+  /** Minimal {@link ColumnStatistics} for tests — only fields Phase 1 reports. */
+  private static final class TestColumnStats implements ColumnStatistics {
+    private final Object min;
+    private final Object max;
+    private final long nullCount;
+
+    TestColumnStats(Object min, Object max, long nullCount) {
+      this.min = min;
+      this.max = max;
+      this.nullCount = nullCount;
+    }
+
+    @Override
+    public Optional<Object> min() {
+      return Optional.of(min);
+    }
+
+    @Override
+    public Optional<Object> max() {
+      return Optional.of(max);
+    }
+
+    @Override
+    public OptionalLong nullCount() {
+      return OptionalLong.of(nullCount);
+    }
   }
 }

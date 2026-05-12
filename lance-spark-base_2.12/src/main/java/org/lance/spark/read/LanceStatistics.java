@@ -15,11 +15,15 @@ package org.lance.spark.read;
 
 import org.lance.ManifestSummary;
 
+import org.apache.spark.sql.connector.expressions.NamedReference;
 import org.apache.spark.sql.connector.read.Statistics;
+import org.apache.spark.sql.connector.read.colstats.ColumnStatistics;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
 import java.io.Serializable;
+import java.util.Collections;
+import java.util.Map;
 import java.util.OptionalLong;
 
 /**
@@ -33,18 +37,35 @@ public class LanceStatistics implements Statistics, Serializable {
   private final long sizeInBytes;
 
   /**
+   * Per-column stats reported via {@link Statistics#columnStats}. Always non-null but typically
+   * empty when no zonemap-indexed projected column has data — kept as a defensive copy so callers
+   * cannot mutate state visible to Spark's CBO.
+   */
+  private final Map<NamedReference, ColumnStatistics> columnStats;
+
+  /**
    * Create statistics from a ManifestSummary.
    *
    * @param summary the manifest summary containing pre-computed statistics
    */
   public LanceStatistics(ManifestSummary summary) {
-    this(summary.getTotalRows(), summary.getTotalFilesSize());
+    this(summary.getTotalRows(), summary.getTotalFilesSize(), Collections.emptyMap());
   }
 
   /** Create statistics with explicit values (e.g., after scaling for pruned fragments). */
   public LanceStatistics(long numRows, long sizeInBytes) {
+    this(numRows, sizeInBytes, Collections.emptyMap());
+  }
+
+  /** Create statistics with explicit values and per-column statistics for CBO. */
+  public LanceStatistics(
+      long numRows, long sizeInBytes, Map<NamedReference, ColumnStatistics> columnStats) {
     this.numRows = numRows;
     this.sizeInBytes = sizeInBytes;
+    this.columnStats =
+        columnStats == null || columnStats.isEmpty()
+            ? Collections.emptyMap()
+            : Collections.unmodifiableMap(new java.util.LinkedHashMap<>(columnStats));
   }
 
   /**
@@ -88,6 +109,23 @@ public class LanceStatistics implements Statistics, Serializable {
    */
   public static LanceStatistics estimateProjected(
       long numRows, long fullSizeInBytes, StructType fullSchema, StructType projectedSchema) {
+    return estimateProjected(
+        numRows, fullSizeInBytes, fullSchema, projectedSchema, Collections.emptyMap());
+  }
+
+  /**
+   * Same as {@link #estimateProjected(long, long, StructType, StructType)} but additionally carries
+   * an aggregated {@code columnStats} map so Spark's CBO can read per-column min/max/null counts
+   * via {@link Statistics#columnStats()}. Map keys must be top-level {@link NamedReference}s
+   * matching the projected schema's field names; entries for non-projected columns are dropped
+   * silently (Spark would ignore them anyway).
+   */
+  public static LanceStatistics estimateProjected(
+      long numRows,
+      long fullSizeInBytes,
+      StructType fullSchema,
+      StructType projectedSchema,
+      Map<NamedReference, ColumnStatistics> columnStats) {
     long projWidth = sumWidths(projectedSchema);
     long fullWidth = sumWidths(fullSchema);
     long sizeInBytes;
@@ -99,7 +137,7 @@ public class LanceStatistics implements Statistics, Serializable {
     }
     // Clamp to 1: integer truncation can round very small scaled sizes to 0, which
     // JoinSelection reads as "below threshold" and would unintentionally force a broadcast.
-    return new LanceStatistics(numRows, Math.max(sizeInBytes, 1L));
+    return new LanceStatistics(numRows, Math.max(sizeInBytes, 1L), columnStats);
   }
 
   private static long sumWidths(StructType schema) {
@@ -121,5 +159,10 @@ public class LanceStatistics implements Statistics, Serializable {
   @Override
   public OptionalLong numRows() {
     return OptionalLong.of(numRows);
+  }
+
+  @Override
+  public Map<NamedReference, ColumnStatistics> columnStats() {
+    return columnStats;
   }
 }
