@@ -102,6 +102,19 @@ public abstract class BaseUpdateColumnsBackfillTest {
             fullTable));
   }
 
+  /** Same row count as prepareDataset() but with stable row IDs for CDF version columns. */
+  protected void prepareDatasetWithStableRowIds() {
+    spark.sql(
+        String.format(
+            "create table %s (id int, value int, name string) using lance "
+                + "TBLPROPERTIES ('enable_stable_row_ids' = 'true')",
+            fullTable));
+    spark.sql(
+        String.format(
+            "insert into %s (id, value, name) values (1, 10, 'one'), (2, 20, 'two'), (3, 30, 'three');",
+            fullTable));
+  }
+
   @Test
   public void testUpdateMatchingRows() {
     // Test case: target has id 1, 2, 3; source has id 2, 4
@@ -253,6 +266,67 @@ public abstract class BaseUpdateColumnsBackfillTest {
           originalMeta.get(i).getInt(2),
           newMeta.get(i).getInt(2),
           "Row " + i + " should preserve _fragid");
+    }
+  }
+
+  /**
+   * Pins down the version-column behavior of UPDATE COLUMNS FROM on a stable-row-id table.
+   *
+   * <p>UPDATE COLUMNS goes through Lance's {@code Update} operation, which (unlike ADD COLUMNS via
+   * {@code Merge} and unlike row-level UPDATE) does <strong>not</strong> bump {@code
+   * _row_last_updated_at_version}. CDF consumers therefore cannot detect column-level rewrites via
+   * the version columns today.
+   *
+   * <p>This test pins down current behavior so a future change to make UPDATE COLUMNS CDF-aware
+   * shows up as a deliberate test update rather than a silent regression.
+   *
+   * <p>Tracking upstream fix: https://github.com/lance-format/lance/issues/6734 — once that lands,
+   * flip the {@code _row_last_updated_at_version} assertion below from {@code assertEquals} to a
+   * strict-greater check (mirroring the ADD COLUMNS version test).
+   */
+  @Test
+  public void testUpdateColumnsPreservesCreatedAtAndAdvancesLastUpdatedWithStableRowIds() {
+    prepareDatasetWithStableRowIds();
+
+    List<Row> before =
+        spark
+            .sql(
+                String.format(
+                    "SELECT id, _row_created_at_version, _row_last_updated_at_version FROM %s ORDER BY id",
+                    fullTable))
+            .collectAsList();
+
+    spark.sql(
+        String.format(
+            "CREATE TEMPORARY VIEW tmp_view_cdf AS SELECT _rowaddr, _fragid, value * 100 AS value FROM %s",
+            fullTable));
+    spark.sql(String.format("ALTER TABLE %s UPDATE COLUMNS value FROM tmp_view_cdf", fullTable));
+
+    List<Row> after =
+        spark
+            .sql(
+                String.format(
+                    "SELECT id, _row_created_at_version, _row_last_updated_at_version FROM %s ORDER BY id",
+                    fullTable))
+            .collectAsList();
+
+    assertEquals(before.size(), after.size());
+    for (int i = 0; i < before.size(); i++) {
+      Row b = before.get(i);
+      Row a = after.get(i);
+      assertEquals(b.getInt(0), a.getInt(0));
+      assertEquals(
+          b.getLong(1),
+          a.getLong(1),
+          "_row_created_at_version must be unchanged for id=" + b.getInt(0));
+      // Known gap (lance-format/lance#6734): UPDATE COLUMNS does not currently advance
+      // last_updated. When that issue is fixed, flip this assertion to a strict-greater check.
+      assertEquals(
+          b.getLong(2),
+          a.getLong(2),
+          "_row_last_updated_at_version is currently NOT advanced by UPDATE COLUMNS (id="
+              + b.getInt(0)
+              + ") — if this changes, update the assertion");
     }
   }
 

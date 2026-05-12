@@ -24,7 +24,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 public abstract class BaseMergeIntoTest {
@@ -174,6 +176,145 @@ public abstract class BaseMergeIntoTest {
             + spark.sparkContext().master()
             + ", shuffle.partitions="
             + spark.conf().get("spark.sql.shuffle.partitions"));
+  }
+
+  /**
+   * Pins down per-branch version-column behavior of MERGE INTO on a stable-row-id table:
+   *
+   * <ul>
+   *   <li>UPDATE branch: advances {@code _row_last_updated_at_version}. Lance recalculates {@code
+   *       _row_created_at_version} downward (to v1) for rewritten rows — matching the row-level
+   *       UPDATE semantics already pinned in BaseCdfVersionTrackingTest.
+   *   <li>DELETE branch: row disappears.
+   *   <li>Untouched rows: both versions preserved.
+   *   <li>INSERT branch: <strong>known CDF gap</strong> — rows from MERGE's NOT MATCHED branch flow
+   *       through the same fragment-rewrite path as updated rows, so their {@code
+   *       _row_created_at_version} is <em>not</em> set to the merge commit version. CDF consumers
+   *       cannot distinguish merge-inserted rows from updated rows via created_at.
+   * </ul>
+   *
+   * <p>Tracking upstream fix for the INSERT-branch gap:
+   * https://github.com/lance-format/lance/issues/6735 — once that lands, change the inserted-row
+   * {@code created_at} assertion below from {@code <= initialInsertVersion} to {@code ==
+   * mergeCommitLastUpdated} (i.e. created_at should equal last_updated, both at the merge commit
+   * version).
+   */
+  @Test
+  public void testMergeIntoTracksVersionColumnsPerBranch() {
+    String tableName = "merge_versions_" + UUID.randomUUID().toString().replace("-", "");
+    String fullTable = catalogName + ".default." + tableName;
+
+    spark.sql(
+        String.format(
+            "CREATE TABLE %s (id INT NOT NULL, value INT) "
+                + "TBLPROPERTIES ('enable_stable_row_ids' = 'true')",
+            fullTable));
+    spark.sql(String.format("INSERT INTO %s VALUES (1, 10), (2, 20), (3, 30), (4, 40)", fullTable));
+
+    Map<Integer, Long> beforeLastUpdated = new HashMap<>();
+    Long initialInsertVersion = null;
+    for (org.apache.spark.sql.Row row :
+        spark
+            .sql(
+                String.format(
+                    "SELECT id, _row_created_at_version, _row_last_updated_at_version "
+                        + "FROM %s ORDER BY id",
+                    fullTable))
+            .collectAsList()) {
+      beforeLastUpdated.put(row.getInt(0), row.getLong(2));
+      if (initialInsertVersion == null) {
+        initialInsertVersion = row.getLong(1);
+      }
+    }
+    Assertions.assertNotNull(initialInsertVersion, "initial insert version must be observable");
+
+    spark
+        .createDataFrame(
+            Arrays.asList(
+                RowFactory.create(1, 110), // UPDATE branch
+                RowFactory.create(2, null), // DELETE branch
+                RowFactory.create(5, 50), // INSERT branch
+                RowFactory.create(6, 60)), // INSERT branch
+            new org.apache.spark.sql.types.StructType().add("id", "int").add("value", "int"))
+        .createOrReplaceTempView("merge_version_source");
+
+    spark.sql(
+        String.format(
+            "MERGE INTO %s t USING merge_version_source s ON t.id = s.id "
+                + "WHEN MATCHED AND s.value IS NULL THEN DELETE "
+                + "WHEN MATCHED THEN UPDATE SET value = s.value "
+                + "WHEN NOT MATCHED THEN INSERT (id, value) VALUES (s.id, s.value)",
+            fullTable));
+
+    List<org.apache.spark.sql.Row> rows =
+        spark
+            .sql(
+                String.format(
+                    "SELECT id, value, _row_created_at_version, _row_last_updated_at_version "
+                        + "FROM %s ORDER BY id",
+                    fullTable))
+            .collectAsList();
+
+    // id=2 deleted; surviving ids: 1, 3, 4, 5, 6.
+    Assertions.assertEquals(5, rows.size(), "expected 5 surviving rows after merge");
+
+    Long mergeCommitLastUpdated = null;
+    for (org.apache.spark.sql.Row row : rows) {
+      int id = row.getInt(0);
+      long createdAt = row.getLong(2);
+      long lastUpdated = row.getLong(3);
+      switch (id) {
+        case 1:
+          // UPDATE branch: last_updated advances; created_at gets recalculated downward.
+          Assertions.assertTrue(
+              lastUpdated > beforeLastUpdated.get(1),
+              "id=1 last_updated must advance across UPDATE branch (before="
+                  + beforeLastUpdated.get(1)
+                  + ", after="
+                  + lastUpdated
+                  + ")");
+          Assertions.assertTrue(
+              createdAt <= beforeLastUpdated.get(1),
+              "id=1 created_at must not jump forward across UPDATE (got " + createdAt + ")");
+          mergeCommitLastUpdated = lastUpdated;
+          break;
+        case 3:
+        case 4:
+          // Untouched rows: not hit by any branch — both versions preserved.
+          Assertions.assertEquals(
+              initialInsertVersion.longValue(),
+              createdAt,
+              "id=" + id + " created_at must be preserved (no branch matched)");
+          Assertions.assertEquals(
+              beforeLastUpdated.get(id).longValue(),
+              lastUpdated,
+              "id=" + id + " last_updated must be preserved (no branch matched)");
+          break;
+        case 5:
+        case 6:
+          // INSERT branch sharing the merge commit: last_updated equals the UPDATE branch's
+          // last_updated (single commit). created_at is currently NOT set to the commit version
+          // (it gets recalculated like an UPDATE rewrite). Tracked in
+          // lance-format/lance#6735 — flip the created_at assertion when fixed.
+          Assertions.assertEquals(
+              mergeCommitLastUpdated == null ? lastUpdated : mergeCommitLastUpdated.longValue(),
+              lastUpdated,
+              "id=" + id + " inserted row last_updated must match the merge commit");
+          Assertions.assertTrue(
+              createdAt <= initialInsertVersion,
+              "id="
+                  + id
+                  + " inserted row created_at currently does NOT reflect the merge commit "
+                  + "(initial="
+                  + initialInsertVersion
+                  + ", got="
+                  + createdAt
+                  + "). If this changes, update the assertion.");
+          break;
+        default:
+          Assertions.fail("unexpected surviving id=" + id);
+      }
+    }
   }
 
   @Test

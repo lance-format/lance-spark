@@ -25,6 +25,8 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.util.*;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
 /**
  * Tests for Change Data Feed (CDF) version tracking columns: _row_created_at_version and
  * _row_last_updated_at_version.
@@ -226,6 +228,54 @@ public abstract class BaseCdfVersionTrackingTest {
         Arrays.asList(
             CdfRow.ofWithVersions(1, "Alice", 200, 1L, 4L),
             CdfRow.ofWithVersions(3, "Charlie", 600, 1L, 4L)));
+  }
+
+  /**
+   * INSERT OVERWRITE replaces the table contents with a new fragment set. The post-overwrite rows
+   * are new rows (no row-identity continuity with the pre-overwrite rows), so both version columns
+   * must equal the overwrite commit version.
+   */
+  @Test
+  public void testInsertOverwriteResetsBothVersionColumns() {
+    CdfTestHelper helper = new CdfTestHelper(spark, catalogName);
+    helper.create();
+
+    // v2: initial insert
+    helper.insert(
+        Arrays.asList(
+            CdfRow.of(1, "Alice", 100), CdfRow.of(2, "Bob", 200), CdfRow.of(3, "Charlie", 300)));
+
+    // v3: update so pre-overwrite rows have non-trivial last_updated
+    helper.update("value = value + 1", "id = 1");
+
+    // v4: INSERT OVERWRITE — pre-overwrite rows are gone, new rows must show overwrite version on
+    // both version columns.
+    spark.sql(
+        String.format(
+            "INSERT OVERWRITE %s VALUES (10, 'Xavier', 1000), (11, 'Yvonne', 1100)",
+            helper.getTableName()));
+
+    List<CdfRow> after = helper.getAllWithVersions();
+    assertEquals(2, after.size(), "overwrite should leave exactly the new rows");
+
+    Long overwriteVersion = null;
+    for (CdfRow row : after) {
+      assertEquals(
+          row.createdAtVersion,
+          row.lastUpdatedAtVersion,
+          "overwritten row id=" + row.id + " must have created_at == last_updated");
+      if (overwriteVersion == null) {
+        overwriteVersion = row.createdAtVersion;
+      } else {
+        assertEquals(
+            overwriteVersion,
+            row.createdAtVersion,
+            "all overwritten rows must share the same commit version");
+      }
+      org.junit.jupiter.api.Assertions.assertTrue(
+          row.createdAtVersion >= 4L,
+          "overwrite commit must be at or after v4 (got " + row.createdAtVersion + ")");
+    }
   }
 
   @Test
