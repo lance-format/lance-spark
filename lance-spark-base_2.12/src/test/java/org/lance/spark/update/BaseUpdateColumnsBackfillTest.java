@@ -51,6 +51,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Base test class for UPDATE COLUMNS FROM command.
@@ -328,19 +329,10 @@ public abstract class BaseUpdateColumnsBackfillTest {
   }
 
   /**
-   * Pins down the version-column behavior of UPDATE COLUMNS FROM on a stable-row-id table.
-   *
-   * <p>UPDATE COLUMNS goes through Lance's {@code Update} operation, which (unlike ADD COLUMNS via
-   * {@code Merge} and unlike row-level UPDATE) does <strong>not</strong> bump {@code
-   * _row_last_updated_at_version}. CDF consumers therefore cannot detect column-level rewrites via
-   * the version columns today.
-   *
-   * <p>This test pins down current behavior so a future change to make UPDATE COLUMNS CDF-aware
-   * shows up as a deliberate test update rather than a silent regression.
-   *
-   * <p>Tracking upstream fix: https://github.com/lance-format/lance/issues/6734 — once that lands,
-   * flip the {@code _row_last_updated_at_version} assertion below from {@code assertEquals} to a
-   * strict-greater check (mirroring the ADD COLUMNS version test).
+   * UPDATE COLUMNS FROM on a stable-row-id table must preserve {@code _row_created_at_version} and
+   * advance {@code _row_last_updated_at_version} for rewritten rows. The connector passes matched
+   * physical row offsets on commit so Lance can partially refresh last-updated metadata (see
+   * lance-format/lance#6734 and the Java {@code Update.updatedFragmentOffsets} API).
    */
   @Test
   public void testUpdateColumnsPreservesCreatedAtAndAdvancesLastUpdatedWithStableRowIds() {
@@ -377,14 +369,9 @@ public abstract class BaseUpdateColumnsBackfillTest {
           b.getLong(1),
           a.getLong(1),
           "_row_created_at_version must be unchanged for id=" + b.getInt(0));
-      // Known gap (lance-format/lance#6734): UPDATE COLUMNS does not currently advance
-      // last_updated. When that issue is fixed, flip this assertion to a strict-greater check.
-      assertEquals(
-          b.getLong(2),
-          a.getLong(2),
-          "_row_last_updated_at_version is currently NOT advanced by UPDATE COLUMNS (id="
-              + b.getInt(0)
-              + ") — if this changes, update the assertion");
+      assertTrue(
+          a.getLong(2) > b.getLong(2),
+          "_row_last_updated_at_version must advance after UPDATE COLUMNS for id=" + b.getInt(0));
     }
   }
 
