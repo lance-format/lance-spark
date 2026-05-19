@@ -140,7 +140,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
   private void rollFragment() throws IOException {
     writeBuffer.setFinished();
     try {
-      completedFragments.addAll(fragmentCreationTask.get());
+      completedFragments.addAll(stripRowIdMeta(fragmentCreationTask.get()));
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       throw new IOException("Interrupted while rolling fragment on partition boundary", e);
@@ -162,7 +162,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
     writeBuffer.setFinished();
 
     try {
-      completedFragments.addAll(fragmentCreationTask.get());
+      completedFragments.addAll(stripRowIdMeta(fragmentCreationTask.get()));
       return new LanceBatchWrite.TaskCommit(new ArrayList<>(completedFragments));
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
@@ -196,6 +196,22 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
   @Override
   public void close() throws IOException {
     writeBuffer.close();
+  }
+
+  static List<FragmentMetadata> stripRowIdMeta(List<FragmentMetadata> fragments) {
+    List<FragmentMetadata> stripped = new ArrayList<>(fragments.size());
+    for (FragmentMetadata fragment : fragments) {
+      stripped.add(
+          new FragmentMetadata(
+              fragment.getId(),
+              fragment.getFiles(),
+              fragment.getPhysicalRows(),
+              fragment.getDeletionFile(),
+              null,
+              fragment.getCreatedAtVersionMeta(),
+              fragment.getLastUpdatedAtVersionMeta()));
+    }
+    return stripped;
   }
 
   /** A freshly-constructed buffer paired with the Fragment.create task that consumes from it. */
@@ -270,8 +286,9 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       boolean useLargeVarTypes = writeOptions.isUseLargeVarTypes();
       long maxBatchBytes = writeOptions.getMaxBatchBytes();
 
-      // Merge initial storage options with write options
-      WriteParams params = writeOptions.toWriteParams(initialStorageOptions);
+      LanceSparkWriteOptions fragmentWriteOptions =
+          writeOptions.toBuilder().enableStableRowIds(false).build();
+      WriteParams params = fragmentWriteOptions.toWriteParams(initialStorageOptions);
 
       ArrowBatchWriteBuffer writeBuffer;
       if (useQueuedBuffer) {

@@ -329,6 +329,12 @@ public class LanceDataset
         && fileFormatVersion != null) {
       writeOptionsBuilder.fileFormatVersion(fileFormatVersion);
     }
+    if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS)
+        && tableProperties.containsKey(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS)) {
+      writeOptionsBuilder.enableStableRowIds(
+          Boolean.parseBoolean(
+              tableProperties.get(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS)));
+    }
     LanceSparkWriteOptions writeOptions = writeOptionsBuilder.build();
 
     List<String> backfillColumns =

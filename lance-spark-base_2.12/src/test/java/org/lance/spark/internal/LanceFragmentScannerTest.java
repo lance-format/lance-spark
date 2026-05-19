@@ -75,7 +75,7 @@ public class LanceFragmentScannerTest {
             });
 
     List<String> result = callGetColumnNames(schema);
-    List<String> expected = Arrays.asList("id", "name", LanceConstant.ROW_ID);
+    List<String> expected = Arrays.asList("id", "name");
     assertEquals(expected, result);
   }
 
@@ -90,7 +90,7 @@ public class LanceFragmentScannerTest {
             });
 
     List<String> result = callGetColumnNames(schema);
-    List<String> expected = Arrays.asList("id", "name", LanceConstant.ROW_ADDRESS);
+    List<String> expected = Arrays.asList("id", "name");
     assertEquals(expected, result);
   }
 
@@ -135,14 +135,12 @@ public class LanceFragmentScannerTest {
             });
 
     List<String> result = callGetColumnNames(schema);
-    // Data columns first, then metadata columns in METADATA_COLUMNS order
-    // Note: FRAGMENT_ID is excluded as it's not included in the projection
+    // Data columns first, then version columns. Row ID, row address, and fragment ID are requested
+    // outside the projection list.
     List<String> expected =
         Arrays.asList(
             "id",
             "name",
-            LanceConstant.ROW_ID,
-            LanceConstant.ROW_ADDRESS,
             LanceConstant.ROW_LAST_UPDATED_AT_VERSION,
             LanceConstant.ROW_CREATED_AT_VERSION);
     assertEquals(expected, result);
@@ -183,14 +181,12 @@ public class LanceFragmentScannerTest {
             });
 
     List<String> result = callGetColumnNames(schema);
-    // Regular data columns in schema order, then metadata columns in METADATA_COLUMNS order
+    // Regular data columns in schema order, then projected version metadata columns.
     List<String> expected =
         Arrays.asList(
             "z_last_column",
             "a_first_column",
             "m_middle_column",
-            LanceConstant.ROW_ID,
-            LanceConstant.ROW_ADDRESS,
             LanceConstant.ROW_CREATED_AT_VERSION);
     assertEquals(expected, result);
   }

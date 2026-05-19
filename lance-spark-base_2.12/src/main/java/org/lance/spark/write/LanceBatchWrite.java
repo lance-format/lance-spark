@@ -150,6 +150,7 @@ public class LanceBatchWrite implements BatchWrite {
         Arrays.stream(messages)
             .map(m -> (TaskCommit) m)
             .map(TaskCommit::getFragments)
+            .map(LanceDataWriter::stripRowIdMeta)
             .flatMap(List::stream)
             .collect(Collectors.toList());
 

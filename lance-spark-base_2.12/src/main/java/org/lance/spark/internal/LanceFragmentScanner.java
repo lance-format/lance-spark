@@ -101,11 +101,13 @@ public class LanceFragmentScanner implements AutoCloseable {
       if (projectedColumns.isEmpty() && inputPartition.getSchema().isEmpty()) {
         // Lance requires at least one projected column. Use _rowid as a lightweight
         // sentinel so the scanner still returns the correct row count (e.g. SELECT 1).
-        // Only do this when the schema is truly empty; when the schema contains virtual
-        // columns (e.g. _fragid, blob position/size) that are not passed to the scanner
-        // but added later by the batch scanner, adding _rowid here would shift column
-        // indices and cause Spark to read wrong data.
         scanOptions.withRowId(true);
+      }
+      if (hasField(inputPartition.getSchema(), LanceConstant.ROW_ID)) {
+        scanOptions.withRowId(true);
+      }
+      if (hasField(inputPartition.getSchema(), LanceConstant.ROW_ADDRESS)) {
+        scanOptions.withRowAddress(true);
       }
       scanOptions.columns(projectedColumns);
       if (inputPartition.getWhereCondition().isPresent()) {
@@ -226,10 +228,9 @@ public class LanceFragmentScanner implements AutoCloseable {
   }
 
   /**
-   * Builds the projection column list for the scanner. Regular data columns come first, followed by
-   * special metadata columns in the order matching {@link
-   * org.lance.spark.LanceDataset#METADATA_COLUMNS}. All special columns (_rowid, _rowaddr, version
-   * columns) go through scanner.project() for consistent output ordering.
+   * Builds the projection column list for the scanner. Row ID and row address are requested through
+   * explicit scan flags so Lance computes them from the active fragment metadata instead of reading
+   * them as regular columns.
    */
   private static List<String> getColumnNames(StructType schema) {
     // Collect all field names in the schema for quick lookup
@@ -252,14 +253,6 @@ public class LanceFragmentScanner implements AutoCloseable {
                         && !name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)
                         && !name.endsWith(LanceConstant.BLOB_SIZE_SUFFIX))
             .collect(Collectors.toList());
-
-    // Append special columns in METADATA_COLUMNS order (must match Rust scanner output order)
-    if (schemaFields.contains(LanceConstant.ROW_ID)) {
-      columns.add(LanceConstant.ROW_ID);
-    }
-    if (schemaFields.contains(LanceConstant.ROW_ADDRESS)) {
-      columns.add(LanceConstant.ROW_ADDRESS);
-    }
     if (schemaFields.contains(LanceConstant.ROW_LAST_UPDATED_AT_VERSION)) {
       columns.add(LanceConstant.ROW_LAST_UPDATED_AT_VERSION);
     }
@@ -268,5 +261,14 @@ public class LanceFragmentScanner implements AutoCloseable {
     }
 
     return columns;
+  }
+
+  private static boolean hasField(StructType schema, String name) {
+    for (StructField field : schema.fields()) {
+      if (field.name().equals(name)) {
+        return true;
+      }
+    }
+    return false;
   }
 }

@@ -72,17 +72,10 @@ import static org.lance.spark.join.FragmentAwareJoinUtils.*;
 public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistributionAndOrdering {
   private static final Logger LOG = LoggerFactory.getLogger(SparkPositionDeltaWrite.class);
 
-  // ---- id InternalRow column indices ----
-  // The `id` InternalRow passed to delete()/update() is a ProjectingInternalRow whose column
-  // positions are resolved by Spark's buildWriteDeltaProjections against the plan output schema.
-  // The plan output inherits the scan schema ordering from LanceDataset.METADATA_COLUMNS, which
-  // places _rowid before _rowaddr. This means the id row follows METADATA_COLUMNS order, NOT the
-  // order declared by rowId() in LancePositionDeltaOperation.
-  //
-  // METADATA_COLUMNS order: _rowid (index 0), _rowaddr (index 1), ...
-  // rowId() declaration:    {_rowaddr, _rowid}  (different order — does NOT control id layout)
-  private static final int ID_COL_ROW_ID = 0;
-  private static final int ID_COL_ROW_ADDR = 1;
+  // The `id` InternalRow passed to delete()/update() follows the order declared by
+  // LancePositionDeltaOperation.rowId(): {_rowaddr, _rowid}.
+  private static final int ID_COL_ROW_ADDR = 0;
+  private static final int ID_COL_ROW_ID = 1;
 
   private final StructType sparkSchema;
   private final LanceSparkWriteOptions writeOptions;
@@ -165,10 +158,14 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     public void commit(WriterCommitMessage[] messages) {
       List<FragmentMetadata> newFragments = new ArrayList<>();
       Map<Integer, RoaringBitmap> aggregatedDeletions = new HashMap<>();
+      boolean useStableRowIds = hasStableRowIds;
 
       for (WriterCommitMessage msg : messages) {
         DeltaWriteTaskCommit taskCommit = (DeltaWriteTaskCommit) msg;
         newFragments.addAll(taskCommit.newFragments());
+        if (taskCommit.useStableRowIds()) {
+          useStableRowIds = true;
+        }
         taskCommit
             .deletionMap()
             .forEach(
@@ -212,7 +209,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
         CommitBuilder commitBuilder =
             new CommitBuilder(dataset).writeParams(writeOptions.getStorageOptions());
-        if (hasStableRowIds) {
+        if (useStableRowIds) {
           commitBuilder.useStableRowIds(true);
         }
         if (managedVersioning) {
@@ -275,8 +272,9 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       boolean useQueuedBuffer = writeOptions.isUseQueuedWriteBuffer();
       boolean useLargeVarTypes = writeOptions.isUseLargeVarTypes();
 
-      // Merge initial storage options with write options
-      WriteParams params = writeOptions.toWriteParams(initialStorageOptions);
+      LanceSparkWriteOptions fragmentWriteOptions =
+          writeOptions.toBuilder().enableStableRowIds(false).build();
+      WriteParams params = fragmentWriteOptions.toWriteParams(initialStorageOptions);
 
       // Select buffer type based on configuration
       ArrowBatchWriteBuffer writeBuffer;
@@ -350,10 +348,11 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     @Override
     public void update(InternalRow metadata, InternalRow id, InternalRow row) throws IOException {
       long rowId = id.getLong(ID_COL_ROW_ID);
+      long rowAddr = id.getLong(ID_COL_ROW_ADDR);
       if (hasStableRowIds) {
         capturedRowIds.add(rowId);
       }
-      recordDeletion(id.getLong(ID_COL_ROW_ADDR));
+      recordDeletion(rowAddr);
       writer.write(row);
     }
 
@@ -389,7 +388,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
         }
       }
 
-      return new DeltaWriteTaskCommit(newFragments, deletionMap);
+      return new DeltaWriteTaskCommit(newFragments, deletionMap, hasStableRowIds);
     }
 
     @Override
@@ -461,11 +460,20 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
     private final List<FragmentMetadata> newFragments;
     private final Map<Integer, RoaringBitmap> deletionMap;
+    private final boolean useStableRowIds;
+
+    DeltaWriteTaskCommit(
+        List<FragmentMetadata> newFragments,
+        Map<Integer, RoaringBitmap> deletionMap,
+        boolean useStableRowIds) {
+      this.newFragments = newFragments;
+      this.deletionMap = deletionMap;
+      this.useStableRowIds = useStableRowIds;
+    }
 
     DeltaWriteTaskCommit(
         List<FragmentMetadata> newFragments, Map<Integer, RoaringBitmap> deletionMap) {
-      this.newFragments = newFragments;
-      this.deletionMap = deletionMap;
+      this(newFragments, deletionMap, false);
     }
 
     public List<FragmentMetadata> newFragments() {
@@ -474,6 +482,10 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
     public Map<Integer, RoaringBitmap> deletionMap() {
       return deletionMap == null ? Collections.emptyMap() : deletionMap;
+    }
+
+    public boolean useStableRowIds() {
+      return useStableRowIds;
     }
   }
 }
