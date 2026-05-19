@@ -19,6 +19,7 @@ import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.Transaction;
 import org.lance.WriteParams;
+import org.lance.namespace.LanceNamespace;
 import org.lance.operation.Update;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRuntime;
@@ -82,6 +83,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
+  private final boolean managedVersioning;
 
   public SparkPositionDeltaWrite(
       StructType sparkSchema,
@@ -89,6 +91,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
+      boolean managedVersioning,
       List<String> tableId) {
     this.sparkSchema = sparkSchema;
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
@@ -100,6 +103,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
+    this.managedVersioning = managedVersioning;
   }
 
   @Override
@@ -194,6 +198,14 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
             new CommitBuilder(dataset).writeParams(writeOptions.getStorageOptions());
         if (dataset.hasStableRowIds()) {
           commitBuilder.useStableRowIds(true);
+        }
+        if (managedVersioning) {
+          LanceNamespace namespace =
+              LanceRuntime.getOrCreateNamespace(namespaceImpl, namespaceProperties);
+          commitBuilder
+              .namespaceClient(namespace)
+              .tableId(tableId)
+              .namespaceClientManagedVersioning(true);
         }
         try (Transaction txn =
                 new Transaction.Builder().readVersion(version).operation(update).build();

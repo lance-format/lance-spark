@@ -193,7 +193,10 @@ public class LanceBatchWrite implements BatchWrite {
         if (managedVersioning) {
           LanceNamespace namespace =
               LanceRuntime.getOrCreateNamespace(namespaceImpl, namespaceProperties);
-          commitBuilder.namespaceClient(namespace).tableId(tableId);
+          commitBuilder
+              .namespaceClient(namespace)
+              .tableId(tableId)
+              .namespaceClientManagedVersioning(true);
         }
         try (Transaction txn =
                 new Transaction.Builder().readVersion(version).operation(operation).build();

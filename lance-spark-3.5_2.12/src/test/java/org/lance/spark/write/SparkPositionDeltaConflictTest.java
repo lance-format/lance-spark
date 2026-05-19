@@ -119,9 +119,9 @@ public class SparkPositionDeltaConflictTest {
       // Both writers pin at V2
       LanceSparkWriteOptions opts = LanceSparkWriteOptions.from(datasetUri);
       SparkPositionDeltaWrite writerA =
-          new SparkPositionDeltaWrite(sparkSchema, opts, null, null, null, null);
+          new SparkPositionDeltaWrite(sparkSchema, opts, null, null, null, false, null);
       SparkPositionDeltaWrite writerB =
-          new SparkPositionDeltaWrite(sparkSchema, opts, null, null, null, null);
+          new SparkPositionDeltaWrite(sparkSchema, opts, null, null, null, false, null);
 
       // Build deletion bitmap targeting all rows in the original fragment
       Map<Integer, RoaringBitmap> deletionMapA = new HashMap<>();

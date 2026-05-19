@@ -35,6 +35,8 @@ public class LanceRowLevelOperationBuilder implements RowLevelOperationBuilder {
 
   private final Map<String, String> namespaceProperties;
 
+  private final boolean managedVersioning;
+
   private final String fileFormatVersion;
 
   private final Map<String, String> tableProperties;
@@ -46,6 +48,7 @@ public class LanceRowLevelOperationBuilder implements RowLevelOperationBuilder {
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
+      boolean managedVersioning,
       String fileFormatVersion,
       Map<String, String> tableProperties) {
     this.command = command;
@@ -54,6 +57,7 @@ public class LanceRowLevelOperationBuilder implements RowLevelOperationBuilder {
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
+    this.managedVersioning = managedVersioning;
     this.fileFormatVersion = fileFormatVersion;
     this.tableProperties = tableProperties;
   }
@@ -67,6 +71,7 @@ public class LanceRowLevelOperationBuilder implements RowLevelOperationBuilder {
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
+        managedVersioning,
         fileFormatVersion,
         tableProperties);
   }

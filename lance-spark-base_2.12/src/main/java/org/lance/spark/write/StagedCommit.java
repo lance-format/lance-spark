@@ -147,7 +147,7 @@ public class StagedCommit {
 
   private void applyManagedVersioning(final CommitBuilder builder) {
     if (managedVersioning) {
-      builder.namespaceClient(namespace).tableId(tableId);
+      builder.namespaceClient(namespace).tableId(tableId).namespaceClientManagedVersioning(true);
     }
   }
 
