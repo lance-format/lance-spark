@@ -196,7 +196,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
         CommitBuilder commitBuilder =
             new CommitBuilder(dataset).writeParams(writeOptions.getStorageOptions());
-        if (dataset.hasStableRowIds()) {
+        if (dataset.hasStableRowIds()
+            || Boolean.TRUE.equals(writeOptions.getEnableStableRowIds())) {
           commitBuilder.useStableRowIds(true);
         }
         if (managedVersioning) {

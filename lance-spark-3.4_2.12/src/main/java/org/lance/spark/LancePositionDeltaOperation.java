@@ -99,6 +99,13 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
     if (fileFormatVersion != null) {
       writeOptionsBuilder.fileFormatVersion(fileFormatVersion);
     }
+    if (tableProperties != null) {
+      String stableRowIds =
+          tableProperties.get(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS);
+      if (stableRowIds != null) {
+        writeOptionsBuilder.enableStableRowIds(Boolean.parseBoolean(stableRowIds));
+      }
+    }
     LanceSparkWriteOptions writeOptions = writeOptionsBuilder.build();
     return new SparkPositionDeltaWriteBuilder(
         sparkSchema,

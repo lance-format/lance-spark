@@ -111,7 +111,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     this.sparkSchema = sparkSchema;
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
       this.writeOptions = writeOptions.withVersion(ds.version());
-      this.hasStableRowIds = ds.hasStableRowIds();
+      this.hasStableRowIds =
+          ds.hasStableRowIds() || Boolean.TRUE.equals(writeOptions.getEnableStableRowIds());
       LOG.debug(
           "Resolved dataset version for position delta write: {}", this.writeOptions.getVersion());
     }
@@ -209,7 +210,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
         CommitBuilder commitBuilder =
             new CommitBuilder(dataset).writeParams(writeOptions.getStorageOptions());
-        if (dataset.hasStableRowIds()) {
+        if (hasStableRowIds) {
           commitBuilder.useStableRowIds(true);
         }
         if (managedVersioning) {

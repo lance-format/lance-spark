@@ -182,6 +182,20 @@ public abstract class SparkLanceNamespaceTestBase {
   }
 
   @Test
+  public void testCreateTablePersistsOnlyUserProperties() throws Exception {
+    String tableName = generateTableName("create_props");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL) TBLPROPERTIES ('key1' = 'val1')");
+
+    Map<String, String> config = getTableConfig(tableName);
+    assertEquals("val1", config.get("key1"));
+    assertFalse(config.containsKey(TableCatalog.PROP_OWNER));
+    assertFalse(config.containsKey(TableCatalog.PROP_PROVIDER));
+    assertFalse(config.containsKey(TableCatalog.PROP_LOCATION));
+  }
+
+  @Test
   public void testListTables() throws Exception {
     String tableName1 = generateTableName("list_test_1");
     String tableName2 = generateTableName("list_test_2");
@@ -721,6 +735,25 @@ public abstract class SparkLanceNamespaceTestBase {
     Map<String, String> config = getTableConfig(tableName);
     assertEquals("val1", config.get("key1"));
     assertEquals("val2", config.get("key2"));
+  }
+
+  @Test
+  public void testAlterStableRowIdsPropertyRejected() throws Exception {
+    String tableName = generateTableName("alter_stable_row_ids");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL)");
+
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    UnsupportedOperationException ex =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () ->
+                catalog.alterTable(
+                    ident,
+                    TableChange.setProperty(
+                        LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS, "true")));
+    assertTrue(ex.getMessage().contains("can only be set at table creation"));
   }
 
   @Test
