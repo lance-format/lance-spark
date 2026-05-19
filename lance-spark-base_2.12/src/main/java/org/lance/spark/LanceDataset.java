@@ -13,6 +13,7 @@
  */
 package org.lance.spark;
 
+import org.lance.spark.partition.PartitionTransform;
 import org.lance.spark.read.LanceScanBuilder;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.write.AddColumnsBackfillWrite;
@@ -173,6 +174,9 @@ public class LanceDataset
   /** Table properties from the Lance dataset config, exposed via {@link #properties()}. */
   private final Map<String, String> tableProperties;
 
+  /** In-memory partition spec for newly staged tables before MemWAL metadata can be read. */
+  private final List<PartitionTransform> partitionSpec;
+
   /**
    * Creates a Lance dataset.
    *
@@ -201,7 +205,8 @@ public class LanceDataset
         managedVersioning,
         null,
         fileFormatVersion,
-        Collections.emptyMap());
+        Collections.emptyMap(),
+        Collections.emptyList());
   }
 
   /**
@@ -216,6 +221,7 @@ public class LanceDataset
    * @param stagedCommit the eagerly created staged commit, or null for non-staged tables
    * @param fileFormatVersion the file format version for writes, or null to use default
    * @param tableProperties table properties from Lance dataset config
+   * @param partitionSpec in-memory partition spec for newly staged tables
    */
   public LanceDataset(
       LanceSparkReadOptions readOptions,
@@ -226,7 +232,8 @@ public class LanceDataset
       boolean managedVersioning,
       StagedCommit stagedCommit,
       String fileFormatVersion,
-      Map<String, String> tableProperties) {
+      Map<String, String> tableProperties,
+      List<PartitionTransform> partitionSpec) {
     this.readOptions = readOptions;
     this.sparkSchema = sparkSchema;
     this.initialStorageOptions = initialStorageOptions;
@@ -236,6 +243,10 @@ public class LanceDataset
     this.stagedCommit = stagedCommit;
     this.fileFormatVersion = fileFormatVersion;
     this.tableProperties = Collections.unmodifiableMap(new HashMap<>(tableProperties));
+    this.partitionSpec =
+        partitionSpec != null
+            ? Collections.unmodifiableList(new ArrayList<>(partitionSpec))
+            : Collections.emptyList();
   }
 
   public LanceSparkReadOptions readOptions() {
@@ -283,7 +294,8 @@ public class LanceDataset
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
-        tableProperties);
+        tableProperties,
+        partitionSpec);
   }
 
   @Override
@@ -380,7 +392,8 @@ public class LanceDataset
             namespaceProperties,
             readOptions.getTableId(),
             managedVersioning,
-            tableProperties);
+            tableProperties,
+            partitionSpec);
 
     if (stagedCommit != null) {
       builder.setStagedCommit(stagedCommit);

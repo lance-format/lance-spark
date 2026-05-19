@@ -22,6 +22,8 @@ import org.lance.namespace.model.DeregisterTableRequest;
 import org.lance.operation.Operation;
 import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
+import org.lance.spark.partition.PartitionTransform;
+import org.lance.spark.utils.PartitionTransformUtil;
 
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.slf4j.Logger;
@@ -52,6 +54,7 @@ public class StagedCommit {
   private boolean enableStableRowIds;
   private List<FragmentMetadata> fragments;
   private Schema schema;
+  private List<PartitionTransform> partitionSpec = Collections.emptyList();
 
   /** Dataset for existing tables. Empty for new tables (staged create). */
   private final Optional<Dataset> dataset;
@@ -108,6 +111,11 @@ public class StagedCommit {
     this.enableStableRowIds = enableStableRowIds;
   }
 
+  public void setPartitionSpec(List<PartitionTransform> partitionSpec) {
+    this.partitionSpec =
+        partitionSpec != null ? new ArrayList<>(partitionSpec) : Collections.emptyList();
+  }
+
   /** Performs the actual commit using the stored dataset and fragments. */
   public void commit() {
     if (dataset.isEmpty()) {
@@ -127,7 +135,7 @@ public class StagedCommit {
     applyManagedVersioning(builder);
     try (Transaction txn = new Transaction.Builder().operation(operation).build();
         Dataset committed = builder.execute(txn)) {
-      // auto-close txn and committed dataset
+      PartitionTransformUtil.initializeMemWal(committed, partitionSpec);
     }
   }
 
@@ -142,7 +150,9 @@ public class StagedCommit {
         new CommitBuilder(uri, LanceRuntime.allocator()).writeParams(storageOptions);
     builder.useStableRowIds(enableStableRowIds);
     applyManagedVersioning(builder);
-    commitOperation(builder, version, operation);
+    try (Dataset committed = commitOperation(builder, version, operation)) {
+      PartitionTransformUtil.initializeMemWal(committed, partitionSpec);
+    }
   }
 
   private void applyManagedVersioning(final CommitBuilder builder) {
@@ -151,12 +161,11 @@ public class StagedCommit {
     }
   }
 
-  private static void commitOperation(
+  private static Dataset commitOperation(
       final CommitBuilder builder, final long readVersion, final Operation operation) {
     try (Transaction txn =
-            new Transaction.Builder().readVersion(readVersion).operation(operation).build();
-        Dataset committed = builder.execute(txn)) {
-      // auto-close txn and committed dataset
+        new Transaction.Builder().readVersion(readVersion).operation(operation).build()) {
+      return builder.execute(txn);
     }
   }
 

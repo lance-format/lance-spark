@@ -14,6 +14,7 @@
 package org.lance.spark.read;
 
 import org.lance.index.scalar.ZoneStats;
+import org.lance.spark.utils.BucketHashUtil;
 
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
@@ -400,6 +401,67 @@ public final class ZonemapFragmentPruner {
       }
       return value;
     }
+  }
+
+  /**
+   * Result of bucket partition detection: the bucket column name, number of buckets, and a map from
+   * fragment ID to the bucket ID for that fragment.
+   */
+  public static final class BucketPartitionInfo implements Serializable {
+    private static final long serialVersionUID = 2L;
+
+    private final String columnName;
+    private final int numBuckets;
+    private final Map<Integer, Integer> fragmentBucketIds;
+
+    public BucketPartitionInfo(
+        String columnName, int numBuckets, Map<Integer, Integer> fragmentBucketIds) {
+      this.columnName = columnName;
+      this.numBuckets = numBuckets;
+      this.fragmentBucketIds = Collections.unmodifiableMap(fragmentBucketIds);
+    }
+
+    public String getColumnName() {
+      return columnName;
+    }
+
+    public int getNumBuckets() {
+      return numBuckets;
+    }
+
+    public Map<Integer, Integer> getFragmentBucketIds() {
+      return fragmentBucketIds;
+    }
+
+    public InternalRow partitionKeyForFragment(int fragmentId) {
+      Integer bucketId = fragmentBucketIds.get(fragmentId);
+      return new GenericInternalRow(new Object[] {bucketId});
+    }
+  }
+
+  /**
+   * Computes bucket IDs for fragments from zonemap stats. Each fragment must have a single
+   * partition value (min == max across all zones). The bucket ID is then computed from that value
+   * using Murmur3 hash, matching Spark's bucket transform.
+   *
+   * @param zones zonemap zones for the bucket column
+   * @param numBuckets number of buckets
+   * @return map from fragment ID to bucket ID, or empty if zones are not bucket-compatible
+   */
+  static Optional<Map<Integer, Integer>> computeFragmentBucketIds(
+      List<ZoneStats> zones, int numBuckets) {
+
+    Optional<Map<Integer, Comparable<?>>> partValues = computeFragmentPartitionValues(zones);
+    if (!partValues.isPresent()) {
+      return Optional.empty();
+    }
+
+    Map<Integer, Integer> result = new HashMap<>();
+    for (Map.Entry<Integer, Comparable<?>> entry : partValues.get().entrySet()) {
+      int bucketId = BucketHashUtil.computeBucketIdFromValue(entry.getValue(), numBuckets);
+      result.put(entry.getKey(), bucketId);
+    }
+    return Optional.of(result);
   }
 
   /**

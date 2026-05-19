@@ -14,6 +14,7 @@
 package org.lance.spark.read;
 
 import org.lance.spark.TestUtils;
+import org.lance.spark.partition.PartitionTransform;
 
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.expressions.Expression;
@@ -194,26 +195,26 @@ public class LanceScanTest {
   @Test
   public void testOutputPartitioningWithPartitionInfo() {
     // Create a LanceScan with partition info
-    Map<Integer, Comparable<?>> fragValues = new HashMap<>();
-    fragValues.put(0, "east");
-    fragValues.put(1, "west");
-    ZonemapFragmentPruner.PartitionInfo partInfo =
-        new ZonemapFragmentPruner.PartitionInfo("region", fragValues);
+    Map<Integer, Object> fragKeys = new HashMap<>();
+    fragKeys.put(0, "east");
+    fragKeys.put(1, "west");
+    PartitionTransform transform = new PartitionTransform.Identity("region");
 
     LanceScan scan =
         new LanceScan(
             TEST_SCHEMA,
             TestUtils.TestTable1Config.readOptions,
-            org.lance.spark.utils.Optional.empty() /* whereConditions */,
-            org.lance.spark.utils.Optional.empty() /* limit */,
-            org.lance.spark.utils.Optional.empty() /* offset */,
-            org.lance.spark.utils.Optional.empty() /* topNSortOrders */,
-            org.lance.spark.utils.Optional.empty() /* pushedAggregation */,
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
             new Predicate[0],
             null,
             Collections.emptyMap(),
             null,
-            partInfo,
+            transform,
+            fragKeys,
             Collections.emptyMap(),
             null,
             Collections.emptyMap());
@@ -240,6 +241,39 @@ public class LanceScanTest {
     scan.planInputPartitions();
     Partitioning partitioning = scan.outputPartitioning();
     assertInstanceOf(UnknownPartitioning.class, partitioning);
+  }
+
+  @Test
+  public void testOutputPartitioningWithBucketInfo() {
+    Map<Integer, Object> fragKeys = new HashMap<>();
+    fragKeys.put(0, 0);
+    fragKeys.put(1, 1);
+    fragKeys.put(2, 2);
+    PartitionTransform transform = new PartitionTransform.Bucket("region", 4);
+
+    LanceScan scan =
+        new LanceScan(
+            TEST_SCHEMA,
+            TestUtils.TestTable1Config.readOptions,
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            new Predicate[0],
+            null,
+            Collections.emptyMap(),
+            null,
+            transform,
+            fragKeys,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+
+    Partitioning partitioning = scan.outputPartitioning();
+    assertInstanceOf(KeyGroupedPartitioning.class, partitioning);
+    KeyGroupedPartitioning kgp = (KeyGroupedPartitioning) partitioning;
+    assertEquals(3, kgp.numPartitions());
   }
 
   // --- equals / hashCode (required for ReusedExchange) ---

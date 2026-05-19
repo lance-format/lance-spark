@@ -13,6 +13,7 @@
  */
 package org.lance.spark;
 
+import org.lance.spark.partition.PartitionTransform;
 import org.lance.spark.write.StagedCommit;
 
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
@@ -25,6 +26,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.List;
 import java.util.Map;
 
 public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
@@ -67,7 +69,8 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
       Map<String, String> namespaceProperties,
       boolean managedVersioning,
       String fileFormatVersion,
-      Map<String, String> tableProperties) {
+      Map<String, String> tableProperties,
+      List<PartitionTransform> partitionSpec) {
     return new LancePositionDeltaDataset(
         readOptions,
         sparkSchema,
@@ -76,7 +79,8 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
         namespaceProperties,
         managedVersioning,
         fileFormatVersion,
-        tableProperties);
+        tableProperties,
+        partitionSpec);
   }
 
   @Override
@@ -89,7 +93,8 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
       boolean managedVersioning,
       StagedCommit stagedCommit,
       String fileFormatVersion,
-      Map<String, String> tableProperties) {
+      Map<String, String> tableProperties,
+      List<PartitionTransform> partitionSpec) {
     return new LancePositionDeltaDataset(
         readOptions,
         sparkSchema,
@@ -99,6 +104,7 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
         managedVersioning,
         stagedCommit,
         fileFormatVersion,
-        tableProperties);
+        tableProperties,
+        partitionSpec);
   }
 }

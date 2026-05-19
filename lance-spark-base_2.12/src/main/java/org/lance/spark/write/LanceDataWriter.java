@@ -18,6 +18,8 @@ import org.lance.FragmentMetadata;
 import org.lance.WriteParams;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.partition.PartitionTransform;
+import org.lance.spark.utils.BucketHashUtil;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
@@ -45,14 +47,15 @@ import java.util.function.Supplier;
 
 public class LanceDataWriter implements DataWriter<InternalRow> {
   private final Supplier<BufferAndTask> bufferTaskFactory;
-  private final int[] partitionColumnIndices;
-  private final DataType[] partitionColumnTypes;
+  private final List<PartitionTransform> partitionSpec;
+  private final int[][] specColumnIndices;
+  private final DataType[][] specColumnTypes;
   private final List<FragmentMetadata> completedFragments = new ArrayList<>();
 
   private ArrowBatchWriteBuffer writeBuffer;
   private FutureTask<List<FragmentMetadata>> fragmentCreationTask;
   private Thread fragmentCreationThread;
-  private Object[] lastKey;
+  private Object lastKey;
   private boolean hasRowsInCurrentFragment;
 
   public LanceDataWriter(
@@ -64,8 +67,9 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
         fragmentCreationTask,
         fragmentCreationThread,
         null,
-        new int[0],
-        new DataType[0]);
+        Collections.emptyList(),
+        new int[0][],
+        new DataType[0][]);
   }
 
   LanceDataWriter(
@@ -73,79 +77,71 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       FutureTask<List<FragmentMetadata>> fragmentCreationTask,
       Thread fragmentCreationThread,
       Supplier<BufferAndTask> bufferTaskFactory,
-      int[] partitionColumnIndices,
-      DataType[] partitionColumnTypes) {
+      List<PartitionTransform> partitionSpec,
+      int[][] specColumnIndices,
+      DataType[][] specColumnTypes) {
     this.writeBuffer = writeBuffer;
     this.fragmentCreationThread = fragmentCreationThread;
     this.fragmentCreationTask = fragmentCreationTask;
     this.bufferTaskFactory = bufferTaskFactory;
-    this.partitionColumnIndices = partitionColumnIndices;
-    this.partitionColumnTypes = partitionColumnTypes;
+    this.partitionSpec = partitionSpec;
+    this.specColumnIndices = specColumnIndices;
+    this.specColumnTypes = specColumnTypes;
   }
 
   @Override
   public void write(InternalRow record) throws IOException {
-    if (partitionColumnIndices.length > 0) {
+    if (!partitionSpec.isEmpty()) {
+      Object key = computePartitionKey(record);
       if (!hasRowsInCurrentFragment) {
-        captureKey(record);
-      } else if (!rowMatchesLastKey(record)) {
+        lastKey = key;
+      } else if (!key.equals(lastKey)) {
         rollFragment();
-        captureKey(record);
+        lastKey = key;
       }
     }
     writeBuffer.write(record);
     hasRowsInCurrentFragment = true;
   }
 
-  /** Compares the row's partition values against {@link #lastKey} without allocating. */
-  private boolean rowMatchesLastKey(InternalRow row) {
-    for (int k = 0; k < partitionColumnIndices.length; k++) {
-      int idx = partitionColumnIndices[k];
-      Object prev = lastKey[k];
-      if (row.isNullAt(idx)) {
-        if (prev != null) return false;
-      } else {
-        if (prev == null) return false;
-        if (!prev.equals(row.get(idx, partitionColumnTypes[k]))) return false;
-      }
+  private Object computePartitionKey(InternalRow row) {
+    if (partitionSpec.size() == 1) {
+      return computeSingleKey(row, 0);
     }
-    return true;
+    Object[] keys = new Object[partitionSpec.size()];
+    for (int i = 0; i < partitionSpec.size(); i++) {
+      keys[i] = computeSingleKey(row, i);
+    }
+    return Arrays.asList(keys);
   }
 
-  /**
-   * Snapshots the row's partition values into {@link #lastKey}. Only called on the first row of a
-   * fragment, so the per-row hot path stays allocation-free.
-   */
-  private void captureKey(InternalRow row) {
-    if (lastKey == null) {
-      lastKey = new Object[partitionColumnIndices.length];
+  private Object computeSingleKey(InternalRow row, int specIdx) {
+    PartitionTransform t = partitionSpec.get(specIdx);
+    int[] colIndices = specColumnIndices[specIdx];
+    DataType[] colTypes = specColumnTypes[specIdx];
+
+    if (t instanceof PartitionTransform.Bucket) {
+      int numBuckets = ((PartitionTransform.Bucket) t).getNumBuckets();
+      return BucketHashUtil.computeBucketId(row, colIndices, colTypes, numBuckets);
     }
-    for (int k = 0; k < partitionColumnIndices.length; k++) {
-      int idx = partitionColumnIndices[k];
-      if (row.isNullAt(idx)) {
-        lastKey[k] = null;
-      } else {
-        Object value = row.get(idx, partitionColumnTypes[k]);
-        // UTF8String wraps a pointer into the row buffer, which may be reused
-        // across calls — snapshot the bytes so the key stays stable.
-        lastKey[k] = value instanceof UTF8String ? ((UTF8String) value).clone() : value;
-      }
+    // Identity: use the raw column value
+    int idx = colIndices[0];
+    if (row.isNullAt(idx)) {
+      return null;
     }
+    Object value = row.get(idx, colTypes[0]);
+    return value instanceof UTF8String ? ((UTF8String) value).clone() : value;
   }
 
-  /**
-   * Closes the current fragment stream, collects its metadata, and spins up a fresh buffer + task
-   * so subsequent rows land in a new fragment. Called at each partition-value transition.
-   */
   private void rollFragment() throws IOException {
     writeBuffer.setFinished();
     try {
       completedFragments.addAll(stripRowIdMeta(fragmentCreationTask.get()));
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      throw new IOException("Interrupted while rolling fragment on partition boundary", e);
+      throw new IOException("Interrupted while rolling fragment", e);
     } catch (ExecutionException e) {
-      throw new IOException("Exception rolling fragment on partition boundary", e);
+      throw new IOException("Exception rolling fragment", e);
     }
     writeBuffer.close();
 
@@ -166,7 +162,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       return new LanceBatchWrite.TaskCommit(new ArrayList<>(completedFragments));
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      throw new IOException("Interrupted while waiting for fragment creation thread to finish", e);
+      throw new IOException("Interrupted waiting for fragment creation", e);
     } catch (ExecutionException e) {
       throw new IOException("Exception in fragment creation thread", e);
     }
@@ -174,21 +170,15 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
 
   @Override
   public void abort() throws IOException {
-    // Signal the write buffer that no more data will be produced.
-    // This unblocks the fragment creation thread's consumer side
-    // (which reads from the buffer via ArrowReader interface),
-    // preventing a deadlock where the consumer waits for more data
-    // while we wait for the consumer to finish.
     writeBuffer.setFinished();
     fragmentCreationThread.interrupt();
     try {
-      // Have a timeout to avoid hanging in native method indefinitely
       fragmentCreationTask.get(5, TimeUnit.MINUTES);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      throw new IOException("Interrupted while waiting for fragment creation thread to finish", e);
+      throw new IOException("Interrupted waiting for fragment creation", e);
     } catch (ExecutionException | TimeoutException e) {
-      throw new IOException("Failed to abort the fragment creation thread", e);
+      throw new IOException("Failed to abort fragment creation", e);
     }
     close();
   }
@@ -231,19 +221,11 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
   public static class WriterFactory implements DataWriterFactory {
     private final LanceSparkWriteOptions writeOptions;
     private final StructType schema;
-
-    /**
-     * Initial storage options fetched from namespace.describeTable() on the driver. These are
-     * passed to workers so they can reuse the credentials without calling describeTable again.
-     */
     private final Map<String, String> initialStorageOptions;
-
-    /** Namespace configuration for credential refresh on workers. */
     private final String namespaceImpl;
-
     private final Map<String, String> namespaceProperties;
     private final List<String> tableId;
-    private final List<String> partitionColumns;
+    private final List<PartitionTransform> partitionSpec;
 
     public WriterFactory(
         StructType schema,
@@ -269,15 +251,14 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
         String namespaceImpl,
         Map<String, String> namespaceProperties,
         List<String> tableId,
-        List<String> partitionColumns) {
-      // Everything passed to writer factory should be serializable
+        List<PartitionTransform> partitionSpec) {
       this.schema = schema;
       this.writeOptions = writeOptions;
       this.initialStorageOptions = initialStorageOptions;
       this.namespaceImpl = namespaceImpl;
       this.namespaceProperties = namespaceProperties;
       this.tableId = tableId;
-      this.partitionColumns = partitionColumns == null ? Collections.emptyList() : partitionColumns;
+      this.partitionSpec = partitionSpec == null ? Collections.emptyList() : partitionSpec;
     }
 
     private BufferAndTask buildBufferAndTask() {
@@ -310,10 +291,9 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
               return Fragment.create(writeOptions.getDatasetUri(), arrowStream, params);
             }
           };
-      FutureTask<List<FragmentMetadata>> fragmentCreationTask =
-          writeBuffer.createTrackedTask(fragmentCreator);
-      Thread fragmentCreationThread = new Thread(fragmentCreationTask);
-      return new BufferAndTask(writeBuffer, fragmentCreationTask, fragmentCreationThread);
+      FutureTask<List<FragmentMetadata>> task = writeBuffer.createTrackedTask(fragmentCreator);
+      Thread thread = new Thread(task);
+      return new BufferAndTask(writeBuffer, task, thread);
     }
 
     @Override
@@ -321,21 +301,33 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       BufferAndTask initial = buildBufferAndTask();
       initial.thread.start();
 
-      int[] indices = resolvePartitionColumnIndices();
-      DataType[] types = resolvePartitionColumnTypes(indices);
+      int[][] colIndices = new int[partitionSpec.size()][];
+      DataType[][] colTypes = new DataType[partitionSpec.size()][];
+      for (int i = 0; i < partitionSpec.size(); i++) {
+        String col = partitionSpec.get(i).getCol();
+        int[] idx = resolveColumnIndices(Collections.singletonList(col));
+        colIndices[i] = idx;
+        colTypes[i] = resolveColumnTypes(idx);
+      }
 
       return new LanceDataWriter(
-          initial.buffer, initial.task, initial.thread, this::buildBufferAndTask, indices, types);
+          initial.buffer,
+          initial.task,
+          initial.thread,
+          this::buildBufferAndTask,
+          partitionSpec,
+          colIndices,
+          colTypes);
     }
 
-    private int[] resolvePartitionColumnIndices() {
-      if (partitionColumns.isEmpty()) {
+    private int[] resolveColumnIndices(List<String> columns) {
+      if (columns.isEmpty()) {
         return new int[0];
       }
       String[] names = schema.fieldNames();
-      int[] indices = new int[partitionColumns.size()];
-      for (int i = 0; i < partitionColumns.size(); i++) {
-        String col = partitionColumns.get(i);
+      int[] indices = new int[columns.size()];
+      for (int i = 0; i < columns.size(); i++) {
+        String col = columns.get(i);
         int found = -1;
         for (int j = 0; j < names.length; j++) {
           if (names[j].equals(col)) {
@@ -345,7 +337,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
         }
         if (found < 0) {
           throw new IllegalArgumentException(
-              "Partition column not found in schema: "
+              "Column not found in schema: "
                   + col
                   + " (available: "
                   + Arrays.toString(names)
@@ -356,7 +348,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       return indices;
     }
 
-    private DataType[] resolvePartitionColumnTypes(int[] indices) {
+    private DataType[] resolveColumnTypes(int[] indices) {
       StructField[] fields = schema.fields();
       DataType[] types = new DataType[indices.length];
       for (int i = 0; i < indices.length; i++) {

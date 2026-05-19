@@ -21,9 +21,10 @@ import org.lance.index.IndexDescription;
 import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.schema.LanceField;
-import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.partition.PartitionTransform;
 import org.lance.spark.utils.Optional;
+import org.lance.spark.utils.PartitionTransformUtil;
 import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.catalyst.InternalRow;
@@ -96,6 +97,7 @@ public class LanceScanBuilder
   private final java.util.Map<String, String> namespaceProperties;
 
   private final java.util.Map<String, String> tableProperties;
+  private final List<PartitionTransform> partitionSpec;
 
   public LanceScanBuilder(
       StructType schema,
@@ -104,6 +106,24 @@ public class LanceScanBuilder
       String namespaceImpl,
       java.util.Map<String, String> namespaceProperties,
       java.util.Map<String, String> tableProperties) {
+    this(
+        schema,
+        readOptions,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        tableProperties,
+        Collections.emptyList());
+  }
+
+  public LanceScanBuilder(
+      StructType schema,
+      LanceSparkReadOptions readOptions,
+      java.util.Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      java.util.Map<String, String> namespaceProperties,
+      java.util.Map<String, String> tableProperties,
+      List<PartitionTransform> partitionSpec) {
     this.fullSchema = schema;
     this.schema = schema;
     this.readOptions = readOptions;
@@ -111,6 +131,10 @@ public class LanceScanBuilder
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableProperties = tableProperties != null ? tableProperties : Collections.emptyMap();
+    this.partitionSpec =
+        partitionSpec != null
+            ? Collections.unmodifiableList(new ArrayList<>(partitionSpec))
+            : Collections.emptyList();
   }
 
   /**
@@ -143,41 +167,45 @@ public class LanceScanBuilder
     // Get statistics from manifest summary before closing dataset
     ManifestSummary summary = getOrOpenDataset().getVersion().getManifestSummary();
 
-    // Collect all columns that need zonemap stats: filter columns + partition column (if declared).
+    // Collect all columns that need zonemap stats: filter columns + partition columns.
     Set<String> columnsToLoad = extractReferencedColumns(pushedPredicates);
-    String partitionColumn = tableProperties.get(LanceConstant.TABLE_OPT_PARTITION_COLUMNS);
-    if (partitionColumn != null && !partitionColumn.trim().isEmpty()) {
-      partitionColumn = partitionColumn.trim();
-      columnsToLoad.add(partitionColumn);
-    } else {
-      partitionColumn = null;
+    Dataset dataset = getOrOpenDataset();
+    List<PartitionTransform> partSpec =
+        partitionSpec.isEmpty()
+            ? PartitionTransformUtil.parseSpec(dataset, tableProperties)
+            : partitionSpec;
+    for (PartitionTransform t : partSpec) {
+      columnsToLoad.add(t.getCol());
     }
 
     // Load zonemap stats for all requested columns in one pass.
     Map<String, List<ZoneStats>> zonemapStats = loadZonemapStats(getOrOpenDataset(), columnsToLoad);
 
-    // Detect partition-compatible columns, gated on lance.partition.columns table property.
-    // Currently a partitioned column is only valid if each fragment contains only a single
-    // value for that column (i.e., all zonemap zones have min == max with the same value).
-    ZonemapFragmentPruner.PartitionInfo partitionInfo = null;
-    if (partitionColumn != null) {
-      if (!zonemapStats.containsKey(partitionColumn)) {
+    // Detect partition-compatible fragments from zonemap stats.
+    // Each transform checks its column's zones; if every fragment
+    // has a single partition value, we get a fragment→key map.
+    Map<Integer, Object> fragmentPartKeys = null;
+    PartitionTransform activeTransform = null;
+    for (PartitionTransform t : partSpec) {
+      List<ZoneStats> colStats = zonemapStats.get(t.getCol());
+      if (colStats == null || colStats.isEmpty()) {
         LOG.warn(
-            "Partition column '{}' declared in {} has no zonemap index or stats;"
+            "Partition column '{}' (transform={}) has no zonemap stats;"
                 + " partition detection disabled",
-            partitionColumn,
-            LanceConstant.TABLE_OPT_PARTITION_COLUMNS);
-      } else {
-        Map<Integer, Comparable<?>> partValues =
-            ZonemapFragmentPruner.computeFragmentPartitionValues(zonemapStats.get(partitionColumn))
-                .orElse(null);
-        if (partValues != null) {
-          partitionInfo = new ZonemapFragmentPruner.PartitionInfo(partitionColumn, partValues);
-          LOG.info(
-              "Detected partition-compatible column '{}' with {} fragments",
-              partitionColumn,
-              partValues.size());
-        }
+            t.getCol(),
+            t.getTransform());
+        continue;
+      }
+      java.util.Optional<Map<Integer, Object>> keys = t.detectFragmentKeys(colStats);
+      if (keys.isPresent()) {
+        fragmentPartKeys = keys.get();
+        activeTransform = t;
+        LOG.info(
+            "Detected partition transform {}('{}') with {} fragments",
+            t.getTransform(),
+            t.getCol(),
+            fragmentPartKeys.size());
+        break;
       }
     }
 
@@ -231,7 +259,8 @@ public class LanceScanBuilder
         statistics,
         zonemapStats,
         survivingFragmentIds,
-        partitionInfo,
+        activeTransform,
+        fragmentPartKeys,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties);
@@ -353,21 +382,20 @@ public class LanceScanBuilder
     }
 
     Set<String> zonemapColumns = findZonemapIndexedColumns(dataset);
-    if (zonemapColumns.isEmpty()) {
-      return Collections.emptyMap();
-    }
+    LOG.debug("zonemapColumns={}, requested columns={}", zonemapColumns, columns);
 
     Map<String, List<ZoneStats>> result = new HashMap<>();
     for (String col : columns) {
-      if (zonemapColumns.contains(col)) {
+      if (zonemapColumns.isEmpty() || zonemapColumns.contains(col)) {
         try {
           List<ZoneStats> stats = dataset.getZonemapStats(col);
+          LOG.debug("getZonemapStats('{}') returned {} zones", col, stats.size());
           if (!stats.isEmpty()) {
             result.put(col, stats);
             LOG.debug("Loaded {} zonemap zones for column '{}'", stats.size(), col);
           }
         } catch (Exception e) {
-          LOG.debug("Failed to load zonemap stats for column '{}': {}", col, e.getMessage());
+          LOG.debug("Failed to load zonemap stats for column" + " '{}': {}", col, e.getMessage());
         }
       }
     }
@@ -387,10 +415,10 @@ public class LanceScanBuilder
         fieldIdToName.put(field.getId(), field.getName());
       }
 
-      // Use the criteria-based overload so that indexes missing index_details
-      // (created by older versions) are silently skipped instead of causing errors.
       IndexCriteria criteria = new IndexCriteria.Builder().build();
       for (IndexDescription idx : dataset.describeIndices(criteria)) {
+        LOG.debug(
+            "Index '{}' type='{}' fields={}", idx.getName(), idx.getIndexType(), idx.getFieldIds());
         if ("ZONEMAP".equalsIgnoreCase(idx.getIndexType())) {
           for (int fieldId : idx.getFieldIds()) {
             String name = fieldIdToName.get(fieldId);

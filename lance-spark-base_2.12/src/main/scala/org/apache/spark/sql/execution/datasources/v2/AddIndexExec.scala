@@ -87,57 +87,87 @@ case class AddIndexExec(
 
     val dataset = Utils.openDatasetBuilder(readOptions).build()
 
-    val indexBuildResult =
-      createIndexJob(dataset, lanceDataset, readOptions, uuid.toString, fragmentIds).run()
-
     try {
-      // Merge index metadata after all fragments are indexed
-      dataset.mergeIndexMetadata(uuid.toString, indexType, Optional.empty())
+      if (indexType == IndexType.ZONEMAP) {
+        // ZoneMap indexes are lightweight (metadata-only).
+        // Build per-fragment segments on the driver and commit
+        // via the segment-based path, avoiding the merge path
+        // which doesn't support ZoneMap.
+        val argsJson = IndexUtils.toJson(args)
+        val segments = fragmentIds.map { fragId =>
+          val params = IndexParams.builder()
+            .setScalarIndexParams(
+              ScalarIndexParams.create("zonemap", argsJson))
+            .build()
+          val opts = IndexOptions
+            .builder(columns.asJava, IndexType.ZONEMAP, params)
+            .replace(true)
+            .withIndexName(indexName)
+            .withFragmentIds(Collections.singletonList(fragId))
+            .build()
+          dataset.createIndex(opts)
+        }
+        dataset.commitExistingIndexSegments(
+          indexName,
+          columns.head,
+          segments.asJava)
+      } else {
+        val indexBuildResult =
+          createIndexJob(
+            dataset,
+            lanceDataset,
+            readOptions,
+            uuid.toString,
+            fragmentIds).run()
+        // BTree/Inverted use the merge path
+        dataset.mergeIndexMetadata(uuid.toString, indexType, Optional.empty())
 
-      val fieldIdByName = dataset.getLanceSchema.fields().asScala
-        .map(f => f.getName -> f.getId)
-        .toMap
-      val fieldIds = columns.map { column =>
-        fieldIdByName.getOrElse(
-          column,
-          throw new IllegalArgumentException(s"Cannot find index column in Lance schema: $column"))
-      }.toList
+        val fieldIdByName = dataset.getLanceSchema.fields().asScala
+          .map(f => f.getName -> f.getId)
+          .toMap
+        val fieldIds = columns.map { column =>
+          fieldIdByName.getOrElse(
+            column,
+            throw new IllegalArgumentException(
+              s"Cannot find index column in Lance schema: $column"))
+        }.toList
 
-      val datasetVersion = dataset.version()
+        val datasetVersion = dataset.version()
 
-      val indexBuilder = Index
-        .builder()
-        .uuid(uuid)
-        .name(indexName)
-        .fields(fieldIds.map(java.lang.Integer.valueOf).asJava)
-        .datasetVersion(datasetVersion)
-        .indexDetails(indexBuildResult.indexDetails)
-        .indexVersion(indexBuildResult.indexVersion)
-        .indexType(indexBuildResult.indexType)
-        .fragments(fragmentIds.asJava)
-      indexBuildResult.createdAt.foreach(indexBuilder.createdAt)
-      val index = indexBuilder.build()
+        val indexBuilder = Index
+          .builder()
+          .uuid(uuid)
+          .name(indexName)
+          .fields(fieldIds.map(java.lang.Integer.valueOf).asJava)
+          .datasetVersion(datasetVersion)
+          .indexDetails(indexBuildResult.indexDetails)
+          .indexVersion(indexBuildResult.indexVersion)
+          .indexType(indexBuildResult.indexType)
+          .fragments(fragmentIds.asJava)
+        indexBuildResult.createdAt.foreach(indexBuilder.createdAt)
+        val index = indexBuilder.build()
 
-      // Find existing indices with the same name to mark as removed (for replace)
-      val removedIndices = dataset.getIndexes.asScala
-        .filter(_.name() == indexName)
-        .toList.asJava
+        // Find existing indices with the same name to mark as removed (for replace)
+        val removedIndices = dataset.getIndexes.asScala
+          .filter(_.name() == indexName)
+          .toList.asJava
 
-      val op = AddIndexOperation.builder()
-        .withNewIndices(Collections.singletonList(index))
-        .withRemovedIndices(removedIndices)
-        .build()
-      val txn = new Transaction.Builder()
-        .readVersion(dataset.version())
-        .operation(op)
-        .build()
-      try {
-        val newDataset = new CommitBuilder(dataset)
-          .writeParams(readOptions.getStorageOptions)
-          .execute(txn)
-        newDataset.close()
-      } finally {
-        txn.close()
+        val op = AddIndexOperation.builder()
+          .withNewIndices(Collections.singletonList(index))
+          .withRemovedIndices(removedIndices)
+          .build()
+        val txn = new Transaction.Builder()
+          .readVersion(dataset.version())
+          .operation(op)
+          .build()
+        try {
+          val newDataset = new CommitBuilder(dataset)
+            .writeParams(readOptions.getStorageOptions)
+            .execute(txn)
+          newDataset.close()
+        } finally {
+          txn.close()
+        }
       }
     } finally {
       dataset.close()
@@ -280,7 +310,9 @@ class FragmentBasedIndexJob(
       .map(t => t.execute())
       .collect()
 
-    IndexUtils.collectIndexBuildResult(results, IndexUtils.buildIndexType(addIndexExec.method))
+    IndexUtils.collectIndexBuildResult(
+      results,
+      IndexUtils.buildIndexType(addIndexExec.method))
   }
 }
 
@@ -324,13 +356,19 @@ case class FragmentIndexTask(
         argsJson))
       .build()
 
-    val indexOptions = IndexOptions
+    val indexOptionsBuilder = IndexOptions
       .builder(java.util.Arrays.asList(columns: _*), indexType, params)
       .replace(true)
       .withIndexName(indexName)
-      .withIndexUUID(uuid)
       .withFragmentIds(Collections.singletonList(fragmentId))
-      .build()
+    // For segment-based indexes (ZoneMap), each fragment needs its
+    // own UUID so segments don't collide. For merge-based indexes
+    // (BTree, Inverted), all fragments share one UUID so their
+    // outputs land in the same index directory for merging.
+    if (indexType != IndexType.ZONEMAP) {
+      indexOptionsBuilder.withIndexUUID(uuid)
+    }
+    val indexOptions = indexOptionsBuilder.build()
 
     val dataset = Utils.openDatasetBuilder(readOptions)
       .initialStorageOptions(initialStorageOptions.map(_.asJava).orNull)
@@ -562,6 +600,7 @@ object IndexUtils {
     method.toLowerCase match {
       case "btree" => IndexType.BTREE
       case "fts" => IndexType.INVERTED
+      case "zonemap" => IndexType.ZONEMAP
       case other => throw new UnsupportedOperationException(s"Unsupported index method: $other")
     }
   }
@@ -570,6 +609,7 @@ object IndexUtils {
     method.toLowerCase match {
       case "btree" => "btree"
       case "fts" => "inverted"
+      case "zonemap" => "zonemap"
       case other => throw new UnsupportedOperationException(s"Unsupported index method: $other")
     }
   }

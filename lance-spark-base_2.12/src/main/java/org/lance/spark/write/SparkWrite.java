@@ -13,16 +13,16 @@
  */
 package org.lance.spark.write;
 
+import org.lance.Dataset;
 import org.lance.WriteParams;
-import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.partition.PartitionTransform;
+import org.lance.spark.utils.PartitionTransformUtil;
+import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.connector.distributions.Distribution;
 import org.apache.spark.sql.connector.distributions.Distributions;
-import org.apache.spark.sql.connector.expressions.Expressions;
 import org.apache.spark.sql.connector.expressions.NamedReference;
-import org.apache.spark.sql.connector.expressions.NullOrdering;
-import org.apache.spark.sql.connector.expressions.SortDirection;
 import org.apache.spark.sql.connector.expressions.SortOrder;
 import org.apache.spark.sql.connector.write.BatchWrite;
 import org.apache.spark.sql.connector.write.RequiresDistributionAndOrdering;
@@ -32,11 +32,9 @@ import org.apache.spark.sql.connector.write.WriteBuilder;
 import org.apache.spark.sql.connector.write.streaming.StreamingWrite;
 import org.apache.spark.sql.types.StructType;
 
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 /**
  * Spark write implementation for Lance tables.
@@ -71,6 +69,8 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
   private final boolean managedVersioning;
   private final StagedCommit stagedCommit;
   private final Map<String, String> tableProperties;
+  private final List<PartitionTransform> initialPartitionSpec;
+  private List<PartitionTransform> cachedPartitionSpec;
 
   SparkWrite(
       StructType schema,
@@ -82,7 +82,8 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
       List<String> tableId,
       boolean managedVersioning,
       StagedCommit stagedCommit,
-      Map<String, String> tableProperties) {
+      Map<String, String> tableProperties,
+      List<PartitionTransform> initialPartitionSpec) {
     this.schema = schema;
     this.writeOptions = writeOptions;
     this.overwrite = overwrite;
@@ -96,46 +97,52 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
         tableProperties != null
             ? Collections.unmodifiableMap(tableProperties)
             : Collections.emptyMap();
+    this.initialPartitionSpec =
+        initialPartitionSpec != null
+            ? Collections.unmodifiableList(initialPartitionSpec)
+            : Collections.emptyList();
   }
 
-  /** Returns partition column names from the table property, empty list if unset. */
-  private List<String> partitionColumnList() {
-    String raw = tableProperties.get(LanceConstant.TABLE_OPT_PARTITION_COLUMNS);
-    if (raw == null || raw.trim().isEmpty()) {
-      return Collections.emptyList();
+  private List<PartitionTransform> partitionSpec() {
+    if (cachedPartitionSpec == null) {
+      if (stagedCommit != null || !initialPartitionSpec.isEmpty()) {
+        cachedPartitionSpec = initialPartitionSpec;
+      } else {
+        try (Dataset dataset =
+            Utils.openDatasetBuilder(writeOptions)
+                .initialStorageOptions(initialStorageOptions)
+                .runtimeNamespace(namespaceImpl, namespaceProperties, tableId)
+                .build()) {
+          cachedPartitionSpec = PartitionTransformUtil.parseSpec(dataset, tableProperties);
+        }
+      }
     }
-    return Arrays.stream(raw.split(","))
-        .map(String::trim)
-        .filter(s -> !s.isEmpty())
-        .collect(Collectors.toList());
+    return cachedPartitionSpec;
   }
 
   @Override
   public Distribution requiredDistribution() {
-    List<String> cols = partitionColumnList();
-    if (cols.isEmpty()) {
+    List<PartitionTransform> spec = partitionSpec();
+    if (spec.isEmpty()) {
       return Distributions.unspecified();
     }
-    NamedReference[] refs = cols.stream().map(Expressions::column).toArray(NamedReference[]::new);
+    NamedReference[] refs =
+        spec.stream().map(PartitionTransform::toClusteringRef).toArray(NamedReference[]::new);
     return Distributions.clustered(refs);
   }
 
   @Override
   public SortOrder[] requiredOrdering() {
-    List<String> cols = partitionColumnList();
-    if (cols.isEmpty()) {
+    List<PartitionTransform> spec = partitionSpec();
+    if (spec.isEmpty()) {
       return new SortOrder[0];
     }
-    return cols.stream()
-        .map(
-            col ->
-                Expressions.sort(
-                    Expressions.column(col), SortDirection.ASCENDING, NullOrdering.NULLS_FIRST))
-        .toArray(SortOrder[]::new);
+    return spec.stream().map(PartitionTransform::toSortOrder).toArray(SortOrder[]::new);
   }
 
   @Override
   public BatchWrite toBatch() {
+    List<PartitionTransform> spec = partitionSpec();
     return new LanceBatchWrite(
         schema,
         writeOptions,
@@ -146,7 +153,7 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
         tableId,
         managedVersioning,
         stagedCommit,
-        partitionColumnList());
+        spec);
   }
 
   @Override
@@ -174,6 +181,7 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
     private final List<String> tableId;
     private final boolean managedVersioning;
     private final Map<String, String> tableProperties;
+    private final List<PartitionTransform> partitionSpec;
 
     public SparkWriteBuilder(
         StructType schema,
@@ -184,6 +192,28 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
         List<String> tableId,
         boolean managedVersioning,
         Map<String, String> tableProperties) {
+      this(
+          schema,
+          writeOptions,
+          initialStorageOptions,
+          namespaceImpl,
+          namespaceProperties,
+          tableId,
+          managedVersioning,
+          tableProperties,
+          Collections.emptyList());
+    }
+
+    public SparkWriteBuilder(
+        StructType schema,
+        LanceSparkWriteOptions writeOptions,
+        Map<String, String> initialStorageOptions,
+        String namespaceImpl,
+        Map<String, String> namespaceProperties,
+        List<String> tableId,
+        boolean managedVersioning,
+        Map<String, String> tableProperties,
+        List<PartitionTransform> partitionSpec) {
       this.schema = schema;
       this.writeOptions = writeOptions;
       this.initialStorageOptions = initialStorageOptions;
@@ -192,6 +222,7 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
       this.tableId = tableId;
       this.managedVersioning = managedVersioning;
       this.tableProperties = tableProperties;
+      this.partitionSpec = partitionSpec;
     }
 
     public void setStagedCommit(StagedCommit stagedCommit) {
@@ -230,7 +261,8 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
           tableId,
           managedVersioning,
           stagedCommit,
-          tableProperties);
+          tableProperties,
+          partitionSpec);
     }
 
     @Override

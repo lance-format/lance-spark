@@ -23,6 +23,7 @@ import org.lance.operation.Operation;
 import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.partition.PartitionTransform;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -64,11 +65,8 @@ public class LanceBatchWrite implements BatchWrite {
 
   private final StagedCommit stagedCommit;
 
-  /**
-   * Partition column names — fragments will be rolled at transitions so each fragment contains
-   * exactly one partition value. Empty when no partitioning is requested.
-   */
-  private final List<String> partitionColumns;
+  /** Partition spec controlling how data is distributed across fragments. */
+  private final List<PartitionTransform> partitionSpec;
 
   public LanceBatchWrite(
       StructType schema,
@@ -103,7 +101,7 @@ public class LanceBatchWrite implements BatchWrite {
       List<String> tableId,
       boolean managedVersioning,
       StagedCommit stagedCommit,
-      List<String> partitionColumns) {
+      List<PartitionTransform> partitionSpec) {
     this.schema = schema;
     this.overwrite = overwrite;
     this.initialStorageOptions = initialStorageOptions;
@@ -112,7 +110,7 @@ public class LanceBatchWrite implements BatchWrite {
     this.tableId = tableId;
     this.managedVersioning = managedVersioning;
     this.stagedCommit = stagedCommit;
-    this.partitionColumns = partitionColumns == null ? Collections.emptyList() : partitionColumns;
+    this.partitionSpec = partitionSpec == null ? Collections.emptyList() : partitionSpec;
 
     // For staged operations, the dataset is managed by StagedCommit.
     // For non-staged operations, pin the dataset version for OCC.
@@ -136,7 +134,7 @@ public class LanceBatchWrite implements BatchWrite {
         namespaceImpl,
         namespaceProperties,
         tableId,
-        partitionColumns);
+        partitionSpec);
   }
 
   @Override

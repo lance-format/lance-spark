@@ -16,13 +16,13 @@ package org.lance.spark.read;
 import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.partition.PartitionTransform;
 import org.lance.spark.read.metric.LanceCustomMetrics;
 import org.lance.spark.utils.Optional;
 
 import org.apache.arrow.util.Preconditions;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.expressions.Expression;
-import org.apache.spark.sql.connector.expressions.FieldReference;
 import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
 import org.apache.spark.sql.connector.expressions.aggregate.CountStar;
@@ -93,11 +93,13 @@ public class LanceScan
   private transient int numPartitions = -1;
 
   /**
-   * Partition info detected from zonemap stats. When present, enables storage-partitioned joins
-   * (SPJ) by reporting the partition column as the output partitioning key instead of {@code
-   * _fragid}. Null when no partition-compatible column is detected.
+   * Active partition transform detected from zonemap stats. Null when no partition-compatible
+   * transform is detected.
    */
-  private final ZonemapFragmentPruner.PartitionInfo partitionInfo;
+  private final PartitionTransform activeTransform;
+
+  /** Map from fragment ID to partition key value. Null when no partitioning is detected. */
+  private final java.util.Map<Integer, Object> fragmentPartKeys;
 
   /**
    * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
@@ -122,7 +124,8 @@ public class LanceScan
       LanceStatistics statistics,
       java.util.Map<String, List<ZoneStats>> zonemapStats,
       Set<Integer> survivingFragmentIds,
-      ZonemapFragmentPruner.PartitionInfo partitionInfo,
+      PartitionTransform activeTransform,
+      java.util.Map<Integer, Object> fragmentPartKeys,
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
       java.util.Map<String, String> namespaceProperties) {
@@ -140,7 +143,8 @@ public class LanceScan
     this.statistics = statistics;
     this.zonemapStats = zonemapStats != null ? zonemapStats : Collections.emptyMap();
     this.cachedSurvivingFragmentIds = survivingFragmentIds;
-    this.partitionInfo = partitionInfo;
+    this.activeTransform = activeTransform;
+    this.fragmentPartKeys = fragmentPartKeys;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
@@ -180,9 +184,12 @@ public class LanceScan
                 i -> {
                   LanceSplit split = finalSplits.get(i);
                   InternalRow partKeyRow = null;
-                  if (partitionInfo != null) {
+                  if (activeTransform != null && fragmentPartKeys != null) {
                     int fragId = split.getFragments().get(0);
-                    partKeyRow = partitionInfo.partitionKeyForFragment(fragId);
+                    Object key = fragmentPartKeys.get(fragId);
+                    if (key != null) {
+                      partKeyRow = activeTransform.partitionKeyRow(key);
+                    }
                   }
                   return new LanceInputPartition(
                       schema,
@@ -371,14 +378,9 @@ public class LanceScan
    */
   @Override
   public Partitioning outputPartitioning() {
-    if (partitionInfo != null) {
-      // Use partition info fragment count — available before
-      // planInputPartitions() is called. This allows
-      // V2ScanPartitioningAndOrdering to see the partitioning
-      // early enough for SPJ.
-      int partCount =
-          numPartitions >= 0 ? numPartitions : partitionInfo.getFragmentPartitionValues().size();
-      Expression[] keys = new Expression[] {FieldReference.apply(partitionInfo.getColumnName())};
+    if (activeTransform != null && fragmentPartKeys != null) {
+      int partCount = numPartitions >= 0 ? numPartitions : fragmentPartKeys.size();
+      Expression[] keys = new Expression[] {activeTransform.toSparkExpression()};
       return new KeyGroupedPartitioning(keys, partCount);
     }
     return new UnknownPartitioning(numPartitions >= 0 ? numPartitions : 0);

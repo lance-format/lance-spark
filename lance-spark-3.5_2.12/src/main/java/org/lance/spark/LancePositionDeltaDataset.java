@@ -13,6 +13,7 @@
  */
 package org.lance.spark;
 
+import org.lance.spark.partition.PartitionTransform;
 import org.lance.spark.write.StagedCommit;
 
 import org.apache.spark.sql.connector.catalog.SupportsRowLevelOperations;
@@ -20,6 +21,7 @@ import org.apache.spark.sql.connector.write.RowLevelOperationBuilder;
 import org.apache.spark.sql.connector.write.RowLevelOperationInfo;
 import org.apache.spark.sql.types.StructType;
 
+import java.util.List;
 import java.util.Map;
 
 public class LancePositionDeltaDataset extends LanceDataset implements SupportsRowLevelOperations {
@@ -31,7 +33,8 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
       Map<String, String> namespaceProperties,
       boolean managedVersioning,
       String fileFormatVersion,
-      Map<String, String> tableProperties) {
+      Map<String, String> tableProperties,
+      List<PartitionTransform> partitionSpec) {
     super(
         readOptions,
         sparkSchema,
@@ -41,7 +44,8 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
         managedVersioning,
         null,
         fileFormatVersion,
-        tableProperties);
+        tableProperties,
+        partitionSpec);
   }
 
   public LancePositionDeltaDataset(
@@ -53,7 +57,8 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
       boolean managedVersioning,
       StagedCommit stagedCommit,
       String fileFormatVersion,
-      Map<String, String> tableProperties) {
+      Map<String, String> tableProperties,
+      List<PartitionTransform> partitionSpec) {
     super(
         readOptions,
         sparkSchema,
@@ -63,7 +68,8 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
         managedVersioning,
         stagedCommit,
         fileFormatVersion,
-        tableProperties);
+        tableProperties,
+        partitionSpec);
   }
 
   @Override
