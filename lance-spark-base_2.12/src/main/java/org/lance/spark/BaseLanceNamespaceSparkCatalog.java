@@ -617,7 +617,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
       describeResponse = namespace.describeTable(describeRequest);
       initialStorageOptions = describeResponse.getStorageOptions();
       managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
-      persistTableProperties(dataset, properties, managedVersioning, tableIdList);
+      if (managedVersioning) {
+        persistTableProperties(dataset, properties, true, tableIdList);
+      }
     }
 
     // Create read options with namespace settings
@@ -667,9 +669,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       if (fileFormatVersion != null) {
         writeBuilder.dataStorageVersion(fileFormatVersion);
       }
-      try (Dataset dataset = writeBuilder.execute()) {
-        persistTableProperties(dataset, properties, false, null);
-      }
+      writeBuilder.execute().close();
     } catch (IllegalArgumentException e) {
       throw new TableAlreadyExistsException(ident);
     }

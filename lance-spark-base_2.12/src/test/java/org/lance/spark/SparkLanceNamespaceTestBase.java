@@ -182,20 +182,6 @@ public abstract class SparkLanceNamespaceTestBase {
   }
 
   @Test
-  public void testCreateTablePersistsOnlyUserProperties() throws Exception {
-    String tableName = generateTableName("create_props");
-    String fullName = catalogName + ".default." + tableName;
-
-    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL) TBLPROPERTIES ('key1' = 'val1')");
-
-    Map<String, String> config = getTableConfig(tableName);
-    assertEquals("val1", config.get("key1"));
-    assertFalse(config.containsKey(TableCatalog.PROP_OWNER));
-    assertFalse(config.containsKey(TableCatalog.PROP_PROVIDER));
-    assertFalse(config.containsKey(TableCatalog.PROP_LOCATION));
-  }
-
-  @Test
   public void testListTables() throws Exception {
     String tableName1 = generateTableName("list_test_1");
     String tableName2 = generateTableName("list_test_2");
