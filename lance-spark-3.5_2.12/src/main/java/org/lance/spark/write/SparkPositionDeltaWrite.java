@@ -24,6 +24,7 @@ import org.lance.namespace.LanceNamespace;
 import org.lance.operation.Update;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRuntime;
+import org.lance.spark.LanceSparkCatalogConfig;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
 import org.lance.spark.utils.Utils;
@@ -111,10 +112,11 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     this.sparkSchema = sparkSchema;
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
       this.writeOptions = writeOptions.withVersion(ds.version());
-      this.hasStableRowIds =
-          ds.hasStableRowIds() || Boolean.TRUE.equals(writeOptions.getEnableStableRowIds());
+      this.hasStableRowIds = hasStableRowIds(ds, writeOptions);
       LOG.debug(
-          "Resolved dataset version for position delta write: {}", this.writeOptions.getVersion());
+          "Resolved dataset version for position delta write: {}, stableRowIds={}",
+          this.writeOptions.getVersion(),
+          this.hasStableRowIds);
     }
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
@@ -420,6 +422,15 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
   // ---------------------------------------------------------------------------
   // Row ID meta helpers
   // ---------------------------------------------------------------------------
+
+  private static boolean hasStableRowIds(Dataset dataset, LanceSparkWriteOptions writeOptions) {
+    if (dataset.hasStableRowIds() || Boolean.TRUE.equals(writeOptions.getEnableStableRowIds())) {
+      return true;
+    }
+    String configured =
+        dataset.getConfig().get(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS);
+    return Boolean.parseBoolean(configured);
+  }
 
   private static List<FragmentMetadata> attachRowIdMeta(
       List<FragmentMetadata> fragments, List<Long> rowIds) {
