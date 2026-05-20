@@ -19,13 +19,7 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.unsafe.hash.Murmur3_x86_32;
 import org.apache.spark.unsafe.types.UTF8String;
 
-/**
- * Computes bucket IDs using Iceberg-compatible Murmur3 hashing (seed 0, int-to-long widening). This
- * ensures Lance bucketed tables can participate in cross-catalog SPJ with Iceberg.
- *
- * <p>This is the single source of truth for bucket hashing — both the write path ({@link
- * #computeBucketId}) and the read path ({@link #computeBucketIdFromValue}) must use this class.
- */
+/** Computes bucket IDs using Iceberg-compatible Murmur3 hashing with seed 0. */
 public final class BucketHashUtil {
 
   static final int MURMUR3_SEED = 0;
@@ -46,9 +40,7 @@ public final class BucketHashUtil {
     int hash = MURMUR3_SEED;
     for (int i = 0; i < columnIndices.length; i++) {
       int idx = columnIndices[i];
-      if (row.isNullAt(idx)) {
-        hash = Murmur3_x86_32.hashLong(0L, hash);
-      } else {
+      if (!row.isNullAt(idx)) {
         hash = hashRowValue(row, idx, columnTypes[i], hash);
       }
     }
@@ -65,9 +57,7 @@ public final class BucketHashUtil {
    */
   public static int computeBucketIdFromValue(Object value, int numBuckets) {
     int hash = MURMUR3_SEED;
-    if (value == null) {
-      hash = Murmur3_x86_32.hashLong(0L, hash);
-    } else {
+    if (value != null) {
       hash = hashBoxedValue(value, hash);
     }
     return (hash & Integer.MAX_VALUE) % numBuckets;
@@ -75,7 +65,7 @@ public final class BucketHashUtil {
 
   private static int hashRowValue(InternalRow row, int idx, DataType type, int seed) {
     if (type == DataTypes.IntegerType || type == DataTypes.DateType) {
-      return Murmur3_x86_32.hashLong(row.getInt(idx), seed);
+      return Murmur3_x86_32.hashInt(row.getInt(idx), seed);
     } else if (type == DataTypes.LongType || type == DataTypes.TimestampType) {
       return Murmur3_x86_32.hashLong(row.getLong(idx), seed);
     } else if (type == DataTypes.StringType) {
@@ -83,15 +73,15 @@ public final class BucketHashUtil {
       return Murmur3_x86_32.hashUnsafeBytes(
           str.getBaseObject(), str.getBaseOffset(), str.numBytes(), seed);
     } else if (type == DataTypes.ShortType) {
-      return Murmur3_x86_32.hashLong(row.getShort(idx), seed);
+      return Murmur3_x86_32.hashInt(row.getShort(idx), seed);
     } else if (type == DataTypes.ByteType) {
-      return Murmur3_x86_32.hashLong(row.getByte(idx), seed);
+      return Murmur3_x86_32.hashInt(row.getByte(idx), seed);
     } else if (type == DataTypes.FloatType) {
-      return Murmur3_x86_32.hashLong(Float.floatToIntBits(row.getFloat(idx)), seed);
+      return Murmur3_x86_32.hashInt(floatBits(row.getFloat(idx)), seed);
     } else if (type == DataTypes.DoubleType) {
-      return Murmur3_x86_32.hashLong(Double.doubleToLongBits(row.getDouble(idx)), seed);
+      return Murmur3_x86_32.hashLong(doubleBits(row.getDouble(idx)), seed);
     } else if (type == DataTypes.BooleanType) {
-      return Murmur3_x86_32.hashLong(row.getBoolean(idx) ? 1L : 0L, seed);
+      return Murmur3_x86_32.hashInt(row.getBoolean(idx) ? 1 : 0, seed);
     } else {
       throw new UnsupportedOperationException(
           "Unsupported bucket column type: "
@@ -104,23 +94,27 @@ public final class BucketHashUtil {
 
   private static int hashBoxedValue(Object value, int seed) {
     if (value instanceof Integer) {
-      return Murmur3_x86_32.hashLong((Integer) value, seed);
+      return Murmur3_x86_32.hashInt((Integer) value, seed);
     } else if (value instanceof Long) {
       return Murmur3_x86_32.hashLong((Long) value, seed);
     } else if (value instanceof String) {
       UTF8String str = UTF8String.fromString((String) value);
       return Murmur3_x86_32.hashUnsafeBytes(
           str.getBaseObject(), str.getBaseOffset(), str.numBytes(), seed);
+    } else if (value instanceof UTF8String) {
+      UTF8String str = (UTF8String) value;
+      return Murmur3_x86_32.hashUnsafeBytes(
+          str.getBaseObject(), str.getBaseOffset(), str.numBytes(), seed);
     } else if (value instanceof Short) {
-      return Murmur3_x86_32.hashLong((Short) value, seed);
+      return Murmur3_x86_32.hashInt((Short) value, seed);
     } else if (value instanceof Byte) {
-      return Murmur3_x86_32.hashLong((Byte) value, seed);
+      return Murmur3_x86_32.hashInt((Byte) value, seed);
     } else if (value instanceof Float) {
-      return Murmur3_x86_32.hashLong(Float.floatToIntBits((Float) value), seed);
+      return Murmur3_x86_32.hashInt(floatBits((Float) value), seed);
     } else if (value instanceof Double) {
-      return Murmur3_x86_32.hashLong(Double.doubleToLongBits((Double) value), seed);
+      return Murmur3_x86_32.hashLong(doubleBits((Double) value), seed);
     } else if (value instanceof Boolean) {
-      return Murmur3_x86_32.hashLong(((Boolean) value) ? 1L : 0L, seed);
+      return Murmur3_x86_32.hashInt(((Boolean) value) ? 1 : 0, seed);
     } else {
       throw new UnsupportedOperationException(
           "Unsupported bucket value type: "
@@ -128,5 +122,13 @@ public final class BucketHashUtil {
               + ". Supported: Integer, Long, String,"
               + " Short, Byte, Float, Double, Boolean.");
     }
+  }
+
+  private static int floatBits(float value) {
+    return value == 0.0f ? 0 : Float.floatToIntBits(value);
+  }
+
+  private static long doubleBits(double value) {
+    return value == 0.0d ? 0L : Double.doubleToLongBits(value);
   }
 }

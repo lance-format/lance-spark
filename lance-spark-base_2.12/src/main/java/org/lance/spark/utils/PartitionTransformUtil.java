@@ -29,6 +29,7 @@ import scala.collection.JavaConverters;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -153,6 +154,14 @@ public final class PartitionTransformUtil {
     dataset.initializeMemWal(params);
   }
 
+  public static Map<Integer, String> sourceIdToColumnMap(Dataset dataset) {
+    Map<Integer, String> result = new HashMap<>();
+    for (LanceField field : dataset.getLanceSchema().fields()) {
+      collectFieldIds(field, "", result);
+    }
+    return result;
+  }
+
   private static List<PartitionTransform> fromMemWalIndexDetails(
       Dataset dataset, MemWalIndexDetails details) {
     List<PartitionTransform> spec = new ArrayList<>();
@@ -187,5 +196,14 @@ public final class PartitionTransformUtil {
       }
     }
     return null;
+  }
+
+  private static void collectFieldIds(
+      LanceField field, String prefix, Map<Integer, String> result) {
+    String fullName = prefix.isEmpty() ? field.getName() : prefix + "." + field.getName();
+    result.put(field.getId(), fullName);
+    for (LanceField child : field.getChildren()) {
+      collectFieldIds(child, fullName, result);
+    }
   }
 }

@@ -13,13 +13,16 @@
  */
 package org.lance.spark.write;
 
+import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.WriteParams;
+import org.lance.memwal.MemWalIndexDetails;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.partition.PartitionTransform;
-import org.lance.spark.utils.BucketHashUtil;
+import org.lance.spark.utils.PartitionTransformUtil;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
@@ -27,17 +30,17 @@ import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.write.DataWriter;
 import org.apache.spark.sql.connector.write.DataWriterFactory;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
-import org.apache.spark.sql.types.DataType;
-import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
-import org.apache.spark.unsafe.types.UTF8String;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
@@ -46,10 +49,10 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
 public class LanceDataWriter implements DataWriter<InternalRow> {
+  private static final Logger LOG = LoggerFactory.getLogger(LanceDataWriter.class);
+
   private final Supplier<BufferAndTask> bufferTaskFactory;
-  private final List<PartitionTransform> partitionSpec;
-  private final int[][] specColumnIndices;
-  private final DataType[][] specColumnTypes;
+  private final ShardingBatchKeyEvaluator shardingKeyEvaluator;
   private final List<FragmentMetadata> completedFragments = new ArrayList<>();
 
   private ArrowBatchWriteBuffer writeBuffer;
@@ -62,14 +65,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       ArrowBatchWriteBuffer writeBuffer,
       FutureTask<List<FragmentMetadata>> fragmentCreationTask,
       Thread fragmentCreationThread) {
-    this(
-        writeBuffer,
-        fragmentCreationTask,
-        fragmentCreationThread,
-        null,
-        Collections.emptyList(),
-        new int[0][],
-        new DataType[0][]);
+    this(writeBuffer, fragmentCreationTask, fragmentCreationThread, null, null);
   }
 
   LanceDataWriter(
@@ -77,60 +73,33 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       FutureTask<List<FragmentMetadata>> fragmentCreationTask,
       Thread fragmentCreationThread,
       Supplier<BufferAndTask> bufferTaskFactory,
-      List<PartitionTransform> partitionSpec,
-      int[][] specColumnIndices,
-      DataType[][] specColumnTypes) {
+      ShardingBatchKeyEvaluator shardingKeyEvaluator) {
     this.writeBuffer = writeBuffer;
     this.fragmentCreationThread = fragmentCreationThread;
     this.fragmentCreationTask = fragmentCreationTask;
     this.bufferTaskFactory = bufferTaskFactory;
-    this.partitionSpec = partitionSpec;
-    this.specColumnIndices = specColumnIndices;
-    this.specColumnTypes = specColumnTypes;
+    this.shardingKeyEvaluator = shardingKeyEvaluator;
   }
 
   @Override
   public void write(InternalRow record) throws IOException {
-    if (!partitionSpec.isEmpty()) {
-      Object key = computePartitionKey(record);
-      if (!hasRowsInCurrentFragment) {
-        lastKey = key;
-      } else if (!key.equals(lastKey)) {
-        rollFragment();
-        lastKey = key;
-      }
+    if (shardingKeyEvaluator != null) {
+      shardingKeyEvaluator.write(record, this::writePartitionedRow);
+      return;
     }
     writeBuffer.write(record);
     hasRowsInCurrentFragment = true;
   }
 
-  private Object computePartitionKey(InternalRow row) {
-    if (partitionSpec.size() == 1) {
-      return computeSingleKey(row, 0);
+  private void writePartitionedRow(InternalRow row, Object key) throws IOException {
+    if (!hasRowsInCurrentFragment) {
+      lastKey = key;
+    } else if (!Objects.equals(key, lastKey)) {
+      rollFragment();
+      lastKey = key;
     }
-    Object[] keys = new Object[partitionSpec.size()];
-    for (int i = 0; i < partitionSpec.size(); i++) {
-      keys[i] = computeSingleKey(row, i);
-    }
-    return Arrays.asList(keys);
-  }
-
-  private Object computeSingleKey(InternalRow row, int specIdx) {
-    PartitionTransform t = partitionSpec.get(specIdx);
-    int[] colIndices = specColumnIndices[specIdx];
-    DataType[] colTypes = specColumnTypes[specIdx];
-
-    if (t instanceof PartitionTransform.Bucket) {
-      int numBuckets = ((PartitionTransform.Bucket) t).getNumBuckets();
-      return BucketHashUtil.computeBucketId(row, colIndices, colTypes, numBuckets);
-    }
-    // Identity: use the raw column value
-    int idx = colIndices[0];
-    if (row.isNullAt(idx)) {
-      return null;
-    }
-    Object value = row.get(idx, colTypes[0]);
-    return value instanceof UTF8String ? ((UTF8String) value).clone() : value;
+    writeBuffer.write(row);
+    hasRowsInCurrentFragment = true;
   }
 
   private void rollFragment() throws IOException {
@@ -155,6 +124,9 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
 
   @Override
   public WriterCommitMessage commit() throws IOException {
+    if (shardingKeyEvaluator != null) {
+      shardingKeyEvaluator.flush(this::writePartitionedRow);
+    }
     writeBuffer.setFinished();
 
     try {
@@ -185,7 +157,13 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
 
   @Override
   public void close() throws IOException {
-    writeBuffer.close();
+    try {
+      if (shardingKeyEvaluator != null) {
+        shardingKeyEvaluator.close();
+      }
+    } finally {
+      writeBuffer.close();
+    }
   }
 
   static List<FragmentMetadata> stripRowIdMeta(List<FragmentMetadata> fragments) {
@@ -298,63 +276,43 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
 
     @Override
     public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
+      ShardingBatchKeyEvaluator shardingKeyEvaluator =
+          partitionSpec.isEmpty()
+              ? null
+              : new ShardingBatchKeyEvaluator(schema, writeOptions, shardingBinding());
+
       BufferAndTask initial = buildBufferAndTask();
       initial.thread.start();
-
-      int[][] colIndices = new int[partitionSpec.size()][];
-      DataType[][] colTypes = new DataType[partitionSpec.size()][];
-      for (int i = 0; i < partitionSpec.size(); i++) {
-        String col = partitionSpec.get(i).getCol();
-        int[] idx = resolveColumnIndices(Collections.singletonList(col));
-        colIndices[i] = idx;
-        colTypes[i] = resolveColumnTypes(idx);
-      }
 
       return new LanceDataWriter(
           initial.buffer,
           initial.task,
           initial.thread,
           this::buildBufferAndTask,
-          partitionSpec,
-          colIndices,
-          colTypes);
+          shardingKeyEvaluator);
     }
 
-    private int[] resolveColumnIndices(List<String> columns) {
-      if (columns.isEmpty()) {
-        return new int[0];
-      }
-      String[] names = schema.fieldNames();
-      int[] indices = new int[columns.size()];
-      for (int i = 0; i < columns.size(); i++) {
-        String col = columns.get(i);
-        int found = -1;
-        for (int j = 0; j < names.length; j++) {
-          if (names[j].equals(col)) {
-            found = j;
-            break;
-          }
+    private ShardingBatchKeyEvaluator.ShardingBinding shardingBinding() {
+      try (Dataset dataset =
+          Utils.openDatasetBuilder(
+                  writeOptions.toBuilder()
+                      .storageOptions(
+                          LanceRuntime.mergeStorageOptions(
+                              writeOptions.getStorageOptions(), initialStorageOptions))
+                      .build())
+              .build()) {
+        Optional<MemWalIndexDetails> details = dataset.memWalIndexDetails();
+        if (details.isPresent() && !details.get().shardingSpecs().isEmpty()) {
+          return new ShardingBatchKeyEvaluator.ShardingBinding(
+              details.get().shardingSpecs().get(0),
+              PartitionTransformUtil.sourceIdToColumnMap(dataset));
         }
-        if (found < 0) {
-          throw new IllegalArgumentException(
-              "Column not found in schema: "
-                  + col
-                  + " (available: "
-                  + Arrays.toString(names)
-                  + ")");
-        }
-        indices[i] = found;
+      } catch (RuntimeException e) {
+        // Staged creates initialize MemWAL after data files are written, so there may not be
+        // dataset metadata to read yet. Fall back to an equivalent in-memory sharding binding.
+        LOG.warn("Falling back to in-memory sharding metadata for partitioned write", e);
       }
-      return indices;
-    }
-
-    private DataType[] resolveColumnTypes(int[] indices) {
-      StructField[] fields = schema.fields();
-      DataType[] types = new DataType[indices.length];
-      for (int i = 0; i < indices.length; i++) {
-        types[i] = fields[indices[i]].dataType();
-      }
-      return types;
+      return ShardingBatchKeyEvaluator.ShardingBinding.fromPartitionSpec(partitionSpec);
     }
   }
 }

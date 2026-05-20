@@ -53,6 +53,17 @@ public class BucketHashUtilTest {
   }
 
   @Test
+  public void testComputeBucketIdFromUtf8StringValueConsistency() {
+    UTF8String value = UTF8String.fromString("test");
+    InternalRow row = new GenericInternalRow(new Object[] {value});
+    int writeBucket =
+        BucketHashUtil.computeBucketId(
+            row, new int[] {0}, new DataType[] {DataTypes.StringType}, 16);
+    int readBucket = BucketHashUtil.computeBucketIdFromValue(value, 16);
+    assertEquals(writeBucket, readBucket, "Catalyst UTF8String values must hash consistently");
+  }
+
+  @Test
   public void testComputeBucketIdFromValueIntConsistency() {
     InternalRow row = new GenericInternalRow(new Object[] {123});
     int writeBucket =
@@ -65,7 +76,7 @@ public class BucketHashUtilTest {
   @Test
   public void testComputeBucketIdFromValueNull() {
     int bucket = BucketHashUtil.computeBucketIdFromValue(null, 4);
-    assertTrue(bucket >= 0 && bucket < 4);
+    assertEquals(0, bucket);
   }
 
   @Test

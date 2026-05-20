@@ -13,6 +13,8 @@
  */
 package org.lance.spark.write;
 
+import org.lance.spark.utils.BucketHashUtil;
+
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
@@ -23,7 +25,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -106,6 +110,18 @@ public abstract class BaseBucketWriteTest {
         spark.sql(String.format("SELECT COUNT(DISTINCT _fragid) as num_frags FROM %s", fullTable));
     long numFrags = fragCount.collectAsList().get(0).getLong(0);
     assertTrue(numFrags > 0, "Should have at least one fragment");
+
+    Dataset<Row> fragmentRows =
+        spark.sql(String.format("SELECT _fragid, region FROM %s ORDER BY _fragid", fullTable));
+    Map<Integer, Integer> bucketByFragment = new HashMap<>();
+    for (Row row : fragmentRows.collectAsList()) {
+      int fragId = row.getInt(0);
+      int bucketId = BucketHashUtil.computeBucketIdFromValue(row.getString(1), 4);
+      Integer previous = bucketByFragment.putIfAbsent(fragId, bucketId);
+      if (previous != null) {
+        assertEquals(previous, bucketId, "Fragment " + fragId + " spans multiple bucket IDs");
+      }
+    }
   }
 
   @Test
