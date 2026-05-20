@@ -403,14 +403,6 @@ public abstract class SparkLanceShardingAdapter implements Serializable {
     dataset.initializeMemWal(params);
   }
 
-  public static Map<Integer, String> sourceIdToColumnMap(Dataset dataset) {
-    Map<Integer, String> result = new HashMap<>();
-    for (LanceField field : dataset.getLanceSchema().fields()) {
-      collectFieldIds(field, "", result);
-    }
-    return result;
-  }
-
   private static List<SparkLanceShardingAdapter> fromMemWalIndexDetails(
       Dataset dataset, MemWalIndexDetails details) {
     List<SparkLanceShardingAdapter> spec = new ArrayList<>();
@@ -445,15 +437,6 @@ public abstract class SparkLanceShardingAdapter implements Serializable {
       }
     }
     return null;
-  }
-
-  private static void collectFieldIds(
-      LanceField field, String prefix, Map<Integer, String> result) {
-    String fullName = prefix.isEmpty() ? field.getName() : prefix + "." + field.getName();
-    result.put(field.getId(), fullName);
-    for (LanceField child : field.getChildren()) {
-      collectFieldIds(child, fullName, result);
-    }
   }
 
   private static String toJson(ShardingSpec shardingSpec) {

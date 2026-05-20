@@ -303,8 +303,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
         Optional<MemWalIndexDetails> details = dataset.memWalIndexDetails();
         if (details.isPresent() && !details.get().shardingSpecs().isEmpty()) {
           return new ShardingBatchKeyEvaluator.ShardingBinding(
-              details.get().shardingSpecs().get(0),
-              SparkLanceShardingAdapter.sourceIdToColumnMap(dataset));
+              details.get().shardingSpecs().get(0), dataset.getLanceSchema());
         }
       } catch (RuntimeException e) {
         // Staged creates initialize MemWAL after data files are written, so there may not be

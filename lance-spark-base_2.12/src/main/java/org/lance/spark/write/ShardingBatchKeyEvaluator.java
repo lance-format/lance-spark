@@ -16,6 +16,7 @@ package org.lance.spark.write;
 import org.lance.memwal.ShardingEvaluator;
 import org.lance.memwal.ShardingField;
 import org.lance.memwal.ShardingSpec;
+import org.lance.schema.LanceSchema;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.sharding.SparkLanceShardingAdapter;
@@ -81,8 +82,7 @@ final class ShardingBatchKeyEvaluator implements AutoCloseable {
     }
     arrowWriter.finish();
     root.setRowCount(pendingRows.size());
-    try (ArrowReader reader =
-        ShardingEvaluator.evaluate(allocator, root, binding.spec, binding.sourceIdToColumn)) {
+    try (ArrowReader reader = binding.evaluate(allocator, root)) {
       if (!reader.loadNextBatch()) {
         throw new IOException("Lance sharding evaluator returned no result batch");
       }
@@ -171,20 +171,26 @@ final class ShardingBatchKeyEvaluator implements AutoCloseable {
 
   static final class ShardingBinding {
     final ShardingSpec spec;
-    final Map<Integer, String> sourceIdToColumn;
+    final LanceSchema lanceSchema;
 
-    ShardingBinding(ShardingSpec spec, Map<Integer, String> sourceIdToColumn) {
+    ShardingBinding(ShardingSpec spec, LanceSchema lanceSchema) {
       this.spec = spec;
-      this.sourceIdToColumn = Collections.unmodifiableMap(new HashMap<>(sourceIdToColumn));
+      this.lanceSchema = lanceSchema;
+    }
+
+    ArrowReader evaluate(BufferAllocator allocator, VectorSchemaRoot root) {
+      if (lanceSchema == null) {
+        return ShardingEvaluator.evaluate(allocator, root, spec);
+      }
+      return ShardingEvaluator.evaluate(allocator, root, spec, lanceSchema);
     }
 
     static ShardingBinding fromPartitionSpec(List<SparkLanceShardingAdapter> partitionSpec) {
       List<ShardingField> fields = new ArrayList<>();
-      Map<Integer, String> sourceIdToColumn = new HashMap<>();
       for (int i = 0; i < partitionSpec.size(); i++) {
         SparkLanceShardingAdapter transform = partitionSpec.get(i);
-        sourceIdToColumn.put(i, transform.getCol());
         Map<String, String> parameters = new HashMap<>();
+        parameters.put("column", transform.getCol());
         String fieldId = transform.getTransform() + "(" + transform.getCol() + ")";
         String resultType = "utf8";
         if (transform instanceof SparkLanceShardingAdapter.Bucket) {
@@ -196,13 +202,13 @@ final class ShardingBatchKeyEvaluator implements AutoCloseable {
         fields.add(
             new ShardingField(
                 fieldId,
-                Collections.singletonList(i),
+                Collections.emptyList(),
                 transform.getTransform(),
                 fieldId,
                 resultType,
                 parameters));
       }
-      return new ShardingBinding(new ShardingSpec(0, fields), sourceIdToColumn);
+      return new ShardingBinding(new ShardingSpec(0, fields), null);
     }
   }
 }
