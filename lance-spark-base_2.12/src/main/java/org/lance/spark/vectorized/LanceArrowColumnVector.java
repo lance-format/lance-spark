@@ -454,7 +454,7 @@ public class LanceArrowColumnVector extends ColumnVector {
       return fixedSizeBinaryAccessor.getBinary(rowId);
     }
     if (blobStructAccessor != null) {
-      return new byte[0];
+      return blobStructAccessor.getBlobReference(rowId);
     }
     if (arrowColumnVector != null) {
       return arrowColumnVector.getBinary(rowId);

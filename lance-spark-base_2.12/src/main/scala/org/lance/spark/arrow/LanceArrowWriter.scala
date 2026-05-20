@@ -128,7 +128,6 @@ object LanceArrowWriter {
         throw new UnsupportedOperationException(s"Unsupported data type: $dt")
     }
   }
-
 }
 
 /**
@@ -323,10 +322,46 @@ private[arrow] class BinaryWriter(val valueVector: VarBinaryVector) extends Lanc
 
 private[arrow] class LargeBinaryWriter(val valueVector: LargeVarBinaryVector)
   extends LanceArrowFieldWriter {
+
+  private val pendingIndices = new java.util.ArrayList[java.lang.Integer]()
+  private val pendingRefs = new java.util.ArrayList[org.lance.spark.utils.BlobReference]()
+
+  @transient private lazy val resolver = new org.lance.spark.utils.BlobReferenceResolver()
+
   override def setNull(): Unit = {}
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
     val bytes = input.getBinary(ordinal)
-    valueVector.setSafe(count, bytes)
+    if (bytes == null || bytes.length == 0) {
+      valueVector.setSafe(count, bytes)
+    } else if (org.lance.spark.utils.BlobReference.isBlobReference(bytes)) {
+      val ref = org.lance.spark.utils.BlobReference.deserialize(bytes)
+      pendingIndices.add(count)
+      pendingRefs.add(ref)
+      valueVector.setSafe(count, Array.emptyByteArray)
+    } else {
+      valueVector.setSafe(count, bytes)
+    }
+  }
+
+  override def finish(): Unit = {
+    super.finish()
+    if (!pendingRefs.isEmpty) {
+      try {
+        resolver.resolveBatch(pendingIndices, pendingRefs, valueVector)
+      } catch {
+        case e: java.io.IOException =>
+          throw new RuntimeException("Failed to resolve blob references", e)
+      } finally {
+        pendingIndices.clear()
+        pendingRefs.clear()
+      }
+    }
+  }
+
+  override def reset(): Unit = {
+    super.reset()
+    pendingIndices.clear()
+    pendingRefs.clear()
   }
 }
 

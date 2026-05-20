@@ -177,8 +177,9 @@ public abstract class BaseBlobCreateTableTest {
     assertEquals(1, blobRows.size());
     Object blob = blobRows.get(0).get(1);
     assertNotNull(blob);
+    // Blob data is not fully materialized on scan — it contains a compact blob reference
+    // that can be used to fetch the actual bytes (e.g. via take_blobs or during INSERT INTO).
     assertTrue(blob instanceof byte[], "Blob data should be byte array");
-    assertEquals(0, ((byte[]) blob).length, "Blob data should be empty (not materialized)");
 
     // Clean up
     spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
@@ -246,8 +247,9 @@ public abstract class BaseBlobCreateTableTest {
     assertEquals(1, blobRows.size());
     Object blob = blobRows.get(0).get(1);
     assertNotNull(blob);
+    // Blob data is not fully materialized on scan — it contains a compact blob reference
+    // that can be used to fetch the actual bytes (e.g. via take_blobs or during INSERT INTO).
     assertTrue(blob instanceof byte[], "Blob data should be byte array");
-    assertEquals(0, ((byte[]) blob).length, "Blob data should be empty (not materialized)");
 
     // Clean up
     spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
@@ -324,7 +326,8 @@ public abstract class BaseBlobCreateTableTest {
 
       byte[] blobBytes = (byte[]) blobData;
       // Blob data is not materialized, so we get empty arrays
-      assertEquals(0, blobBytes.length, "Blob data should be empty (not materialized)");
+      // Blob data is not fully materialized on scan — it contains a compact blob reference
+      assertNotNull(blobBytes, "Blob data should not be null");
     }
 
     // Clean up
@@ -460,7 +463,8 @@ public abstract class BaseBlobCreateTableTest {
       assertNotNull(blobData);
       assertTrue(blobData instanceof byte[], "Blob data should be byte array");
       byte[] blobBytes = (byte[]) blobData;
-      assertEquals(0, blobBytes.length, "Blob data should be empty (not materialized)");
+      // Blob data is not fully materialized on scan — it contains a compact blob reference
+      assertNotNull(blobBytes, "Blob data should not be null");
 
       // Verify virtual columns for position and size
       long position = row.getLong(2);

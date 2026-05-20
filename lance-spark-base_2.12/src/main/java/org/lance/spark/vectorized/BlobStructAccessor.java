@@ -13,6 +13,8 @@
  */
 package org.lance.spark.vectorized;
 
+import org.lance.spark.utils.BlobReference;
+
 import org.apache.arrow.vector.UInt8Vector;
 import org.apache.arrow.vector.complex.StructVector;
 import org.apache.spark.sql.catalyst.InternalRow;
@@ -23,11 +25,36 @@ public class BlobStructAccessor implements AutoCloseable {
   private final UInt8Vector positionVector;
   private final UInt8Vector sizeVector;
 
+  // Blob reference context — set by the scanner to enable serializing blob references
+  private String datasetUri;
+  private String columnName;
+  private long[] rowAddresses;
+
   public BlobStructAccessor(StructVector structVector) {
     this.structVector = structVector;
     // Blob structs have two fields: position and size (both unsigned Int64)
     this.positionVector = (UInt8Vector) structVector.getChild("position");
     this.sizeVector = (UInt8Vector) structVector.getChild("size");
+  }
+
+  /**
+   * Sets the context needed to produce blob references. When set, {@link #getBlobReference(int)}
+   * will return a serialized {@link BlobReference} that the write side can use to fetch the actual
+   * blob bytes from the source dataset.
+   *
+   * @param datasetUri the URI of the source dataset
+   * @param columnName the blob column name
+   * @param rowAddresses row addresses for each row in this batch
+   */
+  public void setBlobReferenceContext(String datasetUri, String columnName, long[] rowAddresses) {
+    this.datasetUri = datasetUri;
+    this.columnName = columnName;
+    this.rowAddresses = rowAddresses;
+  }
+
+  /** Returns true if blob reference context has been set. */
+  public boolean hasBlobReferenceContext() {
+    return datasetUri != null && columnName != null && rowAddresses != null;
   }
 
   public int getNullCount() {
@@ -36,6 +63,28 @@ public class BlobStructAccessor implements AutoCloseable {
 
   public boolean isNullAt(int rowId) {
     return structVector.isNull(rowId);
+  }
+
+  /**
+   * Returns a serialized blob reference for the given row. Returns null if the row is null or if
+   * the blob reference context is not set. Returns empty byte array if the blob has zero size (null
+   * blob value encoded as position=0, size=0).
+   */
+  public byte[] getBlobReference(int rowId) {
+    if (isNullAt(rowId)) {
+      return null;
+    }
+    if (!hasBlobReferenceContext()) {
+      return new byte[0];
+    }
+    Long size = getSize(rowId);
+    if (size == null || size == 0) {
+      // Zero-size blob — either truly empty or null encoded as (0,0)
+      return new byte[0];
+    }
+    long rowAddr = rowAddresses[rowId];
+    BlobReference ref = new BlobReference(datasetUri, columnName, rowAddr);
+    return ref.serialize();
   }
 
   public InternalRow getStruct(int rowId) {

@@ -19,6 +19,7 @@ import org.lance.spark.vectorized.BlobStructAccessor;
 import org.lance.spark.vectorized.LanceArrowColumnVector;
 
 import org.apache.arrow.vector.FieldVector;
+import org.apache.arrow.vector.UInt8Vector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.ipc.ArrowReader;
@@ -36,6 +37,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
   private final LanceFragmentScanner fragmentScanner;
@@ -117,6 +119,10 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
       actualFields.put(rootVectors.get(i).getField().getName(), rootVectors.get(i));
     }
 
+    // Extract row addresses for blob reference support
+    Set<String> blobColumnNames = fragmentScanner.getBlobColumnNames();
+    long[] rowAddresses = extractRowAddresses(rootVectors, blobColumnNames, root.getRowCount());
+
     List<ColumnVector> fieldVectors = new ArrayList<>(schema.size());
     StructField[] fields = schema.fields();
     for (StructField field : fields) {
@@ -150,10 +156,44 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
           throw new IllegalStateException(
               "Lance scan did not return expected field '" + fieldName + "'");
         }
-        fieldVectors.add(new LanceArrowColumnVector(vector));
+        LanceArrowColumnVector colVec = new LanceArrowColumnVector(vector);
+
+        // Set blob reference context so getBinary() produces blob references
+        if (rowAddresses != null && blobColumnNames.contains(fieldName)) {
+          BlobStructAccessor blobAccessor = colVec.getBlobStructAccessor();
+          if (blobAccessor != null) {
+            blobAccessor.setBlobReferenceContext(
+                fragmentScanner.getDatasetUri(), fieldName, rowAddresses);
+          }
+        }
+
+        fieldVectors.add(colVec);
       }
     }
     return fieldVectors;
+  }
+
+  /**
+   * Extracts row addresses from the {@code _rowaddr} column appended by the native scanner. Row
+   * addresses are needed to construct blob references that allow the write side to fetch actual
+   * blob bytes from the source dataset.
+   */
+  private long[] extractRowAddresses(
+      List<FieldVector> rootVectors, Set<String> blobColumnNames, int rowCount) {
+    if (blobColumnNames.isEmpty()) {
+      return null;
+    }
+    for (FieldVector fv : rootVectors) {
+      if (LanceConstant.ROW_ADDRESS.equals(fv.getField().getName()) && fv instanceof UInt8Vector) {
+        UInt8Vector rowAddrVector = (UInt8Vector) fv;
+        long[] rowAddresses = new long[rowCount];
+        for (int i = 0; i < rowCount; i++) {
+          rowAddresses[i] = rowAddrVector.get(i);
+        }
+        return rowAddresses;
+      }
+    }
+    return null;
   }
 
   // Virtual column vector for blob position
