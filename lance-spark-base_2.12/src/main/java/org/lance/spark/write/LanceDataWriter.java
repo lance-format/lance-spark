@@ -20,8 +20,8 @@ import org.lance.WriteParams;
 import org.lance.memwal.MemWalIndexDetails;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
-import org.lance.spark.partition.PartitionTransform;
-import org.lance.spark.utils.PartitionTransformUtil;
+import org.lance.spark.sharding.SparkShardingAdapter;
+import org.lance.spark.utils.ShardingAdapterUtil;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.c.ArrowArrayStream;
@@ -203,7 +203,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
     private final String namespaceImpl;
     private final Map<String, String> namespaceProperties;
     private final List<String> tableId;
-    private final List<PartitionTransform> partitionSpec;
+    private final List<SparkShardingAdapter> partitionSpec;
 
     public WriterFactory(
         StructType schema,
@@ -229,7 +229,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
         String namespaceImpl,
         Map<String, String> namespaceProperties,
         List<String> tableId,
-        List<PartitionTransform> partitionSpec) {
+        List<SparkShardingAdapter> partitionSpec) {
       this.schema = schema;
       this.writeOptions = writeOptions;
       this.initialStorageOptions = initialStorageOptions;
@@ -305,7 +305,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
         if (details.isPresent() && !details.get().shardingSpecs().isEmpty()) {
           return new ShardingBatchKeyEvaluator.ShardingBinding(
               details.get().shardingSpecs().get(0),
-              PartitionTransformUtil.sourceIdToColumnMap(dataset));
+              ShardingAdapterUtil.sourceIdToColumnMap(dataset));
         }
       } catch (RuntimeException e) {
         // Staged creates initialize MemWAL after data files are written, so there may not be

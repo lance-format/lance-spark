@@ -13,7 +13,7 @@
  */
 package org.lance.spark;
 
-import org.lance.spark.partition.PartitionTransform;
+import org.lance.spark.sharding.SparkShardingAdapter;
 import org.lance.spark.write.StagedCommit;
 
 import org.apache.spark.sql.connector.catalog.SupportsRowLevelOperations;
@@ -34,7 +34,7 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
       boolean managedVersioning,
       String fileFormatVersion,
       Map<String, String> tableProperties,
-      List<PartitionTransform> partitionSpec) {
+      List<SparkShardingAdapter> partitionSpec) {
     super(
         readOptions,
         sparkSchema,
@@ -58,7 +58,7 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
       StagedCommit stagedCommit,
       String fileFormatVersion,
       Map<String, String> tableProperties,
-      List<PartitionTransform> partitionSpec) {
+      List<SparkShardingAdapter> partitionSpec) {
     super(
         readOptions,
         sparkSchema,

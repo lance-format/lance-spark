@@ -22,9 +22,9 @@ import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.schema.LanceField;
 import org.lance.spark.LanceSparkReadOptions;
-import org.lance.spark.partition.PartitionTransform;
+import org.lance.spark.sharding.SparkShardingAdapter;
 import org.lance.spark.utils.Optional;
-import org.lance.spark.utils.PartitionTransformUtil;
+import org.lance.spark.utils.ShardingAdapterUtil;
 import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.catalyst.InternalRow;
@@ -97,7 +97,7 @@ public class LanceScanBuilder
   private final java.util.Map<String, String> namespaceProperties;
 
   private final java.util.Map<String, String> tableProperties;
-  private final List<PartitionTransform> partitionSpec;
+  private final List<SparkShardingAdapter> partitionSpec;
 
   public LanceScanBuilder(
       StructType schema,
@@ -123,7 +123,7 @@ public class LanceScanBuilder
       String namespaceImpl,
       java.util.Map<String, String> namespaceProperties,
       java.util.Map<String, String> tableProperties,
-      List<PartitionTransform> partitionSpec) {
+      List<SparkShardingAdapter> partitionSpec) {
     this.fullSchema = schema;
     this.schema = schema;
     this.readOptions = readOptions;
@@ -170,11 +170,11 @@ public class LanceScanBuilder
     // Collect all columns that need zonemap stats: filter columns + partition columns.
     Set<String> columnsToLoad = extractReferencedColumns(pushedPredicates);
     Dataset dataset = getOrOpenDataset();
-    List<PartitionTransform> partSpec =
+    List<SparkShardingAdapter> partSpec =
         partitionSpec.isEmpty()
-            ? PartitionTransformUtil.parseSpec(dataset, tableProperties)
+            ? ShardingAdapterUtil.parseSpec(dataset, tableProperties)
             : partitionSpec;
-    for (PartitionTransform t : partSpec) {
+    for (SparkShardingAdapter t : partSpec) {
       columnsToLoad.add(t.getCol());
     }
 
@@ -185,8 +185,8 @@ public class LanceScanBuilder
     // Each transform checks its column's zones; if every fragment
     // has a single partition value, we get a fragment→key map.
     Map<Integer, Object> fragmentPartKeys = null;
-    PartitionTransform activeTransform = null;
-    for (PartitionTransform t : partSpec) {
+    SparkShardingAdapter activeAdapter = null;
+    for (SparkShardingAdapter t : partSpec) {
       List<ZoneStats> colStats = zonemapStats.get(t.getCol());
       if (colStats == null || colStats.isEmpty()) {
         LOG.warn(
@@ -199,9 +199,9 @@ public class LanceScanBuilder
       java.util.Optional<Map<Integer, Object>> keys = t.detectFragmentKeys(colStats);
       if (keys.isPresent()) {
         fragmentPartKeys = keys.get();
-        activeTransform = t;
+        activeAdapter = t;
         LOG.info(
-            "Detected partition transform {}('{}') with {} fragments",
+            "Detected Spark sharding adapter {}('{}') with {} fragments",
             t.getTransform(),
             t.getCol(),
             fragmentPartKeys.size());
@@ -259,7 +259,7 @@ public class LanceScanBuilder
         statistics,
         zonemapStats,
         survivingFragmentIds,
-        activeTransform,
+        activeAdapter,
         fragmentPartKeys,
         initialStorageOptions,
         namespaceImpl,

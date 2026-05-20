@@ -19,7 +19,7 @@ import org.lance.memwal.MemWalIndexDetails;
 import org.lance.memwal.ShardingSpec;
 import org.lance.schema.LanceField;
 import org.lance.spark.LanceConstant;
-import org.lance.spark.partition.PartitionTransform;
+import org.lance.spark.sharding.SparkShardingAdapter;
 
 import org.apache.spark.sql.connector.expressions.BucketTransform;
 import org.apache.spark.sql.connector.expressions.IdentityTransform;
@@ -34,17 +34,17 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-/** Converts between Spark partition transforms and Lance MemWAL sharding metadata. */
-public final class PartitionTransformUtil {
-  private PartitionTransformUtil() {}
+/** Converts between Spark partitioning requests and Lance MemWAL sharding metadata. */
+public final class ShardingAdapterUtil {
+  private ShardingAdapterUtil() {}
 
-  /** Converts Spark partition transforms into the internal partition transform model. */
-  public static List<PartitionTransform> toSpec(Transform[] transforms) {
+  /** Converts Spark catalog transforms into Spark-facing Lance sharding adapters. */
+  public static List<SparkShardingAdapter> toSpec(Transform[] transforms) {
     if (transforms == null || transforms.length == 0) {
       return Collections.emptyList();
     }
 
-    List<PartitionTransform> spec = new ArrayList<>();
+    List<SparkShardingAdapter> spec = new ArrayList<>();
 
     for (Transform t : transforms) {
       if (t instanceof BucketTransform) {
@@ -60,14 +60,14 @@ public final class PartitionTransformUtil {
               "Lance only supports bucketing on a single" + " column, got: " + cols);
         }
         String colName = String.join(".", cols.get(0).fieldNames());
-        spec.add(new PartitionTransform.Bucket(colName, numBuckets));
+        spec.add(new SparkShardingAdapter.Bucket(colName, numBuckets));
       } else if (t instanceof IdentityTransform) {
         IdentityTransform it = (IdentityTransform) t;
         String colName = String.join(".", it.ref().fieldNames());
-        spec.add(new PartitionTransform.Identity(colName));
+        spec.add(new SparkShardingAdapter.Identity(colName));
       } else {
         throw new UnsupportedOperationException(
-            "Unsupported partition transform: "
+            "Unsupported Spark sharding adapter input: "
                 + t.describe()
                 + ". Lance supports bucket(N, col)"
                 + " and identity(col).");
@@ -78,10 +78,10 @@ public final class PartitionTransformUtil {
   }
 
   /**
-   * Parses partition spec from MemWAL index metadata, falling back to older partition properties
+   * Parses sharding adapters from MemWAL index metadata, falling back to older partition properties
    * for backward compatibility.
    */
-  public static List<PartitionTransform> parseSpec(
+  public static List<SparkShardingAdapter> parseSpec(
       Dataset dataset, Map<String, String> tableProperties) {
     Optional<MemWalIndexDetails> details = dataset.memWalIndexDetails();
     if (details.isPresent() && !details.get().shardingSpecs().isEmpty()) {
@@ -90,25 +90,25 @@ public final class PartitionTransformUtil {
     return parseSpec(tableProperties);
   }
 
-  /** Parses legacy partition spec table properties for backward compatibility. */
-  public static List<PartitionTransform> parseSpec(Map<String, String> tableProperties) {
+  /** Parses legacy partitioning table properties for backward compatibility. */
+  public static List<SparkShardingAdapter> parseSpec(Map<String, String> tableProperties) {
     if (tableProperties == null || tableProperties.isEmpty()) {
       return Collections.emptyList();
     }
 
     String shardingSpecJson = tableProperties.get(LanceConstant.TABLE_OPT_SHARDING_SPEC);
     if (shardingSpecJson != null && !shardingSpecJson.trim().isEmpty()) {
-      return PartitionTransform.fromShardingSpecJson(shardingSpecJson);
+      return SparkShardingAdapter.fromShardingSpecJson(shardingSpecJson);
     }
 
     // Fall back to the previous custom unified spec.
     String specJson = tableProperties.get(LanceConstant.TABLE_OPT_PARTITION_SPEC);
     if (specJson != null && !specJson.trim().isEmpty()) {
-      return PartitionTransform.fromJsonString(specJson);
+      return SparkShardingAdapter.fromJsonString(specJson);
     }
 
     // Fall back to legacy properties
-    List<PartitionTransform> spec = new ArrayList<>();
+    List<SparkShardingAdapter> spec = new ArrayList<>();
 
     String bucketCol = tableProperties.get(LanceConstant.TABLE_OPT_BUCKET_COLUMNS);
     String bucketNumStr = tableProperties.get(LanceConstant.TABLE_OPT_BUCKET_NUM_BUCKETS);
@@ -118,38 +118,38 @@ public final class PartitionTransformUtil {
         && !bucketNumStr.trim().isEmpty()) {
       int numBuckets = Integer.parseInt(bucketNumStr.trim());
       if (numBuckets > 0) {
-        spec.add(new PartitionTransform.Bucket(bucketCol.trim(), numBuckets));
+        spec.add(new SparkShardingAdapter.Bucket(bucketCol.trim(), numBuckets));
         return spec;
       }
     }
 
     String partCol = tableProperties.get(LanceConstant.TABLE_OPT_PARTITION_COLUMNS);
     if (partCol != null && !partCol.trim().isEmpty()) {
-      spec.add(new PartitionTransform.Identity(partCol.trim()));
+      spec.add(new SparkShardingAdapter.Identity(partCol.trim()));
     }
 
     return spec;
   }
 
-  public static void initializeMemWal(Dataset dataset, List<PartitionTransform> spec) {
+  public static void initializeMemWal(Dataset dataset, List<SparkShardingAdapter> spec) {
     if (spec == null || spec.isEmpty() || dataset.memWalIndexDetails().isPresent()) {
       return;
     }
     if (spec.size() > 1) {
       throw new UnsupportedOperationException(
-          "Lance MemWAL sharding supports one partition transform, got: " + spec.size());
+          "Lance MemWAL sharding supports one Spark sharding adapter, got: " + spec.size());
     }
 
-    PartitionTransform transform = spec.get(0);
+    SparkShardingAdapter adapter = spec.get(0);
     InitializeMemWalParams params = new InitializeMemWalParams();
-    if (transform instanceof PartitionTransform.Bucket) {
-      PartitionTransform.Bucket bucket = (PartitionTransform.Bucket) transform;
+    if (adapter instanceof SparkShardingAdapter.Bucket) {
+      SparkShardingAdapter.Bucket bucket = (SparkShardingAdapter.Bucket) adapter;
       params.withBucketSharding(bucket.getCol(), bucket.getNumBuckets());
-    } else if (transform instanceof PartitionTransform.Identity) {
-      params.withIdentitySharding(transform.getCol());
+    } else if (adapter instanceof SparkShardingAdapter.Identity) {
+      params.withIdentitySharding(adapter.getCol());
     } else {
       throw new UnsupportedOperationException(
-          "Unsupported MemWAL sharding transform: " + transform.getTransform());
+          "Unsupported MemWAL sharding transform: " + adapter.getTransform());
     }
     dataset.initializeMemWal(params);
   }
@@ -162,12 +162,12 @@ public final class PartitionTransformUtil {
     return result;
   }
 
-  private static List<PartitionTransform> fromMemWalIndexDetails(
+  private static List<SparkShardingAdapter> fromMemWalIndexDetails(
       Dataset dataset, MemWalIndexDetails details) {
-    List<PartitionTransform> spec = new ArrayList<>();
+    List<SparkShardingAdapter> spec = new ArrayList<>();
     for (ShardingSpec shardingSpec : details.shardingSpecs()) {
       spec.addAll(
-          PartitionTransform.fromShardingSpec(
+          SparkShardingAdapter.fromShardingSpec(
               shardingSpec,
               sourceId -> columnNameByFieldId(dataset.getLanceSchema().fields(), sourceId)));
     }

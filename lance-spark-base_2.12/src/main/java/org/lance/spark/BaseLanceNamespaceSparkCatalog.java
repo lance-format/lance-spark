@@ -36,10 +36,10 @@ import org.lance.operation.UpdateConfig;
 import org.lance.operation.UpdateMap;
 import org.lance.spark.function.LanceBucketFunction;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
-import org.lance.spark.partition.PartitionTransform;
+import org.lance.spark.sharding.SparkShardingAdapter;
 import org.lance.spark.utils.Optional;
-import org.lance.spark.utils.PartitionTransformUtil;
 import org.lance.spark.utils.SchemaConverter;
+import org.lance.spark.utils.ShardingAdapterUtil;
 import org.lance.spark.utils.Utils;
 import org.lance.spark.write.StagedCommit;
 import org.lance.spark.write.StagedCommitOptions;
@@ -581,7 +581,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
       throws TableAlreadyExistsException, NoSuchNamespaceException {
 
-    List<PartitionTransform> partitionSpec = PartitionTransformUtil.toSpec(partitions);
+    List<SparkShardingAdapter> partitionSpec = ShardingAdapterUtil.toSpec(partitions);
 
     // Handle path-based access
     if (isPathBasedIdentifier(ident)) {
@@ -629,7 +629,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       describeResponse = namespace.describeTable(describeRequest);
       initialStorageOptions = describeResponse.getStorageOptions();
       managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
-      PartitionTransformUtil.initializeMemWal(dataset, partitionSpec);
+      ShardingAdapterUtil.initializeMemWal(dataset, partitionSpec);
       Map<String, String> propertiesToPersist =
           tablePropertiesToPersistOnCreate(properties, managedVersioning);
       if (!propertiesToPersist.isEmpty()) {
@@ -666,7 +666,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Identifier ident,
       StructType schema,
       Map<String, String> properties,
-      List<PartitionTransform> partitionSpec)
+      List<SparkShardingAdapter> partitionSpec)
       throws TableAlreadyExistsException {
     String datasetUri = getDatasetUri(ident);
 
@@ -690,7 +690,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         writeBuilder.dataStorageVersion(fileFormatVersion);
       }
       try (Dataset dataset = writeBuilder.execute()) {
-        PartitionTransformUtil.initializeMemWal(dataset, partitionSpec);
+        ShardingAdapterUtil.initializeMemWal(dataset, partitionSpec);
         Map<String, String> propertiesToPersist =
             tablePropertiesToPersistOnCreate(properties, false);
         if (!propertiesToPersist.isEmpty()) {
@@ -878,7 +878,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
       throws TableAlreadyExistsException, NoSuchNamespaceException {
 
-    List<PartitionTransform> partitionSpec = PartitionTransformUtil.toSpec(partitions);
+    List<SparkShardingAdapter> partitionSpec = ShardingAdapterUtil.toSpec(partitions);
 
     // Handle path-based access
     if (isPathBasedIdentifier(ident)) {
@@ -942,7 +942,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Identifier ident,
       StructType schema,
       Map<String, String> properties,
-      List<PartitionTransform> partitionSpec) {
+      List<SparkShardingAdapter> partitionSpec) {
     String datasetUri = getDatasetUri(ident);
     StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
 
@@ -975,7 +975,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
       throws NoSuchNamespaceException, NoSuchTableException {
 
-    List<PartitionTransform> partitionSpec = PartitionTransformUtil.toSpec(partitions);
+    List<SparkShardingAdapter> partitionSpec = ShardingAdapterUtil.toSpec(partitions);
 
     // Handle path-based access
     if (isPathBasedIdentifier(ident)) {
@@ -1024,7 +1024,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Identifier ident,
       StructType schema,
       Map<String, String> properties,
-      List<PartitionTransform> partitionSpec)
+      List<SparkShardingAdapter> partitionSpec)
       throws NoSuchTableException {
     String datasetUri = getDatasetUri(ident);
     StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
@@ -1069,7 +1069,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Identifier ident, StructType schema, Transform[] partitions, Map<String, String> properties)
       throws NoSuchNamespaceException {
 
-    List<PartitionTransform> partitionSpec = PartitionTransformUtil.toSpec(partitions);
+    List<SparkShardingAdapter> partitionSpec = ShardingAdapterUtil.toSpec(partitions);
 
     // Handle path-based access
     if (isPathBasedIdentifier(ident)) {
@@ -1157,7 +1157,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Identifier ident,
       StructType schema,
       Map<String, String> properties,
-      List<PartitionTransform> partitionSpec) {
+      List<SparkShardingAdapter> partitionSpec) {
     String datasetUri = getDatasetUri(ident);
     StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
 
@@ -1595,7 +1595,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       boolean managedVersioning,
       String fileFormatVersion,
       Map<String, String> tableProperties,
-      List<PartitionTransform> partitionSpec);
+      List<SparkShardingAdapter> partitionSpec);
 
   public abstract LanceDataset createStagedDataset(
       LanceSparkReadOptions readOptions,
@@ -1607,5 +1607,5 @@ public abstract class BaseLanceNamespaceSparkCatalog
       StagedCommit stagedCommit,
       String fileFormatVersion,
       Map<String, String> tableProperties,
-      List<PartitionTransform> partitionSpec);
+      List<SparkShardingAdapter> partitionSpec);
 }

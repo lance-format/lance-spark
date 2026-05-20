@@ -22,8 +22,8 @@ import org.lance.namespace.model.DeregisterTableRequest;
 import org.lance.operation.Operation;
 import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
-import org.lance.spark.partition.PartitionTransform;
-import org.lance.spark.utils.PartitionTransformUtil;
+import org.lance.spark.sharding.SparkShardingAdapter;
+import org.lance.spark.utils.ShardingAdapterUtil;
 
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.slf4j.Logger;
@@ -54,7 +54,7 @@ public class StagedCommit {
   private boolean enableStableRowIds;
   private List<FragmentMetadata> fragments;
   private Schema schema;
-  private List<PartitionTransform> partitionSpec = Collections.emptyList();
+  private List<SparkShardingAdapter> partitionSpec = Collections.emptyList();
 
   /** Dataset for existing tables. Empty for new tables (staged create). */
   private final Optional<Dataset> dataset;
@@ -111,7 +111,7 @@ public class StagedCommit {
     this.enableStableRowIds = enableStableRowIds;
   }
 
-  public void setPartitionSpec(List<PartitionTransform> partitionSpec) {
+  public void setPartitionSpec(List<SparkShardingAdapter> partitionSpec) {
     this.partitionSpec =
         partitionSpec != null ? new ArrayList<>(partitionSpec) : Collections.emptyList();
   }
@@ -135,7 +135,7 @@ public class StagedCommit {
     applyManagedVersioning(builder);
     try (Transaction txn = new Transaction.Builder().operation(operation).build();
         Dataset committed = builder.execute(txn)) {
-      PartitionTransformUtil.initializeMemWal(committed, partitionSpec);
+      ShardingAdapterUtil.initializeMemWal(committed, partitionSpec);
     }
   }
 
@@ -151,7 +151,7 @@ public class StagedCommit {
     builder.useStableRowIds(enableStableRowIds);
     applyManagedVersioning(builder);
     try (Dataset committed = commitOperation(builder, version, operation)) {
-      PartitionTransformUtil.initializeMemWal(committed, partitionSpec);
+      ShardingAdapterUtil.initializeMemWal(committed, partitionSpec);
     }
   }
 

@@ -23,7 +23,7 @@ import org.lance.operation.Operation;
 import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
-import org.lance.spark.partition.PartitionTransform;
+import org.lance.spark.sharding.SparkShardingAdapter;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -66,7 +66,7 @@ public class LanceBatchWrite implements BatchWrite {
   private final StagedCommit stagedCommit;
 
   /** Partition spec controlling how data is distributed across fragments. */
-  private final List<PartitionTransform> partitionSpec;
+  private final List<SparkShardingAdapter> partitionSpec;
 
   public LanceBatchWrite(
       StructType schema,
@@ -101,7 +101,7 @@ public class LanceBatchWrite implements BatchWrite {
       List<String> tableId,
       boolean managedVersioning,
       StagedCommit stagedCommit,
-      List<PartitionTransform> partitionSpec) {
+      List<SparkShardingAdapter> partitionSpec) {
     this.schema = schema;
     this.overwrite = overwrite;
     this.initialStorageOptions = initialStorageOptions;

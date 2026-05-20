@@ -13,7 +13,7 @@
  */
 package org.lance.spark;
 
-import org.lance.spark.partition.PartitionTransform;
+import org.lance.spark.sharding.SparkShardingAdapter;
 import org.lance.spark.write.StagedCommit;
 
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
@@ -70,7 +70,7 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
       boolean managedVersioning,
       String fileFormatVersion,
       Map<String, String> tableProperties,
-      List<PartitionTransform> partitionSpec) {
+      List<SparkShardingAdapter> partitionSpec) {
     return new LancePositionDeltaDataset(
         readOptions,
         sparkSchema,
@@ -94,7 +94,7 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
       StagedCommit stagedCommit,
       String fileFormatVersion,
       Map<String, String> tableProperties,
-      List<PartitionTransform> partitionSpec) {
+      List<SparkShardingAdapter> partitionSpec) {
     return new LancePositionDeltaDataset(
         readOptions,
         sparkSchema,

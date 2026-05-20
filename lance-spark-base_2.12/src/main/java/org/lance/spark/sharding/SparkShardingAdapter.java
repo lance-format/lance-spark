@@ -11,7 +11,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.lance.spark.partition;
+package org.lance.spark.sharding;
 
 import org.lance.index.scalar.ZoneStats;
 import org.lance.memwal.ShardingField;
@@ -45,24 +45,15 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
 
-/**
- * A single field in a Lance partition spec. Each transform knows how to:
- *
- * <ul>
- *   <li>compute a partition key from a row (write path)
- *   <li>detect fragment partition values from zonemap stats (read path)
- *   <li>produce the Spark expression for SPJ reporting
- *   <li>produce the sort/distribution expressions for writes
- * </ul>
- */
-public abstract class PartitionTransform implements Serializable {
+/** Spark-facing adapter for one Lance MemWAL sharding field. */
+public abstract class SparkShardingAdapter implements Serializable {
   private static final long serialVersionUID = 1L;
   private static final ObjectMapper MAPPER = new ObjectMapper();
 
   private final String transform;
   private final String col;
 
-  protected PartitionTransform(String transform, String col) {
+  protected SparkShardingAdapter(String transform, String col) {
     this.transform = transform;
     this.col = col;
   }
@@ -110,7 +101,7 @@ public abstract class PartitionTransform implements Serializable {
   }
 
   @JsonCreator
-  public static PartitionTransform fromJson(
+  public static SparkShardingAdapter fromJson(
       @JsonProperty("transform") String transform,
       @JsonProperty("col") String col,
       @JsonProperty("num_buckets") Integer numBuckets) {
@@ -119,16 +110,16 @@ public abstract class PartitionTransform implements Serializable {
         return new Identity(col);
       case "bucket":
         if (numBuckets == null || numBuckets <= 0) {
-          throw new IllegalArgumentException("bucket transform requires positive num_buckets");
+          throw new IllegalArgumentException("bucket sharding requires positive num_buckets");
         }
         return new Bucket(col, numBuckets);
       default:
-        throw new UnsupportedOperationException("Unsupported partition transform: " + transform);
+        throw new UnsupportedOperationException("Unsupported sharding transform: " + transform);
     }
   }
 
-  /** Identity partition: data grouped by raw column value. */
-  public static final class Identity extends PartitionTransform {
+  /** Identity sharding adapter: data grouped by raw column value. */
+  public static final class Identity extends SparkShardingAdapter {
     private static final long serialVersionUID = 1L;
 
     public Identity(String col) {
@@ -172,8 +163,8 @@ public abstract class PartitionTransform implements Serializable {
     }
   }
 
-  /** Bucket partition: data grouped by hash(col) % N. */
-  public static final class Bucket extends PartitionTransform {
+  /** Bucket sharding adapter: data grouped by hash(col) % N. */
+  public static final class Bucket extends SparkShardingAdapter {
     private static final long serialVersionUID = 1L;
 
     private final int numBuckets;
@@ -233,40 +224,40 @@ public abstract class PartitionTransform implements Serializable {
     }
   }
 
-  public static String toJson(List<PartitionTransform> spec) {
+  public static String toJson(List<SparkShardingAdapter> spec) {
     try {
       return MAPPER.writeValueAsString(spec);
     } catch (JsonProcessingException e) {
-      throw new RuntimeException("Failed to serialize partition spec", e);
+      throw new RuntimeException("Failed to serialize Spark sharding adapter spec", e);
     }
   }
 
-  public static List<PartitionTransform> fromJsonString(String json) {
+  public static List<SparkShardingAdapter> fromJsonString(String json) {
     if (json == null || json.trim().isEmpty()) {
       return Collections.emptyList();
     }
     try {
       return MAPPER.readValue(
           json,
-          MAPPER.getTypeFactory().constructCollectionType(List.class, PartitionTransform.class));
+          MAPPER.getTypeFactory().constructCollectionType(List.class, SparkShardingAdapter.class));
     } catch (JsonProcessingException e) {
-      throw new RuntimeException("Failed to parse partition spec: " + json, e);
+      throw new RuntimeException("Failed to parse Spark sharding adapter spec: " + json, e);
     }
   }
 
-  public static ShardingSpec toShardingSpec(List<PartitionTransform> spec) {
+  public static ShardingSpec toShardingSpec(List<SparkShardingAdapter> spec) {
     List<ShardingField> fields = new ArrayList<>();
-    for (PartitionTransform transform : spec) {
-      fields.add(transform.toShardingField());
+    for (SparkShardingAdapter adapter : spec) {
+      fields.add(adapter.toShardingField());
     }
     return new ShardingSpec(0, fields);
   }
 
-  public static String toShardingSpecJson(List<PartitionTransform> spec) {
+  public static String toShardingSpecJson(List<SparkShardingAdapter> spec) {
     return toJson(toShardingSpec(spec));
   }
 
-  public static List<PartitionTransform> fromShardingSpecJson(String json) {
+  public static List<SparkShardingAdapter> fromShardingSpecJson(String json) {
     if (json == null || json.trim().isEmpty()) {
       return Collections.emptyList();
     }
@@ -279,9 +270,9 @@ public abstract class PartitionTransform implements Serializable {
     }
   }
 
-  public static List<PartitionTransform> fromShardingSpec(
+  public static List<SparkShardingAdapter> fromShardingSpec(
       ShardingSpec shardingSpec, Function<Integer, String> sourceIdToColumn) {
-    List<PartitionTransform> spec = new ArrayList<>();
+    List<SparkShardingAdapter> spec = new ArrayList<>();
     for (ShardingField field : shardingSpec.fields()) {
       spec.add(fromShardingField(field, sourceIdToColumn));
     }
@@ -361,7 +352,7 @@ public abstract class PartitionTransform implements Serializable {
         fieldId, Collections.emptyList(), getTransform(), expression, resultType, parameters);
   }
 
-  private static PartitionTransform fromShardingField(
+  private static SparkShardingAdapter fromShardingField(
       ShardingField field, Function<Integer, String> sourceIdToColumn) {
     String transform = field.transform().orElse(null);
     if ("bucket".equals(transform)) {

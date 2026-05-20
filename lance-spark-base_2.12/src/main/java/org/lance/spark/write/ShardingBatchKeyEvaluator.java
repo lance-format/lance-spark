@@ -18,7 +18,7 @@ import org.lance.memwal.ShardingField;
 import org.lance.memwal.ShardingSpec;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
-import org.lance.spark.partition.PartitionTransform;
+import org.lance.spark.sharding.SparkShardingAdapter;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.FieldVector;
@@ -178,17 +178,17 @@ final class ShardingBatchKeyEvaluator implements AutoCloseable {
       this.sourceIdToColumn = Collections.unmodifiableMap(new HashMap<>(sourceIdToColumn));
     }
 
-    static ShardingBinding fromPartitionSpec(List<PartitionTransform> partitionSpec) {
+    static ShardingBinding fromPartitionSpec(List<SparkShardingAdapter> partitionSpec) {
       List<ShardingField> fields = new ArrayList<>();
       Map<Integer, String> sourceIdToColumn = new HashMap<>();
       for (int i = 0; i < partitionSpec.size(); i++) {
-        PartitionTransform transform = partitionSpec.get(i);
+        SparkShardingAdapter transform = partitionSpec.get(i);
         sourceIdToColumn.put(i, transform.getCol());
         Map<String, String> parameters = new HashMap<>();
         String fieldId = transform.getTransform() + "(" + transform.getCol() + ")";
         String resultType = "utf8";
-        if (transform instanceof PartitionTransform.Bucket) {
-          PartitionTransform.Bucket bucket = (PartitionTransform.Bucket) transform;
+        if (transform instanceof SparkShardingAdapter.Bucket) {
+          SparkShardingAdapter.Bucket bucket = (SparkShardingAdapter.Bucket) transform;
           parameters.put("num_buckets", Integer.toString(bucket.getNumBuckets()));
           fieldId = "bucket(" + bucket.getNumBuckets() + ", " + bucket.getCol() + ")";
           resultType = "int32";
