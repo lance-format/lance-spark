@@ -59,9 +59,15 @@ public class LanceArrowColumnVector extends ColumnVector {
   private TimestampUnitAccessor timestampUnitAccessor;
   private LanceStructAccessor structAccessor;
   private ArrowColumnVector arrowColumnVector;
+  private final boolean closeVectorOnClose;
 
   public LanceArrowColumnVector(ValueVector vector) {
+    this(vector, true);
+  }
+
+  public LanceArrowColumnVector(ValueVector vector, boolean closeVectorOnClose) {
     super(LanceArrowUtils.fromArrowField(vector.getField()));
+    this.closeVectorOnClose = closeVectorOnClose;
 
     if (vector instanceof UInt1Vector) {
       uInt1Accessor = new UInt1Accessor((UInt1Vector) vector);
@@ -115,6 +121,9 @@ public class LanceArrowColumnVector extends ColumnVector {
 
   @Override
   public void close() {
+    if (!closeVectorOnClose) {
+      return;
+    }
     if (uInt1Accessor != null) {
       uInt1Accessor.close();
     }
