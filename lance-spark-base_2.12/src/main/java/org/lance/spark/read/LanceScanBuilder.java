@@ -22,9 +22,8 @@ import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.schema.LanceField;
 import org.lance.spark.LanceSparkReadOptions;
-import org.lance.spark.sharding.SparkShardingAdapter;
+import org.lance.spark.sharding.SparkLanceShardingAdapter;
 import org.lance.spark.utils.Optional;
-import org.lance.spark.utils.ShardingAdapterUtil;
 import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.catalyst.InternalRow;
@@ -97,7 +96,7 @@ public class LanceScanBuilder
   private final java.util.Map<String, String> namespaceProperties;
 
   private final java.util.Map<String, String> tableProperties;
-  private final List<SparkShardingAdapter> partitionSpec;
+  private final List<SparkLanceShardingAdapter> partitionSpec;
 
   public LanceScanBuilder(
       StructType schema,
@@ -123,7 +122,7 @@ public class LanceScanBuilder
       String namespaceImpl,
       java.util.Map<String, String> namespaceProperties,
       java.util.Map<String, String> tableProperties,
-      List<SparkShardingAdapter> partitionSpec) {
+      List<SparkLanceShardingAdapter> partitionSpec) {
     this.fullSchema = schema;
     this.schema = schema;
     this.readOptions = readOptions;
@@ -170,11 +169,11 @@ public class LanceScanBuilder
     // Collect all columns that need zonemap stats: filter columns + partition columns.
     Set<String> columnsToLoad = extractReferencedColumns(pushedPredicates);
     Dataset dataset = getOrOpenDataset();
-    List<SparkShardingAdapter> partSpec =
+    List<SparkLanceShardingAdapter> partSpec =
         partitionSpec.isEmpty()
-            ? ShardingAdapterUtil.parseSpec(dataset, tableProperties)
+            ? SparkLanceShardingAdapter.parseSpec(dataset, tableProperties)
             : partitionSpec;
-    for (SparkShardingAdapter t : partSpec) {
+    for (SparkLanceShardingAdapter t : partSpec) {
       columnsToLoad.add(t.getCol());
     }
 
@@ -185,8 +184,8 @@ public class LanceScanBuilder
     // Each transform checks its column's zones; if every fragment
     // has a single partition value, we get a fragment→key map.
     Map<Integer, Object> fragmentPartKeys = null;
-    SparkShardingAdapter activeAdapter = null;
-    for (SparkShardingAdapter t : partSpec) {
+    SparkLanceShardingAdapter activeAdapter = null;
+    for (SparkLanceShardingAdapter t : partSpec) {
       List<ZoneStats> colStats = zonemapStats.get(t.getCol());
       if (colStats == null || colStats.isEmpty()) {
         LOG.warn(

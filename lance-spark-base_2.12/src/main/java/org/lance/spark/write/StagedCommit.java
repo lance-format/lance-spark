@@ -22,8 +22,7 @@ import org.lance.namespace.model.DeregisterTableRequest;
 import org.lance.operation.Operation;
 import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
-import org.lance.spark.sharding.SparkShardingAdapter;
-import org.lance.spark.utils.ShardingAdapterUtil;
+import org.lance.spark.sharding.SparkLanceShardingAdapter;
 
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.slf4j.Logger;
@@ -54,7 +53,7 @@ public class StagedCommit {
   private boolean enableStableRowIds;
   private List<FragmentMetadata> fragments;
   private Schema schema;
-  private List<SparkShardingAdapter> partitionSpec = Collections.emptyList();
+  private List<SparkLanceShardingAdapter> partitionSpec = Collections.emptyList();
 
   /** Dataset for existing tables. Empty for new tables (staged create). */
   private final Optional<Dataset> dataset;
@@ -111,7 +110,7 @@ public class StagedCommit {
     this.enableStableRowIds = enableStableRowIds;
   }
 
-  public void setPartitionSpec(List<SparkShardingAdapter> partitionSpec) {
+  public void setPartitionSpec(List<SparkLanceShardingAdapter> partitionSpec) {
     this.partitionSpec =
         partitionSpec != null ? new ArrayList<>(partitionSpec) : Collections.emptyList();
   }
@@ -135,7 +134,7 @@ public class StagedCommit {
     applyManagedVersioning(builder);
     try (Transaction txn = new Transaction.Builder().operation(operation).build();
         Dataset committed = builder.execute(txn)) {
-      ShardingAdapterUtil.initializeMemWal(committed, partitionSpec);
+      SparkLanceShardingAdapter.initializeMemWal(committed, partitionSpec);
     }
   }
 
@@ -151,7 +150,7 @@ public class StagedCommit {
     builder.useStableRowIds(enableStableRowIds);
     applyManagedVersioning(builder);
     try (Dataset committed = commitOperation(builder, version, operation)) {
-      ShardingAdapterUtil.initializeMemWal(committed, partitionSpec);
+      SparkLanceShardingAdapter.initializeMemWal(committed, partitionSpec);
     }
   }
 

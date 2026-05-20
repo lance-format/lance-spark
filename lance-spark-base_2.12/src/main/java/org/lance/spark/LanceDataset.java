@@ -14,7 +14,7 @@
 package org.lance.spark;
 
 import org.lance.spark.read.LanceScanBuilder;
-import org.lance.spark.sharding.SparkShardingAdapter;
+import org.lance.spark.sharding.SparkLanceShardingAdapter;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.write.AddColumnsBackfillWrite;
 import org.lance.spark.write.SparkWrite;
@@ -175,7 +175,7 @@ public class LanceDataset
   private final Map<String, String> tableProperties;
 
   /** In-memory partition spec for newly staged tables before MemWAL metadata can be read. */
-  private final List<SparkShardingAdapter> partitionSpec;
+  private final List<SparkLanceShardingAdapter> partitionSpec;
 
   /**
    * Creates a Lance dataset.
@@ -233,7 +233,7 @@ public class LanceDataset
       StagedCommit stagedCommit,
       String fileFormatVersion,
       Map<String, String> tableProperties,
-      List<SparkShardingAdapter> partitionSpec) {
+      List<SparkLanceShardingAdapter> partitionSpec) {
     this.readOptions = readOptions;
     this.sparkSchema = sparkSchema;
     this.initialStorageOptions = initialStorageOptions;

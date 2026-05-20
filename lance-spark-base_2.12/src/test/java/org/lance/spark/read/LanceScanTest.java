@@ -14,7 +14,7 @@
 package org.lance.spark.read;
 
 import org.lance.spark.TestUtils;
-import org.lance.spark.sharding.SparkShardingAdapter;
+import org.lance.spark.sharding.SparkLanceShardingAdapter;
 
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.expressions.Expression;
@@ -198,7 +198,7 @@ public class LanceScanTest {
     Map<Integer, Object> fragKeys = new HashMap<>();
     fragKeys.put(0, "east");
     fragKeys.put(1, "west");
-    SparkShardingAdapter transform = new SparkShardingAdapter.Identity("region");
+    SparkLanceShardingAdapter transform = new SparkLanceShardingAdapter.Identity("region");
 
     LanceScan scan =
         new LanceScan(
@@ -249,7 +249,7 @@ public class LanceScanTest {
     fragKeys.put(0, 0);
     fragKeys.put(1, 1);
     fragKeys.put(2, 2);
-    SparkShardingAdapter transform = new SparkShardingAdapter.Bucket("region", 4);
+    SparkLanceShardingAdapter transform = new SparkLanceShardingAdapter.Bucket("region", 4);
 
     LanceScan scan =
         new LanceScan(

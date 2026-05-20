@@ -11,10 +11,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.lance.spark.utils;
+package org.lance.spark.sharding;
 
 import org.lance.spark.LanceConstant;
-import org.lance.spark.sharding.SparkShardingAdapter;
 
 import org.apache.spark.sql.connector.expressions.Expressions;
 import org.apache.spark.sql.connector.expressions.Transform;
@@ -25,49 +24,51 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-public class ShardingAdapterUtilTest {
+public class SparkLanceShardingAdapterTest {
 
   @Test
   public void testBucketTransform() {
     Transform[] transforms = new Transform[] {Expressions.bucket(32, "col1")};
-    List<SparkShardingAdapter> spec = ShardingAdapterUtil.toSpec(transforms);
+    List<SparkLanceShardingAdapter> spec = SparkLanceShardingAdapter.toSpec(transforms);
     assertEquals(1, spec.size());
-    assertInstanceOf(SparkShardingAdapter.Bucket.class, spec.get(0));
+    assertInstanceOf(SparkLanceShardingAdapter.Bucket.class, spec.get(0));
     assertEquals("col1", spec.get(0).getCol());
-    assertEquals(32, ((SparkShardingAdapter.Bucket) spec.get(0)).getNumBuckets());
+    assertEquals(32, ((SparkLanceShardingAdapter.Bucket) spec.get(0)).getNumBuckets());
   }
 
   @Test
   public void testIdentityTransform() {
     Transform[] transforms = new Transform[] {Expressions.identity("region")};
-    List<SparkShardingAdapter> spec = ShardingAdapterUtil.toSpec(transforms);
+    List<SparkLanceShardingAdapter> spec = SparkLanceShardingAdapter.toSpec(transforms);
     assertEquals(1, spec.size());
-    assertInstanceOf(SparkShardingAdapter.Identity.class, spec.get(0));
+    assertInstanceOf(SparkLanceShardingAdapter.Identity.class, spec.get(0));
     assertEquals("region", spec.get(0).getCol());
   }
 
   @Test
   public void testNullTransforms() {
-    List<SparkShardingAdapter> spec = ShardingAdapterUtil.toSpec(null);
+    List<SparkLanceShardingAdapter> spec = SparkLanceShardingAdapter.toSpec(null);
     assertTrue(spec.isEmpty());
   }
 
   @Test
   public void testEmptyTransforms() {
-    List<SparkShardingAdapter> spec = ShardingAdapterUtil.toSpec(new Transform[0]);
+    List<SparkLanceShardingAdapter> spec = SparkLanceShardingAdapter.toSpec(new Transform[0]);
     assertTrue(spec.isEmpty());
   }
 
   @Test
   public void testMultiColumnBucketThrows() {
     Transform[] transforms = new Transform[] {Expressions.bucket(8, "col1", "col2")};
-    assertThrows(UnsupportedOperationException.class, () -> ShardingAdapterUtil.toSpec(transforms));
+    assertThrows(
+        UnsupportedOperationException.class, () -> SparkLanceShardingAdapter.toSpec(transforms));
   }
 
   @Test
   public void testUnsupportedTransformThrows() {
     Transform[] transforms = new Transform[] {Expressions.years("ts")};
-    assertThrows(UnsupportedOperationException.class, () -> ShardingAdapterUtil.toSpec(transforms));
+    assertThrows(
+        UnsupportedOperationException.class, () -> SparkLanceShardingAdapter.toSpec(transforms));
   }
 
   @Test
@@ -79,11 +80,11 @@ public class ShardingAdapterUtilTest {
             + "\"source_ids\":[],\"transform\":\"bucket\","
             + "\"expression\":\"bucket(4, region)\",\"result_type\":\"int32\","
             + "\"parameters\":{\"column\":\"region\",\"num_buckets\":\"4\"}}]}");
-    List<SparkShardingAdapter> spec = ShardingAdapterUtil.parseSpec(props);
+    List<SparkLanceShardingAdapter> spec = SparkLanceShardingAdapter.parseSpec(props);
     assertEquals(1, spec.size());
-    assertInstanceOf(SparkShardingAdapter.Bucket.class, spec.get(0));
+    assertInstanceOf(SparkLanceShardingAdapter.Bucket.class, spec.get(0));
     assertEquals("region", spec.get(0).getCol());
-    assertEquals(4, ((SparkShardingAdapter.Bucket) spec.get(0)).getNumBuckets());
+    assertEquals(4, ((SparkLanceShardingAdapter.Bucket) spec.get(0)).getNumBuckets());
   }
 
   @Test
@@ -91,18 +92,18 @@ public class ShardingAdapterUtilTest {
     Map<String, String> props = new java.util.HashMap<>();
     props.put("lance.partition.bucket.columns", "region");
     props.put("lance.partition.bucket.num_buckets", "4");
-    List<SparkShardingAdapter> spec = ShardingAdapterUtil.parseSpec(props);
+    List<SparkLanceShardingAdapter> spec = SparkLanceShardingAdapter.parseSpec(props);
     assertEquals(1, spec.size());
-    assertInstanceOf(SparkShardingAdapter.Bucket.class, spec.get(0));
-    assertEquals(4, ((SparkShardingAdapter.Bucket) spec.get(0)).getNumBuckets());
+    assertInstanceOf(SparkLanceShardingAdapter.Bucket.class, spec.get(0));
+    assertEquals(4, ((SparkLanceShardingAdapter.Bucket) spec.get(0)).getNumBuckets());
   }
 
   @Test
   public void testParseSpecLegacyIdentity() {
     Map<String, String> props = new java.util.HashMap<>();
     props.put("lance.partition.columns", "region");
-    List<SparkShardingAdapter> spec = ShardingAdapterUtil.parseSpec(props);
+    List<SparkLanceShardingAdapter> spec = SparkLanceShardingAdapter.parseSpec(props);
     assertEquals(1, spec.size());
-    assertInstanceOf(SparkShardingAdapter.Identity.class, spec.get(0));
+    assertInstanceOf(SparkLanceShardingAdapter.Identity.class, spec.get(0));
   }
 }

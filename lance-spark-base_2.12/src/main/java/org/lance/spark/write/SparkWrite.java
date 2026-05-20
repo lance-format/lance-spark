@@ -16,8 +16,7 @@ package org.lance.spark.write;
 import org.lance.Dataset;
 import org.lance.WriteParams;
 import org.lance.spark.LanceSparkWriteOptions;
-import org.lance.spark.sharding.SparkShardingAdapter;
-import org.lance.spark.utils.ShardingAdapterUtil;
+import org.lance.spark.sharding.SparkLanceShardingAdapter;
 import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.connector.distributions.Distribution;
@@ -69,8 +68,8 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
   private final boolean managedVersioning;
   private final StagedCommit stagedCommit;
   private final Map<String, String> tableProperties;
-  private final List<SparkShardingAdapter> initialPartitionSpec;
-  private List<SparkShardingAdapter> cachedPartitionSpec;
+  private final List<SparkLanceShardingAdapter> initialPartitionSpec;
+  private List<SparkLanceShardingAdapter> cachedPartitionSpec;
 
   SparkWrite(
       StructType schema,
@@ -83,7 +82,7 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
       boolean managedVersioning,
       StagedCommit stagedCommit,
       Map<String, String> tableProperties,
-      List<SparkShardingAdapter> initialPartitionSpec) {
+      List<SparkLanceShardingAdapter> initialPartitionSpec) {
     this.schema = schema;
     this.writeOptions = writeOptions;
     this.overwrite = overwrite;
@@ -103,7 +102,7 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
             : Collections.emptyList();
   }
 
-  private List<SparkShardingAdapter> partitionSpec() {
+  private List<SparkLanceShardingAdapter> partitionSpec() {
     if (cachedPartitionSpec == null) {
       if (stagedCommit != null || !initialPartitionSpec.isEmpty()) {
         cachedPartitionSpec = initialPartitionSpec;
@@ -113,7 +112,7 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
                 .initialStorageOptions(initialStorageOptions)
                 .runtimeNamespace(namespaceImpl, namespaceProperties, tableId)
                 .build()) {
-          cachedPartitionSpec = ShardingAdapterUtil.parseSpec(dataset, tableProperties);
+          cachedPartitionSpec = SparkLanceShardingAdapter.parseSpec(dataset, tableProperties);
         }
       }
     }
@@ -122,27 +121,29 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
 
   @Override
   public Distribution requiredDistribution() {
-    List<SparkShardingAdapter> spec = partitionSpec();
+    List<SparkLanceShardingAdapter> spec = partitionSpec();
     if (spec.isEmpty()) {
       return Distributions.unspecified();
     }
     NamedReference[] refs =
-        spec.stream().map(SparkShardingAdapter::toClusteringRef).toArray(NamedReference[]::new);
+        spec.stream()
+            .map(SparkLanceShardingAdapter::toClusteringRef)
+            .toArray(NamedReference[]::new);
     return Distributions.clustered(refs);
   }
 
   @Override
   public SortOrder[] requiredOrdering() {
-    List<SparkShardingAdapter> spec = partitionSpec();
+    List<SparkLanceShardingAdapter> spec = partitionSpec();
     if (spec.isEmpty()) {
       return new SortOrder[0];
     }
-    return spec.stream().map(SparkShardingAdapter::toSortOrder).toArray(SortOrder[]::new);
+    return spec.stream().map(SparkLanceShardingAdapter::toSortOrder).toArray(SortOrder[]::new);
   }
 
   @Override
   public BatchWrite toBatch() {
-    List<SparkShardingAdapter> spec = partitionSpec();
+    List<SparkLanceShardingAdapter> spec = partitionSpec();
     return new LanceBatchWrite(
         schema,
         writeOptions,
@@ -181,7 +182,7 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
     private final List<String> tableId;
     private final boolean managedVersioning;
     private final Map<String, String> tableProperties;
-    private final List<SparkShardingAdapter> partitionSpec;
+    private final List<SparkLanceShardingAdapter> partitionSpec;
 
     public SparkWriteBuilder(
         StructType schema,
@@ -213,7 +214,7 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
         List<String> tableId,
         boolean managedVersioning,
         Map<String, String> tableProperties,
-        List<SparkShardingAdapter> partitionSpec) {
+        List<SparkLanceShardingAdapter> partitionSpec) {
       this.schema = schema;
       this.writeOptions = writeOptions;
       this.initialStorageOptions = initialStorageOptions;

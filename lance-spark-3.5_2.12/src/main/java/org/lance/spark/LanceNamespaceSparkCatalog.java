@@ -13,7 +13,7 @@
  */
 package org.lance.spark;
 
-import org.lance.spark.sharding.SparkShardingAdapter;
+import org.lance.spark.sharding.SparkLanceShardingAdapter;
 import org.lance.spark.write.StagedCommit;
 
 import org.apache.spark.sql.types.StructType;
@@ -33,7 +33,7 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
       boolean managedVersioning,
       String fileFormatVersion,
       Map<String, String> tableProperties,
-      List<SparkShardingAdapter> partitionSpec) {
+      List<SparkLanceShardingAdapter> partitionSpec) {
     return new LancePositionDeltaDataset(
         readOptions,
         sparkSchema,
@@ -57,7 +57,7 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
       StagedCommit stagedCommit,
       String fileFormatVersion,
       Map<String, String> tableProperties,
-      List<SparkShardingAdapter> partitionSpec) {
+      List<SparkLanceShardingAdapter> partitionSpec) {
     return new LancePositionDeltaDataset(
         readOptions,
         sparkSchema,

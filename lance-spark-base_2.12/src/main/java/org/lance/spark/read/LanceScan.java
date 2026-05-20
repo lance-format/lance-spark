@@ -17,7 +17,7 @@ import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.read.metric.LanceCustomMetrics;
-import org.lance.spark.sharding.SparkShardingAdapter;
+import org.lance.spark.sharding.SparkLanceShardingAdapter;
 import org.lance.spark.utils.Optional;
 
 import org.apache.arrow.util.Preconditions;
@@ -96,7 +96,7 @@ public class LanceScan
    * Active Spark sharding adapter detected from zonemap stats. Null when no compatible adapter is
    * detected.
    */
-  private final SparkShardingAdapter activeAdapter;
+  private final SparkLanceShardingAdapter activeAdapter;
 
   /** Map from fragment ID to partition key value. Null when no partitioning is detected. */
   private final java.util.Map<Integer, Object> fragmentPartKeys;
@@ -124,7 +124,7 @@ public class LanceScan
       LanceStatistics statistics,
       java.util.Map<String, List<ZoneStats>> zonemapStats,
       Set<Integer> survivingFragmentIds,
-      SparkShardingAdapter activeAdapter,
+      SparkLanceShardingAdapter activeAdapter,
       java.util.Map<Integer, Object> fragmentPartKeys,
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
