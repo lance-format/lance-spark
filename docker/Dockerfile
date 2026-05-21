@@ -42,7 +42,7 @@ WORKDIR ${SPARK_HOME}
 ENV SPARK_VERSION=${SPARK_DOWNLOAD_VERSION}
 ENV SPARK_MAJOR_VERSION=${SPARK_MAJOR_VERSION}
 ENV SCALA_VERSION=${SCALA_VERSION}
-ENV LANCE_SPARK_VERSION=0.5.0
+ENV LANCE_SPARK_VERSION=0.5.0-beta.1
 ENV LANCE_NS_VERSION=0.7.5
 
 # Download spark
@@ -52,11 +52,11 @@ RUN mkdir -p ${SPARK_HOME} \
  && rm -rf spark.tgz
 
 # Download lance-spark bundle JAR from Maven
-RUN curl -fL https://repo1.maven.org/maven2/com/lancedb/lance-spark-bundle-3.5_2.12/${LANCE_SPARK_VERSION}/lance-spark-bundle-3.5_2.12-${LANCE_SPARK_VERSION}.jar \
+RUN curl -fL https://repo1.maven.org/maven2/org/lance/lance-spark-bundle-3.5_2.12/${LANCE_SPARK_VERSION}/lance-spark-bundle-3.5_2.12-${LANCE_SPARK_VERSION}.jar \
  -o /opt/spark/jars/lance-spark-bundle_2.12-${LANCE_SPARK_VERSION}.jar
 
 # Download additional Lance namespace implementation jars from Maven
-RUN curl -fL https://repo1.maven.org/maven2/com/lancedb/lance-namespace-glue/${LANCE_NS_VERSION}/lance-namespace-glue-${LANCE_NS_VERSION}.jar \
+RUN curl -fL https://repo1.maven.org/maven2/org/lance/lance-namespace-glue/${LANCE_NS_VERSION}/lance-namespace-glue-${LANCE_NS_VERSION}.jar \
  -o /opt/spark/jars/lance-namespace-glue-${LANCE_NS_VERSION}.jar
 
 # For local testing, uncomment the lines below and comment out the Maven downloads above:
