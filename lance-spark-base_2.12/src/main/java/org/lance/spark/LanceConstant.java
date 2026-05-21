@@ -29,6 +29,13 @@ public class LanceConstant {
   public static final String BACKFILL_COLUMNS_KEY = "backfill_columns";
   public static final String UPDATE_COLUMNS_KEY = "update_columns";
 
+  /**
+   * Internal write option carrying the encoded blob source credential/open contexts for an INSERT
+   * whose query reads blob columns. Set on the driver by {@code LanceBlobSourceContextRule} and
+   * consumed by {@code LanceDataset.newWriteBuilder}; not a user-facing option.
+   */
+  public static final String BLOB_SOURCE_CONTEXTS_KEY = "__lance_blob_source_contexts";
+
   /** Table property that declares the partition column(s) for SPJ. */
   public static final String TABLE_OPT_PARTITION_COLUMNS = "lance.partition.columns";
 }

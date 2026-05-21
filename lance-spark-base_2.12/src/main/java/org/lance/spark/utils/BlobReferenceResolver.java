@@ -15,13 +15,11 @@ package org.lance.spark.utils;
 
 import org.lance.BlobFile;
 import org.lance.Dataset;
-import org.lance.ReadOptions;
-import org.lance.spark.LanceRuntime;
-
-import org.apache.arrow.vector.LargeVarBinaryVector;
+import org.lance.spark.LanceSparkReadOptions;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -33,11 +31,31 @@ import java.util.Map;
  * <p>Datasets are cached for the lifetime of this resolver to amortize open costs across batches.
  * Resolution is done in true batches: all pending references are grouped by (datasetUri,
  * columnName) and each group is resolved with a single {@code takeBlobs()} call.
+ *
+ * <p>Source datasets are opened through {@link Utils#openDatasetBuilder(LanceSparkReadOptions)}
+ * using the per-source {@link BlobSourceContext} captured on the driver (keyed by dataset URI).
+ * This keeps the namespace client attached via {@code runtimeNamespace(...)} so vended credentials
+ * keep auto-refreshing — exactly how distributed compaction/index builds open datasets on
+ * executors. When no context is registered for a URI (e.g. a local filesystem source, or when the
+ * SQL extension that captures contexts is not enabled), it falls back to opening by URI with
+ * default options.
  */
 public class BlobReferenceResolver implements AutoCloseable {
 
   /** Cache of opened datasets keyed by dataset URI. */
   private final Map<String, Dataset> datasetCache = new HashMap<>();
+
+  /** Per-source open/credential context, keyed by dataset URI. */
+  private final Map<String, BlobSourceContext> sourceContexts;
+
+  public BlobReferenceResolver() {
+    this(Collections.emptyMap());
+  }
+
+  public BlobReferenceResolver(Map<String, BlobSourceContext> sourceContexts) {
+    this.sourceContexts =
+        sourceContexts != null ? sourceContexts : Collections.<String, BlobSourceContext>emptyMap();
+  }
 
   /**
    * Resolves a single blob reference to actual blob bytes.
@@ -72,18 +90,24 @@ public class BlobReferenceResolver implements AutoCloseable {
   }
 
   /**
-   * Resolves a batch of blob references and writes the resolved bytes directly into the target
-   * vector. References are grouped by (datasetUri, columnName) and each group is resolved with a
+   * Resolves a batch of blob references to their actual bytes, keyed by the caller-supplied vector
+   * indices. References are grouped by (datasetUri, columnName) and each group is resolved with a
    * single {@code takeBlobs()} call.
+   *
+   * <p>The caller is responsible for writing the resolved bytes into the target vector. Resolved
+   * bytes are returned as a map rather than written here because back-filling a variable-width
+   * Arrow vector out of order corrupts its offset buffer; the caller must emit the whole vector in
+   * a single ascending pass.
    *
    * @param indices vector indices corresponding to each blob reference
    * @param refs blob references to resolve
-   * @param vector the target vector to back-fill with resolved bytes
+   * @return a map from vector index to resolved blob bytes
    * @throws IOException if reading blobs fails
    */
-  public void resolveBatch(
-      List<Integer> indices, List<BlobReference> refs, LargeVarBinaryVector vector)
+  public Map<Integer, byte[]> resolveBatch(List<Integer> indices, List<BlobReference> refs)
       throws IOException {
+    Map<Integer, byte[]> resolved = new HashMap<>(refs.size());
+
     // Group by (datasetUri, columnName)
     Map<String, List<IndexedRef>> groups = new HashMap<>();
     for (int i = 0; i < refs.size(); i++) {
@@ -111,28 +135,33 @@ public class BlobReferenceResolver implements AutoCloseable {
         IndexedRef ir = group.get(i);
         if (i < blobs.size()) {
           try (BlobFile blob = blobs.get(i)) {
-            byte[] data = blob.read();
-            vector.setSafe(ir.vectorIndex, data);
+            resolved.put(ir.vectorIndex, blob.read());
           }
         } else {
-          vector.setSafe(ir.vectorIndex, new byte[0]);
+          resolved.put(ir.vectorIndex, new byte[0]);
         }
       }
     }
+    return resolved;
   }
 
   private Dataset getOrOpenDataset(String datasetUri) {
-    return datasetCache.computeIfAbsent(
-        datasetUri,
-        uri -> {
-          ReadOptions.Builder builder = new ReadOptions.Builder();
-          builder.setSession(LanceRuntime.session());
-          return Dataset.open()
-              .allocator(LanceRuntime.allocator())
-              .uri(uri)
-              .readOptions(builder.build())
-              .build();
-        });
+    return datasetCache.computeIfAbsent(datasetUri, this::openDataset);
+  }
+
+  private Dataset openDataset(String datasetUri) {
+    BlobSourceContext context = sourceContexts.get(datasetUri);
+    if (context != null) {
+      // Reopen the source the same way executors do for compaction/index: route through the
+      // namespace client so vended (auto-refreshing) credentials remain valid while reading blobs.
+      return Utils.openDatasetBuilder(context.getReadOptions())
+          .initialStorageOptions(context.getInitialStorageOptions())
+          .runtimeNamespace(
+              context.getNamespaceImpl(), context.getNamespaceProperties(), context.getTableId())
+          .build();
+    }
+    // No captured context (e.g. local filesystem source, or the capture extension is not enabled).
+    return Utils.openDatasetBuilder(LanceSparkReadOptions.from(datasetUri)).build();
   }
 
   @Override

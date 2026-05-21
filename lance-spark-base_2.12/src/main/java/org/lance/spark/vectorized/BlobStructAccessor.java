@@ -30,6 +30,10 @@ public class BlobStructAccessor implements AutoCloseable {
   private String columnName;
   private long[] rowAddresses;
 
+  // Constant serialized prefix (magic + version + datasetUri + columnName) for this batch.
+  // Precomputed once in setBlobReferenceContext so the per-row hot path only appends rowAddress.
+  private byte[] referencePrefix;
+
   public BlobStructAccessor(StructVector structVector) {
     this.structVector = structVector;
     // Blob structs have two fields: position and size (both unsigned Int64)
@@ -50,6 +54,9 @@ public class BlobStructAccessor implements AutoCloseable {
     this.datasetUri = datasetUri;
     this.columnName = columnName;
     this.rowAddresses = rowAddresses;
+    // datasetUri and columnName are constant for the batch — encode the reference prefix once
+    // here rather than re-encoding both strings per row in getBlobReference().
+    this.referencePrefix = BlobReference.serializePrefix(datasetUri, columnName);
   }
 
   /** Returns true if blob reference context has been set. */
@@ -82,9 +89,7 @@ public class BlobStructAccessor implements AutoCloseable {
       // Zero-size blob — either truly empty or null encoded as (0,0)
       return new byte[0];
     }
-    long rowAddr = rowAddresses[rowId];
-    BlobReference ref = new BlobReference(datasetUri, columnName, rowAddr);
-    return ref.serialize();
+    return BlobReference.appendRowAddress(referencePrefix, rowAddresses[rowId]);
   }
 
   public InternalRow getStruct(int rowId) {

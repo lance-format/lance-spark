@@ -74,6 +74,7 @@ public class SparkWriteTest {
         Collections.emptyMap(),
         Arrays.asList("default", "test_table"),
         false,
+        Collections.emptyMap(),
         Collections.emptyMap());
   }
 
@@ -115,6 +116,7 @@ public class SparkWriteTest {
             Collections.emptyMap(),
             null,
             false,
+            Collections.emptyMap(),
             Collections.emptyMap());
     assertSame(builder, builder.truncate());
     BatchWrite batchWrite = builder.build().toBatch();
@@ -139,6 +141,7 @@ public class SparkWriteTest {
             Collections.emptyMap(),
             null,
             false,
+            Collections.emptyMap(),
             Collections.emptyMap());
     builder.truncate();
     SparkWrite sparkWrite = (SparkWrite) builder.build();
@@ -161,7 +164,8 @@ public class SparkWriteTest {
             Collections.emptyMap(),
             Arrays.asList("default", "test_table"),
             false,
-            tableProps);
+            tableProps,
+            Collections.emptyMap());
     return (SparkWrite) builder.build();
   }
 

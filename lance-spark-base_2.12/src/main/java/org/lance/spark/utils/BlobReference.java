@@ -19,6 +19,7 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 
 /**
  * A compact serializable reference to a blob stored in a Lance dataset.
@@ -98,6 +99,18 @@ public class BlobReference {
 
   /** Serialize this reference to a compact byte array. */
   public byte[] serialize() {
+    return appendRowAddress(serializePrefix(datasetUri, columnName), rowAddress);
+  }
+
+  /**
+   * Serializes the constant portion of a reference: everything except the trailing 8-byte
+   * rowAddress (i.e. magic + version + datasetUri + columnName).
+   *
+   * <p>{@code datasetUri} and {@code columnName} are constant for an entire scan batch, so callers
+   * on the per-row read hot path should compute this prefix once and then call {@link
+   * #appendRowAddress(byte[], long)} per row instead of re-encoding the strings every time.
+   */
+  public static byte[] serializePrefix(String datasetUri, String columnName) {
     try {
       ByteArrayOutputStream baos = new ByteArrayOutputStream(128);
       DataOutputStream out = new DataOutputStream(baos);
@@ -105,12 +118,29 @@ public class BlobReference {
       out.writeByte(VERSION);
       writeString(out, datasetUri);
       writeString(out, columnName);
-      out.writeLong(rowAddress);
       out.flush();
       return baos.toByteArray();
     } catch (IOException e) {
       throw new RuntimeException("Failed to serialize BlobReference", e);
     }
+  }
+
+  /**
+   * Returns a full serialized reference: {@code prefix} (from {@link #serializePrefix}) followed by
+   * the 8-byte big-endian {@code rowAddress}, matching {@link DataOutputStream#writeLong}.
+   */
+  public static byte[] appendRowAddress(byte[] prefix, long rowAddress) {
+    byte[] out = Arrays.copyOf(prefix, prefix.length + 8);
+    int off = prefix.length;
+    out[off] = (byte) (rowAddress >>> 56);
+    out[off + 1] = (byte) (rowAddress >>> 48);
+    out[off + 2] = (byte) (rowAddress >>> 40);
+    out[off + 3] = (byte) (rowAddress >>> 32);
+    out[off + 4] = (byte) (rowAddress >>> 24);
+    out[off + 5] = (byte) (rowAddress >>> 16);
+    out[off + 6] = (byte) (rowAddress >>> 8);
+    out[off + 7] = (byte) rowAddress;
+    return out;
   }
 
   /** Deserialize a BlobReference from bytes. */

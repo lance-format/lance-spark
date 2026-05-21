@@ -56,6 +56,10 @@ public abstract class BaseBlobJoinTest {
         SparkSession.builder()
             .appName("blob-join-test")
             .master("local[*]")
+            // Enable the Lance extensions so LanceBlobSourceContextRule runs and propagates the
+            // source dataset's credentials/open context to the write side for blob resolution.
+            .config(
+                "spark.sql.extensions", "org.lance.spark.extensions.LanceSparkSessionExtensions")
             .config(
                 "spark.sql.catalog." + catalogName, "org.lance.spark.LanceNamespaceSparkCatalog")
             .config("spark.sql.catalog." + catalogName + ".impl", "dir")

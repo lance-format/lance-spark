@@ -18,6 +18,8 @@ import org.lance.FragmentMetadata;
 import org.lance.WriteParams;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.utils.BlobReferenceResolver;
+import org.lance.spark.utils.BlobSourceContext;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
@@ -49,6 +51,13 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
   private final DataType[] partitionColumnTypes;
   private final List<FragmentMetadata> completedFragments = new ArrayList<>();
 
+  /**
+   * Resolves blob references to actual bytes during writes. Shared across all batches/fragments of
+   * this write task and closed at teardown to release the source datasets it opens. Null when blob
+   * resolution is not needed (e.g. the test-only constructor).
+   */
+  private final BlobReferenceResolver blobResolver;
+
   private ArrowBatchWriteBuffer writeBuffer;
   private FutureTask<List<FragmentMetadata>> fragmentCreationTask;
   private Thread fragmentCreationThread;
@@ -65,7 +74,8 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
         fragmentCreationThread,
         null,
         new int[0],
-        new DataType[0]);
+        new DataType[0],
+        null);
   }
 
   LanceDataWriter(
@@ -74,13 +84,15 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       Thread fragmentCreationThread,
       Supplier<BufferAndTask> bufferTaskFactory,
       int[] partitionColumnIndices,
-      DataType[] partitionColumnTypes) {
+      DataType[] partitionColumnTypes,
+      BlobReferenceResolver blobResolver) {
     this.writeBuffer = writeBuffer;
     this.fragmentCreationThread = fragmentCreationThread;
     this.fragmentCreationTask = fragmentCreationTask;
     this.bufferTaskFactory = bufferTaskFactory;
     this.partitionColumnIndices = partitionColumnIndices;
     this.partitionColumnTypes = partitionColumnTypes;
+    this.blobResolver = blobResolver;
   }
 
   @Override
@@ -195,7 +207,15 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
 
   @Override
   public void close() throws IOException {
-    writeBuffer.close();
+    try {
+      writeBuffer.close();
+    } finally {
+      // Release any source datasets opened to resolve blob references. Spark always calls close()
+      // (after commit, and after abort), so this is the single teardown point for the resolver.
+      if (blobResolver != null) {
+        blobResolver.close();
+      }
+    }
   }
 
   static List<FragmentMetadata> stripRowIdMeta(List<FragmentMetadata> fragments) {
@@ -245,6 +265,14 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
     private final List<String> tableId;
     private final List<String> partitionColumns;
 
+    /**
+     * Per-source blob credential/open contexts keyed by source dataset URI, captured on the driver
+     * (see {@code LanceBlobSourceContextRule}). Used by the per-task resolver to reopen source
+     * datasets and fetch blob bytes for references that flowed through the shuffle. Empty when no
+     * blob sources were detected or the SQL extension that captures them is not enabled.
+     */
+    private final Map<String, BlobSourceContext> blobSourceContexts;
+
     public WriterFactory(
         StructType schema,
         LanceSparkWriteOptions writeOptions,
@@ -259,7 +287,8 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
           namespaceImpl,
           namespaceProperties,
           tableId,
-          Collections.emptyList());
+          Collections.emptyList(),
+          Collections.emptyMap());
     }
 
     public WriterFactory(
@@ -269,7 +298,8 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
         String namespaceImpl,
         Map<String, String> namespaceProperties,
         List<String> tableId,
-        List<String> partitionColumns) {
+        List<String> partitionColumns,
+        Map<String, BlobSourceContext> blobSourceContexts) {
       // Everything passed to writer factory should be serializable
       this.schema = schema;
       this.writeOptions = writeOptions;
@@ -278,9 +308,11 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       this.namespaceProperties = namespaceProperties;
       this.tableId = tableId;
       this.partitionColumns = partitionColumns == null ? Collections.emptyList() : partitionColumns;
+      this.blobSourceContexts =
+          blobSourceContexts == null ? Collections.emptyMap() : blobSourceContexts;
     }
 
-    private BufferAndTask buildBufferAndTask() {
+    private BufferAndTask buildBufferAndTask(BlobReferenceResolver resolver) {
       int batchSize = writeOptions.getBatchSize();
       boolean useQueuedBuffer = writeOptions.isUseQueuedWriteBuffer();
       boolean useLargeVarTypes = writeOptions.isUseLargeVarTypes();
@@ -295,10 +327,11 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
         int queueDepth = writeOptions.getQueueDepth();
         writeBuffer =
             new QueuedArrowBatchWriteBuffer(
-                schema, batchSize, queueDepth, useLargeVarTypes, maxBatchBytes);
+                schema, batchSize, queueDepth, useLargeVarTypes, maxBatchBytes, resolver);
       } else {
         writeBuffer =
-            new SemaphoreArrowBatchWriteBuffer(schema, batchSize, useLargeVarTypes, maxBatchBytes);
+            new SemaphoreArrowBatchWriteBuffer(
+                schema, batchSize, useLargeVarTypes, maxBatchBytes, resolver);
       }
 
       final ArrowBatchWriteBuffer bufferRef = writeBuffer;
@@ -318,14 +351,24 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
 
     @Override
     public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
-      BufferAndTask initial = buildBufferAndTask();
+      // One resolver per write task, shared across all batches and fragments (rolled by
+      // bufferTaskFactory) and closed when the LanceDataWriter is closed. Always created so blob
+      // references can be resolved even without captured contexts (it falls back to open-by-URI).
+      BlobReferenceResolver resolver = new BlobReferenceResolver(blobSourceContexts);
+      BufferAndTask initial = buildBufferAndTask(resolver);
       initial.thread.start();
 
       int[] indices = resolvePartitionColumnIndices();
       DataType[] types = resolvePartitionColumnTypes(indices);
 
       return new LanceDataWriter(
-          initial.buffer, initial.task, initial.thread, this::buildBufferAndTask, indices, types);
+          initial.buffer,
+          initial.task,
+          initial.thread,
+          () -> buildBufferAndTask(resolver),
+          indices,
+          types,
+          resolver);
     }
 
     private int[] resolvePartitionColumnIndices() {

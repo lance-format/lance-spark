@@ -621,7 +621,7 @@ public class QueuedArrowBatchWriteBufferTest {
       final int queueDepth = 4;
       final QueuedArrowBatchWriteBuffer writeBuffer =
           new QueuedArrowBatchWriteBuffer(
-              allocator, schema, sparkSchema, batchSize, queueDepth, maxBatchBytes);
+              allocator, schema, sparkSchema, batchSize, queueDepth, maxBatchBytes, null);
 
       AtomicInteger rowsWritten = new AtomicInteger(0);
       AtomicInteger rowsRead = new AtomicInteger(0);
@@ -703,7 +703,7 @@ public class QueuedArrowBatchWriteBufferTest {
       final int queueDepth = 4;
       final QueuedArrowBatchWriteBuffer writeBuffer =
           new QueuedArrowBatchWriteBuffer(
-              allocator, schema, sparkSchema, batchSize, queueDepth, maxBatchBytes);
+              allocator, schema, sparkSchema, batchSize, queueDepth, maxBatchBytes, null);
 
       AtomicInteger rowsWritten = new AtomicInteger(0);
       AtomicInteger rowsRead = new AtomicInteger(0);
@@ -772,7 +772,7 @@ public class QueuedArrowBatchWriteBufferTest {
       final int queueDepth = 4;
       final QueuedArrowBatchWriteBuffer writeBuffer =
           new QueuedArrowBatchWriteBuffer(
-              allocator, schema, sparkSchema, batchSize, queueDepth, maxBatchBytes);
+              allocator, schema, sparkSchema, batchSize, queueDepth, maxBatchBytes, null);
 
       AtomicInteger rowsWritten = new AtomicInteger(0);
       AtomicInteger rowsRead = new AtomicInteger(0);

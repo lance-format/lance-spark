@@ -14,6 +14,7 @@
 package org.lance.spark;
 
 import org.lance.spark.read.LanceScanBuilder;
+import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.write.AddColumnsBackfillWrite;
 import org.lance.spark.write.SparkWrite;
@@ -35,6 +36,7 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
+import org.apache.spark.sql.util.LanceSerializeUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -315,8 +317,11 @@ public class LanceDataset
   public WriteBuilder newWriteBuilder(LogicalWriteInfo logicalWriteInfo) {
     // Merge write-time options with the base options from read options
     CaseInsensitiveStringMap sparkWriteOptions = logicalWriteInfo.options();
+    Map<String, BlobSourceContext> blobSourceContexts = decodeBlobSourceContexts(sparkWriteOptions);
     Map<String, String> mergedOptions = new HashMap<>(readOptions.getStorageOptions());
     mergedOptions.putAll(sparkWriteOptions.asCaseSensitiveMap());
+    // Internal-only option (see LanceBlobSourceContextRule); never forward it as a storage option.
+    mergedOptions.remove(LanceConstant.BLOB_SOURCE_CONTEXTS_KEY);
 
     LanceSparkWriteOptions.Builder writeOptionsBuilder =
         LanceSparkWriteOptions.builder()
@@ -380,7 +385,8 @@ public class LanceDataset
             namespaceProperties,
             readOptions.getTableId(),
             managedVersioning,
-            tableProperties);
+            tableProperties,
+            blobSourceContexts);
 
     if (stagedCommit != null) {
       builder.setStagedCommit(stagedCommit);
@@ -390,6 +396,21 @@ public class LanceDataset
       builder.truncate();
     }
     return builder;
+  }
+
+  /**
+   * Decodes the blob source contexts that {@code LanceBlobSourceContextRule} injected into the
+   * write options for an INSERT whose query reads blob columns. Returns an empty map when absent
+   * (e.g. no blob sources, or the SQL extension is not enabled).
+   */
+  @SuppressWarnings("unchecked")
+  private static Map<String, BlobSourceContext> decodeBlobSourceContexts(
+      CaseInsensitiveStringMap writeOptions) {
+    String encoded = writeOptions.get(LanceConstant.BLOB_SOURCE_CONTEXTS_KEY);
+    if (encoded == null || encoded.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    return (Map<String, BlobSourceContext>) LanceSerializeUtil.decode(encoded);
   }
 
   @Override

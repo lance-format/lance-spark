@@ -20,7 +20,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.SpecializedGetters
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.LanceArrowUtils
-import org.lance.spark.utils.Float16Utils
+import org.lance.spark.utils.{BlobReferenceResolver, Float16Utils}
 
 import scala.collection.JavaConverters._
 
@@ -51,11 +51,22 @@ object LanceArrowWriter {
     create(root, schema)
   }
 
-  def create(root: VectorSchemaRoot, sparkSchema: StructType): LanceArrowWriter = {
+  def create(root: VectorSchemaRoot, sparkSchema: StructType): LanceArrowWriter =
+    create(root, sparkSchema, null)
+
+  /**
+   * Creates a writer, injecting a shared {@link BlobReferenceResolver} used by binary writers to
+   * resolve blob references that flow through a shuffle. The resolver is owned by the caller (one per
+   * write task) and reused across batches; pass {@code null} when blob resolution is not needed.
+   */
+  def create(
+      root: VectorSchemaRoot,
+      sparkSchema: StructType,
+      resolver: BlobReferenceResolver): LanceArrowWriter = {
     val children = root.getFieldVectors().asScala.zipWithIndex.map { case (vector, index) =>
       vector.allocateNew()
       val sparkField = sparkSchema.fields(index)
-      createFieldWriter(vector, sparkField.dataType, sparkField.metadata)
+      createFieldWriter(vector, sparkField.dataType, sparkField.metadata, resolver)
     }
     new LanceArrowWriter(root, children.toArray)
   }
@@ -63,14 +74,15 @@ object LanceArrowWriter {
   private[arrow] def createFieldWriter(
       vector: ValueVector,
       sparkType: DataType,
-      metadata: org.apache.spark.sql.types.Metadata = null): LanceArrowFieldWriter = {
+      metadata: org.apache.spark.sql.types.Metadata = null,
+      resolver: BlobReferenceResolver = null): LanceArrowFieldWriter = {
     (sparkType, vector) match {
       case (ArrayType(elementType: NumericType, _), vector: FixedSizeListVector) =>
-        val elementWriter = createFieldWriter(vector.getDataVector(), elementType, null)
+        val elementWriter = createFieldWriter(vector.getDataVector(), elementType, null, resolver)
         new FixedSizeListWriter(vector, elementWriter)
 
       case (ArrayType(elementType, _), vector: ListVector) =>
-        val elementWriter = createFieldWriter(vector.getDataVector(), elementType, null)
+        val elementWriter = createFieldWriter(vector.getDataVector(), elementType, null, resolver)
         new ArrayWriter(vector, elementWriter)
 
       case (BooleanType, vector: BitVector) => new BooleanWriter(vector)
@@ -96,7 +108,7 @@ object LanceArrowWriter {
       case (_: CharType | _: VarcharType, vector: LargeVarCharVector) =>
         new LargeStringWriter(vector)
       case (BinaryType, vector: VarBinaryVector) => new BinaryWriter(vector)
-      case (BinaryType, vector: LargeVarBinaryVector) => new LargeBinaryWriter(vector)
+      case (BinaryType, vector: LargeVarBinaryVector) => new LargeBinaryWriter(vector, resolver)
       case (DateType, vector: DateDayVector) => new DateWriter(vector)
       case (DateType, vector: DateMilliVector) => new DateMilliWriter(vector)
       case (TimestampType, vector: TimeStampMicroTZVector) => new TimestampWriter(vector)
@@ -106,15 +118,21 @@ object LanceArrowWriter {
         val keyWriter = createFieldWriter(
           structVector.getChild(MapVector.KEY_NAME),
           sparkType.asInstanceOf[MapType].keyType,
-          null)
+          null,
+          resolver)
         val valueWriter = createFieldWriter(
           structVector.getChild(MapVector.VALUE_NAME),
           sparkType.asInstanceOf[MapType].valueType,
-          null)
+          null,
+          resolver)
         new MapWriter(vector, structVector, keyWriter, valueWriter)
       case (StructType(fields), vector: StructVector) =>
         val children = fields.zipWithIndex.map { case (field, ordinal) =>
-          createFieldWriter(vector.getChildByOrdinal(ordinal), field.dataType, field.metadata)
+          createFieldWriter(
+            vector.getChildByOrdinal(ordinal),
+            field.dataType,
+            field.metadata,
+            resolver)
         }
         new StructWriter(vector, children.toArray)
       case (NullType, vector: NullVector) => new NullWriter(vector)
@@ -123,7 +141,7 @@ object LanceArrowWriter {
       case (CalendarIntervalType, vector: IntervalMonthDayNanoVector) =>
         new IntervalMonthDayNanoWriter(vector)
       case (udt: UserDefinedType[_], _) =>
-        createFieldWriter(vector, udt.sqlType, metadata)
+        createFieldWriter(vector, udt.sqlType, metadata, resolver)
       case (dt, _) =>
         throw new UnsupportedOperationException(s"Unsupported data type: $dt")
     }
@@ -320,50 +338,8 @@ private[arrow] class BinaryWriter(val valueVector: VarBinaryVector) extends Lanc
   }
 }
 
-private[arrow] class LargeBinaryWriter(val valueVector: LargeVarBinaryVector)
-  extends LanceArrowFieldWriter {
-
-  private val pendingIndices = new java.util.ArrayList[java.lang.Integer]()
-  private val pendingRefs = new java.util.ArrayList[org.lance.spark.utils.BlobReference]()
-
-  @transient private lazy val resolver = new org.lance.spark.utils.BlobReferenceResolver()
-
-  override def setNull(): Unit = {}
-  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
-    val bytes = input.getBinary(ordinal)
-    if (bytes == null || bytes.length == 0) {
-      valueVector.setSafe(count, bytes)
-    } else if (org.lance.spark.utils.BlobReference.isBlobReference(bytes)) {
-      val ref = org.lance.spark.utils.BlobReference.deserialize(bytes)
-      pendingIndices.add(count)
-      pendingRefs.add(ref)
-      valueVector.setSafe(count, Array.emptyByteArray)
-    } else {
-      valueVector.setSafe(count, bytes)
-    }
-  }
-
-  override def finish(): Unit = {
-    super.finish()
-    if (!pendingRefs.isEmpty) {
-      try {
-        resolver.resolveBatch(pendingIndices, pendingRefs, valueVector)
-      } catch {
-        case e: java.io.IOException =>
-          throw new RuntimeException("Failed to resolve blob references", e)
-      } finally {
-        pendingIndices.clear()
-        pendingRefs.clear()
-      }
-    }
-  }
-
-  override def reset(): Unit = {
-    super.reset()
-    pendingIndices.clear()
-    pendingRefs.clear()
-  }
-}
+// LargeBinaryWriter (BinaryType -> LargeVarBinaryVector) is a custom, non-trivial writer that also
+// resolves blob references flowing through a shuffle; it lives in its own file LargeBinaryWriter.scala.
 
 private[arrow] class DateWriter(val valueVector: DateDayVector) extends LanceArrowFieldWriter {
   override def setNull(): Unit = {}

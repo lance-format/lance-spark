@@ -301,7 +301,7 @@ public class SemaphoreArrowBatchWriteBufferTest {
       final long maxBatchBytes = 100 * 1024 * 1024; // 100MB - should never be reached
       final SemaphoreArrowBatchWriteBuffer writeBuffer =
           new SemaphoreArrowBatchWriteBuffer(
-              allocator, schema, sparkSchema, batchSize, maxBatchBytes);
+              allocator, schema, sparkSchema, batchSize, maxBatchBytes, null);
 
       AtomicInteger rowsWritten = new AtomicInteger(0);
       AtomicInteger rowsRead = new AtomicInteger(0);
@@ -331,7 +331,7 @@ public class SemaphoreArrowBatchWriteBufferTest {
       final int rowSizeBytes = 100 * 1024; // ~100KB per row
       final SemaphoreArrowBatchWriteBuffer writeBuffer =
           new SemaphoreArrowBatchWriteBuffer(
-              allocator, schema, sparkSchema, batchSize, maxBatchBytes);
+              allocator, schema, sparkSchema, batchSize, maxBatchBytes, null);
 
       AtomicInteger rowsWritten = new AtomicInteger(0);
       AtomicInteger rowsRead = new AtomicInteger(0);
@@ -406,7 +406,7 @@ public class SemaphoreArrowBatchWriteBufferTest {
       final int rowSizeBytes = 10 * 1024; // 10KB per row
       final SemaphoreArrowBatchWriteBuffer writeBuffer =
           new SemaphoreArrowBatchWriteBuffer(
-              allocator, schema, sparkSchema, batchSize, maxBatchBytes);
+              allocator, schema, sparkSchema, batchSize, maxBatchBytes, null);
 
       AtomicInteger rowsWritten = new AtomicInteger(0);
       AtomicInteger rowsRead = new AtomicInteger(0);
