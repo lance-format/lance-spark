@@ -30,7 +30,18 @@ import java.util.Map;
  *
  * <p>Datasets are cached for the lifetime of this resolver to amortize open costs across batches.
  * Resolution is done in true batches: all pending references are grouped by (datasetUri,
- * columnName) and each group is resolved with a single {@code takeBlobs()} call.
+ * columnName), deduplicated by row address within each group, and each group is resolved with a
+ * single {@code takeBlobs()} call.
+ *
+ * <p><b>takeBlobs ordering contract.</b> {@code Dataset.takeBlobs(addresses, column)} returns one
+ * {@code BlobFile} per requested address, in the same order as the input (Lance's take operation
+ * sorts internally for IO efficiency but remaps the result back to the requested order; when row
+ * addresses are projected it also errors rather than silently dropping deleted rows). We still
+ * deduplicate addresses before calling it — a one-to-many JOIN (this feature's primary target)
+ * repeats the same source row across many output rows, so reading each distinct blob once both
+ * avoids redundant reads and removes any reliance on how takeBlobs treats repeated addresses. A
+ * returned-count mismatch (e.g. a null-descriptor row that take silently drops) is treated as a
+ * hard error rather than risking a positional skew that would write the wrong bytes downstream.
  *
  * <p>Source datasets are opened through {@link Utils#openDatasetBuilder(LanceSparkReadOptions)}
  * using the per-source {@link BlobSourceContext} captured on the driver (keyed by dataset URI).
@@ -91,8 +102,9 @@ public class BlobReferenceResolver implements AutoCloseable {
 
   /**
    * Resolves a batch of blob references to their actual bytes, keyed by the caller-supplied vector
-   * indices. References are grouped by (datasetUri, columnName) and each group is resolved with a
-   * single {@code takeBlobs()} call.
+   * indices. References are grouped by (datasetUri, columnName), deduplicated by row address, and
+   * each group is resolved with a single {@code takeBlobs()} call (see the class javadoc for the
+   * ordering/dedup contract this relies on).
    *
    * <p>The caller is responsible for writing the resolved bytes into the target vector. Resolved
    * bytes are returned as a map rather than written here because back-filling a variable-width
@@ -102,43 +114,54 @@ public class BlobReferenceResolver implements AutoCloseable {
    * @param indices vector indices corresponding to each blob reference
    * @param refs blob references to resolve
    * @return a map from vector index to resolved blob bytes
-   * @throws IOException if reading blobs fails
+   * @throws IOException if reading blobs fails, or if {@code takeBlobs} returns an unexpected
+   *     count/null that would make positional mapping unsafe
    */
   public Map<Integer, byte[]> resolveBatch(List<Integer> indices, List<BlobReference> refs)
       throws IOException {
     Map<Integer, byte[]> resolved = new HashMap<>(refs.size());
 
-    // Group by (datasetUri, columnName)
-    Map<String, List<IndexedRef>> groups = new HashMap<>();
+    // Group by (datasetUri, columnName), deduplicating row addresses within each group.
+    Map<String, Group> groups = new HashMap<>();
     for (int i = 0; i < refs.size(); i++) {
-      int vectorIndex = indices.get(i);
       BlobReference ref = refs.get(i);
       String groupKey = ref.getDatasetUri() + "\0" + ref.getColumnName();
-      groups
-          .computeIfAbsent(groupKey, k -> new ArrayList<>())
-          .add(new IndexedRef(vectorIndex, ref));
+      Group group = groups.computeIfAbsent(groupKey, k -> new Group(ref));
+      group.add(ref.getRowAddress(), indices.get(i));
     }
 
-    // Resolve each group with a single takeBlobs() call
-    for (List<IndexedRef> group : groups.values()) {
-      BlobReference first = group.get(0).ref;
-      Dataset dataset = getOrOpenDataset(first.getDatasetUri());
+    // Resolve each group with a single takeBlobs() call over its distinct addresses, then fan the
+    // bytes back out to every vector index that referenced that address.
+    for (Group group : groups.values()) {
+      Dataset dataset = getOrOpenDataset(group.datasetUri);
+      List<Long> addresses = group.distinctAddresses; // requested order
+      List<BlobFile> blobs = dataset.takeBlobs(addresses, group.columnName);
 
-      List<Long> rowAddresses = new ArrayList<>(group.size());
-      for (IndexedRef ir : group) {
-        rowAddresses.add(ir.ref.getRowAddress());
+      // takeBlobs must return exactly one BlobFile per requested address, in order. A mismatch
+      // means the selection hit deleted/null-descriptor rows, in which case positional mapping
+      // would skew and silently write the wrong bytes into the target table — fail loudly instead.
+      if (blobs.size() != addresses.size()) {
+        throw new IOException(
+            String.format(
+                "takeBlobs returned %d blobs for %d requested addresses (column=%s, dataset=%s); "
+                    + "cannot map results to rows",
+                blobs.size(), addresses.size(), group.columnName, group.datasetUri));
       }
 
-      List<BlobFile> blobs = dataset.takeBlobs(rowAddresses, first.getColumnName());
-
-      for (int i = 0; i < group.size(); i++) {
-        IndexedRef ir = group.get(i);
-        if (i < blobs.size()) {
-          try (BlobFile blob = blobs.get(i)) {
-            resolved.put(ir.vectorIndex, blob.read());
-          }
-        } else {
-          resolved.put(ir.vectorIndex, new byte[0]);
+      for (int i = 0; i < addresses.size(); i++) {
+        BlobFile blob = blobs.get(i);
+        if (blob == null) {
+          throw new IOException(
+              String.format(
+                  "takeBlobs returned a null blob for address %d (column=%s, dataset=%s)",
+                  addresses.get(i), group.columnName, group.datasetUri));
+        }
+        byte[] data;
+        try (BlobFile b = blob) {
+          data = b.read();
+        }
+        for (int vectorIndex : group.indicesByAddress.get(addresses.get(i))) {
+          resolved.put(vectorIndex, data);
         }
       }
     }
@@ -176,13 +199,31 @@ public class BlobReferenceResolver implements AutoCloseable {
     datasetCache.clear();
   }
 
-  private static class IndexedRef {
-    final int vectorIndex;
-    final BlobReference ref;
+  /**
+   * A set of references sharing one (datasetUri, columnName), with row addresses deduplicated.
+   * {@link #distinctAddresses} preserves first-seen order and is the exact list handed to {@code
+   * takeBlobs}; {@link #indicesByAddress} fans each address's resolved bytes back to every vector
+   * index that referenced it.
+   */
+  private static class Group {
+    final String datasetUri;
+    final String columnName;
+    final List<Long> distinctAddresses = new ArrayList<>();
+    final Map<Long, List<Integer>> indicesByAddress = new HashMap<>();
 
-    IndexedRef(int vectorIndex, BlobReference ref) {
-      this.vectorIndex = vectorIndex;
-      this.ref = ref;
+    Group(BlobReference first) {
+      this.datasetUri = first.getDatasetUri();
+      this.columnName = first.getColumnName();
+    }
+
+    void add(long address, int vectorIndex) {
+      List<Integer> forAddress = indicesByAddress.get(address);
+      if (forAddress == null) {
+        forAddress = new ArrayList<>();
+        indicesByAddress.put(address, forAddress);
+        distinctAddresses.add(address);
+      }
+      forAddress.add(vectorIndex);
     }
   }
 }

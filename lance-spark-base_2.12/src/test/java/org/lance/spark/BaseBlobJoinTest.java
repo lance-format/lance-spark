@@ -314,6 +314,97 @@ public abstract class BaseBlobJoinTest {
   }
 
   /**
+   * Verifies that a one-to-many JOIN — where a single source blob row fans out to several output
+   * rows — preserves the blob content for every output row. This exercises the resolver's
+   * deduplication path: the same source row address is referenced by multiple shuffled rows and
+   * must resolve to identical bytes in each, rather than skewing positionally.
+   */
+  @Test
+  public void testBlobPreservedDuringOneToManyJoin() throws Exception {
+    String blobTable = "blob_one_many_a_" + System.currentTimeMillis();
+    String tagTable = "blob_one_many_b_" + System.currentTimeMillis();
+    String targetTable = "blob_one_many_target_" + System.currentTimeMillis();
+    String fqBlob = catalogName + ".default." + blobTable;
+    String fqTag = catalogName + ".default." + tagTable;
+    String fqTarget = catalogName + ".default." + targetTable;
+
+    // Source blob table: one blob per id.
+    spark.sql(
+        "CREATE TABLE IF NOT EXISTS "
+            + fqBlob
+            + " (id INT NOT NULL, blob_a BINARY) USING lance "
+            + "TBLPROPERTIES ('blob_a.lance.encoding' = 'blob')");
+
+    byte[] blob1 = "blob-for-id-1".getBytes(StandardCharsets.UTF_8);
+    byte[] blob2 = "blob-for-id-2".getBytes(StandardCharsets.UTF_8);
+    List<Row> blobRows = new ArrayList<>();
+    blobRows.add(RowFactory.create(1, blob1));
+    blobRows.add(RowFactory.create(2, blob2));
+    StructType blobSchema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.IntegerType, false),
+              DataTypes.createStructField("blob_a", DataTypes.BinaryType, true)
+            });
+    spark.createDataFrame(blobRows, blobSchema).coalesce(1).writeTo(fqBlob).append();
+
+    // Tag table with multiple rows per id, so the join fans each blob row out to several outputs.
+    spark.sql("CREATE TABLE IF NOT EXISTS " + fqTag + " (id INT NOT NULL, tag STRING) USING lance");
+    List<Row> tagRows = new ArrayList<>();
+    tagRows.add(RowFactory.create(1, "a"));
+    tagRows.add(RowFactory.create(1, "b"));
+    tagRows.add(RowFactory.create(1, "c"));
+    tagRows.add(RowFactory.create(2, "d"));
+    StructType tagSchema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.IntegerType, false),
+              DataTypes.createStructField("tag", DataTypes.StringType, true)
+            });
+    spark.createDataFrame(tagRows, tagSchema).coalesce(1).writeTo(fqTag).append();
+
+    // Target carries the (duplicated) blob plus the tag that made it duplicate.
+    spark.sql(
+        "CREATE TABLE IF NOT EXISTS "
+            + fqTarget
+            + " (id INT NOT NULL, blob_a BINARY, tag STRING) USING lance "
+            + "TBLPROPERTIES ('blob_a.lance.encoding' = 'blob')");
+
+    spark.sql(
+        "INSERT INTO "
+            + fqTarget
+            + " SELECT a.id, a.blob_a, b.tag FROM "
+            + fqBlob
+            + " a JOIN "
+            + fqTag
+            + " b ON a.id = b.id");
+
+    Dataset<Row> result =
+        spark.sql("SELECT id, blob_a, tag FROM " + fqTarget + " ORDER BY id, tag");
+    List<Row> rows = result.collectAsList();
+    assertEquals(4, rows.size(), "one-to-many join should produce 4 rows");
+
+    // id=1 fans out to 3 rows (tags a, b, c), id=2 to 1 row (tag d); blob content must match the
+    // source blob for the row's id in every case.
+    try (BlobReferenceResolver resolver = new BlobReferenceResolver()) {
+      for (Row row : rows) {
+        int id = row.getInt(0);
+        byte[] expected = id == 1 ? blob1 : blob2;
+        byte[] resolved = resolver.resolveIfNeeded((byte[]) row.get(1));
+        assertArrayEquals(
+            expected, resolved, "id=" + id + " tag=" + row.getString(2) + " blob mismatch");
+      }
+    }
+
+    String[] tags = rows.stream().map(r -> r.getString(2)).toArray(String[]::new);
+    assertArrayEquals(new String[] {"a", "b", "c", "d"}, tags, "tags should be preserved");
+
+    spark.sql("DROP TABLE IF EXISTS " + fqBlob);
+    spark.sql("DROP TABLE IF EXISTS " + fqTag);
+    spark.sql("DROP TABLE IF EXISTS " + fqTarget);
+  }
+
+  /**
    * Verifies that non-blob columns are preserved correctly during JOIN + INSERT when blob columns
    * are also present.
    */

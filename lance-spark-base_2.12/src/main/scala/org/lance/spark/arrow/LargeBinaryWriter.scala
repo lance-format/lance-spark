@@ -24,23 +24,27 @@ import org.lance.spark.utils.{BlobReference, BlobReferenceResolver}
  * [[BlobReference]]s rather than the actual bytes. This writer detects those and resolves them to
  * real blob bytes via the injected (shared, per-write-task) [[BlobReferenceResolver]].
  *
- * All per-row values are buffered and the vector is emitted in a single ascending pass in
- * [[finish]]. This ordering is required for correctness: resolving references produces bytes for
- * arbitrary, non-contiguous indices, and writing into the middle of an already-populated
- * variable-width Arrow vector corrupts its offset buffer (`setBytes` reads the start offset from the
- * entry being overwritten and only rewrites the next offset, shifting every following row's bytes).
- * Buffering one batch's values is bounded by the batch size.
+ * Buffering is lazy: rows are written straight to the vector in ascending order until the first blob
+ * reference is seen, after which every subsequent row is buffered and the tail is emitted in a
+ * single ascending pass in [[finish]]. Buffering only the tail is required for correctness once
+ * references are present: resolving references produces bytes for arbitrary, non-contiguous indices,
+ * and writing into the middle of an already-populated variable-width Arrow vector corrupts its
+ * offset buffer (`setBytes` reads the start offset from the entry being overwritten and only
+ * rewrites the next offset, shifting every following row's bytes). The common case — a binary column
+ * with no shuffled references — buffers nothing and writes directly. Buffering is bounded by the
+ * batch size.
  */
 private[arrow] class LargeBinaryWriter(
     val valueVector: LargeVarBinaryVector,
     injectedResolver: BlobReferenceResolver) extends LanceArrowFieldWriter {
 
-  // One buffered entry per row, in row order. Each is one of:
+  // Buffered tail entries, in row order, starting at absolute row index `bufferStart`. Each is:
   //   null          -> SQL NULL (validity bit left unset)
   //   Array[Byte]   -> literal binary (possibly empty)
   //   BlobReference -> a reference to resolve to actual blob bytes
+  // `bufferStart` is the absolute index of the first buffered row, or -1 while still writing direct.
   private val entries = new java.util.ArrayList[AnyRef]()
-  private var hasRefs = false
+  private var bufferStart = -1
 
   // Only created when no resolver is injected (e.g. non-shuffle build paths). Owned and closed here.
   private var localResolver: BlobReferenceResolver = _
@@ -56,42 +60,58 @@ private[arrow] class LargeBinaryWriter(
     }
   }
 
-  override def setNull(): Unit = entries.add(null)
+  // `count` (from the base class) is the absolute index of the row currently being written.
+  override def setNull(): Unit = {
+    if (bufferStart >= 0) {
+      entries.add(null)
+    }
+    // Direct mode: leave the validity bit unset; setValueCount fills the offset hole on finish.
+  }
 
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
     val bytes = input.getBinary(ordinal)
     if (bytes != null && BlobReference.isBlobReference(bytes)) {
+      // First reference flips us into buffering mode, starting at this row.
+      if (bufferStart < 0) {
+        bufferStart = count
+      }
       entries.add(BlobReference.deserialize(bytes))
-      hasRefs = true
-    } else {
+    } else if (bufferStart >= 0) {
+      // Buffering mode: defer literals (and null bytes) so the whole tail emits in one pass.
       entries.add(bytes)
+    } else if (bytes != null) {
+      // Direct mode: write literals straight through in ascending order, no buffering needed.
+      valueVector.setSafe(count, bytes)
     }
+    // Direct mode + null bytes: leave the validity bit unset (SQL null), same as setNull.
   }
 
   override def finish(): Unit = {
     try {
-      val resolved: java.util.Map[Integer, Array[Byte]] =
-        if (hasRefs) resolveReferences() else java.util.Collections.emptyMap()
+      if (bufferStart >= 0) {
+        val resolved: java.util.Map[Integer, Array[Byte]] = resolveReferences()
 
-      // Single ascending pass over the batch: write literals and resolved references in order.
-      var i = 0
-      while (i < entries.size()) {
-        entries.get(i) match {
-          case null => // SQL NULL: leave the validity bit unset
-          case _: BlobReference =>
-            val data = resolved.get(i)
-            valueVector.setSafe(i, if (data != null) data else Array.emptyByteArray)
-          case bytes: Array[Byte] =>
-            valueVector.setSafe(i, bytes)
-          case other =>
-            throw new IllegalStateException(s"Unexpected buffered binary entry: $other")
+        // Single ascending pass over the buffered tail (rows bufferStart .. count-1).
+        var j = 0
+        while (j < entries.size()) {
+          val rowId = bufferStart + j
+          entries.get(j) match {
+            case null => // SQL NULL: leave the validity bit unset
+            case _: BlobReference =>
+              val data = resolved.get(rowId)
+              valueVector.setSafe(rowId, if (data != null) data else Array.emptyByteArray)
+            case bytes: Array[Byte] =>
+              valueVector.setSafe(rowId, bytes)
+            case other =>
+              throw new IllegalStateException(s"Unexpected buffered binary entry: $other")
+          }
+          j += 1
         }
-        i += 1
       }
       super.finish()
     } finally {
       entries.clear()
-      hasRefs = false
+      bufferStart = -1
       if (localResolver != null) {
         localResolver.close()
         localResolver = null
@@ -99,19 +119,19 @@ private[arrow] class LargeBinaryWriter(
     }
   }
 
-  /** Collects the buffered references and resolves them to bytes keyed by their row index. */
+  /** Collects the buffered references and resolves them to bytes keyed by their absolute row index. */
   private def resolveReferences(): java.util.Map[Integer, Array[Byte]] = {
     val indices = new java.util.ArrayList[Integer]()
     val refs = new java.util.ArrayList[BlobReference]()
-    var i = 0
-    while (i < entries.size()) {
-      entries.get(i) match {
+    var j = 0
+    while (j < entries.size()) {
+      entries.get(j) match {
         case ref: BlobReference =>
-          indices.add(i)
+          indices.add(bufferStart + j)
           refs.add(ref)
         case _ =>
       }
-      i += 1
+      j += 1
     }
     try {
       resolver.resolveBatch(indices, refs)
@@ -124,6 +144,6 @@ private[arrow] class LargeBinaryWriter(
   override def reset(): Unit = {
     super.reset()
     entries.clear()
-    hasRefs = false
+    bufferStart = -1
   }
 }
