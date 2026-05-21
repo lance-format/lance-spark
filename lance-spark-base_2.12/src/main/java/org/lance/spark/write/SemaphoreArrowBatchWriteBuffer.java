@@ -186,7 +186,12 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
       }
 
       arrowWriter.write(row);
-      currentBatchBytes = this.allocator.getAllocatedMemory() - batchStartBytes;
+      // Add bytes buffered outside the vectors (unresolved blob references resolve to far larger
+      // bytes on finish); without this the guard would size the ~200-byte references and let the
+      // batch grow until resolution OOMs the executor.
+      currentBatchBytes =
+          (this.allocator.getAllocatedMemory() - batchStartBytes)
+              + arrowWriter.estimatedBufferedBytes();
       count++;
 
       if (isBatchFull()) {

@@ -245,7 +245,11 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
     if (maxBatchBytes == Long.MAX_VALUE) {
       return false;
     }
-    return currentBatchAllocator.getAllocatedMemory() >= maxBatchBytes;
+    // Include bytes buffered outside the vector (unresolved blob references resolve to far larger
+    // bytes on finish); sizing only the ~200-byte references would let the batch grow until
+    // resolution OOMs the executor.
+    return currentBatchAllocator.getAllocatedMemory() + currentArrowWriter.estimatedBufferedBytes()
+        >= maxBatchBytes;
   }
 
   /**

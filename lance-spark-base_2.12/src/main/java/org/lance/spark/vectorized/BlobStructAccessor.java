@@ -84,14 +84,18 @@ public class BlobStructAccessor implements AutoCloseable {
     if (!hasBlobReferenceContext()) {
       return new byte[0];
     }
-    // Hot path (once per scanned blob row): test size with the primitive accessor instead of
+    // Hot path (once per scanned blob row): read size with the primitive accessor instead of
     // boxing through getObjectNoOverflow(), which allocates a BigInteger per row. The unsigned
-    // overflow handling is irrelevant for a null/zero check — only 0L compares equal to zero.
-    if (sizeVector.isNull(rowId) || sizeVector.get(rowId) == 0L) {
+    // overflow handling is irrelevant here — a real blob never approaches 2^63 bytes, and only 0L
+    // compares equal to zero for the null/empty check below.
+    long blobSize = sizeVector.isNull(rowId) ? 0L : sizeVector.get(rowId);
+    if (blobSize == 0L) {
       // Zero-size blob — either truly empty or null encoded as (0,0)
       return new byte[0];
     }
-    return BlobReference.appendRowAddress(referencePrefix, rowAddresses[rowId]);
+    // Carry the blob size so the write side can budget resolved bytes against maxBatchBytes before
+    // the reference is materialized into actual blob bytes.
+    return BlobReference.appendRowAddressAndSize(referencePrefix, rowAddresses[rowId], blobSize);
   }
 
   public InternalRow getStruct(int rowId) {

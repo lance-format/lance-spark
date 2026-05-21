@@ -70,6 +70,9 @@ class LargeBinaryWriterTest {
   private def ref(addr: Long): Array[Byte] =
     new BlobReference("file:///src.lance", "blob", addr).serialize()
 
+  private def ref(addr: Long, size: Long): Array[Byte] =
+    new BlobReference("file:///src.lance", "blob", addr, size).serialize()
+
   private def assertBytes(vector: LargeVarBinaryVector, index: Int, expected: Array[Byte]): Unit = {
     assertFalse(vector.isNull(index), s"row $index should not be null")
     assertArrayEquals(expected, vector.get(index), s"row $index bytes mismatch")
@@ -153,6 +156,31 @@ class LargeBinaryWriterTest {
       val ex = assertThrows(classOf[RuntimeException], () => writer.finish())
       assertTrue(ex.getMessage.contains("Failed to resolve blob references"))
       assertTrue(ex.getCause.isInstanceOf[java.io.IOException])
+    }
+  }
+
+  @Test
+  def estimatedBufferedBytesTracksResolvedSizesNotReferenceSizes(): Unit = {
+    withVector { vector =>
+      val writer = new LargeBinaryWriter(vector, new RecordingResolver)
+      // Direct mode (no references yet): nothing buffered, so the byte budget sees nothing extra.
+      writer.write(row("x".getBytes(UTF_8)), 0)
+      assertEquals(0L, writer.estimatedBufferedBytes)
+
+      // First reference flips into buffering: the budget must reflect the resolved blob size
+      // (1 MB here), not the ~200-byte reference that is actually buffered.
+      writer.write(row(ref(10, 1024 * 1024)), 0)
+      assertEquals(1024L * 1024, writer.estimatedBufferedBytes)
+
+      // Buffered literals count their own length; a second reference adds its resolved size.
+      writer.write(row("yz".getBytes(UTF_8)), 0)
+      writer.write(row(ref(20, 512)), 0)
+      writer.write(row(null), 0) // buffered null contributes nothing
+      assertEquals(1024L * 1024 + 2 + 512, writer.estimatedBufferedBytes)
+
+      // finish() drains the tail and clears the running total for the next batch.
+      writer.finish()
+      assertEquals(0L, writer.estimatedBufferedBytes)
     }
   }
 

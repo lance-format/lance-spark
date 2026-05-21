@@ -31,8 +31,12 @@ import org.lance.spark.utils.{BlobReference, BlobReferenceResolver}
  * and writing into the middle of an already-populated variable-width Arrow vector corrupts its
  * offset buffer (`setBytes` reads the start offset from the entry being overwritten and only
  * rewrites the next offset, shifting every following row's bytes). The common case — a binary column
- * with no shuffled references — buffers nothing and writes directly. Buffering is bounded by the
- * batch size.
+ * with no shuffled references — buffers nothing and writes directly.
+ *
+ * Resolved blobs can be orders of magnitude larger than the buffered references, so the buffered
+ * tail must stay bounded by bytes, not just row count: [[estimatedBufferedBytes]] reports the
+ * resolved size carried by each reference, which the write buffer adds to its per-batch byte budget
+ * so the batch flushes (and this tail resolves) before materialization exceeds `maxBatchBytes`.
  */
 private[arrow] class LargeBinaryWriter(
     val valueVector: LargeVarBinaryVector,
@@ -45,6 +49,13 @@ private[arrow] class LargeBinaryWriter(
   // `bufferStart` is the absolute index of the first buffered row, or -1 while still writing direct.
   private val entries = new java.util.ArrayList[AnyRef]()
   private var bufferStart = -1
+
+  // Sum of the bytes the buffered tail will occupy in the vector once emitted in `finish`: each
+  // reference's resolved blob size (carried in the reference) plus each buffered literal's length.
+  // The write buffer reads this via `estimatedBufferedBytes` to budget against maxBatchBytes — the
+  // buffered references are tiny (~200 bytes) but resolve to potentially huge blobs, so without this
+  // the byte guard sizes the references and the batch can balloon to tens of GB at resolution time.
+  private var pendingBytes = 0L
 
   // Only created when no resolver is injected (e.g. non-shuffle build paths). Owned and closed here.
   private var localResolver: BlobReferenceResolver = _
@@ -75,16 +86,22 @@ private[arrow] class LargeBinaryWriter(
       if (bufferStart < 0) {
         bufferStart = count
       }
-      entries.add(BlobReference.deserialize(bytes))
+      val ref = BlobReference.deserialize(bytes)
+      entries.add(ref)
+      pendingBytes += ref.getSize
     } else if (bufferStart >= 0) {
       // Buffering mode: defer literals (and null bytes) so the whole tail emits in one pass.
       entries.add(bytes)
+      if (bytes != null) pendingBytes += bytes.length
     } else if (bytes != null) {
       // Direct mode: write literals straight through in ascending order, no buffering needed.
       valueVector.setSafe(count, bytes)
     }
     // Direct mode + null bytes: leave the validity bit unset (SQL null), same as setNull.
   }
+
+  // Resolved blob bytes (plus deferred literals) the buffered tail will add to the vector on finish.
+  override def estimatedBufferedBytes: Long = pendingBytes
 
   override def finish(): Unit = {
     try {
@@ -112,6 +129,7 @@ private[arrow] class LargeBinaryWriter(
     } finally {
       entries.clear()
       bufferStart = -1
+      pendingBytes = 0L
       if (localResolver != null) {
         localResolver.close()
         localResolver = null
@@ -145,5 +163,6 @@ private[arrow] class LargeBinaryWriter(
     super.reset()
     entries.clear()
     bufferStart = -1
+    pendingBytes = 0L
   }
 }

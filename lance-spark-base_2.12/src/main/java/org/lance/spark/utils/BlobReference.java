@@ -30,6 +30,12 @@ import java.util.Arrays;
  * the source dataset, fetches the actual blob bytes via {@code Dataset.takeBlobs()}, and writes
  * them to the target table.
  *
+ * <p>The trailing {@code size} is the resolved blob's byte length, read straight from the source
+ * blob descriptor's size vector. It carries no addressing information — resolution only needs the
+ * dataset/column/rowAddress — but it lets the write side budget the (potentially huge) resolved
+ * bytes against {@code maxBatchBytes} while the value is still just a ~200-byte reference, so a
+ * batch flushes before materialization OOMs the executor (see {@code LargeBinaryWriter}).
+ *
  * <p>Wire format:
  *
  * <pre>
@@ -38,6 +44,7 @@ import java.util.Arrays;
  *   [2+N bytes] datasetUri (length-prefixed UTF-8)
  *   [2+N bytes] columnName (length-prefixed UTF-8)
  *   [8 bytes] rowAddress
+ *   [8 bytes] size (resolved blob byte length)
  * </pre>
  */
 public class BlobReference {
@@ -45,19 +52,26 @@ public class BlobReference {
   /** 8-byte magic header to identify a serialized BlobReference. */
   public static final byte[] MAGIC = {'L', 'A', 'N', 'C', 'E', 'R', 'E', 'F'};
 
-  /** Min byte length: magic(8) + version(1) + two empty strings(2+2) + rowAddress(8). */
-  private static final int MIN_SIZE = MAGIC.length + 1 + 2 + 2 + 8;
+  /** Min byte length: magic(8) + version(1) + two empty strings(2+2) + rowAddress(8) + size(8). */
+  private static final int MIN_SIZE = MAGIC.length + 1 + 2 + 2 + 8 + 8;
 
-  private static final byte VERSION = 1;
+  private static final byte VERSION = 2;
 
   private final String datasetUri;
   private final String columnName;
   private final long rowAddress;
+  private final long size;
 
+  /** Constructs a reference with an unknown resolved size ({@code 0}); see {@link #getSize()}. */
   public BlobReference(String datasetUri, String columnName, long rowAddress) {
+    this(datasetUri, columnName, rowAddress, 0L);
+  }
+
+  public BlobReference(String datasetUri, String columnName, long rowAddress, long size) {
     this.datasetUri = datasetUri;
     this.columnName = columnName;
     this.rowAddress = rowAddress;
+    this.size = size;
   }
 
   /**
@@ -90,7 +104,7 @@ public class BlobReference {
       if (colLen < 0 || colLen > remaining) {
         return false;
       }
-      int expectedRemaining = colLen + 8;
+      int expectedRemaining = colLen + 8 + 8; // columnName + rowAddress + size
       return remaining == expectedRemaining;
     } catch (IOException e) {
       return false;
@@ -99,16 +113,17 @@ public class BlobReference {
 
   /** Serialize this reference to a compact byte array. */
   public byte[] serialize() {
-    return appendRowAddress(serializePrefix(datasetUri, columnName), rowAddress);
+    return appendRowAddressAndSize(serializePrefix(datasetUri, columnName), rowAddress, size);
   }
 
   /**
-   * Serializes the constant portion of a reference: everything except the trailing 8-byte
-   * rowAddress (i.e. magic + version + datasetUri + columnName).
+   * Serializes the constant portion of a reference: everything except the trailing per-row
+   * rowAddress and size (i.e. magic + version + datasetUri + columnName).
    *
    * <p>{@code datasetUri} and {@code columnName} are constant for an entire scan batch, so callers
    * on the per-row read hot path should compute this prefix once and then call {@link
-   * #appendRowAddress(byte[], long)} per row instead of re-encoding the strings every time.
+   * #appendRowAddressAndSize(byte[], long, long)} per row instead of re-encoding the strings every
+   * time.
    */
   public static byte[] serializePrefix(String datasetUri, String columnName) {
     try {
@@ -127,20 +142,25 @@ public class BlobReference {
 
   /**
    * Returns a full serialized reference: {@code prefix} (from {@link #serializePrefix}) followed by
-   * the 8-byte big-endian {@code rowAddress}, matching {@link DataOutputStream#writeLong}.
+   * the 8-byte big-endian {@code rowAddress} and 8-byte big-endian {@code size}, each matching
+   * {@link DataOutputStream#writeLong}.
    */
-  public static byte[] appendRowAddress(byte[] prefix, long rowAddress) {
-    byte[] out = Arrays.copyOf(prefix, prefix.length + 8);
-    int off = prefix.length;
-    out[off] = (byte) (rowAddress >>> 56);
-    out[off + 1] = (byte) (rowAddress >>> 48);
-    out[off + 2] = (byte) (rowAddress >>> 40);
-    out[off + 3] = (byte) (rowAddress >>> 32);
-    out[off + 4] = (byte) (rowAddress >>> 24);
-    out[off + 5] = (byte) (rowAddress >>> 16);
-    out[off + 6] = (byte) (rowAddress >>> 8);
-    out[off + 7] = (byte) rowAddress;
+  public static byte[] appendRowAddressAndSize(byte[] prefix, long rowAddress, long size) {
+    byte[] out = Arrays.copyOf(prefix, prefix.length + 16);
+    writeLongBE(out, prefix.length, rowAddress);
+    writeLongBE(out, prefix.length + 8, size);
     return out;
+  }
+
+  private static void writeLongBE(byte[] out, int off, long value) {
+    out[off] = (byte) (value >>> 56);
+    out[off + 1] = (byte) (value >>> 48);
+    out[off + 2] = (byte) (value >>> 40);
+    out[off + 3] = (byte) (value >>> 32);
+    out[off + 4] = (byte) (value >>> 24);
+    out[off + 5] = (byte) (value >>> 16);
+    out[off + 6] = (byte) (value >>> 8);
+    out[off + 7] = (byte) value;
   }
 
   /** Deserialize a BlobReference from bytes. */
@@ -155,7 +175,8 @@ public class BlobReference {
       String datasetUri = readString(in);
       String columnName = readString(in);
       long rowAddress = in.readLong();
-      return new BlobReference(datasetUri, columnName, rowAddress);
+      long size = in.readLong();
+      return new BlobReference(datasetUri, columnName, rowAddress, size);
     } catch (IOException e) {
       throw new RuntimeException("Failed to deserialize BlobReference", e);
     }
@@ -188,10 +209,19 @@ public class BlobReference {
     return rowAddress;
   }
 
+  /**
+   * The resolved blob's byte length, captured from the source size vector at read time. Used by the
+   * write side to budget resolved bytes against {@code maxBatchBytes}; {@code 0} when unknown (e.g.
+   * a reference constructed without a size).
+   */
+  public long getSize() {
+    return size;
+  }
+
   @Override
   public String toString() {
     return String.format(
-        "BlobReference{dataset=%s, column=%s, rowAddr=0x%016X}",
-        datasetUri, columnName, rowAddress);
+        "BlobReference{dataset=%s, column=%s, rowAddr=0x%016X, size=%d}",
+        datasetUri, columnName, rowAddress, size);
   }
 }

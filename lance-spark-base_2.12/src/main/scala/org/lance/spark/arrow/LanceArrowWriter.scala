@@ -171,6 +171,21 @@ class LanceArrowWriter(root: VectorSchemaRoot, fields: Array[LanceArrowFieldWrit
     root.setRowCount(0)
   }
 
+  /**
+   * Bytes buffered outside the Arrow vectors that will materialize on [[finish]] (resolved blob
+   * references; see [[LargeBinaryWriter]]). Write buffers add this to the allocator's measured size
+   * so the per-batch byte guard accounts for blob bytes that are still cheap references.
+   */
+  def estimatedBufferedBytes: Long = {
+    var sum = 0L
+    var i = 0
+    while (i < fields.length) {
+      sum += fields(i).estimatedBufferedBytes
+      i += 1
+    }
+    sum
+  }
+
   def field(index: Int): LanceArrowFieldWriter = fields(index)
 }
 
@@ -208,6 +223,8 @@ private[arrow] class FixedSizeListWriter(
     super.finish()
     elementWriter.finish()
   }
+
+  override def estimatedBufferedBytes: Long = elementWriter.estimatedBufferedBytes
 
   override def reset(): Unit = {
     super.reset()
@@ -391,6 +408,7 @@ private[arrow] class ArrayWriter(
     super.finish()
     elementWriter.finish()
   }
+  override def estimatedBufferedBytes: Long = elementWriter.estimatedBufferedBytes
   override def reset(): Unit = {
     super.reset()
     elementWriter.reset()
@@ -428,6 +446,8 @@ private[arrow] class MapWriter(
     keyWriter.finish()
     valueWriter.finish()
   }
+  override def estimatedBufferedBytes: Long =
+    keyWriter.estimatedBufferedBytes + valueWriter.estimatedBufferedBytes
   override def reset(): Unit = {
     super.reset()
     structVector.reset()
@@ -467,6 +487,15 @@ private[arrow] class StructWriter(
   override def finish(): Unit = {
     super.finish()
     children.foreach(_.finish())
+  }
+  override def estimatedBufferedBytes: Long = {
+    var sum = 0L
+    var i = 0
+    while (i < children.length) {
+      sum += children(i).estimatedBufferedBytes
+      i += 1
+    }
+    sum
   }
   override def reset(): Unit = {
     super.reset()

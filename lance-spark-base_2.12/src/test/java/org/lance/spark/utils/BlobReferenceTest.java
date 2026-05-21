@@ -33,6 +33,36 @@ public class BlobReferenceTest {
   }
 
   @Test
+  public void testRoundTripPreservesSize() {
+    BlobReference original =
+        new BlobReference("/tmp/my-dataset", "image_col", 0x0003_0000_0042L, 5L * 1024 * 1024);
+
+    byte[] serialized = original.serialize();
+    assertTrue(BlobReference.isBlobReference(serialized));
+
+    BlobReference deserialized = BlobReference.deserialize(serialized);
+    assertEquals(original.getRowAddress(), deserialized.getRowAddress());
+    assertEquals(5L * 1024 * 1024, deserialized.getSize());
+  }
+
+  @Test
+  public void testAppendRowAddressAndSizeMatchesSerialize() {
+    byte[] prefix = BlobReference.serializePrefix("/tmp/ds", "col");
+    byte[] perRow = BlobReference.appendRowAddressAndSize(prefix, 99L, 4096L);
+
+    BlobReference deserialized = BlobReference.deserialize(perRow);
+    assertEquals("/tmp/ds", deserialized.getDatasetUri());
+    assertEquals("col", deserialized.getColumnName());
+    assertEquals(99L, deserialized.getRowAddress());
+    assertEquals(4096L, deserialized.getSize());
+  }
+
+  @Test
+  public void testUnsizedConstructorDefaultsToZero() {
+    assertEquals(0L, new BlobReference("uri", "col", 1L).getSize());
+  }
+
+  @Test
   public void testRoundTripWithUnicodeUri() {
     BlobReference original = new BlobReference("s3://bucket/path/日本語", "データ", 123456789L);
 
