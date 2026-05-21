@@ -282,7 +282,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
 
     private BufferAndTask buildBufferAndTask() {
       int batchSize = writeOptions.getBatchSize();
-      boolean useQueuedBuffer = writeOptions.isUseQueuedWriteBuffer();
+      int poolSize = writeOptions.getQueueDepth();
       boolean useLargeVarTypes = writeOptions.isUseLargeVarTypes();
       long maxBatchBytes = writeOptions.getMaxBatchBytes();
 
@@ -290,16 +290,9 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
           writeOptions.toBuilder().enableStableRowIds(false).build();
       WriteParams params = fragmentWriteOptions.toWriteParams(initialStorageOptions);
 
-      ArrowBatchWriteBuffer writeBuffer;
-      if (useQueuedBuffer) {
-        int queueDepth = writeOptions.getQueueDepth();
-        writeBuffer =
-            new QueuedArrowBatchWriteBuffer(
-                schema, batchSize, queueDepth, useLargeVarTypes, maxBatchBytes);
-      } else {
-        writeBuffer =
-            new SemaphoreArrowBatchWriteBuffer(schema, batchSize, useLargeVarTypes, maxBatchBytes);
-      }
+      ArrowBatchWriteBuffer writeBuffer =
+          new PooledArrowBatchWriteBuffer(
+              schema, batchSize, poolSize, useLargeVarTypes, maxBatchBytes);
 
       final ArrowBatchWriteBuffer bufferRef = writeBuffer;
       Callable<List<FragmentMetadata>> fragmentCreator =

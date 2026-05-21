@@ -27,9 +27,8 @@ import java.util.concurrent.FutureTask;
  * Abstract base class for Arrow batch write buffers that bridge Spark row writing and Lance
  * fragment creation.
  *
- * <p>Both {@link SemaphoreArrowBatchWriteBuffer} (lock-based) and {@link
- * QueuedArrowBatchWriteBuffer} (queue-based) extend this class, allowing the write path to be
- * configured at runtime.
+ * <p>{@link PooledArrowBatchWriteBuffer} extends this class, pre-allocating a pool of
+ * VectorSchemaRoots that are reused across batches to minimize allocation overhead.
  */
 public abstract class ArrowBatchWriteBuffer extends ArrowReader {
 
