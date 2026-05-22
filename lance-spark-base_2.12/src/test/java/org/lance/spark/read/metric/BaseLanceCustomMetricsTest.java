@@ -13,12 +13,16 @@
  */
 package org.lance.spark.read.metric;
 
+import org.lance.ipc.ScanStats;
+
 import org.apache.spark.sql.connector.metric.CustomMetric;
 import org.apache.spark.sql.connector.metric.CustomTaskMetric;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -31,7 +35,7 @@ public abstract class BaseLanceCustomMetricsTest {
   @Test
   void testAllMetricsReturnsSixMetrics() {
     CustomMetric[] metrics = LanceCustomMetrics.allMetrics();
-    assertEquals(6, metrics.length);
+    assertEquals(12, metrics.length);
   }
 
   @Test
@@ -51,6 +55,12 @@ public abstract class BaseLanceCustomMetricsTest {
                 LanceCustomMetrics.NUM_FRAGMENTS_SCANNED,
                 LanceCustomMetrics.NUM_BATCHES_LOADED,
                 LanceCustomMetrics.NUM_ROWS_SCANNED,
+                LanceCustomMetrics.NUM_IOPS,
+                LanceCustomMetrics.NUM_REQUESTS,
+                LanceCustomMetrics.NUM_BYTES_READ,
+                LanceCustomMetrics.NUM_INDICES_LOADED,
+                LanceCustomMetrics.NUM_PARTS_LOADED,
+                LanceCustomMetrics.NUM_INDEX_COMPARISONS,
                 LanceCustomMetrics.DATASET_OPEN_TIME_NS,
                 LanceCustomMetrics.SCANNER_CREATE_TIME_NS,
                 LanceCustomMetrics.BATCH_LOAD_TIME_NS));
@@ -128,6 +138,12 @@ public abstract class BaseLanceCustomMetricsTest {
           LanceCustomMetrics.NumFragmentsScannedMetric.class,
           LanceCustomMetrics.NumBatchesLoadedMetric.class,
           LanceCustomMetrics.NumRowsScannedMetric.class,
+          LanceCustomMetrics.NumIopsMetric.class,
+          LanceCustomMetrics.NumRequestsMetric.class,
+          LanceCustomMetrics.NumBytesReadMetric.class,
+          LanceCustomMetrics.NumIndicesLoadedMetric.class,
+          LanceCustomMetrics.NumPartsLoadedMetric.class,
+          LanceCustomMetrics.NumIndexComparisonsMetric.class,
           LanceCustomMetrics.DatasetOpenTimeNsMetric.class,
           LanceCustomMetrics.ScannerCreateTimeNsMetric.class,
           LanceCustomMetrics.BatchLoadTimeNsMetric.class,
@@ -142,7 +158,7 @@ public abstract class BaseLanceCustomMetricsTest {
   void testTrackerInitialValues() {
     LanceReadMetricsTracker tracker = new LanceReadMetricsTracker();
     CustomTaskMetric[] values = tracker.currentMetricsValues();
-    assertEquals(6, values.length);
+    assertEquals(12, values.length);
     for (CustomTaskMetric m : values) {
       assertEquals(0L, m.value(), "Initial value should be 0 for " + m.name());
     }
@@ -165,6 +181,59 @@ public abstract class BaseLanceCustomMetricsTest {
     assertEquals(100_000, tracker.getDatasetOpenTimeNs());
     assertEquals(50_000, tracker.getScannerCreateTimeNs());
     assertEquals(200_000, tracker.getBatchLoadTimeNs());
+
+    // Test new metrics initial values
+    assertEquals(0, tracker.getNumIops());
+    assertEquals(0, tracker.getNumRequests());
+    assertEquals(0, tracker.getNumBytesRead());
+    assertEquals(0, tracker.getNumIndicesLoaded());
+    assertEquals(0, tracker.getNumPartsLoaded());
+    assertEquals(0, tracker.getNumIndexComparisons());
+
+    // Test addScanStats with empty Optional does nothing
+    tracker.addScanStats(Optional.empty());
+    assertEquals(0, tracker.getNumIops());
+    assertEquals(0, tracker.getNumRequests());
+
+    // Test addScanStats with a populated ScanStats
+    tracker.addScanStats(
+        Optional.of(
+            new ScanStats(
+                100, // iops
+                50, // requests
+                1024, // bytesRead
+                5, // indicesLoaded
+                20, // partsLoaded
+                1000, // indexComparisons
+                new HashMap<>(),
+                new HashMap<>())));
+
+    assertEquals(100, tracker.getNumIops());
+    assertEquals(50, tracker.getNumRequests());
+    assertEquals(1024, tracker.getNumBytesRead());
+    assertEquals(5, tracker.getNumIndicesLoaded());
+    assertEquals(20, tracker.getNumPartsLoaded());
+    assertEquals(1000, tracker.getNumIndexComparisons());
+
+    // Test addScanStats accumulates values
+    tracker.addScanStats(
+        Optional.of(
+            new ScanStats(
+                200, // iops
+                150, // requests
+                2048, // bytesRead
+                10, // indicesLoaded
+                30, // partsLoaded
+                2000, // indexComparisons
+                new HashMap<>(),
+                new HashMap<>())));
+
+    assertEquals(300, tracker.getNumIops());
+    assertEquals(200, tracker.getNumRequests());
+    assertEquals(3072, tracker.getNumBytesRead());
+    assertEquals(15, tracker.getNumIndicesLoaded());
+    assertEquals(50, tracker.getNumPartsLoaded());
+    assertEquals(3000, tracker.getNumIndexComparisons());
   }
 
   @Test

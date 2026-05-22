@@ -174,6 +174,12 @@ Naming conventions:
 | `numFragmentsScanned` | counter | Lance fragments actually opened by this task. Compare against the table fragment count to verify pruning is working. |
 | `numBatchesLoaded` | counter | Arrow batches returned from the JNI scanner. |
 | `numRowsScanned` | counter | Rows read from storage before filter evaluation. Pair with Spark's built-in `numOutputRows` to compute filter selectivity (`numOutputRows / numRowsScanned`). |
+| `numIops` | counter | Number of I/O operations performed during scanning. |
+| `numRequests` | counter | Number of requests made to the storage layer. |
+| `numBytesRead` | counter | Total bytes read from storage. |
+| `numIndicesLoaded` | counter | Number of top-level indices loaded. |
+| `numPartsLoaded` | counter | Number of index partitions loaded. |
+| `numIndexComparisons` | counter | Number of index comparisons performed during vector search. |
 | `datasetOpenTimeNs` | duration | Time spent in `Dataset.open(...)` — manifest load, namespace lookup, credential fetch. High values indicate catalog or metadata cache misses. |
 | `scannerCreateTimeNs` | duration | Time spent in `fragment.newScan(...)` — scan planning, predicate compilation, index lookup setup. |
 | `batchLoadTimeNs` | duration | Wall-clock time inside `loadNextBatch` — JNI crossing, IO, and Arrow IPC deserialization. Divide by `numBatchesLoaded` to get per-batch cost. |
@@ -188,11 +194,6 @@ How to read these together:
   `LanceSparkReadOptions.batchSize` to amortize JNI overhead over more rows.
 - **Catalog overhead**: `datasetOpenTimeNs` accumulates per fragment opened. If many fragments are
   opened per task, this can dominate; metadata cache size and namespace caching matter most here.
-
-!!!note
-      Additional metrics covering bytes read, fragments pruned, index lookups, and IO/decode
-      time breakdown require new APIs in `lance-jni` and will be added once that surface is
-      available upstream.
 
 ## Caching
 

@@ -36,6 +36,12 @@ public final class LanceCustomMetrics {
   public static final String NUM_FRAGMENTS_SCANNED = "numFragmentsScanned";
   public static final String NUM_BATCHES_LOADED = "numBatchesLoaded";
   public static final String NUM_ROWS_SCANNED = "numRowsScanned";
+  public static final String NUM_IOPS = "numIops";
+  public static final String NUM_REQUESTS = "numRequests";
+  public static final String NUM_BYTES_READ = "numBytesRead";
+  public static final String NUM_INDICES_LOADED = "numIndicesLoaded";
+  public static final String NUM_PARTS_LOADED = "numPartsLoaded";
+  public static final String NUM_INDEX_COMPARISONS = "numIndexComparisons";
 
   public static final String DATASET_OPEN_TIME_NS = "datasetOpenTimeNs";
   public static final String SCANNER_CREATE_TIME_NS = "scannerCreateTimeNs";
@@ -81,6 +87,78 @@ public final class LanceCustomMetrics {
     }
   }
 
+  public static class NumIopsMetric extends CustomSumMetric {
+    @Override
+    public String name() {
+      return NUM_IOPS;
+    }
+
+    @Override
+    public String description() {
+      return "number of I/O operations performed";
+    }
+  }
+
+  public static class NumRequestsMetric extends CustomSumMetric {
+    @Override
+    public String name() {
+      return NUM_REQUESTS;
+    }
+
+    @Override
+    public String description() {
+      return "number of requests made to the storage layer";
+    }
+  }
+
+  public static class NumBytesReadMetric extends CustomSumMetric {
+    @Override
+    public String name() {
+      return NUM_BYTES_READ;
+    }
+
+    @Override
+    public String description() {
+      return "number of bytes read";
+    }
+  }
+
+  public static class NumIndicesLoadedMetric extends CustomSumMetric {
+    @Override
+    public String name() {
+      return NUM_INDICES_LOADED;
+    }
+
+    @Override
+    public String description() {
+      return "number of top-level indices loaded";
+    }
+  }
+
+  public static class NumPartsLoadedMetric extends CustomSumMetric {
+    @Override
+    public String name() {
+      return NUM_PARTS_LOADED;
+    }
+
+    @Override
+    public String description() {
+      return "number of index partitions loaded";
+    }
+  }
+
+  public static class NumIndexComparisonsMetric extends CustomSumMetric {
+    @Override
+    public String name() {
+      return NUM_INDEX_COMPARISONS;
+    }
+
+    @Override
+    public String description() {
+      return "number of index comparisons";
+    }
+  }
+
   public static class DatasetOpenTimeNsMetric extends CustomNsTimeMetric {
     @Override
     public String name() {
@@ -121,6 +199,12 @@ public final class LanceCustomMetrics {
     new NumFragmentsScannedMetric(),
     new NumBatchesLoadedMetric(),
     new NumRowsScannedMetric(),
+    new NumIopsMetric(),
+    new NumRequestsMetric(),
+    new NumBytesReadMetric(),
+    new NumIndicesLoadedMetric(),
+    new NumPartsLoadedMetric(),
+    new NumIndexComparisonsMetric(),
     new DatasetOpenTimeNsMetric(),
     new ScannerCreateTimeNsMetric(),
     new BatchLoadTimeNsMetric(),

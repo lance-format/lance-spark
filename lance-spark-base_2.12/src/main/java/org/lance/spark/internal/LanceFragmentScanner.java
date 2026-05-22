@@ -17,6 +17,7 @@ import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
+import org.lance.ipc.ScanStats;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
@@ -32,6 +33,7 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -292,5 +294,9 @@ public class LanceFragmentScanner implements AutoCloseable {
       }
     }
     return false;
+  }
+
+  public Optional<ScanStats> getScanStats() {
+    return scanner == null ? Optional.empty() : scanner.getStats();
   }
 }

@@ -118,7 +118,7 @@ public abstract class BaseLanceReadMetricsIntegrationTest {
   @Test
   void testSupportedCustomMetricsCount() {
     CustomMetric[] metrics = LanceCustomMetrics.allMetrics();
-    assertEquals(6, metrics.length);
+    assertEquals(12, metrics.length);
   }
 
   @Test
@@ -174,6 +174,25 @@ public abstract class BaseLanceReadMetricsIntegrationTest {
     assertTrue(
         metrics.getOrDefault(LanceCustomMetrics.BATCH_LOAD_TIME_NS, 0L) > 0,
         "batchLoadTimeNs should be > 0");
+
+    // Test new metrics
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_IOPS, 0L) >= 0, "numIops should be >= 0");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_REQUESTS, 0L) >= 0,
+        "numRequests should be >= 0");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_BYTES_READ, 0L) >= 0,
+        "numBytesRead should be >= 0");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_INDICES_LOADED, 0L) >= 0,
+        "numIndicesLoaded should be >= 0");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_PARTS_LOADED, 0L) >= 0,
+        "numPartsLoaded should be >= 0");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_INDEX_COMPARISONS, 0L) >= 0,
+        "numIndexComparisons should be >= 0");
   }
 
   @Test
@@ -203,5 +222,25 @@ public abstract class BaseLanceReadMetricsIntegrationTest {
     assertTrue(
         metrics.getOrDefault(LanceCustomMetrics.BATCH_LOAD_TIME_NS, 0L) > 0,
         "batchLoadTimeNs should be > 0 for COUNT(*)");
+
+    // Test new metrics
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_IOPS, 0L) >= 0,
+        "numIops should be >= 0 for COUNT(*)");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_REQUESTS, 0L) >= 0,
+        "numRequests should be >= 0 for COUNT(*)");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_BYTES_READ, 0L) >= 0,
+        "numBytesRead should be >= 0 for COUNT(*)");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_INDICES_LOADED, 0L) >= 0,
+        "numIndicesLoaded should be >= 0 for COUNT(*)");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_PARTS_LOADED, 0L) >= 0,
+        "numPartsLoaded should be >= 0 for COUNT(*)");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_INDEX_COMPARISONS, 0L) >= 0,
+        "numIndexComparisons should be >= 0 for COUNT(*)");
   }
 }
