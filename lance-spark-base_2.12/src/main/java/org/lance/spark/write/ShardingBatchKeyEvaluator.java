@@ -14,12 +14,10 @@
 package org.lance.spark.write;
 
 import org.lance.memwal.ShardingEvaluator;
-import org.lance.memwal.ShardingField;
 import org.lance.memwal.ShardingSpec;
 import org.lance.schema.LanceSchema;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
-import org.lance.spark.sharding.SparkLanceShardingAdapter;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.FieldVector;
@@ -35,10 +33,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 /** Buffers Spark rows into Arrow batches and evaluates MemWAL sharding keys natively. */
 final class ShardingBatchKeyEvaluator implements AutoCloseable {
@@ -183,32 +178,6 @@ final class ShardingBatchKeyEvaluator implements AutoCloseable {
         return ShardingEvaluator.evaluate(allocator, root, spec);
       }
       return ShardingEvaluator.evaluate(allocator, root, spec, lanceSchema);
-    }
-
-    static ShardingBinding fromPartitionSpec(List<SparkLanceShardingAdapter> partitionSpec) {
-      List<ShardingField> fields = new ArrayList<>();
-      for (int i = 0; i < partitionSpec.size(); i++) {
-        SparkLanceShardingAdapter transform = partitionSpec.get(i);
-        Map<String, String> parameters = new HashMap<>();
-        parameters.put("column", transform.getCol());
-        String fieldId = transform.getTransform() + "(" + transform.getCol() + ")";
-        String resultType = "utf8";
-        if (transform instanceof SparkLanceShardingAdapter.Bucket) {
-          SparkLanceShardingAdapter.Bucket bucket = (SparkLanceShardingAdapter.Bucket) transform;
-          parameters.put("num_buckets", Integer.toString(bucket.getNumBuckets()));
-          fieldId = "bucket(" + bucket.getNumBuckets() + ", " + bucket.getCol() + ")";
-          resultType = "int32";
-        }
-        fields.add(
-            new ShardingField(
-                fieldId,
-                Collections.emptyList(),
-                transform.getTransform(),
-                fieldId,
-                resultType,
-                parameters));
-      }
-      return new ShardingBinding(new ShardingSpec(0, fields), null);
     }
   }
 }

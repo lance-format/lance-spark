@@ -17,7 +17,7 @@ import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.read.metric.LanceCustomMetrics;
-import org.lance.spark.sharding.SparkLanceShardingAdapter;
+import org.lance.spark.sharding.SparkLanceShardingUtils;
 import org.lance.spark.utils.Optional;
 
 import org.apache.arrow.util.Preconditions;
@@ -92,11 +92,8 @@ public class LanceScan
   /** Number of partitions after pruning, set during {@link #planInputPartitions()}. */
   private transient int numPartitions = -1;
 
-  /**
-   * Active Spark sharding adapter detected from zonemap stats. Null when no compatible adapter is
-   * detected.
-   */
-  private final SparkLanceShardingAdapter activeAdapter;
+  /** Active Spark partition expression detected from sharding zonemap stats. */
+  private final Expression activePartitionExpression;
 
   /** Map from fragment ID to partition key value. Null when no partitioning is detected. */
   private final java.util.Map<Integer, Object> fragmentPartKeys;
@@ -124,7 +121,7 @@ public class LanceScan
       LanceStatistics statistics,
       java.util.Map<String, List<ZoneStats>> zonemapStats,
       Set<Integer> survivingFragmentIds,
-      SparkLanceShardingAdapter activeAdapter,
+      Expression activePartitionExpression,
       java.util.Map<Integer, Object> fragmentPartKeys,
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
@@ -143,7 +140,7 @@ public class LanceScan
     this.statistics = statistics;
     this.zonemapStats = zonemapStats != null ? zonemapStats : Collections.emptyMap();
     this.cachedSurvivingFragmentIds = survivingFragmentIds;
-    this.activeAdapter = activeAdapter;
+    this.activePartitionExpression = activePartitionExpression;
     this.fragmentPartKeys = fragmentPartKeys;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
@@ -184,11 +181,11 @@ public class LanceScan
                 i -> {
                   LanceSplit split = finalSplits.get(i);
                   InternalRow partKeyRow = null;
-                  if (activeAdapter != null && fragmentPartKeys != null) {
+                  if (activePartitionExpression != null && fragmentPartKeys != null) {
                     int fragId = split.getFragments().get(0);
                     Object key = fragmentPartKeys.get(fragId);
                     if (key != null) {
-                      partKeyRow = activeAdapter.partitionKeyRow(key);
+                      partKeyRow = SparkLanceShardingUtils.partitionKeyRow(key);
                     }
                   }
                   return new LanceInputPartition(
@@ -377,9 +374,9 @@ public class LanceScan
    */
   @Override
   public Partitioning outputPartitioning() {
-    if (activeAdapter != null && fragmentPartKeys != null) {
+    if (activePartitionExpression != null && fragmentPartKeys != null) {
       int partCount = numPartitions >= 0 ? numPartitions : fragmentPartKeys.size();
-      Expression[] keys = new Expression[] {activeAdapter.toSparkExpression()};
+      Expression[] keys = new Expression[] {activePartitionExpression};
       return new KeyGroupedPartitioning(keys, partCount);
     }
     return new UnknownPartitioning(numPartitions >= 0 ? numPartitions : 0);

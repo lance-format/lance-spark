@@ -14,10 +14,10 @@
 package org.lance.spark.read;
 
 import org.lance.spark.TestUtils;
-import org.lance.spark.sharding.SparkLanceShardingAdapter;
 
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.expressions.Expression;
+import org.apache.spark.sql.connector.expressions.Expressions;
 import org.apache.spark.sql.connector.expressions.FieldReference;
 import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
@@ -193,7 +193,7 @@ public class LanceScanTest {
     Map<Integer, Object> fragKeys = new HashMap<>();
     fragKeys.put(0, "east");
     fragKeys.put(1, "west");
-    SparkLanceShardingAdapter transform = new SparkLanceShardingAdapter.Identity("region");
+    Expression partitionExpression = Expressions.column("region");
 
     LanceScan scan =
         new LanceScan(
@@ -208,7 +208,7 @@ public class LanceScanTest {
             null,
             Collections.emptyMap(),
             null,
-            transform,
+            partitionExpression,
             fragKeys,
             Collections.emptyMap(),
             null,
@@ -244,7 +244,7 @@ public class LanceScanTest {
     fragKeys.put(0, 0);
     fragKeys.put(1, 1);
     fragKeys.put(2, 2);
-    SparkLanceShardingAdapter transform = new SparkLanceShardingAdapter.Bucket("region", 4);
+    Expression partitionExpression = Expressions.bucket(4, "region");
 
     LanceScan scan =
         new LanceScan(
@@ -259,7 +259,7 @@ public class LanceScanTest {
             null,
             Collections.emptyMap(),
             null,
-            transform,
+            partitionExpression,
             fragKeys,
             Collections.emptyMap(),
             null,

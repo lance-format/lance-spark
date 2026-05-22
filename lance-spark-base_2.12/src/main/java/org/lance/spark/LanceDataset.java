@@ -13,8 +13,8 @@
  */
 package org.lance.spark;
 
+import org.lance.memwal.ShardingSpec;
 import org.lance.spark.read.LanceScanBuilder;
-import org.lance.spark.sharding.SparkLanceShardingAdapter;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.write.AddColumnsBackfillWrite;
 import org.lance.spark.write.SparkWrite;
@@ -175,7 +175,7 @@ public class LanceDataset
   private final Map<String, String> tableProperties;
 
   /** In-memory partition spec for newly staged tables before MemWAL metadata can be read. */
-  private final List<SparkLanceShardingAdapter> partitionSpec;
+  private final ShardingSpec partitionSpec;
 
   /**
    * Creates a Lance dataset.
@@ -206,7 +206,7 @@ public class LanceDataset
         null,
         fileFormatVersion,
         Collections.emptyMap(),
-        Collections.emptyList());
+        null);
   }
 
   /**
@@ -221,7 +221,7 @@ public class LanceDataset
    * @param stagedCommit the eagerly created staged commit, or null for non-staged tables
    * @param fileFormatVersion the file format version for writes, or null to use default
    * @param tableProperties table properties from Lance dataset config
-   * @param partitionSpec in-memory partition spec for newly staged tables
+   * @param partitionSpec in-memory sharding spec for newly staged tables
    */
   public LanceDataset(
       LanceSparkReadOptions readOptions,
@@ -233,7 +233,7 @@ public class LanceDataset
       StagedCommit stagedCommit,
       String fileFormatVersion,
       Map<String, String> tableProperties,
-      List<SparkLanceShardingAdapter> partitionSpec) {
+      ShardingSpec partitionSpec) {
     this.readOptions = readOptions;
     this.sparkSchema = sparkSchema;
     this.initialStorageOptions = initialStorageOptions;
@@ -243,10 +243,7 @@ public class LanceDataset
     this.stagedCommit = stagedCommit;
     this.fileFormatVersion = fileFormatVersion;
     this.tableProperties = Collections.unmodifiableMap(new HashMap<>(tableProperties));
-    this.partitionSpec =
-        partitionSpec != null
-            ? Collections.unmodifiableList(new ArrayList<>(partitionSpec))
-            : Collections.emptyList();
+    this.partitionSpec = partitionSpec;
   }
 
   public LanceSparkReadOptions readOptions() {

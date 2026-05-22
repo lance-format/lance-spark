@@ -17,12 +17,13 @@ import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.FragmentMetadata;
 import org.lance.Transaction;
+import org.lance.memwal.ShardingSpec;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.DeregisterTableRequest;
 import org.lance.operation.Operation;
 import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
-import org.lance.spark.sharding.SparkLanceShardingAdapter;
+import org.lance.spark.sharding.SparkLanceShardingUtils;
 
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.slf4j.Logger;
@@ -53,7 +54,7 @@ public class StagedCommit {
   private boolean enableStableRowIds;
   private List<FragmentMetadata> fragments;
   private Schema schema;
-  private List<SparkLanceShardingAdapter> partitionSpec = Collections.emptyList();
+  private ShardingSpec partitionSpec;
 
   /** Dataset for existing tables. Empty for new tables (staged create). */
   private final Optional<Dataset> dataset;
@@ -110,9 +111,8 @@ public class StagedCommit {
     this.enableStableRowIds = enableStableRowIds;
   }
 
-  public void setPartitionSpec(List<SparkLanceShardingAdapter> partitionSpec) {
-    this.partitionSpec =
-        partitionSpec != null ? new ArrayList<>(partitionSpec) : Collections.emptyList();
+  public void setPartitionSpec(ShardingSpec partitionSpec) {
+    this.partitionSpec = partitionSpec;
   }
 
   /** Performs the actual commit using the stored dataset and fragments. */
@@ -134,7 +134,7 @@ public class StagedCommit {
     applyManagedVersioning(builder);
     try (Transaction txn = new Transaction.Builder().operation(operation).build();
         Dataset committed = builder.execute(txn)) {
-      SparkLanceShardingAdapter.initializeMemWal(committed, partitionSpec);
+      SparkLanceShardingUtils.initializeMemWal(committed, partitionSpec);
     }
   }
 
@@ -150,7 +150,7 @@ public class StagedCommit {
     builder.useStableRowIds(enableStableRowIds);
     applyManagedVersioning(builder);
     try (Dataset committed = commitOperation(builder, version, operation)) {
-      SparkLanceShardingAdapter.initializeMemWal(committed, partitionSpec);
+      SparkLanceShardingUtils.initializeMemWal(committed, partitionSpec);
     }
   }
 

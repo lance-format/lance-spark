@@ -17,13 +17,13 @@ import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.FragmentMetadata;
 import org.lance.Transaction;
+import org.lance.memwal.ShardingSpec;
 import org.lance.namespace.LanceNamespace;
 import org.lance.operation.Append;
 import org.lance.operation.Operation;
 import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
-import org.lance.spark.sharding.SparkLanceShardingAdapter;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -37,7 +37,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -65,8 +64,8 @@ public class LanceBatchWrite implements BatchWrite {
 
   private final StagedCommit stagedCommit;
 
-  /** Partition spec controlling how data is distributed across fragments. */
-  private final List<SparkLanceShardingAdapter> partitionSpec;
+  /** Sharding spec controlling how data is distributed across fragments. */
+  private final ShardingSpec partitionSpec;
 
   public LanceBatchWrite(
       StructType schema,
@@ -88,7 +87,7 @@ public class LanceBatchWrite implements BatchWrite {
         tableId,
         managedVersioning,
         stagedCommit,
-        Collections.emptyList());
+        null);
   }
 
   public LanceBatchWrite(
@@ -101,7 +100,7 @@ public class LanceBatchWrite implements BatchWrite {
       List<String> tableId,
       boolean managedVersioning,
       StagedCommit stagedCommit,
-      List<SparkLanceShardingAdapter> partitionSpec) {
+      ShardingSpec partitionSpec) {
     this.schema = schema;
     this.overwrite = overwrite;
     this.initialStorageOptions = initialStorageOptions;
@@ -110,7 +109,7 @@ public class LanceBatchWrite implements BatchWrite {
     this.tableId = tableId;
     this.managedVersioning = managedVersioning;
     this.stagedCommit = stagedCommit;
-    this.partitionSpec = partitionSpec == null ? Collections.emptyList() : partitionSpec;
+    this.partitionSpec = partitionSpec;
 
     // For staged operations, the dataset is managed by StagedCommit.
     // For non-staged operations, pin the dataset version for OCC.

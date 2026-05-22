@@ -20,14 +20,18 @@ import org.lance.index.IndexCriteria;
 import org.lance.index.IndexDescription;
 import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
+import org.lance.memwal.ShardingField;
+import org.lance.memwal.ShardingSpec;
 import org.lance.schema.LanceField;
+import org.lance.schema.LanceSchema;
 import org.lance.spark.LanceSparkReadOptions;
-import org.lance.spark.sharding.SparkLanceShardingAdapter;
+import org.lance.spark.sharding.SparkLanceShardingUtils;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
+import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.FieldReference;
 import org.apache.spark.sql.connector.expressions.NamedReference;
 import org.apache.spark.sql.connector.expressions.NullOrdering;
@@ -95,7 +99,7 @@ public class LanceScanBuilder
 
   private final java.util.Map<String, String> namespaceProperties;
 
-  private final List<SparkLanceShardingAdapter> partitionSpec;
+  private final ShardingSpec partitionSpec;
 
   public LanceScanBuilder(
       StructType schema,
@@ -103,13 +107,7 @@ public class LanceScanBuilder
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
       java.util.Map<String, String> namespaceProperties) {
-    this(
-        schema,
-        readOptions,
-        initialStorageOptions,
-        namespaceImpl,
-        namespaceProperties,
-        Collections.emptyList());
+    this(schema, readOptions, initialStorageOptions, namespaceImpl, namespaceProperties, null);
   }
 
   public LanceScanBuilder(
@@ -118,17 +116,14 @@ public class LanceScanBuilder
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
       java.util.Map<String, String> namespaceProperties,
-      List<SparkLanceShardingAdapter> partitionSpec) {
+      ShardingSpec partitionSpec) {
     this.fullSchema = schema;
     this.schema = schema;
     this.readOptions = readOptions;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
-    this.partitionSpec =
-        partitionSpec != null
-            ? Collections.unmodifiableList(new ArrayList<>(partitionSpec))
-            : Collections.emptyList();
+    this.partitionSpec = partitionSpec;
   }
 
   /**
@@ -164,36 +159,41 @@ public class LanceScanBuilder
     // Collect all columns that need zonemap stats: filter columns + sharding columns.
     Set<String> columnsToLoad = extractReferencedColumns(pushedPredicates);
     Dataset dataset = getOrOpenDataset();
-    List<SparkLanceShardingAdapter> partSpec =
-        partitionSpec.isEmpty() ? SparkLanceShardingAdapter.parseSpec(dataset) : partitionSpec;
-    for (SparkLanceShardingAdapter t : partSpec) {
-      columnsToLoad.add(t.getCol());
+    LanceSchema lanceSchema = dataset.getLanceSchema();
+    ShardingSpec partSpec =
+        SparkLanceShardingUtils.isEmpty(partitionSpec)
+            ? SparkLanceShardingUtils.firstShardingSpec(dataset)
+            : partitionSpec;
+    for (ShardingField field : SparkLanceShardingUtils.fields(partSpec)) {
+      columnsToLoad.add(SparkLanceShardingUtils.columnName(field, lanceSchema));
     }
 
     // Load zonemap stats for all requested columns in one pass.
     Map<String, List<ZoneStats>> zonemapStats = loadZonemapStats(getOrOpenDataset(), columnsToLoad);
 
-    // Detect sharding-compatible fragments from zonemap stats. Each adapter checks its column's
+    // Detect sharding-compatible fragments from zonemap stats. Each field checks its column's
     // zones; if every fragment has a single sharding value, we get a fragment-to-key map.
     Map<Integer, Object> fragmentPartKeys = null;
-    SparkLanceShardingAdapter activeAdapter = null;
-    for (SparkLanceShardingAdapter t : partSpec) {
-      List<ZoneStats> colStats = zonemapStats.get(t.getCol());
+    Expression activePartitionExpression = null;
+    for (ShardingField field : SparkLanceShardingUtils.fields(partSpec)) {
+      String column = SparkLanceShardingUtils.columnName(field, lanceSchema);
+      List<ZoneStats> colStats = zonemapStats.get(column);
       if (colStats == null || colStats.isEmpty()) {
         LOG.warn(
             "Sharding column '{}' (transform={}) has no zonemap stats; sharding detection disabled",
-            t.getCol(),
-            t.getTransform());
+            column,
+            field.transform().orElse(null));
         continue;
       }
-      java.util.Optional<Map<Integer, Object>> keys = t.detectFragmentKeys(colStats);
+      java.util.Optional<Map<Integer, Object>> keys =
+          SparkLanceShardingUtils.detectFragmentKeys(field, lanceSchema, colStats);
       if (keys.isPresent()) {
         fragmentPartKeys = keys.get();
-        activeAdapter = t;
+        activePartitionExpression = SparkLanceShardingUtils.toSparkExpression(field, lanceSchema);
         LOG.info(
-            "Detected Spark sharding adapter {}('{}') with {} fragments",
-            t.getTransform(),
-            t.getCol(),
+            "Detected Lance sharding field {}('{}') with {} fragments",
+            field.transform().orElse(null),
+            column,
             fragmentPartKeys.size());
         break;
       }
@@ -249,7 +249,7 @@ public class LanceScanBuilder
         statistics,
         zonemapStats,
         survivingFragmentIds,
-        activeAdapter,
+        activePartitionExpression,
         fragmentPartKeys,
         initialStorageOptions,
         namespaceImpl,

@@ -14,10 +14,7 @@
 package org.lance.spark.read;
 
 import org.lance.index.scalar.ZoneStats;
-import org.lance.spark.utils.BucketHashUtil;
 
-import org.apache.spark.sql.catalyst.InternalRow;
-import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.Literal;
 import org.apache.spark.sql.connector.expressions.NamedReference;
@@ -29,10 +26,8 @@ import org.apache.spark.unsafe.types.UTF8String;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -357,150 +352,5 @@ public final class ZonemapFragmentPruner {
     LESS_THAN_OR_EQUAL,
     GREATER_THAN,
     GREATER_THAN_OR_EQUAL
-  }
-
-  /**
-   * Result of partition detection: the partition column name and a map from fragment ID to the
-   * partition value for that fragment.
-   */
-  public static final class PartitionInfo implements Serializable {
-    private static final long serialVersionUID = 1L;
-
-    private final String columnName;
-    private final Map<Integer, Comparable<?>> fragmentPartitionValues;
-
-    public PartitionInfo(String columnName, Map<Integer, Comparable<?>> fragmentPartitionValues) {
-      this.columnName = columnName;
-      this.fragmentPartitionValues = Collections.unmodifiableMap(fragmentPartitionValues);
-    }
-
-    public String getColumnName() {
-      return columnName;
-    }
-
-    public Map<Integer, Comparable<?>> getFragmentPartitionValues() {
-      return fragmentPartitionValues;
-    }
-
-    /**
-     * Returns a partition key {@link InternalRow} for the given fragment ID. The row contains a
-     * single column with the partition value, converted to a Spark-compatible type.
-     */
-    public InternalRow partitionKeyForFragment(int fragmentId) {
-      Comparable<?> value = fragmentPartitionValues.get(fragmentId);
-      Object sparkValue = toSparkValue(value);
-      return new GenericInternalRow(new Object[] {sparkValue});
-    }
-
-    private static Object toSparkValue(Comparable<?> value) {
-      if (value == null) {
-        return null;
-      }
-      if (value instanceof String) {
-        return UTF8String.fromString((String) value);
-      }
-      return value;
-    }
-  }
-
-  /**
-   * Result of bucket partition detection: the bucket column name, number of buckets, and a map from
-   * fragment ID to the bucket ID for that fragment.
-   */
-  public static final class BucketPartitionInfo implements Serializable {
-    private static final long serialVersionUID = 2L;
-
-    private final String columnName;
-    private final int numBuckets;
-    private final Map<Integer, Integer> fragmentBucketIds;
-
-    public BucketPartitionInfo(
-        String columnName, int numBuckets, Map<Integer, Integer> fragmentBucketIds) {
-      this.columnName = columnName;
-      this.numBuckets = numBuckets;
-      this.fragmentBucketIds = Collections.unmodifiableMap(fragmentBucketIds);
-    }
-
-    public String getColumnName() {
-      return columnName;
-    }
-
-    public int getNumBuckets() {
-      return numBuckets;
-    }
-
-    public Map<Integer, Integer> getFragmentBucketIds() {
-      return fragmentBucketIds;
-    }
-
-    public InternalRow partitionKeyForFragment(int fragmentId) {
-      Integer bucketId = fragmentBucketIds.get(fragmentId);
-      return new GenericInternalRow(new Object[] {bucketId});
-    }
-  }
-
-  /**
-   * Computes bucket IDs for fragments from zonemap stats. Each fragment must have a single
-   * partition value (min == max across all zones). The bucket ID is then computed from that value
-   * using Murmur3 hash, matching Spark's bucket transform.
-   *
-   * @param zones zonemap zones for the bucket column
-   * @param numBuckets number of buckets
-   * @return map from fragment ID to bucket ID, or empty if zones are not bucket-compatible
-   */
-  static Optional<Map<Integer, Integer>> computeFragmentBucketIds(
-      List<ZoneStats> zones, int numBuckets) {
-
-    Optional<Map<Integer, Comparable<?>>> partValues = computeFragmentPartitionValues(zones);
-    if (!partValues.isPresent()) {
-      return Optional.empty();
-    }
-
-    Map<Integer, Integer> result = new HashMap<>();
-    for (Map.Entry<Integer, Comparable<?>> entry : partValues.get().entrySet()) {
-      int bucketId = BucketHashUtil.computeBucketIdFromValue(entry.getValue(), numBuckets);
-      result.put(entry.getKey(), bucketId);
-    }
-    return Optional.of(result);
-  }
-
-  /**
-   * Checks whether zonemap zones are partitionable — i.e., every fragment has exactly one distinct
-   * value (all zones have {@code min == max} with the same value per fragment).
-   *
-   * @param zones zonemap zones for a single column
-   * @return map from fragment ID to partition value, or empty if zones are not partitionable
-   */
-  static Optional<Map<Integer, Comparable<?>>> computeFragmentPartitionValues(
-      List<ZoneStats> zones) {
-
-    if (zones == null || zones.isEmpty()) {
-      return Optional.empty();
-    }
-
-    Map<Integer, Comparable<?>> result = new HashMap<>();
-
-    for (ZoneStats zone : zones) {
-      Comparable<?> min = zone.getMin();
-      Comparable<?> max = zone.getMax();
-
-      if (min == null || max == null) {
-        return Optional.empty();
-      }
-
-      if (!min.equals(max)) {
-        return Optional.empty();
-      }
-
-      int fragId = zone.getFragmentId();
-      Comparable<?> existing = result.get(fragId);
-      if (existing != null && !existing.equals(min)) {
-        return Optional.empty();
-      }
-
-      result.put(fragId, min);
-    }
-
-    return Optional.of(result);
   }
 }

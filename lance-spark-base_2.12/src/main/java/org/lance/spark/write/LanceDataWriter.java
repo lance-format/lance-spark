@@ -18,9 +18,11 @@ import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.WriteParams;
 import org.lance.memwal.MemWalIndexDetails;
+import org.lance.memwal.ShardingField;
+import org.lance.memwal.ShardingSpec;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
-import org.lance.spark.sharding.SparkLanceShardingAdapter;
+import org.lance.spark.sharding.SparkLanceShardingUtils;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.c.ArrowArrayStream;
@@ -34,8 +36,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.Serializable;
 import java.util.ArrayList;
-import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -202,7 +205,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
     private final String namespaceImpl;
     private final Map<String, String> namespaceProperties;
     private final List<String> tableId;
-    private final List<SparkLanceShardingAdapter> partitionSpec;
+    private final ShardingSpecSnapshot partitionSpec;
 
     public WriterFactory(
         StructType schema,
@@ -218,7 +221,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
           namespaceImpl,
           namespaceProperties,
           tableId,
-          Collections.emptyList());
+          null);
     }
 
     public WriterFactory(
@@ -228,14 +231,17 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
         String namespaceImpl,
         Map<String, String> namespaceProperties,
         List<String> tableId,
-        List<SparkLanceShardingAdapter> partitionSpec) {
+        ShardingSpec partitionSpec) {
       this.schema = schema;
       this.writeOptions = writeOptions;
       this.initialStorageOptions = initialStorageOptions;
       this.namespaceImpl = namespaceImpl;
       this.namespaceProperties = namespaceProperties;
       this.tableId = tableId;
-      this.partitionSpec = partitionSpec == null ? Collections.emptyList() : partitionSpec;
+      this.partitionSpec =
+          SparkLanceShardingUtils.isEmpty(partitionSpec)
+              ? null
+              : ShardingSpecSnapshot.from(partitionSpec);
     }
 
     private BufferAndTask buildBufferAndTask() {
@@ -276,7 +282,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
     @Override
     public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
       ShardingBatchKeyEvaluator shardingKeyEvaluator =
-          partitionSpec.isEmpty()
+          partitionSpec == null
               ? null
               : new ShardingBatchKeyEvaluator(schema, writeOptions, shardingBinding());
 
@@ -306,11 +312,91 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
               details.get().shardingSpecs().get(0), dataset.getLanceSchema());
         }
       } catch (RuntimeException e) {
+        if (partitionSpec.hasSourceIds()) {
+          throw e;
+        }
         // Staged creates initialize MemWAL after data files are written, so there may not be
         // dataset metadata to read yet. Fall back to an equivalent in-memory sharding binding.
         LOG.warn("Falling back to in-memory sharding metadata for partitioned write", e);
       }
-      return ShardingBatchKeyEvaluator.ShardingBinding.fromPartitionSpec(partitionSpec);
+      return new ShardingBatchKeyEvaluator.ShardingBinding(partitionSpec.toShardingSpec(), null);
+    }
+
+    private static final class ShardingSpecSnapshot implements Serializable {
+      private static final long serialVersionUID = 1L;
+
+      private final int specId;
+      private final List<ShardingFieldSnapshot> fields;
+
+      private ShardingSpecSnapshot(int specId, List<ShardingFieldSnapshot> fields) {
+        this.specId = specId;
+        this.fields = fields;
+      }
+
+      private static ShardingSpecSnapshot from(ShardingSpec spec) {
+        List<ShardingFieldSnapshot> fields = new ArrayList<>();
+        for (ShardingField field : spec.fields()) {
+          fields.add(ShardingFieldSnapshot.from(field));
+        }
+        return new ShardingSpecSnapshot(spec.specId(), fields);
+      }
+
+      private ShardingSpec toShardingSpec() {
+        List<ShardingField> restored = new ArrayList<>();
+        for (ShardingFieldSnapshot field : fields) {
+          restored.add(field.toShardingField());
+        }
+        return new ShardingSpec(specId, restored);
+      }
+
+      private boolean hasSourceIds() {
+        for (ShardingFieldSnapshot field : fields) {
+          if (!field.sourceIds.isEmpty()) {
+            return true;
+          }
+        }
+        return false;
+      }
+    }
+
+    private static final class ShardingFieldSnapshot implements Serializable {
+      private static final long serialVersionUID = 1L;
+
+      private final String fieldId;
+      private final List<Integer> sourceIds;
+      private final String transform;
+      private final String expression;
+      private final String resultType;
+      private final Map<String, String> parameters;
+
+      private ShardingFieldSnapshot(
+          String fieldId,
+          List<Integer> sourceIds,
+          String transform,
+          String expression,
+          String resultType,
+          Map<String, String> parameters) {
+        this.fieldId = fieldId;
+        this.sourceIds = sourceIds;
+        this.transform = transform;
+        this.expression = expression;
+        this.resultType = resultType;
+        this.parameters = parameters;
+      }
+
+      private static ShardingFieldSnapshot from(ShardingField field) {
+        return new ShardingFieldSnapshot(
+            field.fieldId(),
+            new ArrayList<>(field.sourceIds()),
+            field.transform().orElse(null),
+            field.expression().orElse(null),
+            field.resultType(),
+            new HashMap<>(field.parameters()));
+      }
+
+      private ShardingField toShardingField() {
+        return new ShardingField(fieldId, sourceIds, transform, expression, resultType, parameters);
+      }
     }
   }
 }
