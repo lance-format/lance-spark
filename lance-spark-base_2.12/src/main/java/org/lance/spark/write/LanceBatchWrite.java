@@ -66,7 +66,7 @@ public class LanceBatchWrite implements BatchWrite {
   private final StagedCommit stagedCommit;
 
   /** Sharding spec controlling how data is distributed across fragments. */
-  private final ShardingSpec partitionSpec;
+  private final ShardingSpec shardingSpec;
 
   /**
    * Per-source blob credential/open contexts keyed by source dataset URI, captured on the driver
@@ -108,7 +108,7 @@ public class LanceBatchWrite implements BatchWrite {
       List<String> tableId,
       boolean managedVersioning,
       StagedCommit stagedCommit,
-      ShardingSpec partitionSpec,
+      ShardingSpec shardingSpec,
       Map<String, BlobSourceContext> blobSourceContexts) {
     this.schema = schema;
     this.overwrite = overwrite;
@@ -118,7 +118,7 @@ public class LanceBatchWrite implements BatchWrite {
     this.tableId = tableId;
     this.managedVersioning = managedVersioning;
     this.stagedCommit = stagedCommit;
-    this.partitionSpec = partitionSpec;
+    this.shardingSpec = shardingSpec;
     this.blobSourceContexts =
         blobSourceContexts == null ? java.util.Collections.emptyMap() : blobSourceContexts;
 
@@ -144,7 +144,7 @@ public class LanceBatchWrite implements BatchWrite {
         namespaceImpl,
         namespaceProperties,
         tableId,
-        partitionSpec,
+        shardingSpec,
         blobSourceContexts);
   }
 

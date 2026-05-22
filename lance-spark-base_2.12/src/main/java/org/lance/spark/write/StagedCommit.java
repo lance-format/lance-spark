@@ -54,7 +54,7 @@ public class StagedCommit {
   private boolean enableStableRowIds;
   private List<FragmentMetadata> fragments;
   private Schema schema;
-  private ShardingSpec partitionSpec;
+  private ShardingSpec shardingSpec;
 
   /** Dataset for existing tables. Empty for new tables (staged create). */
   private final Optional<Dataset> dataset;
@@ -111,8 +111,8 @@ public class StagedCommit {
     this.enableStableRowIds = enableStableRowIds;
   }
 
-  public void setPartitionSpec(ShardingSpec partitionSpec) {
-    this.partitionSpec = partitionSpec;
+  public void setShardingSpec(ShardingSpec shardingSpec) {
+    this.shardingSpec = shardingSpec;
   }
 
   /** Performs the actual commit using the stored dataset and fragments. */
@@ -134,7 +134,7 @@ public class StagedCommit {
     applyManagedVersioning(builder);
     try (Transaction txn = new Transaction.Builder().operation(operation).build();
         Dataset committed = builder.execute(txn)) {
-      SparkLanceShardingUtils.initializeMemWal(committed, partitionSpec);
+      SparkLanceShardingUtils.initializeMemWal(committed, shardingSpec);
     }
   }
 
@@ -150,7 +150,7 @@ public class StagedCommit {
     builder.useStableRowIds(enableStableRowIds);
     applyManagedVersioning(builder);
     try (Dataset committed = commitOperation(builder, version, operation)) {
-      SparkLanceShardingUtils.initializeMemWal(committed, partitionSpec);
+      SparkLanceShardingUtils.initializeMemWal(committed, shardingSpec);
     }
   }
 

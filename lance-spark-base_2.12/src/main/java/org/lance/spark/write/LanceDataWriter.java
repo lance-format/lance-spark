@@ -225,7 +225,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
     private final String namespaceImpl;
     private final Map<String, String> namespaceProperties;
     private final List<String> tableId;
-    private final ShardingSpecSnapshot partitionSpec;
+    private final ShardingSpecSnapshot shardingSpec;
 
     /**
      * Per-source blob credential/open contexts keyed by source dataset URI, captured on the driver
@@ -260,7 +260,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
         String namespaceImpl,
         Map<String, String> namespaceProperties,
         List<String> tableId,
-        ShardingSpec partitionSpec,
+        ShardingSpec shardingSpec,
         Map<String, BlobSourceContext> blobSourceContexts) {
       // Everything passed to writer factory should be serializable
       this.schema = schema;
@@ -269,10 +269,10 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       this.namespaceImpl = namespaceImpl;
       this.namespaceProperties = namespaceProperties;
       this.tableId = tableId;
-      this.partitionSpec =
-          SparkLanceShardingUtils.isEmpty(partitionSpec)
+      this.shardingSpec =
+          SparkLanceShardingUtils.isEmpty(shardingSpec)
               ? null
-              : ShardingSpecSnapshot.from(partitionSpec);
+              : ShardingSpecSnapshot.from(shardingSpec);
       this.blobSourceContexts =
           blobSourceContexts == null ? Collections.emptyMap() : blobSourceContexts;
     }
@@ -316,7 +316,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
     @Override
     public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
       ShardingBatchKeyEvaluator shardingKeyEvaluator =
-          partitionSpec == null
+          shardingSpec == null
               ? null
               : new ShardingBatchKeyEvaluator(schema, writeOptions, shardingBinding());
 
@@ -351,14 +351,14 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
               details.get().shardingSpecs().get(0), dataset.getLanceSchema());
         }
       } catch (RuntimeException e) {
-        if (partitionSpec.hasSourceIds()) {
+        if (shardingSpec.hasSourceIds()) {
           throw e;
         }
         // Staged creates initialize MemWAL after data files are written, so there may not be
         // dataset metadata to read yet. Fall back to an equivalent in-memory sharding binding.
-        LOG.warn("Falling back to in-memory sharding metadata for partitioned write", e);
+        LOG.warn("Falling back to in-memory sharding metadata for sharded write", e);
       }
-      return new ShardingBatchKeyEvaluator.ShardingBinding(partitionSpec.toShardingSpec(), null);
+      return new ShardingBatchKeyEvaluator.ShardingBinding(shardingSpec.toShardingSpec(), null);
     }
 
     private static final class ShardingSpecSnapshot implements Serializable {

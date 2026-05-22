@@ -33,7 +33,7 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
       boolean managedVersioning,
       String fileFormatVersion,
       Map<String, String> tableProperties,
-      ShardingSpec partitionSpec) {
+      ShardingSpec shardingSpec) {
     super(
         readOptions,
         sparkSchema,
@@ -44,7 +44,7 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
         null,
         fileFormatVersion,
         tableProperties,
-        partitionSpec);
+        shardingSpec);
   }
 
   public LancePositionDeltaDataset(
@@ -57,7 +57,7 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
       StagedCommit stagedCommit,
       String fileFormatVersion,
       Map<String, String> tableProperties,
-      ShardingSpec partitionSpec) {
+      ShardingSpec shardingSpec) {
     super(
         readOptions,
         sparkSchema,
@@ -68,7 +68,7 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
         stagedCommit,
         fileFormatVersion,
         tableProperties,
-        partitionSpec);
+        shardingSpec);
   }
 
   @Override

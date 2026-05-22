@@ -41,7 +41,7 @@ import java.util.stream.IntStream;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Integration test verifying that writes with bucket partition spec produce fragments where each
+ * Integration test verifying that writes with bucket sharding spec produce fragments where each
  * fragment contains rows from exactly one bucket.
  */
 public abstract class BaseBucketWriteTest {

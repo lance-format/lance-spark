@@ -69,7 +69,7 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
       boolean managedVersioning,
       String fileFormatVersion,
       Map<String, String> tableProperties,
-      ShardingSpec partitionSpec) {
+      ShardingSpec shardingSpec) {
     return new LancePositionDeltaDataset(
         readOptions,
         sparkSchema,
@@ -79,7 +79,7 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
         managedVersioning,
         fileFormatVersion,
         tableProperties,
-        partitionSpec);
+        shardingSpec);
   }
 
   @Override
@@ -93,7 +93,7 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
       StagedCommit stagedCommit,
       String fileFormatVersion,
       Map<String, String> tableProperties,
-      ShardingSpec partitionSpec) {
+      ShardingSpec shardingSpec) {
     return new LancePositionDeltaDataset(
         readOptions,
         sparkSchema,
@@ -104,6 +104,6 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
         stagedCommit,
         fileFormatVersion,
         tableProperties,
-        partitionSpec);
+        shardingSpec);
   }
 }
