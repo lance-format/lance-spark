@@ -15,6 +15,7 @@ package org.lance.spark.write;
 
 import org.lance.Dataset;
 import org.lance.WriteParams;
+import org.lance.memwal.InitializeMemWalParams;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
 
@@ -38,8 +39,6 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -64,6 +63,15 @@ public class SparkWriteTest {
     return datasetUri;
   }
 
+  private String createIdentityShardedDataset(String name) {
+    String datasetUri = createDataset(name);
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
+        Dataset dataset = Dataset.open(datasetUri, allocator)) {
+      dataset.initializeMemWal(new InitializeMemWalParams().withIdentitySharding("name"));
+    }
+    return datasetUri;
+  }
+
   private SparkWrite.SparkWriteBuilder createBuilder(String datasetUri) {
     LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
     return new SparkWrite.SparkWriteBuilder(
@@ -73,8 +81,7 @@ public class SparkWriteTest {
         null,
         Collections.emptyMap(),
         Arrays.asList("default", "test_table"),
-        false,
-        Collections.emptyMap());
+        false);
   }
 
   @Test
@@ -114,8 +121,7 @@ public class SparkWriteTest {
             null,
             Collections.emptyMap(),
             null,
-            false,
-            Collections.emptyMap());
+            false);
     assertSame(builder, builder.truncate());
     BatchWrite batchWrite = builder.build().toBatch();
     assertInstanceOf(LanceBatchWrite.class, batchWrite);
@@ -138,8 +144,7 @@ public class SparkWriteTest {
             null,
             Collections.emptyMap(),
             null,
-            false,
-            Collections.emptyMap());
+            false);
     builder.truncate();
     SparkWrite sparkWrite = (SparkWrite) builder.build();
     assertTrue(
@@ -149,8 +154,7 @@ public class SparkWriteTest {
 
   // --- requiredDistribution / requiredOrdering tests ---
 
-  private SparkWrite createWriteWithTableProperties(
-      String datasetUri, Map<String, String> tableProps) {
+  private SparkWrite createWrite(String datasetUri) {
     LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
     SparkWrite.SparkWriteBuilder builder =
         new SparkWrite.SparkWriteBuilder(
@@ -160,17 +164,14 @@ public class SparkWriteTest {
             null,
             Collections.emptyMap(),
             Arrays.asList("default", "test_table"),
-            false,
-            tableProps);
+            false);
     return (SparkWrite) builder.build();
   }
 
   @Test
-  public void testRequiredDistributionWithPartitionColumn(TestInfo testInfo) {
-    String datasetUri = createDataset(testInfo.getTestMethod().get().getName());
-    Map<String, String> props = new HashMap<>();
-    props.put("lance.partition.columns", "name");
-    SparkWrite write = createWriteWithTableProperties(datasetUri, props);
+  public void testRequiredDistributionWithMemWalSharding(TestInfo testInfo) {
+    String datasetUri = createIdentityShardedDataset(testInfo.getTestMethod().get().getName());
+    SparkWrite write = createWrite(datasetUri);
 
     Distribution dist = write.requiredDistribution();
     assertInstanceOf(ClusteredDistribution.class, dist);
@@ -179,9 +180,9 @@ public class SparkWriteTest {
   }
 
   @Test
-  public void testRequiredDistributionWithoutPartitionColumn(TestInfo testInfo) {
+  public void testRequiredDistributionWithoutSharding(TestInfo testInfo) {
     String datasetUri = createDataset(testInfo.getTestMethod().get().getName());
-    SparkWrite write = createWriteWithTableProperties(datasetUri, Collections.emptyMap());
+    SparkWrite write = createWrite(datasetUri);
 
     Distribution dist = write.requiredDistribution();
     // Unspecified distribution — no clustering required
@@ -189,20 +190,18 @@ public class SparkWriteTest {
   }
 
   @Test
-  public void testRequiredOrderingWithPartitionColumn(TestInfo testInfo) {
-    String datasetUri = createDataset(testInfo.getTestMethod().get().getName());
-    Map<String, String> props = new HashMap<>();
-    props.put("lance.partition.columns", "name");
-    SparkWrite write = createWriteWithTableProperties(datasetUri, props);
+  public void testRequiredOrderingWithMemWalSharding(TestInfo testInfo) {
+    String datasetUri = createIdentityShardedDataset(testInfo.getTestMethod().get().getName());
+    SparkWrite write = createWrite(datasetUri);
 
     SortOrder[] ordering = write.requiredOrdering();
     assertEquals(1, ordering.length);
   }
 
   @Test
-  public void testRequiredOrderingWithoutPartitionColumn(TestInfo testInfo) {
+  public void testRequiredOrderingWithoutSharding(TestInfo testInfo) {
     String datasetUri = createDataset(testInfo.getTestMethod().get().getName());
-    SparkWrite write = createWriteWithTableProperties(datasetUri, Collections.emptyMap());
+    SparkWrite write = createWrite(datasetUri);
 
     SortOrder[] ordering = write.requiredOrdering();
     assertEquals(0, ordering.length);

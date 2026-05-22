@@ -20,16 +20,8 @@ import org.lance.memwal.MemWalIndexDetails;
 import org.lance.memwal.ShardingField;
 import org.lance.memwal.ShardingSpec;
 import org.lance.schema.LanceField;
-import org.lance.spark.LanceConstant;
 import org.lance.spark.utils.BucketHashUtil;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.connector.expressions.BucketTransform;
@@ -57,7 +49,6 @@ import java.util.function.Function;
 /** Spark-facing adapter for one Lance MemWAL sharding field. */
 public abstract class SparkLanceShardingAdapter implements Serializable {
   private static final long serialVersionUID = 1L;
-  private static final ObjectMapper MAPPER = new ObjectMapper();
 
   private final String transform;
   private final String col;
@@ -67,12 +58,10 @@ public abstract class SparkLanceShardingAdapter implements Serializable {
     this.col = col;
   }
 
-  @JsonProperty("transform")
   public String getTransform() {
     return transform;
   }
 
-  @JsonProperty("col")
   public String getCol() {
     return col;
   }
@@ -107,24 +96,6 @@ public abstract class SparkLanceShardingAdapter implements Serializable {
       return UTF8String.fromString((String) value);
     }
     return value;
-  }
-
-  @JsonCreator
-  public static SparkLanceShardingAdapter fromJson(
-      @JsonProperty("transform") String transform,
-      @JsonProperty("col") String col,
-      @JsonProperty("num_buckets") Integer numBuckets) {
-    switch (transform) {
-      case "identity":
-        return new Identity(col);
-      case "bucket":
-        if (numBuckets == null || numBuckets <= 0) {
-          throw new IllegalArgumentException("bucket sharding requires positive num_buckets");
-        }
-        return new Bucket(col, numBuckets);
-      default:
-        throw new UnsupportedOperationException("Unsupported sharding transform: " + transform);
-    }
   }
 
   /** Identity sharding adapter: data grouped by raw column value. */
@@ -183,7 +154,6 @@ public abstract class SparkLanceShardingAdapter implements Serializable {
       this.numBuckets = numBuckets;
     }
 
-    @JsonProperty("num_buckets")
     public int getNumBuckets() {
       return numBuckets;
     }
@@ -230,54 +200,6 @@ public abstract class SparkLanceShardingAdapter implements Serializable {
       }
       int bucketId = BucketHashUtil.computeBucketIdFromValue(value, numBuckets);
       return Optional.of(bucketId);
-    }
-  }
-
-  public static String toJson(List<SparkLanceShardingAdapter> spec) {
-    try {
-      return MAPPER.writeValueAsString(spec);
-    } catch (JsonProcessingException e) {
-      throw new RuntimeException("Failed to serialize Spark sharding adapter spec", e);
-    }
-  }
-
-  public static List<SparkLanceShardingAdapter> fromJsonString(String json) {
-    if (json == null || json.trim().isEmpty()) {
-      return Collections.emptyList();
-    }
-    try {
-      return MAPPER.readValue(
-          json,
-          MAPPER
-              .getTypeFactory()
-              .constructCollectionType(List.class, SparkLanceShardingAdapter.class));
-    } catch (JsonProcessingException e) {
-      throw new RuntimeException("Failed to parse Spark sharding adapter spec: " + json, e);
-    }
-  }
-
-  public static ShardingSpec toShardingSpec(List<SparkLanceShardingAdapter> spec) {
-    List<ShardingField> fields = new ArrayList<>();
-    for (SparkLanceShardingAdapter adapter : spec) {
-      fields.add(adapter.toShardingField());
-    }
-    return new ShardingSpec(0, fields);
-  }
-
-  public static String toShardingSpecJson(List<SparkLanceShardingAdapter> spec) {
-    return toJson(toShardingSpec(spec));
-  }
-
-  public static List<SparkLanceShardingAdapter> fromShardingSpecJson(String json) {
-    if (json == null || json.trim().isEmpty()) {
-      return Collections.emptyList();
-    }
-    try {
-      JsonNode root = MAPPER.readTree(json);
-      ShardingSpec shardingSpec = fromJson(root);
-      return fromShardingSpec(shardingSpec, id -> null);
-    } catch (JsonProcessingException e) {
-      throw new RuntimeException("Failed to parse MemWAL sharding spec: " + json, e);
     }
   }
 
@@ -328,56 +250,13 @@ public abstract class SparkLanceShardingAdapter implements Serializable {
     return spec;
   }
 
-  /**
-   * Parses sharding adapters from MemWAL index metadata, falling back to older partition properties
-   * for backward compatibility.
-   */
-  public static List<SparkLanceShardingAdapter> parseSpec(
-      Dataset dataset, Map<String, String> tableProperties) {
+  /** Parses sharding adapters from MemWAL index metadata. */
+  public static List<SparkLanceShardingAdapter> parseSpec(Dataset dataset) {
     Optional<MemWalIndexDetails> details = dataset.memWalIndexDetails();
     if (details.isPresent() && !details.get().shardingSpecs().isEmpty()) {
       return fromMemWalIndexDetails(dataset, details.get());
     }
-    return parseSpec(tableProperties);
-  }
-
-  /** Parses legacy partitioning table properties for backward compatibility. */
-  public static List<SparkLanceShardingAdapter> parseSpec(Map<String, String> tableProperties) {
-    if (tableProperties == null || tableProperties.isEmpty()) {
-      return Collections.emptyList();
-    }
-
-    String shardingSpecJson = tableProperties.get(LanceConstant.TABLE_OPT_SHARDING_SPEC);
-    if (shardingSpecJson != null && !shardingSpecJson.trim().isEmpty()) {
-      return fromShardingSpecJson(shardingSpecJson);
-    }
-
-    String specJson = tableProperties.get(LanceConstant.TABLE_OPT_PARTITION_SPEC);
-    if (specJson != null && !specJson.trim().isEmpty()) {
-      return fromJsonString(specJson);
-    }
-
-    List<SparkLanceShardingAdapter> spec = new ArrayList<>();
-
-    String bucketCol = tableProperties.get(LanceConstant.TABLE_OPT_BUCKET_COLUMNS);
-    String bucketNumStr = tableProperties.get(LanceConstant.TABLE_OPT_BUCKET_NUM_BUCKETS);
-    if (bucketCol != null
-        && !bucketCol.trim().isEmpty()
-        && bucketNumStr != null
-        && !bucketNumStr.trim().isEmpty()) {
-      int numBuckets = Integer.parseInt(bucketNumStr.trim());
-      if (numBuckets > 0) {
-        spec.add(new Bucket(bucketCol.trim(), numBuckets));
-        return spec;
-      }
-    }
-
-    String partCol = tableProperties.get(LanceConstant.TABLE_OPT_PARTITION_COLUMNS);
-    if (partCol != null && !partCol.trim().isEmpty()) {
-      spec.add(new Identity(partCol.trim()));
-    }
-
-    return spec;
+    return Collections.emptyList();
   }
 
   public static void initializeMemWal(Dataset dataset, List<SparkLanceShardingAdapter> spec) {
@@ -439,79 +318,6 @@ public abstract class SparkLanceShardingAdapter implements Serializable {
     return null;
   }
 
-  private static String toJson(ShardingSpec shardingSpec) {
-    try {
-      ObjectNode root = MAPPER.createObjectNode();
-      root.put("spec_id", shardingSpec.specId());
-      ArrayNode fields = root.putArray("fields");
-      for (ShardingField field : shardingSpec.fields()) {
-        ObjectNode fieldNode = fields.addObject();
-        fieldNode.put("field_id", field.fieldId());
-        ArrayNode sourceIds = fieldNode.putArray("source_ids");
-        for (Integer sourceId : field.sourceIds()) {
-          sourceIds.add(sourceId);
-        }
-        field.transform().ifPresent(transform -> fieldNode.put("transform", transform));
-        field.expression().ifPresent(expression -> fieldNode.put("expression", expression));
-        fieldNode.put("result_type", field.resultType());
-        ObjectNode parameters = fieldNode.putObject("parameters");
-        for (Map.Entry<String, String> entry : field.parameters().entrySet()) {
-          parameters.put(entry.getKey(), entry.getValue());
-        }
-      }
-      return MAPPER.writeValueAsString(root);
-    } catch (JsonProcessingException e) {
-      throw new RuntimeException("Failed to serialize MemWAL sharding spec", e);
-    }
-  }
-
-  private static ShardingSpec fromJson(JsonNode root) {
-    int specId = intValue(root, "spec_id", "specId", 0);
-    List<ShardingField> fields = new ArrayList<>();
-    JsonNode fieldsNode = root.path("fields");
-    if (fieldsNode.isArray()) {
-      for (JsonNode fieldNode : fieldsNode) {
-        fields.add(shardingFieldFromJson(fieldNode));
-      }
-    }
-    return new ShardingSpec(specId, fields);
-  }
-
-  private static ShardingField shardingFieldFromJson(JsonNode fieldNode) {
-    String fieldId = textValue(fieldNode, "field_id", "fieldId", "");
-    List<Integer> sourceIds = new ArrayList<>();
-    JsonNode sourceIdsNode = firstPresent(fieldNode, "source_ids", "sourceIds");
-    if (sourceIdsNode != null && sourceIdsNode.isArray()) {
-      for (JsonNode sourceId : sourceIdsNode) {
-        sourceIds.add(sourceId.asInt());
-      }
-    }
-    return new ShardingField(
-        fieldId,
-        sourceIds,
-        nullableTextValue(fieldNode, "transform"),
-        nullableTextValue(fieldNode, "expression"),
-        textValue(fieldNode, "result_type", "resultType", "int32"),
-        stringMap(firstPresent(fieldNode, "parameters")));
-  }
-
-  private ShardingField toShardingField() {
-    Map<String, String> parameters = new HashMap<>();
-    parameters.put("column", getCol());
-    String fieldId = getTransform() + "(" + getCol() + ")";
-    String expression = getTransform() + "(" + getCol() + ")";
-    String resultType = "utf8";
-    if (this instanceof Bucket) {
-      int numBuckets = ((Bucket) this).getNumBuckets();
-      parameters.put("num_buckets", Integer.toString(numBuckets));
-      fieldId = "bucket(" + numBuckets + ", " + getCol() + ")";
-      expression = fieldId;
-      resultType = "int32";
-    }
-    return new ShardingField(
-        fieldId, Collections.emptyList(), getTransform(), expression, resultType, parameters);
-  }
-
   private static SparkLanceShardingAdapter fromShardingField(
       ShardingField field, Function<Integer, String> sourceIdToColumn) {
     String transform = field.transform().orElse(null);
@@ -548,40 +354,6 @@ public abstract class SparkLanceShardingAdapter implements Serializable {
           "MemWAL sharding field " + field.fieldId() + " missing parameter " + key);
     }
     return value;
-  }
-
-  private static JsonNode firstPresent(JsonNode node, String... names) {
-    for (String name : names) {
-      JsonNode child = node.get(name);
-      if (child != null && !child.isNull()) {
-        return child;
-      }
-    }
-    return null;
-  }
-
-  private static String textValue(JsonNode node, String first, String second, String defaultValue) {
-    JsonNode child = firstPresent(node, first, second);
-    return child == null ? defaultValue : child.asText();
-  }
-
-  private static String nullableTextValue(JsonNode node, String name) {
-    JsonNode child = firstPresent(node, name);
-    return child == null ? null : child.asText();
-  }
-
-  private static int intValue(JsonNode node, String first, String second, int defaultValue) {
-    JsonNode child = firstPresent(node, first, second);
-    return child == null ? defaultValue : child.asInt();
-  }
-
-  private static Map<String, String> stringMap(JsonNode node) {
-    Map<String, String> result = new HashMap<>();
-    if (node != null && node.isObject()) {
-      node.fields()
-          .forEachRemaining(entry -> result.put(entry.getKey(), entry.getValue().asText()));
-    }
-    return result;
   }
 
   /**

@@ -79,12 +79,7 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
   @Override
   public ScanBuilder newScanBuilder(CaseInsensitiveStringMap caseInsensitiveStringMap) {
     return new LanceScanBuilder(
-        sparkSchema,
-        readOptions,
-        initialStorageOptions,
-        namespaceImpl,
-        namespaceProperties,
-        tableProperties);
+        sparkSchema, readOptions, initialStorageOptions, namespaceImpl, namespaceProperties);
   }
 
   @Override

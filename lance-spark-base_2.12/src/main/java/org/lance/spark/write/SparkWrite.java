@@ -38,10 +38,10 @@ import java.util.Map;
 /**
  * Spark write implementation for Lance tables.
  *
- * <p>When the table property {@code lance.partition.columns} is set, this write requires Spark to
- * cluster (partition) the input data by those columns before writing. This ensures each Lance
- * fragment contains exactly one distinct value for the partition column(s), which is the
- * prerequisite for Storage-Partitioned Joins (SPJ) on the read path.
+ * <p>When a Lance sharding spec is configured, this write asks Spark to cluster input data by the
+ * sharding columns before writing and rolls fragments on sharding-key boundaries. This keeps each
+ * Lance fragment within one sharding key, which is the prerequisite for Storage-Partitioned Joins
+ * (SPJ) on the read path.
  */
 public class SparkWrite implements Write, RequiresDistributionAndOrdering {
   private final LanceSparkWriteOptions writeOptions;
@@ -67,7 +67,6 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
   private final List<String> tableId;
   private final boolean managedVersioning;
   private final StagedCommit stagedCommit;
-  private final Map<String, String> tableProperties;
   private final List<SparkLanceShardingAdapter> initialPartitionSpec;
   private List<SparkLanceShardingAdapter> cachedPartitionSpec;
 
@@ -81,7 +80,6 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
       List<String> tableId,
       boolean managedVersioning,
       StagedCommit stagedCommit,
-      Map<String, String> tableProperties,
       List<SparkLanceShardingAdapter> initialPartitionSpec) {
     this.schema = schema;
     this.writeOptions = writeOptions;
@@ -92,10 +90,6 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
     this.tableId = tableId;
     this.managedVersioning = managedVersioning;
     this.stagedCommit = stagedCommit;
-    this.tableProperties =
-        tableProperties != null
-            ? Collections.unmodifiableMap(tableProperties)
-            : Collections.emptyMap();
     this.initialPartitionSpec =
         initialPartitionSpec != null
             ? Collections.unmodifiableList(initialPartitionSpec)
@@ -112,7 +106,7 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
                 .initialStorageOptions(initialStorageOptions)
                 .runtimeNamespace(namespaceImpl, namespaceProperties, tableId)
                 .build()) {
-          cachedPartitionSpec = SparkLanceShardingAdapter.parseSpec(dataset, tableProperties);
+          cachedPartitionSpec = SparkLanceShardingAdapter.parseSpec(dataset);
         }
       }
     }
@@ -181,7 +175,6 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
     private final Map<String, String> namespaceProperties;
     private final List<String> tableId;
     private final boolean managedVersioning;
-    private final Map<String, String> tableProperties;
     private final List<SparkLanceShardingAdapter> partitionSpec;
 
     public SparkWriteBuilder(
@@ -191,8 +184,7 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
         String namespaceImpl,
         Map<String, String> namespaceProperties,
         List<String> tableId,
-        boolean managedVersioning,
-        Map<String, String> tableProperties) {
+        boolean managedVersioning) {
       this(
           schema,
           writeOptions,
@@ -201,7 +193,6 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
           namespaceProperties,
           tableId,
           managedVersioning,
-          tableProperties,
           Collections.emptyList());
     }
 
@@ -213,7 +204,6 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
         Map<String, String> namespaceProperties,
         List<String> tableId,
         boolean managedVersioning,
-        Map<String, String> tableProperties,
         List<SparkLanceShardingAdapter> partitionSpec) {
       this.schema = schema;
       this.writeOptions = writeOptions;
@@ -222,7 +212,6 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
       this.namespaceProperties = namespaceProperties;
       this.tableId = tableId;
       this.managedVersioning = managedVersioning;
-      this.tableProperties = tableProperties;
       this.partitionSpec = partitionSpec;
     }
 
@@ -262,7 +251,6 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
           tableId,
           managedVersioning,
           stagedCommit,
-          tableProperties,
           partitionSpec);
     }
 

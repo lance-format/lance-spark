@@ -51,10 +51,9 @@ public class LanceInputPartition implements HasPartitionKey {
   private final Map<String, String> namespaceProperties;
 
   /**
-   * Partition key row for storage-partitioned joins (SPJ). When a partition-compatible column is
-   * detected via zonemap stats, this holds the single partition value for this partition's
-   * fragment. Null when no partition column is detected (falls back to fragment-ID-based
-   * partitioning).
+   * Partition key row for storage-partitioned joins (SPJ). When a Lance sharding field is detected
+   * from zonemap stats, this holds the single sharding value for this partition's fragment. Null
+   * when no sharding column is detected (falls back to fragment-ID-based partitioning).
    */
   private final InternalRow partitionKeyRow;
 
@@ -144,12 +143,12 @@ public class LanceInputPartition implements HasPartitionKey {
   /**
    * Returns the partition key for this input partition.
    *
-   * <p>When a partition column is declared via {@code lance.partition.columns} table property and
-   * detected as partition-compatible (zonemap stats showing min==max per fragment), this returns
-   * the partition value as a single-column InternalRow. This enables Spark's storage-partitioned
-   * join (SPJ) protocol to co-locate partitions with the same value across different data sources.
+   * <p>When a Lance sharding field is detected as partition-compatible from zonemap stats, this
+   * returns the sharding value as a single-column InternalRow. This enables Spark's
+   * storage-partitioned join (SPJ) protocol to co-locate partitions with the same value across
+   * different data sources.
    *
-   * <p>When no partition column is configured, {@code outputPartitioning()} returns {@link
+   * <p>When no sharding column is configured, {@code outputPartitioning()} returns {@link
    * org.apache.spark.sql.connector.read.partitioning.UnknownPartitioning} and Spark should not call
    * this method. Returns an empty row as a defensive fallback.
    */

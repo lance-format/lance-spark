@@ -95,7 +95,6 @@ public class LanceScanBuilder
 
   private final java.util.Map<String, String> namespaceProperties;
 
-  private final java.util.Map<String, String> tableProperties;
   private final List<SparkLanceShardingAdapter> partitionSpec;
 
   public LanceScanBuilder(
@@ -103,15 +102,13 @@ public class LanceScanBuilder
       LanceSparkReadOptions readOptions,
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
-      java.util.Map<String, String> namespaceProperties,
-      java.util.Map<String, String> tableProperties) {
+      java.util.Map<String, String> namespaceProperties) {
     this(
         schema,
         readOptions,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
-        tableProperties,
         Collections.emptyList());
   }
 
@@ -121,7 +118,6 @@ public class LanceScanBuilder
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
       java.util.Map<String, String> namespaceProperties,
-      java.util.Map<String, String> tableProperties,
       List<SparkLanceShardingAdapter> partitionSpec) {
     this.fullSchema = schema;
     this.schema = schema;
@@ -129,7 +125,6 @@ public class LanceScanBuilder
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
-    this.tableProperties = tableProperties != null ? tableProperties : Collections.emptyMap();
     this.partitionSpec =
         partitionSpec != null
             ? Collections.unmodifiableList(new ArrayList<>(partitionSpec))
@@ -166,13 +161,11 @@ public class LanceScanBuilder
     // Get statistics from manifest summary before closing dataset
     ManifestSummary summary = getOrOpenDataset().getVersion().getManifestSummary();
 
-    // Collect all columns that need zonemap stats: filter columns + partition columns.
+    // Collect all columns that need zonemap stats: filter columns + sharding columns.
     Set<String> columnsToLoad = extractReferencedColumns(pushedPredicates);
     Dataset dataset = getOrOpenDataset();
     List<SparkLanceShardingAdapter> partSpec =
-        partitionSpec.isEmpty()
-            ? SparkLanceShardingAdapter.parseSpec(dataset, tableProperties)
-            : partitionSpec;
+        partitionSpec.isEmpty() ? SparkLanceShardingAdapter.parseSpec(dataset) : partitionSpec;
     for (SparkLanceShardingAdapter t : partSpec) {
       columnsToLoad.add(t.getCol());
     }
@@ -180,17 +173,15 @@ public class LanceScanBuilder
     // Load zonemap stats for all requested columns in one pass.
     Map<String, List<ZoneStats>> zonemapStats = loadZonemapStats(getOrOpenDataset(), columnsToLoad);
 
-    // Detect partition-compatible fragments from zonemap stats.
-    // Each transform checks its column's zones; if every fragment
-    // has a single partition value, we get a fragment→key map.
+    // Detect sharding-compatible fragments from zonemap stats. Each adapter checks its column's
+    // zones; if every fragment has a single sharding value, we get a fragment-to-key map.
     Map<Integer, Object> fragmentPartKeys = null;
     SparkLanceShardingAdapter activeAdapter = null;
     for (SparkLanceShardingAdapter t : partSpec) {
       List<ZoneStats> colStats = zonemapStats.get(t.getCol());
       if (colStats == null || colStats.isEmpty()) {
         LOG.warn(
-            "Partition column '{}' (transform={}) has no zonemap stats;"
-                + " partition detection disabled",
+            "Sharding column '{}' (transform={}) has no zonemap stats; sharding detection disabled",
             t.getCol(),
             t.getTransform());
         continue;

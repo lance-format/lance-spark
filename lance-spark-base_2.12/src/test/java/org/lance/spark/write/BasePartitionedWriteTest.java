@@ -31,9 +31,9 @@ import java.util.stream.IntStream;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Integration test verifying that writes with {@code lance.partition.columns} produce fragments
- * where data is clustered by the partition column. When the number of Spark write tasks exceeds the
- * number of distinct partition values, each fragment contains exactly one partition value.
+ * Integration test verifying that writes with identity sharding produce fragments where data is
+ * clustered by the sharding column. When the number of Spark write tasks exceeds the number of
+ * distinct sharding values, each fragment contains exactly one sharding value.
  */
 public abstract class BasePartitionedWriteTest {
   protected String catalogName = "lance_part_write_test";
@@ -79,15 +79,11 @@ public abstract class BasePartitionedWriteTest {
     String tableName = "part_collide_" + UUID.randomUUID().toString().replace("-", "");
     String fullTable = catalogName + ".default." + tableName;
 
-    // TODO: collapse back to `CREATE TABLE ... TBLPROPERTIES(...)` once the catalog
-    // persists TBLPROPERTIES on create. Today only ALTER TABLE goes through
-    // dataset.updateConfig, so properties set on CREATE are dropped before INSERT.
     spark.sql(
         String.format(
-            "CREATE TABLE %s (id INT, region STRING, value DOUBLE) USING lance", fullTable));
-    spark.sql(
-        String.format(
-            "ALTER TABLE %s SET TBLPROPERTIES ('lance.partition.columns' = 'region')", fullTable));
+            "CREATE TABLE %s (id INT, region STRING, value DOUBLE) USING lance "
+                + "PARTITIONED BY (region)",
+            fullTable));
 
     // 20 distinct regions into 2 buckets => some task will receive multiple regions.
     // Rows-per-region is tiny so all rows in a task comfortably fit in a single fragment —
@@ -139,7 +135,7 @@ public abstract class BasePartitionedWriteTest {
     String tableName = "no_part_write_" + UUID.randomUUID().toString().replace("-", "");
     String fullTable = catalogName + ".default." + tableName;
 
-    // Create table WITHOUT partition column property
+    // Create table without Spark partitioning/sharding.
     spark.sql(
         String.format(
             "CREATE TABLE %s (id INT, region STRING, value DOUBLE) USING lance", fullTable));

@@ -13,12 +13,15 @@
  */
 package org.lance.spark.sharding;
 
-import org.lance.spark.LanceConstant;
+import org.lance.memwal.ShardingField;
+import org.lance.memwal.ShardingSpec;
 
 import org.apache.spark.sql.connector.expressions.Expressions;
 import org.apache.spark.sql.connector.expressions.Transform;
 import org.junit.jupiter.api.Test;
 
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -72,38 +75,38 @@ public class SparkLanceShardingAdapterTest {
   }
 
   @Test
-  public void testParseSpecFromMemWalShardingSpec() {
-    Map<String, String> props = new java.util.HashMap<>();
-    props.put(
-        LanceConstant.TABLE_OPT_SHARDING_SPEC,
-        "{\"spec_id\":0,\"fields\":[{\"field_id\":\"bucket(4, region)\","
-            + "\"source_ids\":[],\"transform\":\"bucket\","
-            + "\"expression\":\"bucket(4, region)\",\"result_type\":\"int32\","
-            + "\"parameters\":{\"column\":\"region\",\"num_buckets\":\"4\"}}]}");
-    List<SparkLanceShardingAdapter> spec = SparkLanceShardingAdapter.parseSpec(props);
+  public void testFromShardingSpecUsesSourceIds() {
+    ShardingField field =
+        new ShardingField(
+            "shard_key",
+            Collections.singletonList(7),
+            "identity",
+            null,
+            "utf8",
+            Collections.emptyMap());
+    ShardingSpec shardingSpec = new ShardingSpec(0, Collections.singletonList(field));
+
+    List<SparkLanceShardingAdapter> spec =
+        SparkLanceShardingAdapter.fromShardingSpec(shardingSpec, id -> id == 7 ? "region" : null);
+    assertEquals(1, spec.size());
+    assertInstanceOf(SparkLanceShardingAdapter.Identity.class, spec.get(0));
+    assertEquals("region", spec.get(0).getCol());
+  }
+
+  @Test
+  public void testFromBucketShardingSpec() {
+    Map<String, String> parameters = new HashMap<>();
+    parameters.put("num_buckets", "4");
+    ShardingField field =
+        new ShardingField(
+            "shard_key", Collections.singletonList(7), "bucket", null, "int32", parameters);
+    ShardingSpec shardingSpec = new ShardingSpec(0, Collections.singletonList(field));
+
+    List<SparkLanceShardingAdapter> spec =
+        SparkLanceShardingAdapter.fromShardingSpec(shardingSpec, id -> id == 7 ? "region" : null);
     assertEquals(1, spec.size());
     assertInstanceOf(SparkLanceShardingAdapter.Bucket.class, spec.get(0));
     assertEquals("region", spec.get(0).getCol());
     assertEquals(4, ((SparkLanceShardingAdapter.Bucket) spec.get(0)).getNumBuckets());
-  }
-
-  @Test
-  public void testParseSpecLegacyBucket() {
-    Map<String, String> props = new java.util.HashMap<>();
-    props.put("lance.partition.bucket.columns", "region");
-    props.put("lance.partition.bucket.num_buckets", "4");
-    List<SparkLanceShardingAdapter> spec = SparkLanceShardingAdapter.parseSpec(props);
-    assertEquals(1, spec.size());
-    assertInstanceOf(SparkLanceShardingAdapter.Bucket.class, spec.get(0));
-    assertEquals(4, ((SparkLanceShardingAdapter.Bucket) spec.get(0)).getNumBuckets());
-  }
-
-  @Test
-  public void testParseSpecLegacyIdentity() {
-    Map<String, String> props = new java.util.HashMap<>();
-    props.put("lance.partition.columns", "region");
-    List<SparkLanceShardingAdapter> spec = SparkLanceShardingAdapter.parseSpec(props);
-    assertEquals(1, spec.size());
-    assertInstanceOf(SparkLanceShardingAdapter.Identity.class, spec.get(0));
   }
 }

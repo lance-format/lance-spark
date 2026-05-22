@@ -294,7 +294,6 @@ public class LanceDataset
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
-        tableProperties,
         partitionSpec);
   }
 
@@ -392,7 +391,6 @@ public class LanceDataset
             namespaceProperties,
             readOptions.getTableId(),
             managedVersioning,
-            tableProperties,
             partitionSpec);
 
     if (stagedCommit != null) {

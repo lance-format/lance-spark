@@ -28,33 +28,4 @@ public class LanceConstant {
 
   public static final String BACKFILL_COLUMNS_KEY = "backfill_columns";
   public static final String UPDATE_COLUMNS_KEY = "update_columns";
-
-  /**
-   * Table property that declares the partition column(s) for SPJ.
-   *
-   * @deprecated Use MemWAL index metadata.
-   */
-  @Deprecated public static final String TABLE_OPT_PARTITION_COLUMNS = "lance.partition.columns";
-
-  /**
-   * @deprecated Use MemWAL index metadata.
-   */
-  @Deprecated
-  public static final String TABLE_OPT_BUCKET_COLUMNS = "lance.partition.bucket.columns";
-
-  /**
-   * @deprecated Use MemWAL index metadata.
-   */
-  @Deprecated
-  public static final String TABLE_OPT_BUCKET_NUM_BUCKETS = "lance.partition.bucket.num_buckets";
-
-  /** Legacy MemWAL sharding spec JSON table property. */
-  @Deprecated public static final String TABLE_OPT_SHARDING_SPEC = "lance.memwal.sharding.spec";
-
-  /**
-   * Unified partition spec as JSON array of transform objects.
-   *
-   * @deprecated Use MemWAL index metadata.
-   */
-  @Deprecated public static final String TABLE_OPT_PARTITION_SPEC = "lance.partition.spec";
 }

@@ -47,7 +47,6 @@ public class LanceScanBuilderTest {
         TestUtils.TestTable1Config.readOptions,
         Collections.emptyMap(),
         null,
-        Collections.emptyMap(),
         Collections.emptyMap());
   }
 
@@ -115,7 +114,7 @@ public class LanceScanBuilderTest {
             Collections.singletonMap(LanceSparkReadOptions.CONFIG_PUSH_DOWN_FILTERS, "false"),
             TestUtils.TestTable1Config.datasetUri);
     LanceScanBuilder builder =
-        new LanceScanBuilder(TEST_SCHEMA, options, Collections.emptyMap(), null, null, null);
+        new LanceScanBuilder(TEST_SCHEMA, options, Collections.emptyMap(), null, null);
     Predicate[] predicates = {TestPredicates.gt("x", 1L)};
     Predicate[] result = builder.pushPredicates(predicates);
     assertEquals(1, result.length);
@@ -145,7 +144,6 @@ public class LanceScanBuilderTest {
             TestUtils.TestTable1Config.readOptions,
             Collections.emptyMap(),
             null,
-            Collections.emptyMap(),
             Collections.emptyMap());
     Predicate[] predicates = {TestPredicates.gt("id", 1L)};
     Predicate[] result = builder.pushPredicates(predicates);
@@ -192,7 +190,7 @@ public class LanceScanBuilderTest {
             Collections.singletonMap(LanceSparkReadOptions.CONFIG_TOP_N_PUSH_DOWN, "false"),
             TestUtils.TestTable1Config.datasetUri);
     LanceScanBuilder builder =
-        new LanceScanBuilder(TEST_SCHEMA, options, Collections.emptyMap(), null, null, null);
+        new LanceScanBuilder(TEST_SCHEMA, options, Collections.emptyMap(), null, null);
     SortOrder order = new TestSortOrder("x", SortDirection.ASCENDING, NullOrdering.NULLS_FIRST);
     assertFalse(builder.pushTopN(new SortOrder[] {order}, 10));
   }

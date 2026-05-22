@@ -35,7 +35,7 @@ import static org.junit.jupiter.api.Assertions.*;
  *
  * <p>Setup: Two Lance tables with a "region" column, each with multiple fragments where each
  * fragment contains a single region value (min==max in zonemap). A btree index on "region" provides
- * zonemap stats. The table property {@code lance.partition.columns=region} enables SPJ.
+ * zonemap stats. Identity sharding on "region" enables SPJ.
  *
  * <p>Expected behavior:
  *
@@ -90,7 +90,7 @@ public abstract class BaseSpjBroadcastTest {
     spark.sql(
         String.format(
             "CREATE TABLE %s (id INT, region STRING, value DOUBLE) USING lance "
-                + "TBLPROPERTIES ('lance.partition.columns' = 'region')",
+                + "PARTITIONED BY (region)",
             fullTable));
 
     // Insert data region-by-region to create one fragment per region

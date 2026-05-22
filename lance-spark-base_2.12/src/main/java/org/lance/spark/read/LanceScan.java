@@ -368,13 +368,12 @@ public class LanceScan
   /**
    * Reports the output partitioning to Spark's optimizer.
    *
-   * <p>When a partition-compatible column is detected via zonemap stats (every fragment has a
-   * single distinct value for that column), we report the data column as the partition key. This
-   * enables Spark's storage-partitioned join (SPJ) protocol — allowing shuffle-free joins between
-   * Lance tables or between Lance and other data sources (e.g., Iceberg) that share the same
-   * partition column.
+   * <p>When a sharding-compatible column is detected via zonemap stats (every fragment has a single
+   * distinct value for that column), we report the data column as the partition key. This enables
+   * Spark's storage-partitioned join (SPJ) protocol for Lance tables and other data sources that
+   * share the same sharding column.
    *
-   * <p>When no partition column is detected, returns {@link UnknownPartitioning}.
+   * <p>When no sharding column is detected, returns {@link UnknownPartitioning}.
    */
   @Override
   public Partitioning outputPartitioning() {

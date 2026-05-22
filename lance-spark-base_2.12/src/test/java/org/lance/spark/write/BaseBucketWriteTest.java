@@ -13,6 +13,10 @@
  */
 package org.lance.spark.write;
 
+import org.lance.memwal.MemWalIndexDetails;
+import org.lance.memwal.ShardingField;
+import org.lance.schema.LanceField;
+import org.lance.spark.LanceRuntime;
 import org.lance.spark.utils.BucketHashUtil;
 
 import org.apache.spark.sql.Dataset;
@@ -25,9 +29,11 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -41,12 +47,13 @@ import static org.junit.jupiter.api.Assertions.*;
 public abstract class BaseBucketWriteTest {
   protected String catalogName = "lance_bucket_write_test";
   protected SparkSession spark;
+  protected Path rootPath;
 
   @TempDir Path tempDir;
 
   @BeforeEach
   public void setup() {
-    Path rootPath = tempDir.resolve(UUID.randomUUID().toString());
+    rootPath = tempDir.resolve(UUID.randomUUID().toString());
     rootPath.toFile().mkdirs();
     String testRoot = rootPath.toString();
     spark =
@@ -67,6 +74,39 @@ public abstract class BaseBucketWriteTest {
   public void tearDown() throws IOException {
     if (spark != null) {
       spark.close();
+    }
+  }
+
+  @Test
+  public void testBucketShardingDoesNotRequirePrimaryKey() {
+    String tableName = "bucket_no_pk_" + UUID.randomUUID().toString().replace("-", "");
+    String fullTable = catalogName + ".default." + tableName;
+
+    spark.sql(
+        String.format(
+            "CREATE TABLE %s (id INT, region STRING, value DOUBLE) USING lance "
+                + "PARTITIONED BY (bucket(4, region))",
+            fullTable));
+
+    try (org.lance.Dataset dataset =
+        org.lance.Dataset.open()
+            .allocator(LanceRuntime.allocator())
+            .uri(tableUri(tableName))
+            .build()) {
+      assertFalse(
+          dataset.getLanceSchema().fields().stream().anyMatch(BaseBucketWriteTest::isPrimaryKey),
+          "Bucket sharding should not require an unenforced primary key");
+
+      MemWalIndexDetails details =
+          dataset
+              .memWalIndexDetails()
+              .orElseThrow(() -> new AssertionError("MemWAL index should be initialized"));
+      assertFalse(details.shardingSpecs().isEmpty(), "MemWAL sharding spec should be persisted");
+
+      LanceField regionField = field(dataset, "region");
+      ShardingField shardingField = details.shardingSpecs().get(0).fields().get(0);
+      assertEquals(Optional.of("bucket"), shardingField.transform());
+      assertEquals(Collections.singletonList(regionField.getId()), shardingField.sourceIds());
     }
   }
 
@@ -181,5 +221,25 @@ public abstract class BaseBucketWriteTest {
     Dataset<Row> nullRows =
         spark.sql(String.format("SELECT * FROM %s WHERE region IS NULL", fullTable));
     assertEquals(2, nullRows.count());
+  }
+
+  private String tableUri(String tableName) {
+    return rootPath.resolve(tableName + ".lance").toString();
+  }
+
+  private static LanceField field(org.lance.Dataset dataset, String name) {
+    return dataset.getLanceSchema().fields().stream()
+        .filter(field -> field.getName().equals(name))
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("Missing Lance field: " + name));
+  }
+
+  private static boolean isPrimaryKey(LanceField field) {
+    if (field.isUnenforcedPrimaryKey()) {
+      return true;
+    }
+    Map<String, String> metadata = field.getMetadata();
+    return metadata != null
+        && "true".equalsIgnoreCase(metadata.get("lance-schema:unenforced-primary-key"));
   }
 }
