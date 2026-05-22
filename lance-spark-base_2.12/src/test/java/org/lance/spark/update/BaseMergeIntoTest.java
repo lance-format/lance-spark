@@ -189,22 +189,14 @@ public abstract class BaseMergeIntoTest {
    * Pins down per-branch version-column behavior of MERGE INTO on a stable-row-id table:
    *
    * <ul>
-   *   <li>UPDATE branch: advances {@code _row_last_updated_at_version}. Lance recalculates {@code
-   *       _row_created_at_version} downward (to v1) for rewritten rows — matching the row-level
-   *       UPDATE semantics already pinned in BaseCdfVersionTrackingTest.
+   *   <li>UPDATE branch: advances {@code _row_last_updated_at_version}. MERGE rewrites the matched
+   *       row into the merge commit, so {@code _row_created_at_version} matches {@code
+   *       _row_last_updated_at_version} for the replacement row.
    *   <li>DELETE branch: row disappears.
    *   <li>Untouched rows: both versions preserved.
-   *   <li>INSERT branch: <strong>known CDF gap</strong> — rows from MERGE's NOT MATCHED branch flow
-   *       through the same fragment-rewrite path as updated rows, so their {@code
-   *       _row_created_at_version} is <em>not</em> set to the merge commit version. CDF consumers
-   *       cannot distinguish merge-inserted rows from updated rows via created_at.
+   *   <li>INSERT branch: inserted rows are created in the merge commit, so {@code
+   *       _row_created_at_version} matches {@code _row_last_updated_at_version}.
    * </ul>
-   *
-   * <p>Tracking upstream fix for the INSERT-branch gap:
-   * https://github.com/lance-format/lance/issues/6735 — once that lands, change the inserted-row
-   * {@code created_at} assertion below from {@code <= initialInsertVersion} to {@code ==
-   * mergeCommitLastUpdated} (i.e. created_at should equal last_updated, both at the merge commit
-   * version).
    */
   @Test
   public void testMergeIntoTracksVersionColumnsPerBranch() {
@@ -272,7 +264,7 @@ public abstract class BaseMergeIntoTest {
       long lastUpdated = row.getLong(3);
       switch (id) {
         case 1:
-          // UPDATE branch: last_updated advances; created_at gets recalculated downward.
+          // UPDATE branch: last_updated advances; replacement row is created by the merge commit.
           Assertions.assertTrue(
               lastUpdated > beforeLastUpdated.get(1),
               "id=1 last_updated must advance across UPDATE branch (before="
@@ -280,9 +272,8 @@ public abstract class BaseMergeIntoTest {
                   + ", after="
                   + lastUpdated
                   + ")");
-          Assertions.assertTrue(
-              createdAt <= beforeLastUpdated.get(1),
-              "id=1 created_at must not jump forward across UPDATE (got " + createdAt + ")");
+          Assertions.assertEquals(
+              lastUpdated, createdAt, "id=1 created_at must match the merge commit");
           mergeCommitLastUpdated = lastUpdated;
           break;
         case 3:
@@ -299,24 +290,14 @@ public abstract class BaseMergeIntoTest {
           break;
         case 5:
         case 6:
-          // INSERT branch sharing the merge commit: last_updated equals the UPDATE branch's
-          // last_updated (single commit). created_at is currently NOT set to the commit version
-          // (it gets recalculated like an UPDATE rewrite). Tracked in
-          // lance-format/lance#6735 — flip the created_at assertion when fixed.
+          // INSERT branch sharing the merge commit: created_at and last_updated both equal the
+          // UPDATE branch's last_updated (single commit).
           Assertions.assertEquals(
               mergeCommitLastUpdated == null ? lastUpdated : mergeCommitLastUpdated.longValue(),
               lastUpdated,
               "id=" + id + " inserted row last_updated must match the merge commit");
-          Assertions.assertTrue(
-              createdAt <= initialInsertVersion,
-              "id="
-                  + id
-                  + " inserted row created_at currently does NOT reflect the merge commit "
-                  + "(initial="
-                  + initialInsertVersion
-                  + ", got="
-                  + createdAt
-                  + "). If this changes, update the assertion.");
+          Assertions.assertEquals(
+              lastUpdated, createdAt, "id=" + id + " inserted row created_at must match merge");
           break;
         default:
           Assertions.fail("unexpected surviving id=" + id);
