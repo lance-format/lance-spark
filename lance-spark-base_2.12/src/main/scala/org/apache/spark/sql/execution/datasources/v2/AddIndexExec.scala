@@ -27,8 +27,9 @@ import org.apache.spark.sql.util.LanceArrowUtils
 import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
 import org.apache.spark.unsafe.types.UTF8String
 import org.lance.{CommitBuilder, Dataset, Transaction}
-import org.lance.index.{Index, IndexOptions, IndexParams, IndexType}
+import org.lance.index.{DistanceType, Index, IndexOptions, IndexParams, IndexType}
 import org.lance.index.scalar.{BTreeIndexParams, ScalarIndexParams}
+import org.lance.index.vector.{IvfBuildParams, PQBuildParams, SQBuildParams, VectorIndexParams, VectorTrainer}
 import org.lance.operation.{CreateIndex => AddIndexOperation}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceRuntime, LanceSparkReadOptions}
 import org.lance.spark.arrow.LanceArrowWriter
@@ -82,8 +83,32 @@ case class AddIndexExec(
       return Seq(new GenericInternalRow(Array[Any](0L, UTF8String.fromString(indexName))))
     }
 
-    val uuid = UUID.randomUUID()
     val indexType = IndexUtils.buildIndexType(method)
+
+    // Vector indexes (IVF_*) use the multi-segment commit API: each fragment produces a
+    // self-contained uncommitted segment, and the driver publishes them atomically under
+    // a single logical index name. This path is separate from the scalar (BTREE / INVERTED)
+    // distributed build because scalar per-fragment createIndex still produces partial files
+    // that require mergeIndexMetadata to finalize.
+    if (IndexUtils.isVectorIndex(indexType)) {
+      val (nsImpl, nsProps, tableId, initialStorageOpts) = credentialVending(lanceDataset)
+      val spec = VectorIndexSpec.fromArgs(indexType, args)
+      val committed = new VectorIndexJob(
+        this,
+        readOptions,
+        indexType,
+        spec,
+        fragmentIds,
+        nsImpl,
+        nsProps,
+        tableId,
+        initialStorageOpts).runAndCommit()
+      return Seq(new GenericInternalRow(Array[Any](
+        committed,
+        UTF8String.fromString(indexName))))
+    }
+
+    val uuid = UUID.randomUUID()
 
     val dataset = Utils.openDatasetBuilder(readOptions).build()
 
@@ -148,26 +173,28 @@ case class AddIndexExec(
       UTF8String.fromString(indexName))))
   }
 
+  // Get namespace info from catalog if available (for credential vending on workers)
+  private def credentialVending(lanceDataset: LanceDataset): (
+      Option[String],
+      Option[Map[String, String]],
+      Option[List[String]],
+      Option[Map[String, String]]) = catalog match {
+    case nsCatalog: BaseLanceNamespaceSparkCatalog =>
+      (
+        Option(nsCatalog.getNamespaceImpl),
+        Option(nsCatalog.getNamespaceProperties).map(_.asScala.toMap),
+        Option(lanceDataset.readOptions().getTableId).map(_.asScala.toList),
+        Option(lanceDataset.getInitialStorageOptions).map(_.asScala.toMap))
+    case _ => (None, None, None, None)
+  }
+
   private def createIndexJob(
       dataset: Dataset,
       lanceDataset: LanceDataset,
       readOptions: LanceSparkReadOptions,
       uuid: String,
       fragmentIds: List[Integer]): IndexJob = {
-    // Get namespace info from catalog if available (for credential vending on workers)
-    val (nsImpl, nsProps, tableId, initialStorageOpts): (
-        Option[String],
-        Option[Map[String, String]],
-        Option[List[String]],
-        Option[Map[String, String]]) = catalog match {
-      case nsCatalog: BaseLanceNamespaceSparkCatalog =>
-        (
-          Option(nsCatalog.getNamespaceImpl),
-          Option(nsCatalog.getNamespaceProperties).map(_.asScala.toMap),
-          Option(readOptions.getTableId).map(_.asScala.toList),
-          Option(lanceDataset.getInitialStorageOptions).map(_.asScala.toMap))
-      case _ => (None, None, None, None)
-    }
+    val (nsImpl, nsProps, tableId, initialStorageOpts) = credentialVending(lanceDataset)
 
     IndexUtils.buildIndexType(method) match {
       case IndexType.BTREE =>
@@ -545,11 +572,356 @@ case class RangeBTreeIndexBuilder(
 }
 
 /**
+ * A job implementation for creating IVF-family vector indexes on fragments in parallel.
+ *
+ * Each Spark task calls [[org.lance.Dataset#createIndex]] with `withFragmentIds(List(fid))`
+ * and vector index params; lance-core returns an *uncommitted* index segment per call. The
+ * driver collects these segments and publishes them atomically under one logical index name
+ * via [[org.lance.Dataset#commitExistingIndexSegments]].
+ *
+ * IVF centroids and (for IVF_PQ) the PQ codebook are trained once on the driver and
+ * broadcast to executors so every per-fragment segment shares the same artifacts. This is
+ * required by lance-core's distributed build path, which rejects per-fragment-trained
+ * centroids, and ensures all segments land in the same query-time compatibility group.
+ *
+ * Replace-on-recreate semantics are preserved by pre-calling [[org.lance.Dataset#dropIndex]]
+ * when a same-name index already exists.
+ *
+ * @param addIndexExec       AddIndexExec instance that initiated this job
+ * @param readOptions        Configuration options for reading the Lance dataset
+ * @param indexType          One of IVF_FLAT, IVF_PQ, IVF_SQ
+ * @param spec               Serializable carrier for IVF/PQ/SQ build params
+ * @param fragmentIds        Fragment IDs to process (one segment per fragment)
+ * @param nsImpl             Optional namespace implementation class for credential vending
+ * @param nsProps            Optional namespace properties for credential vending
+ * @param tableId            Optional table identifier for credential vending
+ * @param initialStorageOpts Optional initial storage options for the dataset
+ */
+class VectorIndexJob(
+    addIndexExec: AddIndexExec,
+    readOptions: LanceSparkReadOptions,
+    indexType: IndexType,
+    spec: VectorIndexSpec,
+    fragmentIds: List[Integer],
+    nsImpl: Option[String],
+    nsProps: Option[Map[String, String]],
+    tableId: Option[List[String]],
+    initialStorageOpts: Option[Map[String, String]]) extends Serializable {
+
+  def runAndCommit(): Long = {
+    val columns = addIndexExec.columns.toList
+    if (columns.size != 1) {
+      throw new IllegalArgumentException(
+        s"Vector index supports a single column only, got: $columns")
+    }
+    val column = columns.head
+    val indexName = addIndexExec.indexName
+
+    // Driver-side training: lance-core's distributed build (createIndex + withFragmentIds)
+    // requires precomputed IVF centroids — and for IVF_PQ, a precomputed codebook. Train
+    // once here, broadcast to executors, and every per-fragment segment shares the same
+    // centroids/codebook so segments land in the same compatibility group at query time.
+    val (centroids, codebook) = trainArtifactsOnDriver(column)
+
+    val trainedSpec = spec.copy(centroids = centroids, codebook = codebook)
+    val encodedReadOptions = encode(readOptions)
+
+    val tasks = fragmentIds.map { fid =>
+      VectorIndexTask(
+        encodedReadOptions,
+        columns,
+        indexType.name(),
+        trainedSpec,
+        indexName,
+        fid,
+        nsImpl,
+        nsProps,
+        tableId,
+        initialStorageOpts)
+    }.toSeq
+
+    val handles: Array[LanceIndexHandle] = addIndexExec.session.sparkContext
+      .parallelize(tasks, tasks.size)
+      .map(_.execute())
+      .collect()
+
+    val segments = handles.toList.map(_.toIndex).asJava
+
+    // commit_existing_index_segments is additive — pre-drop to preserve
+    // CREATE-INDEX replace-on-recreate semantics.
+    val dataset = Utils.openDatasetBuilder(readOptions).build()
+    try {
+      val sameNameExists = dataset.getIndexes.asScala.exists(_.name() == indexName)
+      if (sameNameExists) {
+        dataset.dropIndex(indexName)
+      }
+      dataset.commitExistingIndexSegments(indexName, column, segments)
+    } finally {
+      dataset.close()
+    }
+
+    handles.length.toLong
+  }
+
+  private def trainArtifactsOnDriver(column: String): (Array[Float], Array[Float]) = {
+    val dataset = Utils.openDatasetBuilder(readOptions).build()
+    try {
+      val ivfBuilder = new IvfBuildParams.Builder().setNumPartitions(spec.numPartitions)
+      spec.sampleRate.foreach(ivfBuilder.setSampleRate)
+      spec.maxIters.foreach(ivfBuilder.setMaxIters)
+      val centroids = VectorTrainer.trainIvfCentroids(dataset, column, ivfBuilder.build())
+
+      val codebook: Array[Float] = indexType match {
+        case IndexType.IVF_PQ =>
+          val pqBuilder = new PQBuildParams.Builder()
+          spec.numSubVectors.foreach(pqBuilder.setNumSubVectors)
+          spec.pqNumBits.foreach(pqBuilder.setNumBits)
+          spec.pqMaxIters.foreach(pqBuilder.setMaxIters)
+          spec.sampleRate.foreach(pqBuilder.setSampleRate)
+          VectorTrainer.trainPqCodebook(dataset, column, pqBuilder.build())
+        case _ => null
+      }
+
+      (centroids, codebook)
+    } finally {
+      dataset.close()
+    }
+  }
+}
+
+/**
+ * Executor-side task that builds one uncommitted vector index segment covering one fragment.
+ * Returns a Spark-serializable [[LanceIndexHandle]] that the driver reconstitutes into an
+ * [[org.lance.index.Index]] for commit.
+ */
+case class VectorIndexTask(
+    encodedReadOptions: String,
+    columns: List[String],
+    indexTypeName: String,
+    spec: VectorIndexSpec,
+    indexName: String,
+    fragmentId: Int,
+    namespaceImpl: Option[String],
+    namespaceProperties: Option[Map[String, String]],
+    tableId: Option[List[String]],
+    initialStorageOptions: Option[Map[String, String]]) extends Serializable {
+
+  def execute(): LanceIndexHandle = {
+    val readOptions = decode[LanceSparkReadOptions](encodedReadOptions)
+    val indexType = IndexType.valueOf(indexTypeName)
+    val vectorParams = spec.toVectorIndexParams(indexType)
+    val params = IndexParams.builder().setVectorIndexParams(vectorParams).build()
+
+    val indexOptions = IndexOptions
+      .builder(java.util.Arrays.asList(columns: _*), indexType, params)
+      .replace(true)
+      .withIndexName(indexName)
+      .withFragmentIds(Collections.singletonList(fragmentId))
+      .build()
+
+    val dataset = Utils.openDatasetBuilder(readOptions)
+      .initialStorageOptions(initialStorageOptions.map(_.asJava).orNull)
+      .build()
+
+    try {
+      LanceIndexHandle.from(dataset.createIndex(indexOptions))
+    } finally {
+      dataset.close()
+    }
+  }
+}
+
+/**
+ * Serializable carrier for IVF-family build parameters. Parsed from user WITH-args on the
+ * driver and shipped to executors, where [[toVectorIndexParams]] rebuilds the native
+ * [[VectorIndexParams]] (whose nested builders are not serializable).
+ */
+case class VectorIndexSpec(
+    metricType: String,
+    numPartitions: Int,
+    sampleRate: Option[Int],
+    maxIters: Option[Int],
+    useResidual: Option[Boolean],
+    // IVF_PQ
+    numSubVectors: Option[Int],
+    pqNumBits: Option[Int],
+    pqMaxIters: Option[Int],
+    // IVF_SQ
+    sqNumBits: Option[Short],
+    // Driver-trained artifacts passed into per-fragment builds.
+    // Populated by VectorIndexJob before task dispatch; null before training.
+    centroids: Array[Float] = null,
+    codebook: Array[Float] = null) extends Serializable {
+
+  def toVectorIndexParams(indexType: IndexType): VectorIndexParams = {
+    val ivfBuilder = new IvfBuildParams.Builder().setNumPartitions(numPartitions)
+    sampleRate.foreach(ivfBuilder.setSampleRate)
+    maxIters.foreach(ivfBuilder.setMaxIters)
+    useResidual.foreach(v => ivfBuilder.setUseResidual(v))
+    if (centroids != null) ivfBuilder.setCentroids(centroids)
+    val ivfParams = ivfBuilder.build()
+
+    val dt = VectorIndexSpec.parseDistanceType(metricType)
+    val b = new VectorIndexParams.Builder(ivfParams).setDistanceType(dt)
+
+    indexType match {
+      case IndexType.IVF_FLAT => // no sub-quantizer
+      case IndexType.IVF_PQ =>
+        val pqBuilder = new PQBuildParams.Builder()
+        numSubVectors.foreach(pqBuilder.setNumSubVectors)
+        pqNumBits.foreach(pqBuilder.setNumBits)
+        pqMaxIters.foreach(pqBuilder.setMaxIters)
+        sampleRate.foreach(pqBuilder.setSampleRate)
+        if (codebook != null) pqBuilder.setCodebook(codebook)
+        b.setPqParams(pqBuilder.build())
+      case IndexType.IVF_SQ =>
+        val sqBuilder = new SQBuildParams.Builder()
+        sqNumBits.foreach(v => sqBuilder.setNumBits(v))
+        sampleRate.foreach(sqBuilder.setSampleRate)
+        b.setSqParams(sqBuilder.build())
+      case other =>
+        throw new IllegalArgumentException(s"Unsupported vector index type: $other")
+    }
+
+    b.build()
+  }
+}
+
+object VectorIndexSpec {
+
+  def fromArgs(indexType: IndexType, args: Seq[LanceNamedArgument]): VectorIndexSpec = {
+    def argInt(name: String): Option[Int] = args.find(_.name == name).map { a =>
+      a.value match {
+        case i: java.lang.Integer => i.intValue()
+        case l: java.lang.Long => l.intValue()
+        case other =>
+          throw new IllegalArgumentException(
+            s"Vector index arg '$name' must be an integer, got: $other")
+      }
+    }
+    def argBool(name: String): Option[Boolean] = args.find(_.name == name).map { a =>
+      a.value match {
+        case b: java.lang.Boolean => b.booleanValue()
+        case other =>
+          throw new IllegalArgumentException(
+            s"Vector index arg '$name' must be a boolean, got: $other")
+      }
+    }
+    def argString(name: String): Option[String] = args.find(_.name == name).map { a =>
+      a.value match {
+        case s: java.lang.String => s
+        case other => String.valueOf(other)
+      }
+    }
+
+    val numPartitions = argInt("num_partitions").getOrElse(
+      throw new IllegalArgumentException(
+        "Vector index requires 'num_partitions' in WITH clause"))
+
+    val metric = argString("metric_type").getOrElse("l2")
+
+    val sqBits: Option[Short] = indexType match {
+      case IndexType.IVF_SQ => argInt("num_bits").map(_.toShort).orElse(Some(8.toShort))
+      case _ => None
+    }
+    val pqBits: Option[Int] = indexType match {
+      case IndexType.IVF_PQ => argInt("num_bits").orElse(Some(8))
+      case _ => None
+    }
+
+    VectorIndexSpec(
+      metricType = metric,
+      numPartitions = numPartitions,
+      sampleRate = argInt("sample_rate"),
+      maxIters = argInt("max_iters"),
+      useResidual = argBool("use_residual"),
+      numSubVectors = argInt("num_sub_vectors"),
+      pqNumBits = pqBits,
+      pqMaxIters = argInt("pq_max_iters"),
+      sqNumBits = sqBits)
+  }
+
+  def parseDistanceType(s: String): DistanceType = s.toLowerCase match {
+    case "l2" | "euclidean" => DistanceType.L2
+    case "cosine" => DistanceType.Cosine
+    case "dot" | "inner_product" | "ip" => DistanceType.Dot
+    case "hamming" => DistanceType.Hamming
+    case other => throw new IllegalArgumentException(
+        s"Unsupported metric_type '$other'; expected one of: l2, cosine, dot, hamming")
+  }
+}
+
+/**
+ * Spark-serializable snapshot of [[org.lance.index.Index]], used to ship uncommitted
+ * index-segment metadata from executors back to the driver. `org.lance.index.Index` is
+ * not itself `Serializable`, so we carry its fields as primitives and reconstitute via
+ * [[org.lance.index.Index.Builder]] on the driver.
+ */
+case class LanceIndexHandle(
+    uuid: String,
+    fieldIds: List[java.lang.Integer],
+    name: String,
+    datasetVersion: Long,
+    fragmentIds: List[java.lang.Integer],
+    indexDetails: Array[Byte],
+    indexVersion: Int,
+    createdAtMillis: Long,
+    baseId: java.lang.Integer,
+    indexTypeName: String) extends Serializable {
+
+  def toIndex: Index = {
+    val b = Index
+      .builder()
+      .uuid(UUID.fromString(uuid))
+      .fields(fieldIds.asJava)
+      .name(name)
+      .datasetVersion(datasetVersion)
+      .fragments(fragmentIds.asJava)
+      .indexVersion(indexVersion)
+      .indexType(IndexType.valueOf(indexTypeName))
+    if (indexDetails != null && indexDetails.nonEmpty) b.indexDetails(indexDetails)
+    if (createdAtMillis >= 0) b.createdAt(Instant.ofEpochMilli(createdAtMillis))
+    if (baseId != null) b.baseId(baseId)
+    b.build()
+  }
+}
+
+object LanceIndexHandle {
+  def from(index: Index): LanceIndexHandle = {
+    val fragments = index.fragments().orElse(Collections.emptyList[java.lang.Integer]())
+    val details: Array[Byte] =
+      if (index.indexDetails().isPresent) index.indexDetails().get() else Array.emptyByteArray
+    val createdAt: Long =
+      if (index.createdAt().isPresent) index.createdAt().get().toEpochMilli else -1L
+    val baseId: java.lang.Integer =
+      if (index.baseId().isPresent) index.baseId().get() else null
+    LanceIndexHandle(
+      uuid = index.uuid().toString,
+      fieldIds = index.fields().asScala.toList,
+      name = index.name(),
+      datasetVersion = index.datasetVersion(),
+      fragmentIds = fragments.asScala.toList,
+      indexDetails = details,
+      indexVersion = index.indexVersion(),
+      createdAtMillis = createdAt,
+      baseId = baseId,
+      indexTypeName = index.indexType().name())
+  }
+}
+
+/**
  * Utility methods for working with index types.
  */
 object IndexUtils {
 
   private val jsonMapper = new ObjectMapper()
+
+  private val VectorIndexTypes: Set[IndexType] = Set(
+    IndexType.IVF_FLAT,
+    IndexType.IVF_PQ,
+    IndexType.IVF_SQ)
+
+  def isVectorIndex(indexType: IndexType): Boolean = VectorIndexTypes.contains(indexType)
 
   /**
    * Build an [[IndexType]] from the given index method string.
@@ -562,6 +934,9 @@ object IndexUtils {
     method.toLowerCase match {
       case "btree" => IndexType.BTREE
       case "fts" => IndexType.INVERTED
+      case "ivf_flat" => IndexType.IVF_FLAT
+      case "ivf_pq" => IndexType.IVF_PQ
+      case "ivf_sq" => IndexType.IVF_SQ
       case other => throw new UnsupportedOperationException(s"Unsupported index method: $other")
     }
   }
