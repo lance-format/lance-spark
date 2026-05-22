@@ -15,6 +15,7 @@ package org.lance.spark.write;
 
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.utils.BlobReferenceResolver;
 
 import com.google.common.base.Preconditions;
 import org.apache.arrow.memory.BufferAllocator;
@@ -79,12 +80,16 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
 
   private org.lance.spark.arrow.LanceArrowWriter arrowWriter = null;
 
+  /** Resolves blob references during writes; null when blob resolution is not needed. */
+  private final BlobReferenceResolver resolver;
+
   public SemaphoreArrowBatchWriteBuffer(
       BufferAllocator allocator,
       Schema schema,
       StructType sparkSchema,
       int batchSize,
-      long maxBatchBytes) {
+      long maxBatchBytes,
+      BlobReferenceResolver resolver) {
     // Pass a child allocator to ArrowReader so VectorSchemaRoot allocation is tracked
     super(allocator.newChildAllocator("semaphore-buffer", 0, Long.MAX_VALUE));
     Preconditions.checkNotNull(schema);
@@ -94,6 +99,7 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
     this.sparkSchema = sparkSchema;
     this.batchSize = batchSize;
     this.maxBatchBytes = maxBatchBytes;
+    this.resolver = resolver;
     // Start with count = batchSize so the writer blocks on canWrite.await() until the
     // reader's prepareLoadNextBatch() initializes arrowWriter and resets count to 0.
     this.count = batchSize;
@@ -101,29 +107,45 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
 
   public SemaphoreArrowBatchWriteBuffer(
       BufferAllocator allocator, Schema schema, StructType sparkSchema, int batchSize) {
-    this(allocator, schema, sparkSchema, batchSize, LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES);
+    this(
+        allocator,
+        schema,
+        sparkSchema,
+        batchSize,
+        LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES,
+        null);
   }
 
   /** Simplified constructor that uses LanceRuntime allocator and converts Spark schema to Arrow. */
   public SemaphoreArrowBatchWriteBuffer(StructType sparkSchema, int batchSize) {
-    this(sparkSchema, batchSize, false, LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES);
+    this(sparkSchema, batchSize, false, LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES, null);
   }
 
   /** Constructor with large var types support, using LanceRuntime allocator. */
   public SemaphoreArrowBatchWriteBuffer(
       StructType sparkSchema, int batchSize, boolean useLargeVarTypes) {
-    this(sparkSchema, batchSize, useLargeVarTypes, LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES);
+    this(
+        sparkSchema,
+        batchSize,
+        useLargeVarTypes,
+        LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES,
+        null);
   }
 
   /** Constructor with all tuning parameters, using LanceRuntime allocator. */
   public SemaphoreArrowBatchWriteBuffer(
-      StructType sparkSchema, int batchSize, boolean useLargeVarTypes, long maxBatchBytes) {
+      StructType sparkSchema,
+      int batchSize,
+      boolean useLargeVarTypes,
+      long maxBatchBytes,
+      BlobReferenceResolver resolver) {
     this(
         LanceRuntime.allocator(),
         LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false, useLargeVarTypes),
         sparkSchema,
         batchSize,
-        maxBatchBytes);
+        maxBatchBytes,
+        resolver);
   }
 
   @Override
@@ -164,7 +186,12 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
       }
 
       arrowWriter.write(row);
-      currentBatchBytes = this.allocator.getAllocatedMemory() - batchStartBytes;
+      // Add bytes buffered outside the vectors (unresolved blob references resolve to far larger
+      // bytes on finish); without this the guard would size the ~200-byte references and let the
+      // batch grow until resolution OOMs the executor.
+      currentBatchBytes =
+          (this.allocator.getAllocatedMemory() - batchStartBytes)
+              + arrowWriter.estimatedBufferedBytes();
       count++;
 
       if (isBatchFull()) {
@@ -204,7 +231,8 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
       v.allocateNew();
     }
     root.setRowCount(0);
-    arrowWriter = org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(root, sparkSchema);
+    arrowWriter =
+        org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(root, sparkSchema, resolver);
     lock.lock();
     try {
       count = 0;

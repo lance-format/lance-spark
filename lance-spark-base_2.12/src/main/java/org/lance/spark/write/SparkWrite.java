@@ -19,6 +19,7 @@ import org.lance.memwal.ShardingSpec;
 import org.lance.schema.LanceSchema;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
+import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.connector.distributions.Distribution;
@@ -33,6 +34,7 @@ import org.apache.spark.sql.connector.write.WriteBuilder;
 import org.apache.spark.sql.connector.write.streaming.StreamingWrite;
 import org.apache.spark.sql.types.StructType;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -73,6 +75,9 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
   private LanceSchema cachedLanceSchema;
   private boolean cachedPartitionSpecLoaded;
 
+  /** Per-source blob credential/open contexts keyed by source dataset URI. */
+  private final Map<String, BlobSourceContext> blobSourceContexts;
+
   SparkWrite(
       StructType schema,
       LanceSparkWriteOptions writeOptions,
@@ -83,7 +88,8 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
       List<String> tableId,
       boolean managedVersioning,
       StagedCommit stagedCommit,
-      ShardingSpec initialPartitionSpec) {
+      ShardingSpec initialPartitionSpec,
+      Map<String, BlobSourceContext> blobSourceContexts) {
     this.schema = schema;
     this.writeOptions = writeOptions;
     this.overwrite = overwrite;
@@ -94,6 +100,8 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
     this.managedVersioning = managedVersioning;
     this.stagedCommit = stagedCommit;
     this.initialPartitionSpec = initialPartitionSpec;
+    this.blobSourceContexts =
+        blobSourceContexts == null ? Collections.emptyMap() : blobSourceContexts;
   }
 
   private ShardingSpec partitionSpec() {
@@ -152,7 +160,8 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
         tableId,
         managedVersioning,
         stagedCommit,
-        spec);
+        spec,
+        blobSourceContexts);
   }
 
   @Override
@@ -180,6 +189,7 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
     private final List<String> tableId;
     private final boolean managedVersioning;
     private final ShardingSpec partitionSpec;
+    private final Map<String, BlobSourceContext> blobSourceContexts;
 
     public SparkWriteBuilder(
         StructType schema,
@@ -197,7 +207,8 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
           namespaceProperties,
           tableId,
           managedVersioning,
-          null);
+          null,
+          Collections.emptyMap());
     }
 
     public SparkWriteBuilder(
@@ -208,7 +219,8 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
         Map<String, String> namespaceProperties,
         List<String> tableId,
         boolean managedVersioning,
-        ShardingSpec partitionSpec) {
+        ShardingSpec partitionSpec,
+        Map<String, BlobSourceContext> blobSourceContexts) {
       this.schema = schema;
       this.writeOptions = writeOptions;
       this.initialStorageOptions = initialStorageOptions;
@@ -217,6 +229,8 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
       this.tableId = tableId;
       this.managedVersioning = managedVersioning;
       this.partitionSpec = partitionSpec;
+      this.blobSourceContexts =
+          blobSourceContexts == null ? Collections.emptyMap() : blobSourceContexts;
     }
 
     public void setStagedCommit(StagedCommit stagedCommit) {
@@ -255,7 +269,8 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
           tableId,
           managedVersioning,
           stagedCommit,
-          partitionSpec);
+          partitionSpec,
+          blobSourceContexts);
     }
 
     @Override

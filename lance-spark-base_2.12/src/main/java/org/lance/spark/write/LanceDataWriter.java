@@ -23,6 +23,8 @@ import org.lance.memwal.ShardingSpec;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
+import org.lance.spark.utils.BlobReferenceResolver;
+import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.c.ArrowArrayStream;
@@ -38,6 +40,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -57,6 +60,13 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
   private final ShardingBatchKeyEvaluator shardingKeyEvaluator;
   private final List<FragmentMetadata> completedFragments = new ArrayList<>();
 
+  /**
+   * Resolves blob references to actual bytes during writes. Shared across all batches/fragments of
+   * this write task and closed at teardown to release the source datasets it opens. Null when blob
+   * resolution is not needed (e.g. the test-only constructor).
+   */
+  private final BlobReferenceResolver blobResolver;
+
   private ArrowBatchWriteBuffer writeBuffer;
   private FutureTask<List<FragmentMetadata>> fragmentCreationTask;
   private Thread fragmentCreationThread;
@@ -67,7 +77,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       ArrowBatchWriteBuffer writeBuffer,
       FutureTask<List<FragmentMetadata>> fragmentCreationTask,
       Thread fragmentCreationThread) {
-    this(writeBuffer, fragmentCreationTask, fragmentCreationThread, null, null);
+    this(writeBuffer, fragmentCreationTask, fragmentCreationThread, null, null, null);
   }
 
   LanceDataWriter(
@@ -75,12 +85,14 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       FutureTask<List<FragmentMetadata>> fragmentCreationTask,
       Thread fragmentCreationThread,
       Supplier<BufferAndTask> bufferTaskFactory,
-      ShardingBatchKeyEvaluator shardingKeyEvaluator) {
+      ShardingBatchKeyEvaluator shardingKeyEvaluator,
+      BlobReferenceResolver blobResolver) {
     this.writeBuffer = writeBuffer;
     this.fragmentCreationThread = fragmentCreationThread;
     this.fragmentCreationTask = fragmentCreationTask;
     this.bufferTaskFactory = bufferTaskFactory;
     this.shardingKeyEvaluator = shardingKeyEvaluator;
+    this.blobResolver = blobResolver;
   }
 
   @Override
@@ -164,7 +176,15 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
         shardingKeyEvaluator.close();
       }
     } finally {
-      writeBuffer.close();
+      try {
+        writeBuffer.close();
+      } finally {
+        // Release any source datasets opened to resolve blob references. Spark always calls close()
+        // (after commit, and after abort), so this is the single teardown point for the resolver.
+        if (blobResolver != null) {
+          blobResolver.close();
+        }
+      }
     }
   }
 
@@ -207,6 +227,14 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
     private final List<String> tableId;
     private final ShardingSpecSnapshot partitionSpec;
 
+    /**
+     * Per-source blob credential/open contexts keyed by source dataset URI, captured on the driver
+     * (see {@code LanceBlobSourceContextRule}). Used by the per-task resolver to reopen source
+     * datasets and fetch blob bytes for references that flowed through the shuffle. Empty when no
+     * blob sources were detected or the SQL extension that captures them is not enabled.
+     */
+    private final Map<String, BlobSourceContext> blobSourceContexts;
+
     public WriterFactory(
         StructType schema,
         LanceSparkWriteOptions writeOptions,
@@ -221,7 +249,8 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
           namespaceImpl,
           namespaceProperties,
           tableId,
-          null);
+          null,
+          Collections.emptyMap());
     }
 
     public WriterFactory(
@@ -231,7 +260,9 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
         String namespaceImpl,
         Map<String, String> namespaceProperties,
         List<String> tableId,
-        ShardingSpec partitionSpec) {
+        ShardingSpec partitionSpec,
+        Map<String, BlobSourceContext> blobSourceContexts) {
+      // Everything passed to writer factory should be serializable
       this.schema = schema;
       this.writeOptions = writeOptions;
       this.initialStorageOptions = initialStorageOptions;
@@ -242,9 +273,11 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
           SparkLanceShardingUtils.isEmpty(partitionSpec)
               ? null
               : ShardingSpecSnapshot.from(partitionSpec);
+      this.blobSourceContexts =
+          blobSourceContexts == null ? Collections.emptyMap() : blobSourceContexts;
     }
 
-    private BufferAndTask buildBufferAndTask() {
+    private BufferAndTask buildBufferAndTask(BlobReferenceResolver resolver) {
       int batchSize = writeOptions.getBatchSize();
       boolean useQueuedBuffer = writeOptions.isUseQueuedWriteBuffer();
       boolean useLargeVarTypes = writeOptions.isUseLargeVarTypes();
@@ -259,10 +292,11 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
         int queueDepth = writeOptions.getQueueDepth();
         writeBuffer =
             new QueuedArrowBatchWriteBuffer(
-                schema, batchSize, queueDepth, useLargeVarTypes, maxBatchBytes);
+                schema, batchSize, queueDepth, useLargeVarTypes, maxBatchBytes, resolver);
       } else {
         writeBuffer =
-            new SemaphoreArrowBatchWriteBuffer(schema, batchSize, useLargeVarTypes, maxBatchBytes);
+            new SemaphoreArrowBatchWriteBuffer(
+                schema, batchSize, useLargeVarTypes, maxBatchBytes, resolver);
       }
 
       final ArrowBatchWriteBuffer bufferRef = writeBuffer;
@@ -286,15 +320,20 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
               ? null
               : new ShardingBatchKeyEvaluator(schema, writeOptions, shardingBinding());
 
-      BufferAndTask initial = buildBufferAndTask();
+      // One resolver per write task, shared across all batches and fragments (rolled by
+      // bufferTaskFactory) and closed when the LanceDataWriter is closed. Always created so blob
+      // references can be resolved even without captured contexts (it falls back to open-by-URI).
+      BlobReferenceResolver resolver = new BlobReferenceResolver(blobSourceContexts);
+      BufferAndTask initial = buildBufferAndTask(resolver);
       initial.thread.start();
 
       return new LanceDataWriter(
           initial.buffer,
           initial.task,
           initial.thread,
-          this::buildBufferAndTask,
-          shardingKeyEvaluator);
+          () -> buildBufferAndTask(resolver),
+          shardingKeyEvaluator,
+          resolver);
     }
 
     private ShardingBatchKeyEvaluator.ShardingBinding shardingBinding() {

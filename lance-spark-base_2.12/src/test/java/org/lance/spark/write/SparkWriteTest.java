@@ -81,7 +81,9 @@ public class SparkWriteTest {
         null,
         Collections.emptyMap(),
         Arrays.asList("default", "test_table"),
-        false);
+        false,
+        null,
+        Collections.emptyMap());
   }
 
   @Test
@@ -121,7 +123,9 @@ public class SparkWriteTest {
             null,
             Collections.emptyMap(),
             null,
-            false);
+            false,
+            null,
+            Collections.emptyMap());
     assertSame(builder, builder.truncate());
     BatchWrite batchWrite = builder.build().toBatch();
     assertInstanceOf(LanceBatchWrite.class, batchWrite);
@@ -144,7 +148,9 @@ public class SparkWriteTest {
             null,
             Collections.emptyMap(),
             null,
-            false);
+            false,
+            null,
+            Collections.emptyMap());
     builder.truncate();
     SparkWrite sparkWrite = (SparkWrite) builder.build();
     assertTrue(
@@ -164,7 +170,9 @@ public class SparkWriteTest {
             null,
             Collections.emptyMap(),
             Arrays.asList("default", "test_table"),
-            false);
+            false,
+            null,
+            Collections.emptyMap());
     return (SparkWrite) builder.build();
   }
 

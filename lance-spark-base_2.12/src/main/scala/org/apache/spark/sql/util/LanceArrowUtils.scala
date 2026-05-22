@@ -362,7 +362,14 @@ object LanceArrowUtils {
             toArrowField(
               field.name,
               field.dataType,
-              field.nullable,
+              // Relax child nullability when the parent is nullable. A null parent row forces
+              // StructWriter.setNull() to advance every child's count (to keep child vectors
+              // aligned with the parent StructVector), and Lance's Rust writer rejects those
+              // null placeholders if any child field is non-nullable. Scoping the relaxation
+              // to nullable parents keeps user-declared non-nullability on top-level fields,
+              // and propagates naturally into nested structs. Most common unblocked case: UDT
+              // columns like VectorUDT / MatrixUDT whose sqlType marks children as non-nullable.
+              nullable || field.nullable,
               timeZoneId,
               field.metadata,
               largeVarTypes)

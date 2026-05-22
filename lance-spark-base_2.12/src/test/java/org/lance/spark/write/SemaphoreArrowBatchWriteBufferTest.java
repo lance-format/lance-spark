@@ -13,6 +13,9 @@
  */
 package org.lance.spark.write;
 
+import org.lance.spark.utils.BlobReference;
+import org.lance.spark.utils.BlobReferenceResolver;
+
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -31,6 +34,9 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
@@ -288,6 +294,112 @@ public class SemaphoreArrowBatchWriteBufferTest {
     return UTF8String.fromBytes(data);
   }
 
+  private Schema createBlobSchema() {
+    Field field =
+        new Field(
+            "blob",
+            FieldType.nullable(
+                org.apache.arrow.vector.types.Types.MinorType.LARGEVARBINARY.getType()),
+            null);
+    return new Schema(Collections.singletonList(field));
+  }
+
+  private StructType createBlobSparkSchema() {
+    return new StructType(
+        new StructField[] {DataTypes.createStructField("blob", DataTypes.BinaryType, true)});
+  }
+
+  /** Resolver that fabricates {@code size} bytes per reference — no source dataset needed. */
+  private static class SizedFakeResolver extends BlobReferenceResolver {
+    @Override
+    public Map<Integer, byte[]> resolveBatch(List<Integer> indices, List<BlobReference> refs) {
+      Map<Integer, byte[]> out = new HashMap<>();
+      for (int i = 0; i < indices.size(); i++) {
+        out.put(indices.get(i), new byte[(int) refs.get(i).getSize()]);
+      }
+      return out;
+    }
+  }
+
+  @Test
+  public void testByteBasedFlushAccountsForUnresolvedBlobReferences() throws Exception {
+    // Regression: blob references are ~200-byte placeholders in the vector but resolve to large
+    // blobs on finish(). The byte guard must size the *resolved* blobs (carried in each reference),
+    // otherwise the references never trip maxBatchBytes and the whole batch materializes at once.
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Schema schema = createBlobSchema();
+      StructType sparkSchema = createBlobSparkSchema();
+
+      final int totalRows = 12;
+      final int batchSize = 1000; // High row limit - only the byte budget should flush
+      final long maxBatchBytes = 1024 * 1024; // 1MB
+      final long blobSize = 400 * 1024; // 400KB resolved per reference -> flush every ~3 rows
+      final SemaphoreArrowBatchWriteBuffer writeBuffer =
+          new SemaphoreArrowBatchWriteBuffer(
+              allocator, schema, sparkSchema, batchSize, maxBatchBytes, new SizedFakeResolver());
+
+      AtomicInteger rowsWritten = new AtomicInteger(0);
+      AtomicInteger rowsRead = new AtomicInteger(0);
+      AtomicInteger batchCount = new AtomicInteger(0);
+      AtomicInteger maxRowsInBatch = new AtomicInteger(0);
+
+      Thread writerThread =
+          new Thread(
+              () -> {
+                try {
+                  for (int i = 0; i < totalRows; i++) {
+                    byte[] reference =
+                        new BlobReference("file:///src.lance", "blob", i, blobSize).serialize();
+                    writeBuffer.write(new GenericInternalRow(new Object[] {reference}));
+                    rowsWritten.incrementAndGet();
+                  }
+                } finally {
+                  writeBuffer.setFinished();
+                }
+              });
+
+      Callable<Void> readerCallable =
+          () -> {
+            while (writeBuffer.loadNextBatch()) {
+              VectorSchemaRoot root = writeBuffer.getVectorSchemaRoot();
+              int rowCount = root.getRowCount();
+              for (int i = 0; i < rowCount; i++) {
+                // Each placeholder reference must have resolved to a full-size blob in the vector.
+                byte[] resolved = (byte[]) root.getVector("blob").getObject(i);
+                assertEquals(blobSize, resolved.length);
+              }
+              rowsRead.addAndGet(rowCount);
+              batchCount.incrementAndGet();
+              maxRowsInBatch.updateAndGet(prev -> Math.max(prev, rowCount));
+            }
+            return null;
+          };
+
+      FutureTask<Void> readerTask = writeBuffer.createTrackedTask(readerCallable);
+      Thread readerThread = new Thread(readerTask);
+      writerThread.start();
+      readerThread.start();
+      writerThread.join();
+      readerThread.join();
+
+      try {
+        assertEquals(totalRows, rowsWritten.get());
+        assertEquals(totalRows, rowsRead.get());
+        // Without sizing the resolved blobs, 12 tiny references stay under 1MB and form one batch.
+        Assertions.assertTrue(
+            batchCount.get() > 1,
+            "Blob references should trip the byte budget, but got "
+                + batchCount.get()
+                + " batches");
+        Assertions.assertTrue(
+            maxRowsInBatch.get() < batchSize,
+            "Max rows per batch (" + maxRowsInBatch.get() + ") should be bounded by bytes");
+      } finally {
+        writeBuffer.close();
+      }
+    }
+  }
+
   @Test
   public void testByteBasedFlushWithSmallRows() throws Exception {
     // With small rows, the row count limit should be reached before byte limit.
@@ -301,7 +413,7 @@ public class SemaphoreArrowBatchWriteBufferTest {
       final long maxBatchBytes = 100 * 1024 * 1024; // 100MB - should never be reached
       final SemaphoreArrowBatchWriteBuffer writeBuffer =
           new SemaphoreArrowBatchWriteBuffer(
-              allocator, schema, sparkSchema, batchSize, maxBatchBytes);
+              allocator, schema, sparkSchema, batchSize, maxBatchBytes, null);
 
       AtomicInteger rowsWritten = new AtomicInteger(0);
       AtomicInteger rowsRead = new AtomicInteger(0);
@@ -331,7 +443,7 @@ public class SemaphoreArrowBatchWriteBufferTest {
       final int rowSizeBytes = 100 * 1024; // ~100KB per row
       final SemaphoreArrowBatchWriteBuffer writeBuffer =
           new SemaphoreArrowBatchWriteBuffer(
-              allocator, schema, sparkSchema, batchSize, maxBatchBytes);
+              allocator, schema, sparkSchema, batchSize, maxBatchBytes, null);
 
       AtomicInteger rowsWritten = new AtomicInteger(0);
       AtomicInteger rowsRead = new AtomicInteger(0);
@@ -406,7 +518,7 @@ public class SemaphoreArrowBatchWriteBufferTest {
       final int rowSizeBytes = 10 * 1024; // 10KB per row
       final SemaphoreArrowBatchWriteBuffer writeBuffer =
           new SemaphoreArrowBatchWriteBuffer(
-              allocator, schema, sparkSchema, batchSize, maxBatchBytes);
+              allocator, schema, sparkSchema, batchSize, maxBatchBytes, null);
 
       AtomicInteger rowsWritten = new AtomicInteger(0);
       AtomicInteger rowsRead = new AtomicInteger(0);

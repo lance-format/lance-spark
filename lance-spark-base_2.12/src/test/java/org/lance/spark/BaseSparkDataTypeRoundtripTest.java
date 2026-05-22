@@ -450,10 +450,7 @@ public abstract class BaseSparkDataTypeRoundtripTest {
    * {@code InternalRow}, so in a test context (where Spark hands back public {@link Row}s) the
    * helper reconstructs vectors manually.
    *
-   * <p>Note: a null VectorUDT row is intentionally omitted. VectorUDT's sqlType marks the inner
-   * {@code type} field as non-nullable; when the parent struct is null, the StructWriter writes
-   * null placeholders to all children — including non-nullable ones — and Lance's native writer
-   * rejects the batch. This is a known limitation of structs with non-nullable children.
+   * <p>Null parent rows are covered separately in {@link #testVectorUDTNullRowRoundtrip}.
    */
   @Test
   public void testVectorUDTRoundtrip() {
@@ -485,6 +482,27 @@ public abstract class BaseSparkDataTypeRoundtripTest {
     // Reconstruct vectors manually since VectorUDT.deserialize() expects InternalRow.
     assertEquals(dense, reconstructVector(out.get(0).getStruct(1)));
     assertEquals(sparse, reconstructVector(out.get(1).getStruct(1)));
+  }
+
+  /**
+   * Round-trip for a null VectorUDT row. Used to fail because VectorUDT's sqlType marks the inner
+   * {@code type} field as non-nullable; see {@code LanceArrowUtils.toArrowField} for the schema
+   * relaxation that fixes it.
+   */
+  @Test
+  public void testVectorUDTNullRowRoundtrip() {
+    VectorUDT vectorUDT = new VectorUDT();
+    StructType schema =
+        new StructType().add("id", DataTypes.IntegerType, false).add("vec", vectorUDT, true);
+
+    Vector dense = new DenseVector(new double[] {1.0, 2.0, 3.0});
+    List<Row> data =
+        Arrays.asList(RowFactory.create(0, dense), RowFactory.create(1, (Object) null));
+
+    List<Row> out = writeAndRead(schema, data, "vector_udt_null_row").orderBy("id").collectAsList();
+    assertEquals(2, out.size());
+    assertEquals(dense, reconstructVector(out.get(0).getStruct(1)));
+    assertTrue(out.get(1).isNullAt(1), "row 1 should round-trip as null");
   }
 
   /**

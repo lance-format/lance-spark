@@ -13,9 +13,15 @@
  */
 package org.lance.spark.update;
 
+import org.apache.spark.ml.linalg.DenseVector;
+import org.apache.spark.ml.linalg.Vector;
+import org.apache.spark.ml.linalg.VectorUDT;
 import org.apache.spark.sql.RowFactory;
+import org.apache.spark.sql.SaveMode;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
@@ -28,6 +34,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 public abstract class BaseMergeIntoTest {
   private static final int SHUFFLE_PARTITIONS = 4;
@@ -370,5 +377,50 @@ public abstract class BaseMergeIntoTest {
             RowFactory.create(100, 1000),
             RowFactory.create(101, 1010));
     Assertions.assertEquals(expected, actual, "Expected merged rows to match result set");
+  }
+
+  /**
+   * End-to-end smoke test for DELETE on a Lance table with a UDT column. Verifies the catalog path
+   * ({@code saveAsTable} → {@code createTable} → {@code toArrowSchema}) accepts a UDT-rooted schema
+   * and that position-delta DELETE handles UDT-derived struct metadata.
+   *
+   * <p>Intentionally narrow — what this does NOT cover:
+   *
+   * <ul>
+   *   <li>PR #471's UDT case in {@code LanceArrowWriter.createFieldWriter} — the catalog unwraps
+   *       UDT to sqlType before the writer sees it. Direct coverage: {@code testVectorUDTRoundtrip}
+   *       in {@code BaseSparkDataTypeRoundtripTest}.
+   *   <li>PR #549's nullable-relaxation — DELETE only records position bitmaps, never calls {@code
+   *       writer.write()}. UPDATE / MERGE would, but Spark V2's analyzer ({@code
+   *       TableOutputResolver.canWrite}) rejects UDT assignments before lance-spark code runs.
+   * </ul>
+   */
+  @Test
+  public void testDeleteOnVectorUDTColumn() {
+    String tableName = "delete_udt_" + UUID.randomUUID().toString().replace("-", "");
+    String fullTable = catalogName + ".default." + tableName;
+    VectorUDT vectorUDT = new VectorUDT();
+    StructType schema =
+        new StructType().add("id", DataTypes.IntegerType, false).add("vec", vectorUDT, true);
+
+    Vector v1 = new DenseVector(new double[] {1.0, 2.0, 3.0});
+    Vector v2 = new DenseVector(new double[] {4.0, 5.0, 6.0});
+    Vector v3 = new DenseVector(new double[] {7.0, 8.0, 9.0});
+    spark
+        .createDataFrame(
+            Arrays.asList(
+                RowFactory.create(1, v1), RowFactory.create(2, v2), RowFactory.create(3, v3)),
+            schema)
+        .write()
+        .mode(SaveMode.ErrorIfExists)
+        .saveAsTable(fullTable);
+
+    spark.sql("DELETE FROM " + fullTable + " WHERE id = 2");
+
+    List<Integer> ids =
+        spark.sql("SELECT id FROM " + fullTable + " ORDER BY id").collectAsList().stream()
+            .map(r -> r.getInt(0))
+            .collect(Collectors.toList());
+    Assertions.assertEquals(Arrays.asList(1, 3), ids, "expected id=2 to be deleted");
   }
 }

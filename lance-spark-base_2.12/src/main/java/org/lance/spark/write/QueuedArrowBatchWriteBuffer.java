@@ -15,6 +15,7 @@ package org.lance.spark.write;
 
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.utils.BlobReferenceResolver;
 
 import com.google.common.base.Preconditions;
 import org.apache.arrow.memory.BufferAllocator;
@@ -85,6 +86,9 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
   /** Arrow writer for current batch. */
   private org.lance.spark.arrow.LanceArrowWriter currentArrowWriter;
 
+  /** Resolves blob references during writes; null when blob resolution is not needed. */
+  private final BlobReferenceResolver resolver;
+
   /** Count of rows in current batch. */
   private final AtomicInteger currentBatchRowCount = new AtomicInteger(0);
 
@@ -124,12 +128,19 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
         sparkSchema,
         batchSize,
         DEFAULT_QUEUE_DEPTH,
-        LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES);
+        LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES,
+        null);
   }
 
   /** Simplified constructor that uses LanceRuntime allocator and converts Spark schema to Arrow. */
   public QueuedArrowBatchWriteBuffer(StructType sparkSchema, int batchSize, int queueDepth) {
-    this(sparkSchema, batchSize, queueDepth, false, LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES);
+    this(
+        sparkSchema,
+        batchSize,
+        queueDepth,
+        false,
+        LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES,
+        null);
   }
 
   /** Constructor with large var types support, using LanceRuntime allocator. */
@@ -140,7 +151,8 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
         batchSize,
         queueDepth,
         useLargeVarTypes,
-        LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES);
+        LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES,
+        null);
   }
 
   /** Constructor with all tuning parameters, using LanceRuntime allocator. */
@@ -149,14 +161,16 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
       int batchSize,
       int queueDepth,
       boolean useLargeVarTypes,
-      long maxBatchBytes) {
+      long maxBatchBytes,
+      BlobReferenceResolver resolver) {
     this(
         LanceRuntime.allocator(),
         LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false, useLargeVarTypes),
         sparkSchema,
         batchSize,
         queueDepth,
-        maxBatchBytes);
+        maxBatchBytes,
+        resolver);
   }
 
   public QueuedArrowBatchWriteBuffer(
@@ -171,7 +185,8 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
         sparkSchema,
         batchSize,
         queueDepth,
-        LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES);
+        LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES,
+        null);
   }
 
   public QueuedArrowBatchWriteBuffer(
@@ -180,7 +195,8 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
       StructType sparkSchema,
       int batchSize,
       int queueDepth,
-      long maxBatchBytes) {
+      long maxBatchBytes,
+      BlobReferenceResolver resolver) {
     super(allocator);
     Preconditions.checkNotNull(schema);
     Preconditions.checkArgument(batchSize > 0, "Batch size must be positive");
@@ -192,6 +208,7 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
     this.batchSize = batchSize;
     this.maxBatchBytes = maxBatchBytes;
     this.queueDepth = queueDepth;
+    this.resolver = resolver;
     this.batchQueue = new ArrayBlockingQueue<>(queueDepth);
 
     // Create a child allocator for producer that shares the same root as the consumer
@@ -219,7 +236,7 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
       throw e;
     }
     currentArrowWriter =
-        org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(currentBatch, sparkSchema);
+        org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(currentBatch, sparkSchema, resolver);
     currentBatchRowCount.set(0);
   }
 
@@ -228,7 +245,11 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
     if (maxBatchBytes == Long.MAX_VALUE) {
       return false;
     }
-    return currentBatchAllocator.getAllocatedMemory() >= maxBatchBytes;
+    // Include bytes buffered outside the vector (unresolved blob references resolve to far larger
+    // bytes on finish); sizing only the ~200-byte references would let the batch grow until
+    // resolution OOMs the executor.
+    return currentBatchAllocator.getAllocatedMemory() + currentArrowWriter.estimatedBufferedBytes()
+        >= maxBatchBytes;
   }
 
   /**

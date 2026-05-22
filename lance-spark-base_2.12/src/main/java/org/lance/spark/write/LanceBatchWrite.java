@@ -24,6 +24,7 @@ import org.lance.operation.Operation;
 import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -67,6 +68,12 @@ public class LanceBatchWrite implements BatchWrite {
   /** Sharding spec controlling how data is distributed across fragments. */
   private final ShardingSpec partitionSpec;
 
+  /**
+   * Per-source blob credential/open contexts keyed by source dataset URI, captured on the driver
+   * and passed to write tasks so they can reopen source datasets to resolve blob references.
+   */
+  private final Map<String, BlobSourceContext> blobSourceContexts;
+
   public LanceBatchWrite(
       StructType schema,
       LanceSparkWriteOptions writeOptions,
@@ -87,7 +94,8 @@ public class LanceBatchWrite implements BatchWrite {
         tableId,
         managedVersioning,
         stagedCommit,
-        null);
+        null,
+        java.util.Collections.emptyMap());
   }
 
   public LanceBatchWrite(
@@ -100,7 +108,8 @@ public class LanceBatchWrite implements BatchWrite {
       List<String> tableId,
       boolean managedVersioning,
       StagedCommit stagedCommit,
-      ShardingSpec partitionSpec) {
+      ShardingSpec partitionSpec,
+      Map<String, BlobSourceContext> blobSourceContexts) {
     this.schema = schema;
     this.overwrite = overwrite;
     this.initialStorageOptions = initialStorageOptions;
@@ -110,6 +119,8 @@ public class LanceBatchWrite implements BatchWrite {
     this.managedVersioning = managedVersioning;
     this.stagedCommit = stagedCommit;
     this.partitionSpec = partitionSpec;
+    this.blobSourceContexts =
+        blobSourceContexts == null ? java.util.Collections.emptyMap() : blobSourceContexts;
 
     // For staged operations, the dataset is managed by StagedCommit.
     // For non-staged operations, pin the dataset version for OCC.
@@ -133,7 +144,8 @@ public class LanceBatchWrite implements BatchWrite {
         namespaceImpl,
         namespaceProperties,
         tableId,
-        partitionSpec);
+        partitionSpec,
+        blobSourceContexts);
   }
 
   @Override

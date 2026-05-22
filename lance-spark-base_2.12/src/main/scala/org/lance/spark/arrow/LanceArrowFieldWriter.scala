@@ -40,6 +40,16 @@ abstract private[arrow] class LanceArrowFieldWriter {
 
   private[arrow] var count: Int = 0
 
+  /**
+   * Estimated bytes this writer is holding outside its Arrow vector that will materialize into the
+   * vector on [[finish]]. Almost always 0 — writers put values straight into the vector, so the
+   * allocator already accounts for them. The exception is [[LargeBinaryWriter]], which buffers
+   * unresolved blob references (~200 bytes each on the shuffle path) whose resolved bytes can be
+   * orders of magnitude larger; reporting that pending size lets the write buffer flush against
+   * `maxBatchBytes` before resolution materializes the blobs and OOMs the executor.
+   */
+  def estimatedBufferedBytes: Long = 0L
+
   def write(input: SpecializedGetters, ordinal: Int): Unit = {
     if (input.isNullAt(ordinal)) {
       setNull()
