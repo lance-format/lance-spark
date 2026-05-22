@@ -778,6 +778,76 @@ class TestDDLIndex:
         assert len(query_result) == 3
         _assert_lance_index_metadata(spark, "default.employees", "idx_dept", "BTREE")
 
+    def test_create_zonemap_index(self, spark):
+        """Test CREATE INDEX with zonemap on a scalar column."""
+        spark.sql(
+            """
+            CREATE TABLE default.events (
+                id INT,
+                event_ts INT,
+                payload STRING
+            )
+            """
+        )
+
+        data = [(i, i * 100, f"p{i}") for i in range(100)]
+        df = spark.createDataFrame(data, ["id", "event_ts", "payload"])
+        df.writeTo("default.events").append()
+
+        result = spark.sql(
+            """
+            ALTER TABLE default.events
+            CREATE INDEX idx_ts_zm USING zonemap (event_ts) WITH (rows_per_zone = 16)
+            """
+        ).collect()
+        assert len(result) == 1
+        assert result[0][1] == "idx_ts_zm"
+
+        # SHOW INDEXES surfaces the zonemap-typed segment(s).
+        indexes = spark.sql("SHOW INDEXES IN default.events").collect()
+        zonemap_rows = [row for row in indexes if row["name"] == "idx_ts_zm"]
+        assert len(zonemap_rows) >= 1
+        assert zonemap_rows[0]["index_type"] == "zonemap"
+
+        # Indexed query still returns the correct row.
+        query_result = spark.sql(
+            "SELECT * FROM default.events WHERE event_ts = 5000"
+        ).collect()
+        assert len(query_result) == 1
+        assert query_result[0].id == 50
+
+    def test_create_zonemap_index_consolidated(self, spark):
+        """ZoneMap with spark.lance.zonemap.consolidate.enabled=true commits one segment."""
+        spark.sql(
+            """
+            CREATE TABLE default.metrics (
+                id INT,
+                bucket INT
+            )
+            """
+        )
+
+        data = [(i, i % 10) for i in range(80)]
+        df = spark.createDataFrame(data, ["id", "bucket"])
+        df.writeTo("default.metrics").append()
+
+        spark.conf.set("spark.lance.zonemap.consolidate.enabled", "true")
+        try:
+            spark.sql(
+                """
+                ALTER TABLE default.metrics
+                CREATE INDEX idx_bucket_zm USING zonemap (bucket)
+                """
+            ).collect()
+        finally:
+            spark.conf.unset("spark.lance.zonemap.consolidate.enabled")
+
+        indexes = spark.sql("SHOW INDEXES IN default.metrics").collect()
+        zonemap_rows = [row for row in indexes if row["name"] == "idx_bucket_zm"]
+        # Consolidated path commits exactly one IndexMetadata segment.
+        assert len(zonemap_rows) == 1
+        assert zonemap_rows[0]["index_type"] == "zonemap"
+
     def test_create_fts_index(self, spark):
         """Test CREATE INDEX with full-text search (FTS)."""
         spark.sql("""
