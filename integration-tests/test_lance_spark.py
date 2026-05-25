@@ -46,6 +46,10 @@ def _lance_storage_options(spark):
     }
 
 
+def _sql_binary_literal(data: bytes) -> str:
+    return "X'" + data.hex().upper() + "'"
+
+
 def _table_location(spark, table_name):
     rows = (
         spark.sql(f"DESCRIBE EXTENDED {table_name}")
@@ -703,6 +707,72 @@ class TestDDLColumnCompression:
 
         id_meta = schema.field("id").metadata
         assert b"lance-encoding:compression" not in (id_meta or {})
+
+
+class TestDDLBlobV2:
+    def test_blob_v2_table_reads_content_as_descriptor(self, spark):
+        spark.sql("""
+            CREATE TABLE default.test_blob_v2 (
+                id INT NOT NULL,
+                content BINARY
+            ) USING lance
+            TBLPROPERTIES (
+                'content.lance.encoding' = 'blob',
+                'file_format_version' = '2.2'
+            )
+        """)
+
+        first_content = b"SQL insert content 1"
+        second_content = b"SQL insert content 2"
+
+        spark.sql(
+            f"INSERT INTO default.test_blob_v2 VALUES (1, {_sql_binary_literal(first_content)})"
+        )
+        spark.sql(
+            f"INSERT INTO default.test_blob_v2 VALUES (2, {_sql_binary_literal(second_content)})"
+        )
+
+        describe_rows = spark.sql("DESCRIBE default.test_blob_v2").collect()
+        content_field = next(row for row in describe_rows if row.col_name == "content")
+        content_type = content_field.data_type.lower()
+
+        assert "struct" in content_type
+        assert "kind" in content_type
+        assert "blob_uri" in content_type
+
+        rows = spark.sql("""
+            SELECT id, content.size, content.kind, content.blob_id, content.blob_uri
+            FROM default.test_blob_v2
+            ORDER BY id
+        """).collect()
+
+        assert len(rows) == 2
+
+        assert rows[0].id == 1
+        assert rows[0].size == len(first_content)
+        assert rows[0].kind == 0
+
+        assert rows[1].id == 2
+        assert rows[1].size == len(second_content)
+        assert rows[1].kind == 0
+
+    def test_blob_v2_insert_rejects_non_binary_content(self, spark):
+        spark.sql("""
+            CREATE TABLE default.test_blob_v2_bad_insert (
+                id INT NOT NULL,
+                content BINARY
+            ) USING lance
+            TBLPROPERTIES (
+                'content.lance.encoding' = 'blob',
+                'file_format_version' = '2.2'
+            )
+        """)
+
+        with pytest.raises(Exception, match="got string"):
+            spark.sql("""
+                INSERT INTO default.test_blob_v2_bad_insert
+                VALUES (1, 'not-binary')
+            """)
 
 
 class TestDDLIndex:

@@ -71,7 +71,7 @@ public abstract class BaseBlobCreateTableTest {
   // These tests verify that when a table is created with blob encoding property,
   // subsequent DataFrame writes don't need to set the blob encoding metadata.
 
-  /** Helper method to verify a field has blob encoding metadata set. */
+  /** Helper method to verify a field has blob v1 encoding metadata set. */
   private void assertBlobMetadata(StructType schema, String fieldName) {
     StructField field = schema.apply(fieldName);
     assertNotNull(field, fieldName + " field should exist in schema");
@@ -82,6 +82,9 @@ public abstract class BaseBlobCreateTableTest {
         BlobUtils.LANCE_ENCODING_BLOB_VALUE,
         field.metadata().getString(BlobUtils.LANCE_ENCODING_BLOB_KEY),
         BlobUtils.LANCE_ENCODING_BLOB_KEY + " metadata should be 'true'");
+    assertFalse(
+        BlobUtils.isBlobV2SparkField(field),
+        fieldName + " should not be tagged as blob v2 without file_format_version >= 2.2");
   }
 
   @Test
@@ -489,12 +492,198 @@ public abstract class BaseBlobCreateTableTest {
     spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
   }
 
-  private String bytesToHex(byte[] bytes) {
-    StringBuilder hexString = new StringBuilder();
-    for (byte b : bytes) {
-      hexString.append(String.format("%02X", b));
+  @Test
+  public void testBlobV2SupportsSqlInsertAndDataFrameAppend() {
+    String tableName = "blob_v2_sql_" + System.currentTimeMillis();
+
+    spark.sql(
+        "CREATE TABLE IF NOT EXISTS "
+            + catalogName
+            + ".default."
+            + tableName
+            + " ("
+            + "id INT NOT NULL, "
+            + "data BINARY"
+            + ") USING lance "
+            + "TBLPROPERTIES ("
+            + "'data.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.2'"
+            + ")");
+
+    String testData1 = "SQL insert content 1";
+    String testData2 = "SQL insert content 2";
+    spark.sql(
+        "INSERT INTO "
+            + catalogName
+            + ".default."
+            + tableName
+            + " VALUES "
+            + "(1, X'"
+            + bytesToHex(testData1.getBytes(StandardCharsets.UTF_8))
+            + "'), "
+            + "(2, X'"
+            + bytesToHex(testData2.getBytes(StandardCharsets.UTF_8))
+            + "')");
+
+    List<Row> rows = new ArrayList<>();
+    Random random = new Random(42);
+    for (int i = 10; i < 13; i++) {
+      byte[] largeData = new byte[100000]; // 100KB
+      random.nextBytes(largeData);
+      rows.add(RowFactory.create(i, largeData));
     }
-    return hexString.toString();
+    StructType plainSchema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.IntegerType, false),
+              DataTypes.createStructField("data", DataTypes.BinaryType, true)
+            });
+    Dataset<Row> df = spark.createDataFrame(rows, plainSchema);
+    assertDoesNotThrow(() -> df.writeTo(catalogName + ".default." + tableName).append());
+
+    Dataset<Row> count = spark.sql("SELECT COUNT(*) FROM " + catalogName + ".default." + tableName);
+    assertEquals(5L, count.collectAsList().get(0).getLong(0));
+
+    List<Row> descriptors =
+        spark
+            .sql(
+                "SELECT id, data.size AS sz FROM "
+                    + catalogName
+                    + ".default."
+                    + tableName
+                    + " ORDER BY id")
+            .collectAsList();
+
+    assertEquals(5, descriptors.size());
+    assertEquals(testData1.getBytes(StandardCharsets.UTF_8).length, descriptors.get(0).getLong(1));
+    assertEquals(testData2.getBytes(StandardCharsets.UTF_8).length, descriptors.get(1).getLong(1));
+    assertEquals(100000L, descriptors.get(2).getLong(1));
+    assertBlobV2Metadata(spark.table(catalogName + ".default." + tableName).schema(), "data");
+    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
+  }
+
+  @Test
+  public void testBlobV2SupportsSqlValuesInsert() {
+    String tableName = "blob_v2_empty_table_" + System.currentTimeMillis();
+
+    spark.sql(
+        "CREATE TABLE IF NOT EXISTS "
+            + catalogName
+            + ".default."
+            + tableName
+            + " ("
+            + "id INT NOT NULL, "
+            + "text STRING, "
+            + "blob_data BINARY"
+            + ") USING lance "
+            + "TBLPROPERTIES ("
+            + "'blob_data.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.2'"
+            + ")");
+
+    assertBlobV2Metadata(spark.table(catalogName + ".default." + tableName).schema(), "blob_data");
+
+    String testData1 = "This is test blob data 1";
+    String testData2 = "This is test blob data 2";
+    spark.sql(
+        "INSERT INTO "
+            + catalogName
+            + ".default."
+            + tableName
+            + " VALUES "
+            + "(1, 'first text', X'"
+            + bytesToHex(testData1.getBytes(StandardCharsets.UTF_8))
+            + "'), "
+            + "(2, 'second text', X'"
+            + bytesToHex(testData2.getBytes(StandardCharsets.UTF_8))
+            + "')");
+
+    Dataset<Row> count = spark.sql("SELECT COUNT(*) FROM " + catalogName + ".default." + tableName);
+
+    assertEquals(2L, count.collectAsList().get(0).getLong(0));
+
+    List<Row> projection =
+        spark
+            .sql("SELECT id, text FROM " + catalogName + ".default." + tableName + " ORDER BY id")
+            .collectAsList();
+
+    assertEquals(2, projection.size());
+    assertEquals(1, projection.get(0).getInt(0));
+    assertEquals("first text", projection.get(0).getString(1));
+    assertEquals(2, projection.get(1).getInt(0));
+    assertEquals("second text", projection.get(1).getString(1));
+
+    List<Row> descriptors =
+        spark
+            .sql(
+                "SELECT id, blob_data.kind AS kind, blob_data.size AS sz FROM "
+                    + catalogName
+                    + ".default."
+                    + tableName
+                    + " ORDER BY id")
+            .collectAsList();
+
+    assertEquals(2, descriptors.size());
+    assertEquals(0, descriptors.get(0).getShort(1));
+    assertEquals(testData1.getBytes(StandardCharsets.UTF_8).length, descriptors.get(0).getLong(2));
+    assertEquals(testData2.getBytes(StandardCharsets.UTF_8).length, descriptors.get(1).getLong(2));
+
+    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
+  }
+
+  @Test
+  public void testBlobColumnsStayBlobV1WithFileFormatVersion21() {
+    String tableName = "blob_v1_ffv_21_" + System.currentTimeMillis();
+
+    spark.sql(
+        "CREATE TABLE IF NOT EXISTS "
+            + catalogName
+            + ".default."
+            + tableName
+            + " ("
+            + "id INT NOT NULL, "
+            + "data BINARY"
+            + ") USING lance "
+            + "TBLPROPERTIES ("
+            + "'data.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.1'"
+            + ")");
+
+    StructType schema = spark.table(catalogName + ".default." + tableName).schema();
+
+    assertBlobMetadata(schema, "data");
+    assertEquals(DataTypes.BinaryType, schema.apply("data").dataType());
+
+    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
+  }
+
+  @Test
+  public void testCreateTableSupportsMultipleBlobV2Columns() {
+    String tableName = "blob_v2_table_multi_" + System.currentTimeMillis();
+
+    spark.sql(
+        "CREATE TABLE IF NOT EXISTS "
+            + catalogName
+            + ".default."
+            + tableName
+            + " ("
+            + "id INT NOT NULL, "
+            + "blob1 BINARY, "
+            + "regular_binary BINARY, "
+            + "blob2 BINARY"
+            + ") USING lance "
+            + "TBLPROPERTIES ("
+            + "'blob1.lance.encoding' = 'blob', "
+            + "'blob2.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.2'"
+            + ")");
+
+    StructType schema = spark.table(catalogName + ".default." + tableName).schema();
+    assertBlobV2Metadata(schema, "blob1");
+    assertBlobV2Metadata(schema, "blob2");
+    assertFalse(BlobUtils.isBlobV2SparkField(schema.apply("regular_binary")));
+
+    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
   }
 
   // ==================== Large VarChar Tests ====================
@@ -707,5 +896,20 @@ public abstract class BaseBlobCreateTableTest {
 
     // Clean up
     spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
+  }
+
+  private static String bytesToHex(byte[] bytes) {
+    StringBuilder hexString = new StringBuilder();
+    for (byte b : bytes) {
+      hexString.append(String.format("%02X", b));
+    }
+    return hexString.toString();
+  }
+
+  private void assertBlobV2Metadata(StructType schema, String fieldName) {
+    StructField field = schema.apply(fieldName);
+    assertNotNull(field);
+    assertEquals(BlobUtils.BLOB_DESCRIPTOR_STRUCT, field.dataType());
+    assertTrue(BlobUtils.isBlobV2SparkField(field));
   }
 }

@@ -20,7 +20,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.SpecializedGetters
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.LanceArrowUtils
-import org.lance.spark.utils.{BlobReferenceResolver, Float16Utils}
+import org.lance.spark.utils.{BlobReferenceResolver, BlobUtils, Float16Utils}
 
 import scala.collection.JavaConverters._
 
@@ -127,6 +127,8 @@ object LanceArrowWriter {
           null,
           resolver)
         new MapWriter(vector, structVector, keyWriter, valueWriter)
+      case (BinaryType, vector: StructVector) if BlobUtils.isBlobV2SparkMetadata(metadata) =>
+        new BlobV2StructWriter(vector, createFieldWriter(vector.getChild("data"), BinaryType))
       case (StructType(fields), vector: StructVector) =>
         val children = fields.zipWithIndex.map { case (field, ordinal) =>
           createFieldWriter(
@@ -477,6 +479,55 @@ private[arrow] class MapWriter(
     keyWriter.reset()
     valueWriter.reset()
   }
+}
+
+private[arrow] class BlobV2StructWriter(
+    val valueVector: StructVector,
+    val dataWriter: LanceArrowFieldWriter) extends LanceArrowFieldWriter {
+
+  override def write(input: SpecializedGetters, ordinal: Int): Unit = {
+    if (input.isNullAt(ordinal)) {
+      dataWriter.write(input, ordinal)
+      valueVector.setNull(count)
+    } else {
+      valueVector.setIndexDefined(count)
+      dataWriter.write(input, ordinal)
+    }
+    count += 1
+  }
+
+  // Rows are written through write(). setNull and setValue are no-ops so child counts stay
+  // owned by dataWriter.write().
+  override def setNull(): Unit = ()
+
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = ()
+
+  override def finish(): Unit = {
+    super.finish()
+    dataWriter.finish()
+    // The sibling descriptor fields (uri, position, size) are never populated on write —
+    // Lance synthesises them on read. Skip per-row null setting: setValueCount allocates the
+    // validity buffer and a fresh buffer's bits are all zero, which is "null". Saves
+    // O(rows * 3) Arrow validity writes per batch.
+    var i = 0
+    while (i < nullChildren.length) {
+      nullChildren(i).setValueCount(count)
+      i += 1
+    }
+  }
+
+  override def reset(): Unit = {
+    super.reset()
+    dataWriter.reset()
+    var i = 0
+    while (i < nullChildren.length) {
+      nullChildren(i).reset()
+      i += 1
+    }
+  }
+
+  private val nullChildren: Array[FieldVector] =
+    Array("uri", "position", "size").map(valueVector.getChild).toArray
 }
 
 private[arrow] class StructWriter(

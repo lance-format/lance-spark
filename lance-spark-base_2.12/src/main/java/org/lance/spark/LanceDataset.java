@@ -18,6 +18,7 @@ import org.lance.spark.read.LanceScanBuilder;
 import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.write.AddColumnsBackfillWrite;
+import org.lance.spark.write.LanceWriteSchemaValidator;
 import org.lance.spark.write.SparkWrite;
 import org.lance.spark.write.StagedCommit;
 import org.lance.spark.write.UpdateColumnsBackfillWrite;
@@ -59,6 +60,14 @@ public class LanceDataset
   private static final Set<TableCapability> CAPABILITIES =
       ImmutableSet.of(
           TableCapability.BATCH_READ, TableCapability.BATCH_WRITE, TableCapability.TRUNCATE);
+
+  // Blob v2 is read as descriptor structs, but written as BINARY from sparkSchema.
+  private static final Set<TableCapability> CAPABILITIES_WITH_BLOB_V2 =
+      ImmutableSet.of(
+          TableCapability.BATCH_READ,
+          TableCapability.BATCH_WRITE,
+          TableCapability.TRUNCATE,
+          TableCapability.ACCEPT_ANY_SCHEMA);
 
   public static final MetadataColumn FRAGMENT_ID_COLUMN =
       new MetadataColumn() {
@@ -318,11 +327,14 @@ public class LanceDataset
 
   @Override
   public Set<TableCapability> capabilities() {
-    return CAPABILITIES;
+    return BlobUtils.hasBlobV2Fields(sparkSchema) ? CAPABILITIES_WITH_BLOB_V2 : CAPABILITIES;
   }
 
   @Override
   public WriteBuilder newWriteBuilder(LogicalWriteInfo logicalWriteInfo) {
+    if (capabilities().contains(TableCapability.ACCEPT_ANY_SCHEMA)) {
+      LanceWriteSchemaValidator.validate(sparkSchema, logicalWriteInfo.schema());
+    }
     // Merge write-time options with the base options from read options
     CaseInsensitiveStringMap sparkWriteOptions = logicalWriteInfo.options();
     Map<String, BlobSourceContext> blobSourceContexts = decodeBlobSourceContexts(sparkWriteOptions);
