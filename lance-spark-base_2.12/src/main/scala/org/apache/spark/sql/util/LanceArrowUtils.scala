@@ -44,6 +44,8 @@ object LanceArrowUtils {
   val ARROW_FIXED_SIZE_LIST_SIZE_KEY = VectorUtils.ARROW_FIXED_SIZE_LIST_SIZE_KEY
   val ARROW_FLOAT16_KEY = Float16Utils.ARROW_FLOAT16_KEY
   val ENCODING_BLOB = BlobUtils.LANCE_ENCODING_BLOB_KEY
+  val ARROW_EXT_NAME_KEY = BlobUtils.ARROW_EXTENSION_NAME_KEY
+  val BLOB_V2_EXT_NAME = BlobUtils.ARROW_EXTENSION_BLOB_V2
   val ARROW_LARGE_VAR_CHAR_KEY = LargeVarCharUtils.ARROW_LARGE_VAR_CHAR_KEY
   val ARROW_DATE_MILLISECOND_KEY = DateMilliUtils.ARROW_DATE_MILLISECOND_KEY
 
@@ -82,6 +84,8 @@ object LanceArrowUtils {
         val elementType = fromArrowField(elementField)
         val containsNull = elementField.isNullable
         ArrayType(elementType, containsNull)
+      case _: ArrowType.Struct if isBlobField(field) =>
+        BinaryType
       case _: ArrowType.Struct =>
         // Always recurse through LanceArrowUtils for struct children so special cases
         // like Date(MILLISECOND), FixedSizeBinary, etc. are applied in nested schemas too.
@@ -529,8 +533,10 @@ object LanceArrowUtils {
 
   private def isBlobField(field: Field): Boolean = {
     val metadata = field.getMetadata
-    metadata != null && metadata.containsKey(ENCODING_BLOB) &&
-    "true".equalsIgnoreCase(metadata.get(ENCODING_BLOB))
+    if (metadata == null) return false
+    (metadata.containsKey(ENCODING_BLOB) &&
+      "true".equalsIgnoreCase(metadata.get(ENCODING_BLOB))) ||
+    BLOB_V2_EXT_NAME.equals(metadata.get(ARROW_EXT_NAME_KEY))
   }
 }
 

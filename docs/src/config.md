@@ -500,3 +500,18 @@ Lance Spark maintains index and metadata caches to minimize redundant I/O. Cache
 | `LANCE_METADATA_CACHE_SIZE`| 1GB     | Metadata cache size in bytes.    |
 
 For details on how caching works and tuning recommendations, see [Performance Tuning - Caching](performance.md#caching).
+
+## Blob v2 Reads
+
+Lance datasets that contain a blob v2 column expose that column to Spark as the native 5-field descriptor struct: `struct<kind:short, position:long, size:long, blob_id:long, blob_uri:string>`. Querying the descriptor never fetches the blob bytes, so `SELECT payload.size` and `SELECT payload.blob_uri` are cheap.
+
+```sql
+-- Query metadata only (no byte fetch):
+SELECT id, payload.size, payload.kind FROM lance.ns.tbl;
+```
+
+A column is treated as blob v2 when the Arrow field carries `ARROW:extension:name = lance.blob.v2`, matching lance-core's blob v2 extension type.
+
+Filter pushdown for SQL `WHERE` is disabled on blob v2 tables; Spark evaluates predicates after the scan. Zonemap-based fragment pruning still runs.
+
+The connector does not materialize blob bytes on read; queries against descriptor fields fetch metadata only.

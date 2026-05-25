@@ -38,6 +38,7 @@ import org.apache.arrow.vector.complex.LargeListVector;
 import org.apache.arrow.vector.complex.ListVector;
 import org.apache.arrow.vector.complex.MapVector;
 import org.apache.arrow.vector.complex.StructVector;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.Decimal;
 import org.apache.spark.sql.util.LanceArrowUtils;
 import org.apache.spark.sql.vectorized.ArrowColumnVector;
@@ -71,7 +72,7 @@ public class LanceArrowColumnVector extends ColumnVector {
   }
 
   public LanceArrowColumnVector(ValueVector vector, boolean closeVectorOnClose) {
-    super(LanceArrowUtils.fromArrowField(vector.getField()));
+    super(computeDataType(vector));
     this.closeVectorOnClose = closeVectorOnClose;
 
     if (vector instanceof UInt1Vector) {
@@ -86,6 +87,8 @@ public class LanceArrowColumnVector extends ColumnVector {
       fixedSizeBinaryAccessor = new FixedSizeBinaryAccessor((FixedSizeBinaryVector) vector);
     } else if (vector instanceof FixedSizeListVector) {
       fixedSizeListAccessor = new FixedSizeListAccessor((FixedSizeListVector) vector);
+    } else if (vector instanceof StructVector && BlobUtils.isBlobV2ArrowField(vector.getField())) {
+      structAccessor = new LanceStructAccessor((StructVector) vector);
     } else if (vector instanceof StructVector && BlobUtils.isBlobArrowField(vector.getField())) {
       blobStructAccessor = new BlobStructAccessor((StructVector) vector);
     } else if (vector instanceof StructVector) {
@@ -521,5 +524,12 @@ public class LanceArrowColumnVector extends ColumnVector {
    */
   public BlobStructAccessor getBlobStructAccessor() {
     return blobStructAccessor;
+  }
+
+  private static DataType computeDataType(ValueVector vector) {
+    if (vector instanceof StructVector && BlobUtils.isBlobV2ArrowField(vector.getField())) {
+      return BlobUtils.BLOB_DESCRIPTOR_STRUCT;
+    }
+    return LanceArrowUtils.fromArrowField(vector.getField());
   }
 }

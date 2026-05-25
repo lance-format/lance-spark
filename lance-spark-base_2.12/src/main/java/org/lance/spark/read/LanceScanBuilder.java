@@ -26,6 +26,7 @@ import org.lance.schema.LanceField;
 import org.lance.schema.LanceSchema;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
+import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.Utils;
 
@@ -117,8 +118,8 @@ public class LanceScanBuilder
       String namespaceImpl,
       java.util.Map<String, String> namespaceProperties,
       ShardingSpec shardingSpec) {
-    this.fullSchema = schema;
-    this.schema = schema;
+    this.fullSchema = BlobUtils.applyBlobV2DescriptorSchema(schema);
+    this.schema = this.fullSchema;
     this.readOptions = readOptions;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
