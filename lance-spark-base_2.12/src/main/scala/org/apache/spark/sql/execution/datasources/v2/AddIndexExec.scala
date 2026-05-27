@@ -18,6 +18,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode
 import org.apache.arrow.c.{ArrowArrayStream, Data}
 import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.arrow.vector.ipc.ArrowReader
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
 import org.apache.spark.sql.catalyst.plans.logical.{AddIndexOutputType, LanceNamedArgument}
@@ -32,7 +33,7 @@ import org.lance.index.scalar.{BTreeIndexParams, ScalarIndexParams}
 import org.lance.operation.{CreateIndex => AddIndexOperation}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceRuntime, LanceSparkReadOptions}
 import org.lance.spark.arrow.LanceArrowWriter
-import org.lance.spark.utils.{CloseableUtil, ParserUtils, Utils}
+import org.lance.spark.utils.{CloseableUtil, Utils}
 import org.lance.spark.write.SingleBatchArrowReader
 
 import java.time.Instant
@@ -44,9 +45,9 @@ import scala.collection.JavaConverters._
  * Physical execution of distributed CREATE INDEX (ALTER TABLE ... CREATE INDEX ...) for Lance datasets.
  *
  * <ul>
- * <li>For BTREE index, it uses a range-based approach that redistributes and sorts data across partitions, creates indexes for each range in parallel, and finally merges them into a global index structure.
- * <li>For other index types, it processes each fragment independently in parallel, merges index metadata
- * and commits an index-creation transaction.
+ * <li>For zonemap index, it builds uncommitted index segments in parallel and commits the logical index on the driver.
+ * <li>For BTREE index, range mode redistributes and sorts data across partitions, creates indexes for each range in parallel, and finally merges them into a global index structure.
+ * <li>For fragment-trainable scalar index types (BTREE fragment mode, FTS, etc.), it processes each fragment independently in parallel, merges index metadata and commits an index-creation transaction.
  * </ul>
  */
 case class AddIndexExec(
@@ -82,92 +83,119 @@ case class AddIndexExec(
       return Seq(new GenericInternalRow(Array[Any](0L, UTF8String.fromString(indexName))))
     }
 
-    val uuid = UUID.randomUUID()
     val indexType = IndexUtils.buildIndexType(method)
 
+    if (indexType == IndexType.ZONEMAP && columns.size != 1) {
+      throw new UnsupportedOperationException(
+        "Zonemap index currently supports a single column only")
+    }
+
+    val btreeBuildMode = IndexUtils.btreeBuildMode(indexType, args)
+    val useLogicalSegmentCommit = IndexUtils.useLogicalSegmentCommit(indexType)
+
+    val numSegmentsOpt = args.find(_.name == "num_segments")
+    if (numSegmentsOpt.isDefined && !useLogicalSegmentCommit) {
+      throw new IllegalArgumentException(
+        "num_segments option is only supported for index types that use segmented builds (e.g., zonemap)")
+    }
+    val validatedNumSegments: Option[Int] = numSegmentsOpt.map { arg =>
+      arg.value match {
+        case null =>
+          throw new IllegalArgumentException(
+            "num_segments must be a positive integer, got: null")
+        case n: Number =>
+          val asLong = n.longValue()
+          if (asLong < 1L || asLong > Int.MaxValue)
+            throw new IllegalArgumentException(
+              s"num_segments must be a positive integer that fits in Int, got: $asLong")
+          asLong.toInt
+        case other =>
+          throw new IllegalArgumentException(
+            s"num_segments must be a positive integer, got: $other")
+      }
+    }
+
+    // Zonemap uses logical segment commit path
+    if (useLogicalSegmentCommit) {
+      val (nsImpl, nsProps, tableId, initialStorageOpts) =
+        extractNamespaceInfo(lanceDataset, readOptions)
+      val zonemapJob = new ZonemapIndexJob(
+        this,
+        readOptions,
+        fragmentIds,
+        validatedNumSegments,
+        nsImpl,
+        nsProps,
+        tableId,
+        initialStorageOpts)
+      val segments = zonemapJob.run()
+      // Atomic add+remove via Lance core; see commitIndexSegments
+      commitIndexSegments(readOptions, columns.head, segments)
+      return Seq(new GenericInternalRow(Array[Any](
+        fragmentIds.size.toLong,
+        UTF8String.fromString(indexName))))
+    }
+
+    val uuid = UUID.randomUUID()
     val dataset = Utils.openDatasetBuilder(readOptions).build()
 
+    val indexBuildResult =
+      createIndexJob(
+        dataset,
+        lanceDataset,
+        readOptions,
+        uuid.toString,
+        fragmentIds,
+        btreeBuildMode).run()
+
     try {
-      if (indexType == IndexType.ZONEMAP) {
-        // ZoneMap indexes are lightweight (metadata-only).
-        // Build per-fragment segments on the driver and commit
-        // via the segment-based path, avoiding the merge path
-        // which doesn't support ZoneMap.
-        val argsJson = IndexUtils.toJson(args)
-        val segments = fragmentIds.map { fragId =>
-          val params = IndexParams.builder()
-            .setScalarIndexParams(
-              ScalarIndexParams.create("zonemap", argsJson))
-            .build()
-          val opts = IndexOptions
-            .builder(columns.asJava, IndexType.ZONEMAP, params)
-            .replace(true)
-            .withIndexName(indexName)
-            .withFragmentIds(Collections.singletonList(fragId))
-            .build()
-          dataset.createIndex(opts)
-        }
-        dataset.commitExistingIndexSegments(
-          indexName,
-          columns.head,
-          segments.asJava)
-      } else {
-        val indexBuildResult =
-          createIndexJob(
-            dataset,
-            lanceDataset,
-            readOptions,
-            uuid.toString,
-            fragmentIds).run()
-        // BTree/Inverted use the merge path
-        dataset.mergeIndexMetadata(uuid.toString, indexType, Optional.empty())
+      // Merge index metadata after all fragments are indexed
+      dataset.mergeIndexMetadata(uuid.toString, indexType, Optional.empty())
 
-        val fieldIdByName = dataset.getLanceSchema.fields().asScala
-          .map(f => f.getName -> f.getId)
-          .toMap
-        val fieldIds = columns.map { column =>
-          fieldIdByName.getOrElse(
-            column,
-            throw new IllegalArgumentException(
-              s"Cannot find index column in Lance schema: $column"))
-        }.toList
+      val fieldIdByName = dataset.getLanceSchema.fields().asScala
+        .map(f => f.getName -> f.getId)
+        .toMap
+      val fieldIds = columns.map { column =>
+        fieldIdByName.getOrElse(
+          column,
+          throw new IllegalArgumentException(s"Cannot find index column in Lance schema: $column"))
+      }.toList
 
-        val datasetVersion = dataset.version()
+      val datasetVersion = dataset.version()
 
-        val indexBuilder = Index
-          .builder()
-          .uuid(uuid)
-          .name(indexName)
-          .fields(fieldIds.map(java.lang.Integer.valueOf).asJava)
-          .datasetVersion(datasetVersion)
-          .indexDetails(indexBuildResult.indexDetails)
-          .indexVersion(indexBuildResult.indexVersion)
-          .indexType(indexBuildResult.indexType)
-          .fragments(fragmentIds.asJava)
-        indexBuildResult.createdAt.foreach(indexBuilder.createdAt)
-        val index = indexBuilder.build()
+      val indexBuilder = Index
+        .builder()
+        .uuid(uuid)
+        .name(indexName)
+        .fields(fieldIds.map(java.lang.Integer.valueOf).asJava)
+        .datasetVersion(datasetVersion)
+        .indexDetails(indexBuildResult.indexDetails)
+        .indexVersion(indexBuildResult.indexVersion)
+        .indexType(indexBuildResult.indexType)
+        .fragments(fragmentIds.asJava)
+      indexBuildResult.createdAt.foreach(indexBuilder.createdAt)
+      val index = indexBuilder.build()
 
-        // Find existing indices with the same name to mark as removed (for replace)
-        val removedIndices = dataset.getIndexes.asScala
-          .filter(_.name() == indexName)
-          .toList.asJava
+      // Find existing indices with the same name to mark as removed (for replace)
+      val removedIndices = dataset.getIndexes.asScala
+        .filter(_.name() == indexName)
+        .toList.asJava
 
-        val op = AddIndexOperation.builder()
-          .withNewIndices(Collections.singletonList(index))
-          .withRemovedIndices(removedIndices)
-          .build()
-        val txn = new Transaction.Builder()
-          .readVersion(dataset.version())
-          .operation(op)
-          .build()
-        try {
-          val newDataset = new CommitBuilder(dataset)
-            .writeParams(readOptions.getStorageOptions)
-            .execute(txn)
-          newDataset.close()
-        } finally {
-          txn.close()
-        }
+      val op = AddIndexOperation.builder()
+        .withNewIndices(Collections.singletonList(index))
+        .withRemovedIndices(removedIndices)
+        .build()
+      val txn = new Transaction.Builder()
+        .readVersion(dataset.version())
+        .operation(op)
+        .build()
+      try {
+        val newDataset = new CommitBuilder(dataset)
+          .writeParams(readOptions.getStorageOptions)
+          .execute(txn)
+        newDataset.close()
+      } finally {
+        txn.close()
       }
     } finally {
       dataset.close()
@@ -178,18 +206,32 @@ case class AddIndexExec(
       UTF8String.fromString(indexName))))
   }
 
-  private def createIndexJob(
-      dataset: Dataset,
-      lanceDataset: LanceDataset,
+  // Lance core's commitExistingIndexSegments handles atomic replacement:
+  // it finds existing segments whose fragments overlap with incoming ones
+  // and removes them in the same CreateIndex transaction.
+  private def commitIndexSegments(
       readOptions: LanceSparkReadOptions,
-      uuid: String,
-      fragmentIds: List[Integer]): IndexJob = {
-    // Get namespace info from catalog if available (for credential vending on workers)
-    val (nsImpl, nsProps, tableId, initialStorageOpts): (
-        Option[String],
-        Option[Map[String, String]],
-        Option[List[String]],
-        Option[Map[String, String]]) = catalog match {
+      column: String,
+      segments: Seq[Index]): Unit = {
+    val dataset = Utils.openDatasetBuilder(readOptions).build()
+    try {
+      dataset.commitExistingIndexSegments(
+        indexName,
+        column,
+        segments.toList.asJava)
+    } finally {
+      dataset.close()
+    }
+  }
+
+  private def extractNamespaceInfo(
+      lanceDataset: LanceDataset,
+      readOptions: LanceSparkReadOptions): (
+      Option[String],
+      Option[Map[String, String]],
+      Option[List[String]],
+      Option[Map[String, String]]) = {
+    catalog match {
       case nsCatalog: BaseLanceNamespaceSparkCatalog =>
         (
           Option(nsCatalog.getNamespaceImpl),
@@ -198,11 +240,21 @@ case class AddIndexExec(
           Option(lanceDataset.getInitialStorageOptions).map(_.asScala.toMap))
       case _ => (None, None, None, None)
     }
+  }
+
+  private def createIndexJob(
+      dataset: Dataset,
+      lanceDataset: LanceDataset,
+      readOptions: LanceSparkReadOptions,
+      uuid: String,
+      fragmentIds: List[Integer],
+      btreeBuildMode: Option[String]): IndexJob = {
+    val (nsImpl, nsProps, tableId, initialStorageOpts) =
+      extractNamespaceInfo(lanceDataset, readOptions)
 
     IndexUtils.buildIndexType(method) match {
       case IndexType.BTREE =>
-        val mode = args.find(_.name == "build_mode").map(_.value.asInstanceOf[String])
-        mode match {
+        btreeBuildMode match {
           case Some("range") =>
             return new RangeBasedBTreeIndexJob(
               this,
@@ -224,10 +276,6 @@ case class AddIndexExec(
               nsProps,
               tableId,
               initialStorageOpts)
-
-          case Some(unknown) =>
-            throw new IllegalArgumentException(
-              s"Unrecognized build_mode: '$unknown'. Supported values are 'fragment' and 'range'.")
         }
 
       case _ =>
@@ -310,9 +358,7 @@ class FragmentBasedIndexJob(
       .map(t => t.execute())
       .collect()
 
-    IndexUtils.collectIndexBuildResult(
-      results,
-      IndexUtils.buildIndexType(addIndexExec.method))
+    IndexUtils.collectIndexBuildResult(results, IndexUtils.buildIndexType(addIndexExec.method))
   }
 }
 
@@ -356,19 +402,13 @@ case class FragmentIndexTask(
         argsJson))
       .build()
 
-    val indexOptionsBuilder = IndexOptions
+    val indexOptions = IndexOptions
       .builder(java.util.Arrays.asList(columns: _*), indexType, params)
       .replace(true)
       .withIndexName(indexName)
+      .withIndexUUID(uuid)
       .withFragmentIds(Collections.singletonList(fragmentId))
-    // For segment-based indexes (ZoneMap), each fragment needs its
-    // own UUID so segments don't collide. For merge-based indexes
-    // (BTree, Inverted), all fragments share one UUID so their
-    // outputs land in the same index directory for merging.
-    if (indexType != IndexType.ZONEMAP) {
-      indexOptionsBuilder.withIndexUUID(uuid)
-    }
-    val indexOptions = indexOptionsBuilder.build()
+      .build()
 
     val dataset = Utils.openDatasetBuilder(readOptions)
       .initialStorageOptions(initialStorageOptions.map(_.asJava).orNull)
@@ -431,16 +471,14 @@ class RangeBasedBTreeIndexJob(
     val columns = addIndexExec.columns.toList
     val zoneSize = addIndexExec.args.find(_.name == "zone_size").map(_.value.asInstanceOf[Long])
 
-    // Build a fully qualified table name to read data back through Spark. Every segment is
-    // backtick-quoted so that Spark's multipart identifier parser does not split on dots,
-    // hyphens, or other special characters inside catalog/namespace/table names.
+    // Build a fully qualified table name to read data back through Spark.
     val namespace = Option(ident.namespace()).map(_.toSeq).getOrElse(Seq.empty)
-    val rawParts = if (namespace.isEmpty) {
+    val parts = if (namespace.isEmpty) {
       Seq(catalog.name(), ident.name())
     } else {
       catalog.name() +: namespace :+ ident.name()
     }
-    val fullTableName = rawParts.map(ParserUtils.quoteIdentifier).mkString(".")
+    val fullTableName = parts.mkString(".")
 
     // Read specific column and _rowid from dataset
     val df = session.table(fullTableName)
@@ -585,6 +623,127 @@ case class RangeBTreeIndexBuilder(
 }
 
 /**
+ * A job implementation for creating zonemap indexes using logical segment commit.
+ * Fragments are batched into segments, each built in parallel, and committed
+ * as a logical index on the driver.
+ */
+class ZonemapIndexJob(
+    addIndexExec: AddIndexExec,
+    readOptions: LanceSparkReadOptions,
+    fragmentIds: List[Integer],
+    numSegments: Option[Int],
+    nsImpl: Option[String],
+    nsProps: Option[Map[String, String]],
+    tableId: Option[List[String]],
+    initialStorageOpts: Option[Map[String, String]])
+  extends Logging {
+
+  def run(): Seq[Index] = {
+    val encodedReadOptions = encode(readOptions)
+    val columns = addIndexExec.columns.toList
+    val argsJson = IndexUtils.toJson(addIndexExec.args)
+    val fragmentBatches = batchFragments(fragmentIds, numSegments)
+
+    val tasks = fragmentBatches.map { batch =>
+      ZonemapIndexTask(
+        encodedReadOptions,
+        columns,
+        addIndexExec.method,
+        argsJson,
+        addIndexExec.indexName,
+        batch,
+        nsImpl,
+        nsProps,
+        tableId,
+        initialStorageOpts)
+    }.toSeq
+
+    try {
+      addIndexExec.session.sparkContext
+        .parallelize(tasks, tasks.size)
+        .map(t => t.execute())
+        .collect()
+        .map(decode[Index])
+        .toSeq
+    } catch {
+      case e: Exception =>
+        throw new RuntimeException(
+          "Zonemap segment build failed. Uncommitted segments are not " +
+            "visible to readers and will not affect query correctness.",
+          e)
+    }
+  }
+
+  private def batchFragments(
+      fragmentIds: List[Integer],
+      numSegments: Option[Int]): Seq[List[Integer]] = {
+    val n = fragmentIds.size
+    val k = numSegments match {
+      case Some(requested) =>
+        val clamped = math.max(1, math.min(n, requested))
+        if (clamped != requested) {
+          logInfo(
+            s"num_segments=$requested clamped to $clamped " +
+              s"(fragment count=$n)")
+        }
+        clamped
+      case None => math.max(
+          1,
+          math.min(n, addIndexExec.session.sparkContext.defaultParallelism))
+    }
+    (0 until k).map { i =>
+      fragmentIds.slice(
+        (i.toLong * n / k).toInt,
+        ((i.toLong + 1) * n / k).toInt)
+    }.filter(_.nonEmpty)
+  }
+}
+
+/**
+ * A task to create a zonemap index segment on a batch of fragments.
+ */
+case class ZonemapIndexTask(
+    encodedReadOptions: String,
+    columns: List[String],
+    method: String,
+    argsJson: String,
+    indexName: String,
+    fragmentIds: List[Integer],
+    namespaceImpl: Option[String],
+    namespaceProperties: Option[Map[String, String]],
+    tableId: Option[List[String]],
+    initialStorageOptions: Option[Map[String, String]]) extends Serializable {
+
+  def execute(): String = {
+    val readOptions = decode[LanceSparkReadOptions](encodedReadOptions)
+    val indexType = IndexUtils.buildIndexType(method)
+    val params = IndexParams.builder()
+      .setScalarIndexParams(ScalarIndexParams.create(method, argsJson))
+      .build()
+
+    val indexOptions = IndexOptions
+      .builder(java.util.Arrays.asList(columns: _*), indexType, params)
+      .withFragmentIds(fragmentIds.asJava)
+      .replace(false)
+      .build()
+
+    val dataset = Utils.openDatasetBuilder(readOptions)
+      .initialStorageOptions(initialStorageOptions.map(_.asJava).orNull)
+      .runtimeNamespace(
+        namespaceImpl.orNull,
+        namespaceProperties.map(_.asJava).orNull,
+        tableId.map(_.asJava).orNull)
+      .build()
+
+    try {
+      encode(dataset.createIndex(indexOptions))
+    } finally {
+      dataset.close()
+    }
+  }
+}
+
+/**
  * Utility methods for working with index types.
  */
 object IndexUtils {
@@ -601,8 +760,8 @@ object IndexUtils {
   def buildIndexType(method: String): IndexType = {
     method.toLowerCase match {
       case "btree" => IndexType.BTREE
-      case "fts" => IndexType.INVERTED
       case "zonemap" => IndexType.ZONEMAP
+      case "fts" => IndexType.INVERTED
       case other => throw new UnsupportedOperationException(s"Unsupported index method: $other")
     }
   }
@@ -610,10 +769,29 @@ object IndexUtils {
   def buildScalarIndexParamType(method: String): String = {
     method.toLowerCase match {
       case "btree" => "btree"
-      case "fts" => "inverted"
       case "zonemap" => "zonemap"
+      case "fts" => "inverted"
       case other => throw new UnsupportedOperationException(s"Unsupported index method: $other")
     }
+  }
+
+  def btreeBuildMode(indexType: IndexType, args: Seq[LanceNamedArgument]): Option[String] = {
+    if (indexType != IndexType.BTREE) {
+      None
+    } else {
+      val buildMode = args.find(_.name == "build_mode").map(_.value.asInstanceOf[String])
+      buildMode match {
+        case Some("fragment") | Some("range") | None =>
+          buildMode
+        case Some(unknown) =>
+          throw new IllegalArgumentException(
+            s"Unrecognized build_mode: '$unknown'. Supported values are 'fragment' and 'range'.")
+      }
+    }
+  }
+
+  def useLogicalSegmentCommit(indexType: IndexType): Boolean = {
+    indexType == IndexType.ZONEMAP
   }
 
   /** Extracts the commit metadata from a newly created Index. */

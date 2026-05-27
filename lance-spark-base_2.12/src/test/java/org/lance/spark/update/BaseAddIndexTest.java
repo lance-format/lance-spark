@@ -31,6 +31,7 @@ import java.io.IOException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -196,6 +197,214 @@ public abstract class BaseAddIndexTest {
     Row r = query.collectAsList().get(0);
     Assertions.assertEquals(15, r.getInt(0));
     Assertions.assertEquals("text_15", r.getString(1));
+  }
+
+  @Test
+  public void testCreateZonemapIndex() {
+    prepareDataset();
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index test_index_zonemap using zonemap (id) with (rows_per_zone=4)",
+                fullTable));
+
+    Assertions.assertEquals(
+        "StructType(StructField(fragments_indexed,LongType,true),StructField(index_name,StringType,true))",
+        result.schema().toString());
+
+    Row row2 = result.collectAsList().get(0);
+    long fragmentsIndexed2 = row2.getLong(0);
+    String indexName2 = row2.getString(1);
+
+    Assertions.assertTrue(fragmentsIndexed2 >= 2, "Expected at least 2 fragments to be indexed");
+    Assertions.assertEquals("test_index_zonemap", indexName2);
+
+    checkIndex("test_index_zonemap");
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int fragmentCount = lanceDataset.getFragments().size();
+      int expectedSegmentCount = Math.min(fragmentCount, spark.sparkContext().defaultParallelism());
+      List<Index> zonemapSegments =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> "test_index_zonemap".equals(index.name()))
+              .collect(Collectors.toList());
+      int coveredFragments =
+          zonemapSegments.stream()
+              .map(index -> index.fragments().orElse(Collections.emptyList()).size())
+              .mapToInt(Integer::intValue)
+              .sum();
+
+      Assertions.assertEquals(
+          expectedSegmentCount,
+          zonemapSegments.size(),
+          "Expected distributed zonemap build to batch fragments into bounded segment count");
+      Assertions.assertTrue(
+          zonemapSegments.stream()
+              .allMatch(
+                  index -> index.fragments().isPresent() && !index.fragments().get().isEmpty()),
+          "Expected each zonemap segment to cover at least one fragment");
+      Assertions.assertEquals(
+          fragmentCount,
+          coveredFragments,
+          "Expected zonemap segments to cover all fragments exactly once");
+    } finally {
+      lanceDataset.close();
+    }
+
+    Dataset<Row> query2 = spark.sql(String.format("select * from %s where id=15", fullTable));
+    Assertions.assertEquals(1L, query2.count());
+    Row r2 = query2.collectAsList().get(0);
+    Assertions.assertEquals(15, r2.getInt(0));
+    Assertions.assertEquals("text_15", r2.getString(1));
+  }
+
+  @Test
+  public void testCreateZonemapIndexWithNumSegments() {
+    prepareDataset();
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index test_index_zonemap_segments using zonemap (id) with (num_segments = 3)",
+                fullTable));
+
+    Row row2 = result.collectAsList().get(0);
+    long fragmentsIndexed2 = row2.getLong(0);
+    String indexName2 = row2.getString(1);
+
+    Assertions.assertTrue(fragmentsIndexed2 >= 2, "Expected at least 2 fragments to be indexed");
+    Assertions.assertEquals("test_index_zonemap_segments", indexName2);
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int fragmentCount = lanceDataset.getFragments().size();
+      int expectedSegmentCount = Math.min(fragmentCount, 3);
+      List<Index> segments =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> "test_index_zonemap_segments".equals(index.name()))
+              .collect(Collectors.toList());
+
+      Assertions.assertEquals(
+          expectedSegmentCount,
+          segments.size(),
+          "Expected num_segments=3 to produce exactly 3 segments (or fewer if fragment count < 3)");
+
+      int coveredFragments =
+          segments.stream()
+              .map(index -> index.fragments().orElse(Collections.emptyList()).size())
+              .mapToInt(Integer::intValue)
+              .sum();
+      Assertions.assertEquals(
+          fragmentCount,
+          coveredFragments,
+          "Expected committed segments to cover all fragments exactly once");
+    } finally {
+      lanceDataset.close();
+    }
+  }
+
+  @Test
+  public void testRepeatedCreateZonemapIndexReplacesExistingSegments() {
+    prepareDataset();
+
+    String sql =
+        String.format(
+            "alter table %s create index test_index_zonemap_repeat using zonemap (id) with (rows_per_zone=4)",
+            fullTable);
+
+    spark.sql(sql);
+
+    // Capture segment UUIDs after first run
+    org.lance.Dataset ds1 = org.lance.Dataset.open().uri(tableDir).build();
+    Set<UUID> firstRunUuids;
+    try {
+      firstRunUuids =
+          ds1.getIndexes().stream()
+              .filter(index -> "test_index_zonemap_repeat".equals(index.name()))
+              .map(Index::uuid)
+              .collect(Collectors.toSet());
+    } finally {
+      ds1.close();
+    }
+    Assertions.assertFalse(firstRunUuids.isEmpty(), "First run should produce segments");
+
+    spark.sql(sql);
+
+    // Verify segments were replaced (new UUIDs), not duplicated
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int fragmentCount = lanceDataset.getFragments().size();
+      int expectedSegmentCount = Math.min(fragmentCount, spark.sparkContext().defaultParallelism());
+      List<Index> zonemapSegments =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> "test_index_zonemap_repeat".equals(index.name()))
+              .collect(Collectors.toList());
+      Set<UUID> secondRunUuids =
+          zonemapSegments.stream().map(Index::uuid).collect(Collectors.toSet());
+      int coveredFragments =
+          zonemapSegments.stream()
+              .map(index -> index.fragments().orElse(Collections.emptyList()).size())
+              .mapToInt(Integer::intValue)
+              .sum();
+
+      Assertions.assertEquals(
+          expectedSegmentCount,
+          zonemapSegments.size(),
+          "Expected recreated zonemap index to replace existing batched segments instead of duplicating them");
+      Assertions.assertEquals(
+          fragmentCount,
+          coveredFragments,
+          "Expected recreated zonemap segments to cover all fragments exactly once");
+      Assertions.assertTrue(
+          Collections.disjoint(firstRunUuids, secondRunUuids),
+          "Expected second run to produce fresh segment UUIDs, not reuse first run's");
+    } finally {
+      lanceDataset.close();
+    }
+  }
+
+  @Test
+  public void testZonemapRejectsMultipleColumns() {
+    prepareDataset();
+    Assertions.assertThrows(
+        Exception.class,
+        () ->
+            spark.sql(
+                String.format(
+                    "alter table %s create index idx_multi using zonemap (id, text)", fullTable)));
+  }
+
+  @Test
+  public void testNumSegmentsRejectedForBtree() {
+    prepareDataset();
+    Assertions.assertThrows(
+        Exception.class,
+        () ->
+            spark.sql(
+                String.format(
+                    "alter table %s create index idx_btree_seg using btree (id) with (num_segments=3)",
+                    fullTable)));
+  }
+
+  @Test
+  public void testNumSegmentsRejectsZeroAndNegative() {
+    prepareDataset();
+    Assertions.assertThrows(
+        Exception.class,
+        () ->
+            spark.sql(
+                String.format(
+                    "alter table %s create index idx_zero using zonemap (id) with (num_segments=0)",
+                    fullTable)));
+    Assertions.assertThrows(
+        Exception.class,
+        () ->
+            spark.sql(
+                String.format(
+                    "alter table %s create index idx_neg using zonemap (id) with (num_segments=-1)",
+                    fullTable)));
   }
 
   @Test
