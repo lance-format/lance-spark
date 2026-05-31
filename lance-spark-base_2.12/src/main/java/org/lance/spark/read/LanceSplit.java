@@ -75,17 +75,30 @@ public class LanceSplit implements Serializable {
    */
   public static ScanPlanResult planScan(LanceSparkReadOptions readOptions) {
     try (Dataset dataset = Utils.openDatasetBuilder(readOptions).build()) {
-      List<Fragment> fragments = dataset.getFragments();
-      List<LanceSplit> splits = new ArrayList<>(fragments.size());
-      Map<Integer, Long> fragmentRowCounts = new HashMap<>(fragments.size());
-      for (Fragment fragment : fragments) {
-        int id = fragment.getId();
-        splits.add(new LanceSplit(Collections.singletonList(id)));
-        fragmentRowCounts.put(id, fragment.metadata().getNumRows());
-      }
-      long resolvedVersion = dataset.getVersion().getId();
-      return new ScanPlanResult(splits, resolvedVersion, fragmentRowCounts);
+      return planScan(dataset);
     }
+  }
+
+  /**
+   * Generates splits and resolves the dataset version using an already-opened dataset.
+   *
+   * <p>Prefer this overload over {@link #planScan(LanceSparkReadOptions)} when the caller already
+   * holds an open {@link Dataset} (e.g. in scan planning), to avoid re-opening the dataset and
+   * paying the manifest IO cost twice.
+   *
+   * <p>The caller retains ownership of the dataset; this method does not close it.
+   */
+  public static ScanPlanResult planScan(Dataset dataset) {
+    List<Fragment> fragments = dataset.getFragments();
+    List<LanceSplit> splits = new ArrayList<>(fragments.size());
+    Map<Integer, Long> fragmentRowCounts = new HashMap<>(fragments.size());
+    for (Fragment fragment : fragments) {
+      int id = fragment.getId();
+      splits.add(new LanceSplit(Collections.singletonList(id)));
+      fragmentRowCounts.put(id, fragment.metadata().getNumRows());
+    }
+    long resolvedVersion = dataset.getVersion().getId();
+    return new ScanPlanResult(splits, resolvedVersion, fragmentRowCounts);
   }
 
   /**

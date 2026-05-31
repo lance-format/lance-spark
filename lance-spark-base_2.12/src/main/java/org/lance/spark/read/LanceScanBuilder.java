@@ -232,6 +232,14 @@ public class LanceScanBuilder
           summary.getTotalRows());
     }
 
+    // Pre-compute splits and per-fragment row counts from the same Dataset handle that we
+    // already opened above. This consolidates two driver-side opens into one and lets us pin
+    // the resolved version onto the read options shipped to workers, providing snapshot
+    // isolation across all tasks of this query.
+    LanceSplit.ScanPlanResult scanPlan = LanceSplit.planScan(dataset);
+    LanceSparkReadOptions resolvedReadOptions =
+        readOptions.withVersion((int) scanPlan.getResolvedVersion());
+
     // Close the lazily opened dataset - it's no longer needed after build
     closeLazyDataset();
 
@@ -239,7 +247,7 @@ public class LanceScanBuilder
         FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);
     return new LanceScan(
         schema,
-        readOptions,
+        resolvedReadOptions,
         whereCondition,
         limit,
         offset,
@@ -249,6 +257,8 @@ public class LanceScanBuilder
         statistics,
         zonemapStats,
         survivingFragmentIds,
+        scanPlan.getSplits(),
+        scanPlan.getFragmentRowCounts(),
         activeShardingExpression,
         fragmentShardingKeys,
         initialStorageOptions,
