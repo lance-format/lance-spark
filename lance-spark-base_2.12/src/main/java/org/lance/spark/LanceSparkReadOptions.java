@@ -107,7 +107,7 @@ public class LanceSparkReadOptions implements Serializable {
   private final String datasetName;
   private final boolean pushDownFilters;
   private final Integer blockSize;
-  private final Integer version;
+  private final Long version;
   private final Integer indexCacheSize;
   private final Integer metadataCacheSize;
   private final int batchSize;
@@ -238,7 +238,7 @@ public class LanceSparkReadOptions implements Serializable {
     return blockSize;
   }
 
-  public Integer getVersion() {
+  public Long getVersion() {
     return version;
   }
 
@@ -312,7 +312,7 @@ public class LanceSparkReadOptions implements Serializable {
    * @param newVersion the version to use
    * @return a new LanceSparkReadOptions with the specified version
    */
-  public LanceSparkReadOptions withVersion(int newVersion) {
+  public LanceSparkReadOptions withVersion(long newVersion) {
     return builder()
         .datasetUri(this.datasetUri)
         .pushDownFilters(this.pushDownFilters)
@@ -411,7 +411,7 @@ public class LanceSparkReadOptions implements Serializable {
     private boolean pushDownFilters = DEFAULT_PUSH_DOWN_FILTERS;
     private Integer blockSize;
     private Query nearest;
-    private Integer version;
+    private Long version;
     private Integer indexCacheSize;
     private Integer metadataCacheSize;
     private int batchSize = DEFAULT_BATCH_SIZE;
@@ -453,7 +453,7 @@ public class LanceSparkReadOptions implements Serializable {
       return this;
     }
 
-    public Builder version(Integer version) {
+    public Builder version(Long version) {
       this.version = version;
       return this;
     }
@@ -546,7 +546,7 @@ public class LanceSparkReadOptions implements Serializable {
         this.blockSize = Integer.parseInt(opts.get(CONFIG_BLOCK_SIZE));
       }
       if (opts.containsKey(CONFIG_VERSION)) {
-        this.version = Integer.parseInt(opts.get(CONFIG_VERSION));
+        this.version = Long.parseLong(opts.get(CONFIG_VERSION));
       }
       if (opts.containsKey(CONFIG_INDEX_CACHE_SIZE)) {
         this.indexCacheSize = Integer.parseInt(opts.get(CONFIG_INDEX_CACHE_SIZE));

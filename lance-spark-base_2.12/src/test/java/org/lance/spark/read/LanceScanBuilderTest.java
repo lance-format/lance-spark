@@ -278,6 +278,38 @@ public class LanceScanBuilderTest {
     assertEquals(TEST_SCHEMA, scan.readSchema());
   }
 
+  /**
+   * Asserts the contract that splits planned during {@link LanceScanBuilder#build()} match what
+   * {@link LanceScan#planInputPartitions()} returns. This guarantees the second {@code
+   * Dataset.open()} that previously happened during {@code planInputPartitions()} is gone — the
+   * scan now consumes pre-computed splits instead of re-enumerating fragments.
+   */
+  @Test
+  public void testBuildPrecomputesSplitsForPlanInputPartitions() {
+    int expectedSplits =
+        LanceSplit.planScan(TestUtils.TestTable1Config.readOptions).getSplits().size();
+    LanceScanBuilder builder = createBuilder();
+    LanceScan scan = (LanceScan) builder.build();
+    assertEquals(expectedSplits, scan.planInputPartitions().length);
+  }
+
+  /**
+   * Asserts that {@link LanceScanBuilder#build()} pins the resolved dataset version onto the read
+   * options shipped to workers, so all tasks of one query observe a consistent snapshot even under
+   * concurrent writes.
+   */
+  @Test
+  public void testBuildPinsResolvedVersionOnReadOptions() {
+    LanceScanBuilder builder = createBuilder();
+    LanceScan scan = (LanceScan) builder.build();
+    org.apache.spark.sql.connector.read.InputPartition[] partitions = scan.planInputPartitions();
+    assertTrue(partitions.length > 0);
+    LanceInputPartition first = (LanceInputPartition) partitions[0];
+    Long pinned = first.getReadOptions().getVersion();
+    assertNotNull(pinned, "build() must pin the resolved version onto readOptions");
+    assertTrue(pinned > 0);
+  }
+
   @Test
   public void testBuildWithCountStarReturnsLocalScan() {
     LanceScanBuilder builder = createBuilder();

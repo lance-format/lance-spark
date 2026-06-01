@@ -99,11 +99,11 @@ public class LanceScan
 
   /**
    * Per-fragment logical row counts (after deletions), captured together with {@link
-   * #precomputedSplits} on the driver. Consumed only by {@link #pruneByLimit} — kept transient to
-   * avoid bloating the serialized plan when shipped via {@code BatchScanExec} / {@code
-   * ReusedExchange} comparisons. Effectively final after construction.
+   * #precomputedSplits} on the driver. Consumed by {@link #pruneByLimit}. Not declared {@code
+   * transient} because Java deserialization would skip the constructor and leave the field {@code
+   * null}, which would NPE inside {@link #pruneByLimit}.
    */
-  private final transient java.util.Map<Integer, Long> precomputedFragmentRowCounts;
+  private final java.util.Map<Integer, Long> precomputedFragmentRowCounts;
 
   /** Number of partitions after pruning, set during {@link #planInputPartitions()}. */
   private transient int numPartitions = -1;
