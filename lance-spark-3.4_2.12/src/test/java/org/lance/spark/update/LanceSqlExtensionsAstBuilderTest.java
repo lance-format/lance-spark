@@ -189,4 +189,67 @@ public class LanceSqlExtensionsAstBuilderTest {
     assertEquals(
         List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
   }
+
+  @Test
+  public void testCreateBranchFromMain() {
+    LanceSqlExtensionsParser parser =
+        createParser(
+            "ALTER TABLE `my-catalog`.`my-table` CREATE BRANCH IF NOT EXISTS `branch-a` AS OF VERSION 7");
+    org.apache.spark.sql.catalyst.plans.logical.LanceCreateBranch plan =
+        (org.apache.spark.sql.catalyst.plans.logical.LanceCreateBranch)
+            astBuilder.visitSingleStatement(parser.singleStatement());
+
+    UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
+    assertEquals(
+        List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+    assertEquals("branch-a", plan.branchName());
+    assertEquals(true, plan.ifNotExists());
+    assertTrue(plan.ref().getBranchName().isEmpty());
+    assertEquals(7, plan.ref().getVersionNumber().get());
+  }
+
+  @Test
+  public void testCreateBranchFromBranch() {
+    LanceSqlExtensionsParser parser =
+        createParser(
+            "ALTER TABLE `my-catalog`.`my-table` CREATE BRANCH IF NOT EXISTS `branch-a` AS OF BRANCH `source-branch` VERSION 7");
+    org.apache.spark.sql.catalyst.plans.logical.LanceCreateBranch plan =
+        (org.apache.spark.sql.catalyst.plans.logical.LanceCreateBranch)
+            astBuilder.visitSingleStatement(parser.singleStatement());
+
+    UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
+    assertEquals(
+        List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+    assertEquals("branch-a", plan.branchName());
+    assertEquals(true, plan.ifNotExists());
+    assertEquals("source-branch", plan.ref().getBranchName().get());
+    assertEquals(7, plan.ref().getVersionNumber().get());
+  }
+
+  @Test
+  public void testDropBranch() {
+    LanceSqlExtensionsParser parser =
+        createParser("ALTER TABLE `my-catalog`.`my-table` DROP BRANCH IF EXISTS `branch-a`");
+    org.apache.spark.sql.catalyst.plans.logical.LanceDropBranch plan =
+        (org.apache.spark.sql.catalyst.plans.logical.LanceDropBranch)
+            astBuilder.visitSingleStatement(parser.singleStatement());
+
+    UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
+    assertEquals(
+        List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+    assertEquals("branch-a", plan.branchName());
+    assertEquals(true, plan.ifExists());
+  }
+
+  @Test
+  public void testShowBranch() {
+    LanceSqlExtensionsParser parser = createParser("SHOW BRANCH IN `my-catalog`.`my-table`");
+    org.apache.spark.sql.catalyst.plans.logical.LanceShowBranches plan =
+        (org.apache.spark.sql.catalyst.plans.logical.LanceShowBranches)
+            astBuilder.visitSingleStatement(parser.singleStatement());
+
+    UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
+    assertEquals(
+        List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+  }
 }

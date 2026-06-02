@@ -51,6 +51,15 @@ case class LanceDataSourceV2Strategy(session: SparkSession) extends SparkStrateg
     case LanceDropIndex(ResolvedIdentifier(catalog, ident), indexName) =>
       LanceDropIndexExec(asTableCatalog(catalog), ident, indexName.toLowerCase) :: Nil
 
+    case LanceCreateBranch(ResolvedIdentifier(catalog, ident), branchName, ref, ifNotExists) =>
+      LanceCreateBranchExec(asTableCatalog(catalog), ident, branchName, ref, ifNotExists) :: Nil
+
+    case LanceDropBranch(ResolvedIdentifier(catalog, ident), branchName, ifExists) =>
+      LanceDropBranchExec(asTableCatalog(catalog), ident, branchName, ifExists) :: Nil
+
+    case LanceShowBranches(ResolvedIdentifier(catalog, ident)) =>
+      LanceShowBranchesExec(asTableCatalog(catalog), ident) :: Nil
+
     case SetUnenforcedPrimaryKey(ResolvedIdentifier(catalog, ident), columns) =>
       SetUnenforcedPrimaryKeyExec(asTableCatalog(catalog), ident, columns) :: Nil
 

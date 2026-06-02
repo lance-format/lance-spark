@@ -13,6 +13,7 @@
  */
 package org.apache.spark.sql.catalyst.parser.extensions
 
+import org.antlr.v4.runtime.ParserRuleContext
 import org.apache.spark.sql.catalyst.analysis.{UnresolvedIdentifier, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.parser.ParserInterface
 import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, LanceDropIndex, LanceNamedArgument, LogicalPlan, Optimize, SetUnenforcedPrimaryKey, ShowIndexes, UpdateColumnsBackfill, Vacuum}
@@ -113,6 +114,75 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
     val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
     val indexName = cleanIdentifier(ctx.indexName.getText)
     LanceDropIndex(table, indexName)
+  }
+
+  override def visitCreateBranchRefMain(ctx: LanceSqlExtensionsParser.CreateBranchRefMainContext)
+      : LanceCreateBranch = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val branchName = cleanIdentifier(ctx.branchName.getText)
+    val ifNotExists = ctx.EXISTS() != null
+    if (ctx.refMainVersion == null) {
+      LanceCreateBranch(table, branchName, org.lance.Ref.ofMain(), ifNotExists)
+    } else {
+      LanceCreateBranch(
+        table,
+        branchName,
+        org.lance.Ref.ofMain(_parseVersion(ctx, ctx.refMainVersion.getText)),
+        ifNotExists)
+    }
+  }
+
+  override def visitCreateBranchRefBranch(
+      ctx: LanceSqlExtensionsParser.CreateBranchRefBranchContext): LanceCreateBranch = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val branchName = cleanIdentifier(ctx.branchName.getText)
+    val refBranchName = cleanIdentifier(ctx.refBranchName.getText)
+    val ifNotExists = ctx.EXISTS() != null
+    if (ctx.refBranchVersion == null) {
+      LanceCreateBranch(table, branchName, org.lance.Ref.ofBranch(refBranchName), ifNotExists)
+    } else {
+      LanceCreateBranch(
+        table,
+        branchName,
+        org.lance.Ref.ofBranch(refBranchName, _parseVersion(ctx, ctx.refBranchVersion.getText)),
+        ifNotExists)
+    }
+  }
+
+  def _parseVersion(ctx: ParserRuleContext, value: String): Long = {
+    try {
+      java.lang.Long.valueOf(value)
+    } catch {
+      case _: NumberFormatException =>
+        throw new ParseException(
+          errorClass = "INVALID_TYPED_LITERAL",
+          messageParameters = Map(
+            "valueType" -> "LONG",
+            "value" -> value),
+          ctx)
+    }
+  }
+
+  override def visitCreateBranchRefTag(ctx: LanceSqlExtensionsParser.CreateBranchRefTagContext)
+      : LanceCreateBranch = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val branchName = cleanIdentifier(ctx.branchName.getText)
+    val refTagName = cleanIdentifier(ctx.refTagName.getText)
+    val ifNotExists = ctx.EXISTS() != null
+    LanceCreateBranch(table, branchName, org.lance.Ref.ofTag(refTagName), ifNotExists)
+  }
+
+  override def visitDropBranch(ctx: LanceSqlExtensionsParser.DropBranchContext): LanceDropBranch = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val branchName = cleanIdentifier(ctx.branchName.getText)
+    val ifExists = ctx.EXISTS() != null
+    LanceDropBranch(table, branchName, ifExists)
+  }
+
+  override def visitShowBranches(ctx: LanceSqlExtensionsParser.ShowBranchesContext)
+      : LanceShowBranches = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    LanceShowBranches(table)
   }
 
   override def visitSetUnenforcedPrimaryKey(
