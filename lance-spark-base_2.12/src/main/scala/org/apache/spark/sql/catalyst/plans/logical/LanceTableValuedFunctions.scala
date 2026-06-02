@@ -22,10 +22,10 @@ import org.apache.spark.sql.catalyst.util.ArrayData
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.util.{CaseInsensitiveStringMap, LanceArrowUtils}
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.lance.ipc.Query
 import org.lance.spark.{LanceDataset, LanceSparkReadOptions}
-import org.lance.spark.utils.{QueryUtils, Utils}
+import org.lance.spark.utils.QueryUtils
 
 import scala.collection.JavaConverters._
 import scala.util.control.NonFatal
@@ -72,12 +72,7 @@ object LanceTableValuedFunctions {
     val queryVector = extractQueryVector(args(2))
     val limit = extractLimit(args(3))
 
-    val resolvedTable =
-      if (looksLikePath(tableName)) {
-        resolvePathTable(tableName)
-      } else {
-        resolveCatalogTable(spark, tableName)
-      }
+    val resolvedTable = resolveCatalogTable(spark, tableName)
 
     val resolver = spark.sessionState.conf.resolver
     val sourceSchema = resolvedTable.table.schema()
@@ -141,27 +136,6 @@ object LanceTableValuedFunctions {
       catalog: Option[TableCatalog],
       identifier: Option[Identifier])
 
-  private def resolvePathTable(path: String): ResolvedLanceTable = {
-    val readOptions = LanceSparkReadOptions.from(path)
-    val dataset = Utils.openDatasetBuilder(readOptions).build()
-    try {
-      val schema = LanceArrowUtils.fromArrowSchema(dataset.getSchema)
-      ResolvedLanceTable(
-        new LanceDataset(
-          readOptions,
-          schema,
-          null,
-          null,
-          null,
-          false,
-          dataset.getLanceFileFormatVersion),
-        None,
-        None)
-    } finally {
-      dataset.close()
-    }
-  }
-
   private def resolveCatalogTable(spark: SparkSession, tableName: String): ResolvedLanceTable = {
     val catalogManager = spark.sessionState.catalogManager
     val parts = spark.sessionState.sqlParser.parseMultipartIdentifier(tableName)
@@ -170,8 +144,13 @@ object LanceTableValuedFunctions {
     val (catalog, ident) = parts match {
       case Seq(table) =>
         (currentCatalog, Identifier.of(catalogManager.currentNamespace, table))
-      case Seq(namespace, table) =>
-        (currentCatalog, Identifier.of(Array(namespace), table))
+      case Seq(namespaceOrCatalog, table) =>
+        tableCatalog(spark, namespaceOrCatalog) match {
+          case Some(namedCatalog) =>
+            (namedCatalog, Identifier.of(Array.empty, table))
+          case None =>
+            (currentCatalog, Identifier.of(Array(namespaceOrCatalog), table))
+        }
       case multipart if multipart.size >= 3 =>
         tableCatalog(spark, multipart.head) match {
           case Some(namedCatalog) =>
@@ -204,17 +183,6 @@ object LanceTableValuedFunctions {
     } catch {
       case NonFatal(_) => None
     }
-  }
-
-  private def looksLikePath(value: String): Boolean = {
-    value.startsWith("/") ||
-    value.contains("/") ||
-    value.startsWith("s3://") ||
-    value.startsWith("gs://") ||
-    value.startsWith("az://") ||
-    value.startsWith("abfss://") ||
-    value.startsWith("file://") ||
-    value.startsWith("hdfs://")
   }
 
   private def extractString(expr: Expression, argName: String): String = {
