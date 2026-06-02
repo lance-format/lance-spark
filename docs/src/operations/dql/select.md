@@ -61,15 +61,15 @@ Query data from Lance tables using SQL or DataFrames.
 Use the `vector_search` table-valued function to search a vector column from SQL:
 
 ```sql
-vector_search(table, column, query_vector, limit)
+vector_search(table, nearest)
 ```
 
 Arguments:
 
 - `table` - A catalog table identifier or direct Lance dataset path, passed as a string.
-- `column` - The vector column name, passed as a string.
-- `query_vector` - An array of numeric values, for example `array(0.1f, 0.2f, 0.3f)`.
-- `limit` - A positive integer TopK limit.
+- `nearest` - A Lance nearest-neighbor query JSON string. Include `column`, `key`,
+  and `k`; optional fields such as `distanceType` and `useIndex` are passed through
+  to Lance. The `k` value is also used as Spark's final global TopK limit.
 
 Catalog table example:
 
@@ -77,9 +77,7 @@ Catalog table example:
 SELECT id, title
 FROM vector_search(
   'lance.default.documents',
-  'embedding',
-  array(0.12f, 0.34f, 0.56f),
-  10
+  '{"column":"embedding","key":[0.12,0.34,0.56],"k":10,"distanceType":"Cosine","useIndex":true}'
 );
 ```
 
@@ -89,9 +87,7 @@ Direct path example:
 SELECT id
 FROM vector_search(
   '/data/lance/documents.lance',
-  'embedding',
-  array(0.12f, 0.34f, 0.56f),
-  10
+  '{"column":"embedding","key":[0.12,0.34,0.56],"k":10}'
 );
 ```
 

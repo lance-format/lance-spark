@@ -18,8 +18,7 @@ import org.apache.spark.sql.catalyst.FunctionIdentifier
 import org.apache.spark.sql.catalyst.analysis.FunctionRegistryBase
 import org.apache.spark.sql.catalyst.analysis.TableFunctionRegistry.TableFunctionBuilder
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, Expression, ExpressionInfo, Literal, SortOrder}
-import org.apache.spark.sql.catalyst.util.ArrayData
-import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
+import org.apache.spark.sql.connector.catalog.{Identifier, LookupCatalog, TableCatalog}
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
@@ -28,7 +27,6 @@ import org.lance.spark.{LanceDataset, LanceSparkReadOptions}
 import org.lance.spark.utils.QueryUtils
 
 import scala.collection.JavaConverters._
-import scala.util.control.NonFatal
 
 object LanceTableValuedFunctions {
 
@@ -62,35 +60,29 @@ object LanceTableValuedFunctions {
   }
 
   private def resolveVectorSearch(spark: SparkSession, args: Seq[Expression]): LogicalPlan = {
-    if (args.size != 4) {
+    if (args.size != 2) {
       throw new IllegalArgumentException(
-        s"$VECTOR_SEARCH needs four parameters: table, column, query_vector, limit.")
+        s"$VECTOR_SEARCH needs two parameters: table, nearest.")
     }
 
     val tableName = extractString(args(0), "table")
-    val requestedColumn = extractString(args(1), "column")
-    val queryVector = extractQueryVector(args(2))
-    val limit = extractLimit(args(3))
+    val nearestJson = extractString(args(1), "nearest")
+    val nearestQuery = extractNearestQuery(nearestJson)
+    val limit = extractLimit(nearestQuery)
 
     val resolvedTable = resolveCatalogTable(spark, tableName)
 
     val resolver = spark.sessionState.conf.resolver
     val sourceSchema = resolvedTable.table.schema()
-    val vectorField = sourceSchema.fields.find(field => resolver(field.name, requestedColumn))
-      .getOrElse {
-        throw new IllegalArgumentException(
-          s"Column $requestedColumn does not exist in Lance table $tableName.")
-      }
     if (sourceSchema.fields.exists(field => resolver(field.name, VECTOR_DISTANCE))) {
       throw new IllegalArgumentException(
         s"$VECTOR_SEARCH cannot read a table that already contains "
           + s"$VECTOR_DISTANCE; the name is reserved for vector search distance.")
     }
 
-    val query = createNearestQuery(vectorField.name, queryVector, limit)
     val scanOptions =
       new CaseInsensitiveStringMap(
-        Map(LanceSparkReadOptions.CONFIG_NEAREST -> QueryUtils.queryToString(query)).asJava)
+        Map(LanceSparkReadOptions.CONFIG_NEAREST -> nearestJson).asJava)
     val relation =
       DataSourceV2Relation.create(
         withDistanceColumn(resolvedTable.table),
@@ -111,13 +103,28 @@ object LanceTableValuedFunctions {
       limited)
   }
 
-  private def createNearestQuery(column: String, queryVector: Array[Float], limit: Int): Query = {
-    val builder = new Query.Builder()
-    builder.setColumn(column)
-    builder.setKey(queryVector)
-    builder.setK(limit)
-    builder.setUseIndex(true)
-    builder.build()
+  private def extractNearestQuery(nearestJson: String): Query = {
+    try {
+      val query = QueryUtils.stringToQuery(nearestJson)
+      if (query == null) {
+        throw new IllegalArgumentException(s"$VECTOR_SEARCH nearest argument cannot be null.")
+      }
+      query
+    } catch {
+      case e: Exception =>
+        throw new IllegalArgumentException(
+          s"$VECTOR_SEARCH nearest argument must be a valid Lance nearest query json.",
+          e)
+    }
+  }
+
+  private def extractLimit(query: Query): Int = {
+    val limit = query.getK
+    if (limit <= 0) {
+      throw new IllegalArgumentException(
+        s"$VECTOR_SEARCH nearest query k must be a positive integer, but got $limit.")
+    }
+    limit
   }
 
   private def withDistanceColumn(table: LanceDataset): LanceDataset = {
@@ -137,51 +144,31 @@ object LanceTableValuedFunctions {
       identifier: Option[Identifier])
 
   private def resolveCatalogTable(spark: SparkSession, tableName: String): ResolvedLanceTable = {
-    val catalogManager = spark.sessionState.catalogManager
     val parts = spark.sessionState.sqlParser.parseMultipartIdentifier(tableName)
-    val currentCatalog = catalogManager.currentCatalog.asInstanceOf[TableCatalog]
-
+    val lookup = new LookupCatalog {
+      override protected val catalogManager = spark.sessionState.catalogManager
+    }
     val (catalog, ident) = parts match {
-      case Seq(table) =>
-        (currentCatalog, Identifier.of(catalogManager.currentNamespace, table))
-      case Seq(namespaceOrCatalog, table) =>
-        tableCatalog(spark, namespaceOrCatalog) match {
-          case Some(namedCatalog) =>
-            (namedCatalog, Identifier.of(Array.empty, table))
-          case None =>
-            (currentCatalog, Identifier.of(Array(namespaceOrCatalog), table))
-        }
-      case multipart if multipart.size >= 3 =>
-        tableCatalog(spark, multipart.head) match {
-          case Some(namedCatalog) =>
-            (
-              namedCatalog,
-              Identifier.of(multipart.slice(1, multipart.size - 1).toArray, multipart.last))
-          case None =>
-            (currentCatalog, Identifier.of(multipart.dropRight(1).toArray, multipart.last))
-        }
+      case lookup.CatalogAndIdentifier(resolvedCatalog, resolvedIdent) =>
+        (resolvedCatalog, resolvedIdent)
       case _ =>
         throw new IllegalArgumentException(s"Invalid Lance table identifier: $tableName")
     }
+    val tableCatalog = catalog match {
+      case catalog: TableCatalog => catalog
+      case other =>
+        throw new IllegalArgumentException(
+          s"$VECTOR_SEARCH only supports table catalogs, but $tableName resolved to "
+            + other.getClass.getName)
+    }
 
-    catalog.loadTable(ident) match {
+    tableCatalog.loadTable(ident) match {
       case lanceTable: LanceDataset =>
-        ResolvedLanceTable(lanceTable, Some(catalog), Some(ident))
+        ResolvedLanceTable(lanceTable, Some(tableCatalog), Some(ident))
       case other =>
         throw new IllegalArgumentException(
           s"$VECTOR_SEARCH only supports Lance tables, but $tableName resolved to "
             + other.getClass.getName)
-    }
-  }
-
-  private def tableCatalog(spark: SparkSession, catalogName: String): Option[TableCatalog] = {
-    try {
-      spark.sessionState.catalogManager.catalog(catalogName) match {
-        case catalog: TableCatalog => Some(catalog)
-        case _ => None
-      }
-    } catch {
-      case NonFatal(_) => None
     }
   }
 
@@ -193,67 +180,6 @@ object LanceTableValuedFunctions {
     value.toString
   }
 
-  private def extractLimit(expr: Expression): Int = {
-    val value = evalFoldable(expr, "limit")
-    val limit = value match {
-      case n: java.lang.Byte => n.longValue()
-      case n: java.lang.Short => n.longValue()
-      case n: java.lang.Integer => n.longValue()
-      case n: java.lang.Long => n.longValue()
-      case n: java.lang.Number => n.longValue()
-      case other =>
-        throw new IllegalArgumentException(
-          s"$VECTOR_SEARCH limit must be a positive integer, but got ${typeName(other)}.")
-    }
-    if (limit <= 0 || limit > Int.MaxValue) {
-      throw new IllegalArgumentException(
-        s"$VECTOR_SEARCH limit must be a positive integer no larger than ${Int.MaxValue}, "
-          + s"but got $limit.")
-    }
-    limit.toInt
-  }
-
-  private def extractQueryVector(expr: Expression): Array[Float] = {
-    val value = evalFoldable(expr, "query_vector")
-    if (value == null) {
-      throw new IllegalArgumentException(s"$VECTOR_SEARCH query_vector argument cannot be null.")
-    }
-    val arrayData = value match {
-      case data: ArrayData => data
-      case other =>
-        throw new IllegalArgumentException(
-          s"$VECTOR_SEARCH query_vector must be an array of numeric values, "
-            + s"but got ${typeName(other)}.")
-    }
-    if (arrayData.numElements() == 0) {
-      throw new IllegalArgumentException(s"$VECTOR_SEARCH query_vector cannot be empty.")
-    }
-    expr.dataType match {
-      case ArrayType(elementType, _) =>
-        Array.tabulate(arrayData.numElements()) { index =>
-          if (arrayData.isNullAt(index)) {
-            throw new IllegalArgumentException(
-              s"$VECTOR_SEARCH query_vector cannot contain null elements.")
-          }
-          elementType match {
-            case FloatType => arrayData.getFloat(index)
-            case DoubleType => arrayData.getDouble(index).toFloat
-            case ByteType => arrayData.getByte(index).toFloat
-            case ShortType => arrayData.getShort(index).toFloat
-            case IntegerType => arrayData.getInt(index).toFloat
-            case LongType => arrayData.getLong(index).toFloat
-            case other =>
-              throw new IllegalArgumentException(
-                s"$VECTOR_SEARCH query_vector must contain numeric values convertible to FLOAT, "
-                  + s"but got element type ${other.simpleString}.")
-          }
-        }
-      case other =>
-        throw new IllegalArgumentException(
-          s"$VECTOR_SEARCH query_vector must be an array, but got ${other.simpleString}.")
-    }
-  }
-
   private def evalFoldable(expr: Expression, argName: String): Any = {
     if (!expr.foldable) {
       throw new IllegalArgumentException(
@@ -262,13 +188,6 @@ object LanceTableValuedFunctions {
     expr.eval()
   }
 
-  private def typeName(value: Any): String = {
-    if (value == null) {
-      "null"
-    } else {
-      value.getClass.getName
-    }
-  }
 }
 
 /**
@@ -286,6 +205,6 @@ abstract class LanceTableValueFunction(val fnName: String) extends LeafNode {
   val args: Seq[Expression]
 }
 
-/** Plan for vector_search(table, column, query_vector, limit). */
+/** Plan for vector_search(table, nearest). */
 case class VectorSearchQuery(override val args: Seq[Expression])
   extends LanceTableValueFunction(LanceTableValuedFunctions.VECTOR_SEARCH)

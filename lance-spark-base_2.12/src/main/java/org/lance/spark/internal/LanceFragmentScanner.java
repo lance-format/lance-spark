@@ -37,8 +37,6 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 public class LanceFragmentScanner implements AutoCloseable {
-  private static final String VECTOR_DISTANCE_COLUMN = "_distance";
-
   private final Dataset dataset;
   private final LanceScanner scanner;
   private final int fragmentId;
@@ -112,9 +110,9 @@ public class LanceFragmentScanner implements AutoCloseable {
 
       List<String> projectedColumns = new ArrayList<>(getColumnNames(inputPartition.getSchema()));
       if (readOptions.getNearest() != null
-          && hasField(inputPartition.getSchema(), VECTOR_DISTANCE_COLUMN)
-          && !projectedColumns.contains(VECTOR_DISTANCE_COLUMN)) {
-        projectedColumns.add(VECTOR_DISTANCE_COLUMN);
+          && hasField(inputPartition.getSchema(), LanceConstant.VECTOR_DISTANCE)
+          && !projectedColumns.contains(LanceConstant.VECTOR_DISTANCE)) {
+        projectedColumns.add(LanceConstant.VECTOR_DISTANCE);
       }
       if (projectedColumns.isEmpty() && inputPartition.getSchema().isEmpty()) {
         scanOptions.withRowId(true);
@@ -284,7 +282,7 @@ public class LanceFragmentScanner implements AutoCloseable {
                     !name.equals(LanceConstant.FRAGMENT_ID)
                         && !name.equals(LanceConstant.ROW_ID)
                         && !name.equals(LanceConstant.ROW_ADDRESS)
-                        && !name.equals(VECTOR_DISTANCE_COLUMN)
+                        && !name.equals(LanceConstant.VECTOR_DISTANCE)
                         && !name.equals(LanceConstant.ROW_CREATED_AT_VERSION)
                         && !name.equals(LanceConstant.ROW_LAST_UPDATED_AT_VERSION)
                         && !name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)

@@ -17,6 +17,8 @@ public class LanceConstant {
   public static final String FRAGMENT_ID = "_fragid";
   public static final String ROW_ID = "_rowid";
   public static final String ROW_ADDRESS = "_rowaddr";
+
+  // Internal distance column emitted by Lance nearest-neighbor scans.
   public static final String VECTOR_DISTANCE = "_distance";
 
   // CDF (Change Data Feed) version tracking columns

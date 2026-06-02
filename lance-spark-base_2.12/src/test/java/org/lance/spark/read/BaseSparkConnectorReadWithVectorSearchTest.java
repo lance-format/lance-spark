@@ -29,6 +29,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
@@ -36,6 +37,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -89,7 +91,7 @@ public abstract class BaseSparkConnectorReadWithVectorSearchTest {
 
   @Test
   public void testVectorSearchReturnsExpectedTopK() {
-    Dataset<Row> result = vectorSearch("i", 5);
+    Dataset<Row> result = vectorSearch("i", nearestQuery(5));
 
     List<Row> rows = result.collectAsList();
     Set<Integer> expectedI = new HashSet<>(Arrays.asList(1, 81, 161, 241, 321));
@@ -103,7 +105,7 @@ public abstract class BaseSparkConnectorReadWithVectorSearchTest {
 
   @Test
   public void testVectorSearchKeepsMultiplePartitions() {
-    Dataset<Row> result = vectorSearch("i", 5);
+    Dataset<Row> result = vectorSearch("i", nearestQuery(5));
 
     assertTrue(
         scanPartitionCount(result) > 1,
@@ -113,7 +115,7 @@ public abstract class BaseSparkConnectorReadWithVectorSearchTest {
 
   @Test
   public void testVectorSearchDoesNotExposeDistanceColumn() {
-    Dataset<Row> result = vectorSearch("*", 1);
+    Dataset<Row> result = vectorSearch("*", nearestQuery(1));
 
     assertFalse(
         Arrays.asList(result.schema().fieldNames()).contains("_distance"),
@@ -122,7 +124,7 @@ public abstract class BaseSparkConnectorReadWithVectorSearchTest {
 
   @Test
   public void testVectorSearchReturnsGlobalLimit() {
-    Dataset<Row> result = vectorSearch("i", 1);
+    Dataset<Row> result = vectorSearch("i", nearestQuery(1));
 
     assertEquals(1, result.collectAsList().size());
     assertFalse(
@@ -131,45 +133,128 @@ public abstract class BaseSparkConnectorReadWithVectorSearchTest {
   }
 
   @Test
+  public void testVectorSearchDefaultsToExactL2Query() throws Exception {
+    Query query = scanNearestQuery(vectorSearch("i", nearestQuery(5)));
+
+    assertFalse(query.isUseIndex(), "vector_search should default to exact search");
+    assertTrue(query.getDistanceType().isPresent(), "vector_search should set distance type");
+    assertEquals(DistanceType.L2, query.getDistanceType().get());
+  }
+
+  @Test
+  public void testVectorSearchAcceptsDistanceTypeWithoutUseIndex() throws Exception {
+    Query.Builder builder = nearestQueryBuilder(5);
+    builder.setDistanceType(DistanceType.Dot);
+    Query query = scanNearestQuery(vectorSearch("i", builder.build()));
+
+    assertFalse(query.isUseIndex(), "vector_search should default use_index to false");
+    assertTrue(query.getDistanceType().isPresent(), "vector_search should set distance type");
+    assertEquals(DistanceType.Dot, query.getDistanceType().get());
+  }
+
+  @Test
+  public void testVectorSearchAcceptsExplicitUseIndex() throws Exception {
+    Query.Builder builder = nearestQueryBuilder(5);
+    builder.setDistanceType(DistanceType.Cosine);
+    builder.setUseIndex(true);
+    Query query = scanNearestQuery(vectorSearch("i", builder.build()));
+
+    assertTrue(query.isUseIndex(), "vector_search should allow ANN search when requested");
+    assertTrue(query.getDistanceType().isPresent(), "vector_search should set distance type");
+    assertEquals(DistanceType.Cosine, query.getDistanceType().get());
+  }
+
+  @Test
+  public void testVectorSearchRejectsInvalidNearestJson() {
+    Exception ex =
+        assertThrows(
+            Exception.class,
+            () -> spark.sql("SELECT * FROM vector_search('" + testDataset5Uri() + "', '{')"));
+
+    assertTrue(
+        ex.getMessage().contains("nearest"),
+        "Expected nearest json error, got: " + ex.getMessage());
+  }
+
+  @Test
   public void testVectorSearchRejectsInvalidLimit() {
+    String nearestJson =
+        "{\"column\":\"vec\",\"k\":0,\"key\":["
+            + queryVector32()
+            + "],\"distanceType\":\"L2\",\"useIndex\":false}";
+
     assertThrows(
-        IllegalArgumentException.class,
+        Exception.class,
         () ->
             spark
                 .sql(
                     "SELECT * FROM vector_search('"
                         + testDataset5Uri()
-                        + "', 'vec', array("
-                        + queryVector32()
-                        + "), 0)")
+                        + "', '"
+                        + nearestJson
+                        + "')")
                 .collect());
   }
 
-  private static Dataset<Row> vectorSearch(String selectList, int limit) {
-    return spark.sql(
-        "SELECT "
-            + selectList
-            + " FROM vector_search('"
-            + testDataset5Uri()
-            + "', 'vec', array("
-            + queryVector32()
-            + "), "
-            + limit
-            + ")");
+  private static Dataset<Row> vectorSearch(String selectList, Query query) {
+    String nearestJson = QueryUtils.queryToString(query);
+    StringBuilder sql =
+        new StringBuilder()
+            .append("SELECT ")
+            .append(selectList)
+            .append(" FROM vector_search('")
+            .append(testDataset5Uri())
+            .append("', '")
+            .append(nearestJson)
+            .append("'");
+    sql.append(")");
+    return spark.sql(sql.toString());
+  }
+
+  private static Query scanNearestQuery(Dataset<Row> result) throws Exception {
+    LanceScan scan = lanceScan(result);
+    Field readOptionsField = LanceScan.class.getDeclaredField("readOptions");
+    readOptionsField.setAccessible(true);
+    LanceSparkReadOptions readOptions = (LanceSparkReadOptions) readOptionsField.get(scan);
+    Query query = readOptions.getNearest();
+    assertNotNull(query, "Expected vector_search to configure nearest query");
+    return query;
+  }
+
+  private static LanceScan lanceScan(Dataset<Row> result) {
+    scala.collection.Iterator<SparkPlan> leaves =
+        result.queryExecution().executedPlan().collectLeaves().iterator();
+    while (leaves.hasNext()) {
+      SparkPlan node = leaves.next();
+      if (node instanceof BatchScanExec) {
+        return (LanceScan) ((BatchScanExec) node).scan();
+      }
+    }
+    throw new IllegalStateException("No Lance BatchScanExec found in vector_search plan");
   }
 
   private static Query knnQuery() {
+    Query.Builder builder = nearestQueryBuilder(1);
+    builder.setUseIndex(true);
+    return builder.build();
+  }
+
+  private static Query nearestQuery(int k) {
+    return nearestQueryBuilder(k).build();
+  }
+
+  private static Query.Builder nearestQueryBuilder(int k) {
     Query.Builder builder = new Query.Builder();
     float[] key = new float[32];
     for (int i = 0; i < 32; i++) {
       key[i] = (float) (i + 32);
     }
-    builder.setK(1);
+    builder.setK(k);
     builder.setColumn("vec");
     builder.setKey(key);
-    builder.setUseIndex(true);
+    builder.setUseIndex(false);
     builder.setDistanceType(DistanceType.L2);
-    return builder.build();
+    return builder;
   }
 
   private static int scanPartitionCount(Dataset<Row> result) {
