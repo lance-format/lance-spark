@@ -53,6 +53,7 @@ The following features require the Lance Spark SQL extension to be enabled:
 - [UPDATE COLUMNS with backfill](operations/dml/update-columns.md) - Update existing columns using data from a source
 - [OPTIMIZE](operations/ddl/optimize.md) - Compact table fragments for improved query performance
 - [VACUUM](operations/ddl/vacuum.md) - Remove old versions and reclaim storage space
+- [SQL vector search](operations/dql/select.md#vector-search) - Search vector columns with `vector_search(...)`
 
 ## Basic Setup
 

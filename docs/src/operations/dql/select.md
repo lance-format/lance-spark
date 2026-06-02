@@ -53,6 +53,53 @@ Query data from Lance tables using SQL or DataFrames.
     SELECT * FROM users WHERE age > 25;
     ```
 
+## Vector Search
+
+!!! note
+    This feature requires the Lance Spark SQL extension to be enabled. See [Spark SQL Extensions](../../config.md#spark-sql-extensions) for configuration details.
+
+Use the `vector_search` table-valued function to search a vector column from SQL:
+
+```sql
+vector_search(table, column, query_vector, limit)
+```
+
+Arguments:
+
+- `table` - A catalog table identifier or direct Lance dataset path, passed as a string.
+- `column` - The vector column name, passed as a string.
+- `query_vector` - An array of numeric values, for example `array(0.1f, 0.2f, 0.3f)`.
+- `limit` - A positive integer TopK limit.
+
+Catalog table example:
+
+```sql
+SELECT id, title
+FROM vector_search(
+  'lance.default.documents',
+  'embedding',
+  array(0.12f, 0.34f, 0.56f),
+  10
+);
+```
+
+Direct path example:
+
+```sql
+SELECT id
+FROM vector_search(
+  '/data/lance/documents.lance',
+  'embedding',
+  array(0.12f, 0.34f, 0.56f),
+  10
+);
+```
+
+`vector_search` uses Lance's native nearest-neighbor scan on each fragment, keeps the normal
+fragment scan partitions, and applies the final global TopK ordering in Spark using Lance's
+native `_distance` value. The `_distance` column is internal to the SQL plan and is not returned
+by `SELECT *`.
+
 ## Aggregate Queries
 
 === "SQL"

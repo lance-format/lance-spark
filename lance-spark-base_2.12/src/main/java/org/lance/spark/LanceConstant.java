@@ -17,6 +17,7 @@ public class LanceConstant {
   public static final String FRAGMENT_ID = "_fragid";
   public static final String ROW_ID = "_rowid";
   public static final String ROW_ADDRESS = "_rowaddr";
+  public static final String VECTOR_DISTANCE = "_distance";
 
   // CDF (Change Data Feed) version tracking columns
   public static final String ROW_CREATED_AT_VERSION = "_row_created_at_version";

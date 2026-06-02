@@ -304,6 +304,10 @@ public class LanceScanBuilder
 
   @Override
   public boolean pushTopN(SortOrder[] orders, int limit) {
+    if (readOptions.getNearest() != null) {
+      return false;
+    }
+
     // The Order by operator will use compute thread in lance.
     // So it's better to have an option to enable it.
     if (!readOptions.isTopNPushDown()) {
