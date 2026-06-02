@@ -291,7 +291,7 @@ Using the Glue namespace requires additional dependencies beyond the main Lance 
 Example with Spark Shell:
 ```shell
 spark-shell \
-  --packages org.lance:lance-spark-bundle-3.5_2.12:0.4.0,org.lance:lance-namespace-glue:0.7.7,software.amazon.awssdk:bundle:2.20.0 \
+  --packages org.lance:lance-spark-bundle-3.5_2.12:0.4.0,org.lance:lance-namespace-glue:0.3.0,software.amazon.awssdk:bundle:2.20.0 \
   --conf spark.sql.catalog.lance=org.lance.spark.LanceNamespaceSparkCatalog \
   --conf spark.sql.catalog.lance.impl=glue \
   --conf spark.sql.catalog.lance.root=s3://your-bucket/lance
