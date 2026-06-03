@@ -20,6 +20,7 @@ import org.apache.spark.sql.connector.expressions.FieldReference;
 import org.apache.spark.sql.connector.expressions.filter.Predicate;
 import org.junit.jupiter.api.Test;
 
+import java.sql.Date;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -454,5 +455,93 @@ public class ZonemapFragmentPrunerTest {
     Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
     assertTrue(result.isPresent());
     assertEquals(Set.of(0), result.get());
+  }
+
+  @Test
+  public void testIntegerLiteralAgainstLongZoneStats() {
+    Map<String, List<ZoneStats>> stats = threeFragmentStats("seq");
+    Predicate[] filters = new Predicate[] {TestPredicates.eq("seq", 150)};
+
+    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    assertTrue(result.isPresent());
+    assertEquals(Set.of(1), result.get());
+  }
+
+  @Test
+  public void testShortLiteralAgainstLongZoneStats() {
+    Map<String, List<ZoneStats>> stats = threeFragmentStats("x");
+    Predicate[] filters = new Predicate[] {TestPredicates.gt("x", (short) 150)};
+
+    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    assertTrue(result.isPresent());
+    assertEquals(Set.of(1, 2), result.get());
+  }
+
+  @Test
+  public void testByteLiteralAgainstLongZoneStats() {
+    Map<String, List<ZoneStats>> stats = threeFragmentStats("x");
+    Predicate[] filters = new Predicate[] {TestPredicates.lte("x", (byte) 50)};
+
+    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    assertTrue(result.isPresent());
+    assertEquals(Set.of(0), result.get());
+  }
+
+  @Test
+  public void testFloatLiteralAgainstDoubleZoneStats() {
+    Map<String, List<ZoneStats>> stats = new HashMap<>();
+    stats.put(
+        "f",
+        Arrays.asList(
+            new ZoneStats(0, 0, 100, 0.0d, 9.9d, 0),
+            new ZoneStats(1, 0, 100, 10.0d, 19.9d, 0),
+            new ZoneStats(2, 0, 100, 20.0d, 29.9d, 0)));
+
+    Predicate[] filters = new Predicate[] {TestPredicates.eq("f", 15.0f)};
+
+    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    assertTrue(result.isPresent());
+    assertEquals(Set.of(1), result.get());
+  }
+
+  @Test
+  public void testDateLiteralAgainstLongZoneStats() {
+    // Spark DateType literal is Integer epoch days; Date32 zone bounds are Long
+    // epoch days — same Integer→Long widening as INT32.
+    Map<String, List<ZoneStats>> stats = new HashMap<>();
+    stats.put(
+        "d",
+        Arrays.asList(
+            new ZoneStats(0, 0, 100, 19000L, 19099L, 0),
+            new ZoneStats(1, 0, 100, 19100L, 19199L, 0),
+            new ZoneStats(2, 0, 100, 19200L, 19299L, 0)));
+
+    Predicate[] filters =
+        new Predicate[] {TestPredicates.eq("d", Date.valueOf("2022-04-27"))}; // day 19109
+
+    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    assertTrue(result.isPresent());
+    assertEquals(Set.of(1), result.get());
+  }
+
+  @Test
+  public void testInListWithIntegerLiteralsAgainstLongZoneStats() {
+    Map<String, List<ZoneStats>> stats = threeFragmentStats("x");
+    Predicate[] filters = new Predicate[] {TestPredicates.in("x", 50, 250, 999)};
+
+    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    assertTrue(result.isPresent());
+    assertEquals(Set.of(0, 2), result.get());
+  }
+
+  @Test
+  public void testInListWithMixedWidthLiteralsAgainstLongZoneStats() {
+    // Per-element widening inside analyzeIn's loop.
+    Map<String, List<ZoneStats>> stats = threeFragmentStats("x");
+    Predicate[] filters = new Predicate[] {TestPredicates.in("x", 50, 250L, (short) 70, (byte) 5)};
+
+    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    assertTrue(result.isPresent());
+    assertEquals(Set.of(0, 2), result.get());
   }
 }

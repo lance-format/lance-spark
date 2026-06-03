@@ -109,6 +109,7 @@ object LanceArrowWriter {
         new LargeStringWriter(vector)
       case (BinaryType, vector: VarBinaryVector) => new BinaryWriter(vector)
       case (BinaryType, vector: LargeVarBinaryVector) => new LargeBinaryWriter(vector, resolver)
+      case (BinaryType, vector: FixedSizeBinaryVector) => new FixedSizeBinaryWriter(vector)
       case (DateType, vector: DateDayVector) => new DateWriter(vector)
       case (DateType, vector: DateMilliVector) => new DateMilliWriter(vector)
       case (TimestampType, vector: TimeStampMicroTZVector) => new TimestampWriter(vector)
@@ -140,6 +141,10 @@ object LanceArrowWriter {
       case (_: DayTimeIntervalType, vector: DurationVector) => new DurationWriter(vector)
       case (CalendarIntervalType, vector: IntervalMonthDayNanoVector) =>
         new IntervalMonthDayNanoWriter(vector)
+      // TimeType is Spark 4.1+ only. Use class name check for cross-version compatibility.
+      case (dt, vector: TimeNanoVector)
+          if dt.getClass.getName == "org.apache.spark.sql.types.TimeType" =>
+        new TimeNanoWriter(vector)
       case (udt: UserDefinedType[_], _) =>
         createFieldWriter(vector, udt.sqlType, metadata, resolver)
       case (dt, _) =>
@@ -358,6 +363,24 @@ private[arrow] class BinaryWriter(val valueVector: VarBinaryVector) extends Lanc
 // LargeBinaryWriter (BinaryType -> LargeVarBinaryVector) is a custom, non-trivial writer that also
 // resolves blob references flowing through a shuffle; it lives in its own file LargeBinaryWriter.scala.
 
+private[arrow] class FixedSizeBinaryWriter(val valueVector: FixedSizeBinaryVector)
+  extends LanceArrowFieldWriter {
+  private val byteWidth: Int = valueVector.getByteWidth
+  override def setNull(): Unit = {
+    valueVector.setNull(count)
+  }
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    val bytes = input.getBinary(ordinal)
+    // FixedSizeBinaryVector.setSafe silently truncates/corrupts when the input length does not
+    // match byteWidth; validate up-front so the user gets a clear, column-aware error instead.
+    if (bytes.length != byteWidth) {
+      throw new IllegalArgumentException(
+        s"FixedSizeBinary column '$name' expects $byteWidth bytes per row, got ${bytes.length}")
+    }
+    valueVector.setSafe(count, bytes)
+  }
+}
+
 private[arrow] class DateWriter(val valueVector: DateDayVector) extends LanceArrowFieldWriter {
   override def setNull(): Unit = {}
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
@@ -529,5 +552,20 @@ private[arrow] class IntervalMonthDayNanoWriter(val valueVector: IntervalMonthDa
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
     val interval = input.getInterval(ordinal)
     valueVector.setSafe(count, interval.months, interval.days, interval.microseconds * 1000L)
+  }
+}
+
+/**
+ * Writer for Spark TimeType values to Arrow TimeNanoVector.
+ * Spark 4.1 stores time-of-day internally as nanoseconds since midnight
+ * (via {@code LocalTime.getLong(NANO_OF_DAY)}). Arrow Time(NANOSECOND, 64) also
+ * expects nanoseconds, so the value is written directly without conversion.
+ */
+private[arrow] class TimeNanoWriter(val valueVector: TimeNanoVector)
+  extends LanceArrowFieldWriter {
+  override def setNull(): Unit = {}
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    val nanos = input.getLong(ordinal)
+    valueVector.setSafe(count, nanos)
   }
 }

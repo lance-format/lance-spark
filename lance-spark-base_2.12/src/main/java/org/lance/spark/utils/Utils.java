@@ -85,7 +85,7 @@ public class Utils {
     private OpenDatasetBuilder(LanceSparkReadOptions opts) {
       this.uri = opts.getDatasetUri();
       this.storageOptions = opts.getStorageOptions();
-      this.version = opts.getVersion() != null ? opts.getVersion().longValue() : null;
+      this.version = opts.getVersion();
       this.catalogName = opts.getCatalogName();
       this.namespace = opts.getNamespace();
       this.tableId = opts.getTableId();
@@ -197,7 +197,7 @@ public class Utils {
             .catalogName(catalogName);
 
     if (versionId.isPresent()) {
-      builder.version(versionId.get().intValue());
+      builder.version(versionId.get());
     }
     if (tableId.isPresent()) {
       builder.tableId(tableId.get());

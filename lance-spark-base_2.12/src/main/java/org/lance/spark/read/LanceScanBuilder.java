@@ -26,6 +26,7 @@ import org.lance.schema.LanceField;
 import org.lance.schema.LanceSchema;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
+import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.Utils;
 
@@ -117,8 +118,8 @@ public class LanceScanBuilder
       String namespaceImpl,
       java.util.Map<String, String> namespaceProperties,
       ShardingSpec shardingSpec) {
-    this.fullSchema = schema;
-    this.schema = schema;
+    this.fullSchema = BlobUtils.applyBlobV2DescriptorSchema(schema);
+    this.schema = this.fullSchema;
     this.readOptions = readOptions;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
@@ -147,113 +148,129 @@ public class LanceScanBuilder
 
   @Override
   public Scan build() {
-    // Return LocalScan if we have a metadata-only aggregation result
-    if (localScan != null) {
+    // Wrap the entire planning body in try/finally to guarantee that the lazily-opened native
+    // dataset handle (lazyDataset) is always released, including when intermediate steps such as
+    // zonemap loading or LanceSplit.planScan(dataset) throw.
+    try {
+      // Return LocalScan if we have a metadata-only aggregation result
+      if (localScan != null) {
+        return localScan;
+      }
+
+      // Get statistics from manifest summary before closing dataset
+      ManifestSummary summary = getOrOpenDataset().getVersion().getManifestSummary();
+
+      // Collect all columns that need zonemap stats: filter columns + sharding columns.
+      Set<String> columnsToLoad = extractReferencedColumns(pushedPredicates);
+      Dataset dataset = getOrOpenDataset();
+      LanceSchema lanceSchema = dataset.getLanceSchema();
+      ShardingSpec activeShardingSpec =
+          SparkLanceShardingUtils.isEmpty(shardingSpec)
+              ? SparkLanceShardingUtils.firstShardingSpec(dataset)
+              : shardingSpec;
+      for (ShardingField field : SparkLanceShardingUtils.fields(activeShardingSpec)) {
+        columnsToLoad.add(SparkLanceShardingUtils.columnName(field, lanceSchema));
+      }
+
+      // Load zonemap stats for all requested columns in one pass.
+      Map<String, List<ZoneStats>> zonemapStats =
+          loadZonemapStats(getOrOpenDataset(), columnsToLoad);
+
+      // Detect sharding-compatible fragments from zonemap stats. Each field checks its column's
+      // zones; if every fragment has a single sharding value, we get a fragment-to-key map.
+      Map<Integer, Object> fragmentShardingKeys = null;
+      Expression activeShardingExpression = null;
+      for (ShardingField field : SparkLanceShardingUtils.fields(activeShardingSpec)) {
+        String column = SparkLanceShardingUtils.columnName(field, lanceSchema);
+        List<ZoneStats> colStats = zonemapStats.get(column);
+        if (colStats == null || colStats.isEmpty()) {
+          LOG.warn(
+              "Sharding column '{}' (transform={}) has no zonemap stats;"
+                  + " sharding detection disabled",
+              column,
+              field.transform().orElse(null));
+          continue;
+        }
+        java.util.Optional<Map<Integer, Object>> keys =
+            SparkLanceShardingUtils.detectFragmentKeys(field, lanceSchema, colStats);
+        if (keys.isPresent()) {
+          fragmentShardingKeys = keys.get();
+          activeShardingExpression = SparkLanceShardingUtils.toSparkExpression(field, lanceSchema);
+          LOG.info(
+              "Detected Lance sharding field {}('{}') with {} fragments",
+              field.transform().orElse(null),
+              column,
+              fragmentShardingKeys.size());
+          break;
+        }
+      }
+
+      // Pre-compute fragment pruning so we can (a) estimate post-pruning statistics for
+      // JoinSelection (BroadcastHashJoin vs SortMergeJoin) and (b) pass the cached result
+      // to LanceScan to avoid re-computing during planInputPartitions().
+      Set<Integer> survivingFragmentIds = null;
+      if (pushedPredicates.length > 0 && !zonemapStats.isEmpty()) {
+        survivingFragmentIds =
+            ZonemapFragmentPruner.pruneFragments(pushedPredicates, zonemapStats).orElse(null);
+      }
+
+      // Scale rows and full size by the zonemap fragment-pruning ratio first, then let
+      // LanceStatistics.estimateProjected apply the column-width ratio on top
+      // (when the projected schema is narrower than the full schema).
+      long projectedRows = summary.getTotalRows();
+      long projectedFullSize = summary.getTotalFilesSize();
+      if (survivingFragmentIds != null && summary.getTotalFragments() > 0) {
+        double ratio = (double) survivingFragmentIds.size() / summary.getTotalFragments();
+        projectedRows = (long) (projectedRows * ratio);
+        projectedFullSize = (long) (projectedFullSize * ratio);
+      }
+      LanceStatistics statistics =
+          LanceStatistics.estimateProjected(projectedRows, projectedFullSize, fullSchema, schema);
+      if (survivingFragmentIds != null) {
+        LOG.debug(
+            "Scan statistics after pruning: {} of {} fragments survive,"
+                + " estimatedSize={}, estimatedRows={} (full: size={}, rows={})",
+            survivingFragmentIds.size(),
+            summary.getTotalFragments(),
+            statistics.sizeInBytes(),
+            statistics.numRows(),
+            summary.getTotalFilesSize(),
+            summary.getTotalRows());
+      }
+
+      // Pre-compute splits and per-fragment row counts from the same Dataset handle that we
+      // already opened above. This consolidates two driver-side opens into one and lets us pin
+      // the resolved version onto the read options shipped to workers, providing snapshot
+      // isolation across all tasks of this query. The version is kept as a long end-to-end so
+      // long-lived high-write-frequency datasets do not silently truncate to a wrong version.
+      LanceSplit.ScanPlanResult scanPlan = LanceSplit.planScan(dataset);
+      LanceSparkReadOptions resolvedReadOptions =
+          readOptions.withVersion(scanPlan.getResolvedVersion());
+
+      Optional<String> whereCondition =
+          FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);
+      return new LanceScan(
+          schema,
+          resolvedReadOptions,
+          whereCondition,
+          limit,
+          offset,
+          topNSortOrders,
+          pushedAggregation,
+          pushedPredicates,
+          statistics,
+          zonemapStats,
+          survivingFragmentIds,
+          scanPlan.getSplits(),
+          scanPlan.getFragmentRowCounts(),
+          activeShardingExpression,
+          fragmentShardingKeys,
+          initialStorageOptions,
+          namespaceImpl,
+          namespaceProperties);
+    } finally {
       closeLazyDataset();
-      return localScan;
     }
-
-    // Get statistics from manifest summary before closing dataset
-    ManifestSummary summary = getOrOpenDataset().getVersion().getManifestSummary();
-
-    // Collect all columns that need zonemap stats: filter columns + sharding columns.
-    Set<String> columnsToLoad = extractReferencedColumns(pushedPredicates);
-    Dataset dataset = getOrOpenDataset();
-    LanceSchema lanceSchema = dataset.getLanceSchema();
-    ShardingSpec activeShardingSpec =
-        SparkLanceShardingUtils.isEmpty(shardingSpec)
-            ? SparkLanceShardingUtils.firstShardingSpec(dataset)
-            : shardingSpec;
-    for (ShardingField field : SparkLanceShardingUtils.fields(activeShardingSpec)) {
-      columnsToLoad.add(SparkLanceShardingUtils.columnName(field, lanceSchema));
-    }
-
-    // Load zonemap stats for all requested columns in one pass.
-    Map<String, List<ZoneStats>> zonemapStats = loadZonemapStats(getOrOpenDataset(), columnsToLoad);
-
-    // Detect sharding-compatible fragments from zonemap stats. Each field checks its column's
-    // zones; if every fragment has a single sharding value, we get a fragment-to-key map.
-    Map<Integer, Object> fragmentShardingKeys = null;
-    Expression activeShardingExpression = null;
-    for (ShardingField field : SparkLanceShardingUtils.fields(activeShardingSpec)) {
-      String column = SparkLanceShardingUtils.columnName(field, lanceSchema);
-      List<ZoneStats> colStats = zonemapStats.get(column);
-      if (colStats == null || colStats.isEmpty()) {
-        LOG.warn(
-            "Sharding column '{}' (transform={}) has no zonemap stats; sharding detection disabled",
-            column,
-            field.transform().orElse(null));
-        continue;
-      }
-      java.util.Optional<Map<Integer, Object>> keys =
-          SparkLanceShardingUtils.detectFragmentKeys(field, lanceSchema, colStats);
-      if (keys.isPresent()) {
-        fragmentShardingKeys = keys.get();
-        activeShardingExpression = SparkLanceShardingUtils.toSparkExpression(field, lanceSchema);
-        LOG.info(
-            "Detected Lance sharding field {}('{}') with {} fragments",
-            field.transform().orElse(null),
-            column,
-            fragmentShardingKeys.size());
-        break;
-      }
-    }
-
-    // Pre-compute fragment pruning so we can (a) estimate post-pruning statistics for
-    // JoinSelection (BroadcastHashJoin vs SortMergeJoin) and (b) pass the cached result
-    // to LanceScan to avoid re-computing during planInputPartitions().
-    Set<Integer> survivingFragmentIds = null;
-    if (pushedPredicates.length > 0 && !zonemapStats.isEmpty()) {
-      survivingFragmentIds =
-          ZonemapFragmentPruner.pruneFragments(pushedPredicates, zonemapStats).orElse(null);
-    }
-
-    // Scale rows and full size by the zonemap fragment-pruning ratio first, then let
-    // LanceStatistics.estimateProjected apply the column-width ratio on top
-    // (when the projected schema is narrower than the full schema).
-    long projectedRows = summary.getTotalRows();
-    long projectedFullSize = summary.getTotalFilesSize();
-    if (survivingFragmentIds != null && summary.getTotalFragments() > 0) {
-      double ratio = (double) survivingFragmentIds.size() / summary.getTotalFragments();
-      projectedRows = (long) (projectedRows * ratio);
-      projectedFullSize = (long) (projectedFullSize * ratio);
-    }
-    LanceStatistics statistics =
-        LanceStatistics.estimateProjected(projectedRows, projectedFullSize, fullSchema, schema);
-    if (survivingFragmentIds != null) {
-      LOG.debug(
-          "Scan statistics after pruning: {} of {} fragments survive,"
-              + " estimatedSize={}, estimatedRows={} (full: size={}, rows={})",
-          survivingFragmentIds.size(),
-          summary.getTotalFragments(),
-          statistics.sizeInBytes(),
-          statistics.numRows(),
-          summary.getTotalFilesSize(),
-          summary.getTotalRows());
-    }
-
-    // Close the lazily opened dataset - it's no longer needed after build
-    closeLazyDataset();
-
-    Optional<String> whereCondition =
-        FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);
-    return new LanceScan(
-        schema,
-        readOptions,
-        whereCondition,
-        limit,
-        offset,
-        topNSortOrders,
-        pushedAggregation,
-        pushedPredicates,
-        statistics,
-        zonemapStats,
-        survivingFragmentIds,
-        activeShardingExpression,
-        fragmentShardingKeys,
-        initialStorageOptions,
-        namespaceImpl,
-        namespaceProperties);
   }
 
   @Override

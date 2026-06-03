@@ -335,13 +335,22 @@ public final class ZonemapFragmentPruner {
   }
 
   /**
-   * V2 {@link Literal} exposes values in Spark's internal representation ({@code UTF8String} for
-   * strings). Zone stats from lance-core store String values — normalize here so {@code compareTo}
-   * against min/max works.
+   * V2 {@link Literal} exposes values in Spark's internal representation, while Lance's JNI
+   * materializes {@code ZoneStats.min/max} with every integer width boxed as {@code Long} and every
+   * floating-point width as {@code Double}. Widen narrow Java boxed primitives (Byte / Short /
+   * Integer / Float) to match — otherwise an Integer literal against a Long zone bound would throw
+   * {@code ClassCastException} from {@code Comparable.compareTo}. Also normalizes {@code
+   * UTF8String} → {@code String} for the same reason.
    */
   private static Object normalizeLiteral(Object value) {
     if (value instanceof UTF8String) {
       return value.toString();
+    }
+    if (value instanceof Byte || value instanceof Short || value instanceof Integer) {
+      return ((Number) value).longValue();
+    }
+    if (value instanceof Float) {
+      return ((Float) value).doubleValue();
     }
     return value;
   }

@@ -29,7 +29,7 @@ import org.apache.arrow.vector.types.pojo.ArrowType
 import org.apache.spark.SparkUnsupportedOperationException
 import org.apache.spark.sql.types._
 import org.lance.spark.LanceConstant
-import org.lance.spark.utils.{Float16Utils, LargeVarCharUtils, VectorUtils}
+import org.lance.spark.utils.{FixedSizeBinaryUtils, Float16Utils, LargeVarCharUtils, VectorUtils}
 import org.scalatest.funsuite.AnyFunSuite
 
 import java.time.ZoneId
@@ -560,5 +560,155 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
     assert(
       nameType === ArrowType.LargeUtf8.INSTANCE,
       s"Struct child should remain LargeUtf8, got $nameType")
+  }
+
+  test("Arrow Time types map to TimeType or LongType") {
+    import org.apache.arrow.vector.types.TimeUnit
+
+    // All four Arrow Time types should be handled by fromArrowField
+    val timeFields = Seq(
+      ("time_nano", new ArrowType.Time(TimeUnit.NANOSECOND, 64)),
+      ("time_micro", new ArrowType.Time(TimeUnit.MICROSECOND, 64)),
+      ("time_milli", new ArrowType.Time(TimeUnit.MILLISECOND, 32)),
+      ("time_sec", new ArrowType.Time(TimeUnit.SECOND, 32)))
+
+    for ((name, arrowTimeType) <- timeFields) {
+      val field = new Field(
+        name,
+        new FieldType(true, arrowTimeType, null, null),
+        java.util.Collections.emptyList())
+      val sparkType = LanceArrowUtils.fromArrowField(field)
+      // On Spark 4.1+ this should be TimeType, on older Spark it should be LongType
+      val expectedType = TimeUtils.resolveSparkTimeType()
+      assert(
+        sparkType === expectedType,
+        s"Arrow $arrowTimeType should map to $expectedType, got $sparkType")
+    }
+  }
+
+  test("nested Arrow Time types") {
+    import org.apache.arrow.vector.types.TimeUnit
+
+    // Time field inside a struct
+    val timeField = new Field(
+      "t",
+      new FieldType(true, new ArrowType.Time(TimeUnit.NANOSECOND, 64), null, null),
+      java.util.Collections.emptyList())
+    val structField = new Field(
+      "s",
+      new FieldType(true, ArrowType.Struct.INSTANCE, null, null),
+      java.util.Arrays.asList(timeField))
+
+    val structType =
+      LanceArrowUtils.fromArrowField(structField).asInstanceOf[StructType]
+    val expectedType = TimeUtils.resolveSparkTimeType()
+    assert(structType("t").dataType === expectedType)
+  }
+
+  test("nested Arrow Time types in list and map") {
+    import org.apache.arrow.vector.types.TimeUnit
+
+    val expectedType = TimeUtils.resolveSparkTimeType()
+
+    // Time as list element
+    val timeElemField = new Field(
+      "element",
+      new FieldType(true, new ArrowType.Time(TimeUnit.MICROSECOND, 64), null, null),
+      java.util.Collections.emptyList())
+    val listField = new Field(
+      "l",
+      new FieldType(true, ArrowType.List.INSTANCE, null, null),
+      java.util.Arrays.asList(timeElemField))
+
+    val arrayType = LanceArrowUtils.fromArrowField(listField).asInstanceOf[ArrayType]
+    assert(arrayType.elementType === expectedType)
+
+    // Time as map value
+    val keyField = new Field(
+      "key",
+      new FieldType(false, ArrowType.Utf8.INSTANCE, null, null),
+      java.util.Collections.emptyList())
+    val valueField = new Field(
+      "value",
+      new FieldType(true, new ArrowType.Time(TimeUnit.SECOND, 32), null, null),
+      java.util.Collections.emptyList())
+    val entriesField = new Field(
+      "entries",
+      new FieldType(false, ArrowType.Struct.INSTANCE, null, null),
+      java.util.Arrays.asList(keyField, valueField))
+    val mapField = new Field(
+      "m",
+      new FieldType(true, new ArrowType.Map(false), null, null),
+      java.util.Arrays.asList(entriesField))
+
+    val mapType = LanceArrowUtils.fromArrowField(mapField).asInstanceOf[MapType]
+    assert(mapType.keyType === StringType)
+    assert(mapType.valueType === expectedType)
+  }
+
+  test("toArrowType for TimeType produces Time(NANOSECOND, 64)") {
+    import org.apache.arrow.vector.types.TimeUnit
+
+    if (!TimeUtils.isTimeTypeAvailable) {
+      cancel("TimeType not available on this Spark version")
+    }
+    val timeType = TimeUtils.resolveSparkTimeType()
+    val schema = new StructType().add("t", timeType)
+    val arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", true)
+    val arrowField = arrowSchema.findField("t")
+    val arrowTimeType = arrowField.getType.asInstanceOf[ArrowType.Time]
+    assert(arrowTimeType.getUnit === TimeUnit.NANOSECOND)
+    assert(arrowTimeType.getBitWidth === 64)
+  }
+
+  test("FixedSizeBinary metadata produces FixedSizeBinary arrow type") {
+    val fixedSizeBinaryMetadata = new MetadataBuilder()
+      .putLong(
+        FixedSizeBinaryUtils.ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY,
+        16)
+      .build()
+
+    val schema = new StructType()
+      .add("regular_binary", BinaryType, nullable = true)
+      .add("fixed_binary", BinaryType, nullable = true, fixedSizeBinaryMetadata)
+
+    val arrowSchema = LanceArrowUtils.toArrowSchema(schema, "UTC", false)
+
+    // Regular binary should use Binary
+    val regularField = arrowSchema.findField("regular_binary")
+    assert(regularField.getType === ArrowType.Binary.INSTANCE)
+
+    // Fixed binary with metadata should use FixedSizeBinary(16)
+    val fixedField = arrowSchema.findField("fixed_binary")
+    assert(fixedField.getType.isInstanceOf[ArrowType.FixedSizeBinary])
+    assert(fixedField.getType.asInstanceOf[ArrowType.FixedSizeBinary].getByteWidth === 16)
+  }
+
+  test("FixedSizeBinary roundtrip preserves byte width") {
+    // Simulate reading: create an Arrow FixedSizeBinary field -> convert to Spark schema
+    val arrowField = new Field(
+      "hash",
+      new FieldType(true, new ArrowType.FixedSizeBinary(32), null, null),
+      java.util.Collections.emptyList())
+    val arrowSchema = new org.apache.arrow.vector.types.pojo.Schema(
+      java.util.Arrays.asList(arrowField))
+
+    val sparkSchema = LanceArrowUtils.fromArrowSchema(arrowSchema)
+    val hashField = sparkSchema("hash")
+
+    // Data type is BinaryType (Spark has no FixedSizeBinary)
+    assert(hashField.dataType === BinaryType)
+
+    // But metadata preserves the byte width
+    assert(hashField.metadata.contains(FixedSizeBinaryUtils.ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY))
+    assert(hashField.metadata.getLong(
+      FixedSizeBinaryUtils.ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY) === 32)
+
+    // Simulate writing: convert Spark schema back to Arrow
+    val roundtripArrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false)
+    val roundtripField = roundtripArrowSchema.findField("hash")
+
+    assert(roundtripField.getType.isInstanceOf[ArrowType.FixedSizeBinary])
+    assert(roundtripField.getType.asInstanceOf[ArrowType.FixedSizeBinary].getByteWidth === 32)
   }
 }

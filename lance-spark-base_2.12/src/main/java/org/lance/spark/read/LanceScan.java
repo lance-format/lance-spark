@@ -89,6 +89,22 @@ public class LanceScan
    */
   private final Set<Integer> cachedSurvivingFragmentIds;
 
+  /**
+   * Splits pre-computed on the driver during {@link LanceScanBuilder#build()}. Each entry is one
+   * fragment. Built from a single {@code Dataset} handle that was already opened for manifest /
+   * schema / zonemap loading, so no second {@code Dataset.open()} is needed at {@link
+   * #planInputPartitions()} time.
+   */
+  private final List<LanceSplit> precomputedSplits;
+
+  /**
+   * Per-fragment logical row counts (after deletions), captured together with {@link
+   * #precomputedSplits} on the driver. Consumed by {@link #pruneByLimit}. Not declared {@code
+   * transient} because Java deserialization would skip the constructor and leave the field {@code
+   * null}, which would NPE inside {@link #pruneByLimit}.
+   */
+  private final java.util.Map<Integer, Long> precomputedFragmentRowCounts;
+
   /** Number of partitions after pruning, set during {@link #planInputPartitions()}. */
   private transient int numPartitions = -1;
 
@@ -121,6 +137,8 @@ public class LanceScan
       LanceStatistics statistics,
       java.util.Map<String, List<ZoneStats>> zonemapStats,
       Set<Integer> survivingFragmentIds,
+      List<LanceSplit> precomputedSplits,
+      java.util.Map<Integer, Long> precomputedFragmentRowCounts,
       Expression activeShardingExpression,
       java.util.Map<Integer, Object> fragmentShardingKeys,
       java.util.Map<String, String> initialStorageOptions,
@@ -140,6 +158,11 @@ public class LanceScan
     this.statistics = statistics;
     this.zonemapStats = zonemapStats != null ? zonemapStats : Collections.emptyMap();
     this.cachedSurvivingFragmentIds = survivingFragmentIds;
+    this.precomputedSplits = precomputedSplits;
+    this.precomputedFragmentRowCounts =
+        precomputedFragmentRowCounts != null
+            ? precomputedFragmentRowCounts
+            : Collections.emptyMap();
     this.activeShardingExpression = activeShardingExpression;
     this.fragmentShardingKeys = fragmentShardingKeys;
     this.initialStorageOptions = initialStorageOptions;
@@ -154,8 +177,10 @@ public class LanceScan
 
   @Override
   public InputPartition[] planInputPartitions() {
-    LanceSplit.ScanPlanResult planResult = LanceSplit.planScan(readOptions);
-    List<LanceSplit> prunedSplits = pruneByRowAddrFilters(planResult.getSplits());
+    // Splits and per-fragment row counts are pre-computed on the driver during
+    // LanceScanBuilder.build() from the same Dataset handle that loaded manifest /
+    // schema / zonemap stats. This avoids a second Dataset.open() at plan time.
+    List<LanceSplit> prunedSplits = pruneByRowAddrFilters(precomputedSplits);
 
     // Zonemap-based fragment pruning: uses per-column min/max/null_count
     // statistics to eliminate fragments that provably cannot match
@@ -166,15 +191,13 @@ public class LanceScan
     // use per-fragment row counts to plan only enough splits to satisfy the limit.
     // This avoids scheduling hundreds of unnecessary tasks. Correctness is guaranteed
     // because Spark still keeps a global CollectLimit on top (isPartiallyPushed = true).
-    prunedSplits = pruneByLimit(prunedSplits, planResult.getFragmentRowCounts());
+    prunedSplits = pruneByLimit(prunedSplits, precomputedFragmentRowCounts);
 
     // Capture as effectively final for use in lambda
     final List<LanceSplit> finalSplits = prunedSplits;
 
-    // Use resolved version for snapshot isolation - ensures all workers read the same version
-    LanceSparkReadOptions resolvedReadOptions =
-        readOptions.withVersion((int) planResult.getResolvedVersion());
-
+    // readOptions is already pinned to the resolved version by LanceScanBuilder for
+    // snapshot isolation across all workers.
     InputPartition[] result =
         IntStream.range(0, finalSplits.size())
             .mapToObj(
@@ -192,7 +215,7 @@ public class LanceScan
                       schema,
                       i,
                       split,
-                      resolvedReadOptions,
+                      readOptions,
                       whereConditions,
                       limit,
                       offset,

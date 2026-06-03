@@ -186,16 +186,18 @@ public abstract class BaseMergeIntoTest {
   }
 
   /**
-   * Pins down per-branch version-column behavior of MERGE INTO on a stable-row-id table:
+   * Verifies per-branch version-column behavior of MERGE INTO on a stable-row-id table:
    *
    * <ul>
-   *   <li>UPDATE branch: advances {@code _row_last_updated_at_version}. MERGE rewrites the matched
-   *       row into the merge commit, so {@code _row_created_at_version} matches {@code
-   *       _row_last_updated_at_version} for the replacement row.
+   *   <li>UPDATE branch: {@code _row_last_updated_at_version} advances to the merge commit version.
+   *       {@code _row_created_at_version} also equals the merge commit version because
+   *       SparkPositionDeltaWrite assigns new stable row IDs to rewritten rows rather than
+   *       preserving the originals; Lance therefore treats them as new rows with no prior source.
    *   <li>DELETE branch: row disappears.
    *   <li>Untouched rows: both versions preserved.
-   *   <li>INSERT branch: inserted rows are created in the merge commit, so {@code
-   *       _row_created_at_version} matches {@code _row_last_updated_at_version}.
+   *   <li>INSERT branch: both {@code _row_created_at_version} and {@code
+   *       _row_last_updated_at_version} equal the merge commit version (fixed in
+   *       lance-format/lance#6774, tracked in lance-format/lance#6735).
    * </ul>
    */
   @Test
@@ -264,7 +266,9 @@ public abstract class BaseMergeIntoTest {
       long lastUpdated = row.getLong(3);
       switch (id) {
         case 1:
-          // UPDATE branch: last_updated advances; replacement row is created by the merge commit.
+          // UPDATE branch: last_updated advances to the merge commit version.
+          // created_at also equals the merge commit version because SparkPositionDeltaWrite
+          // assigns new stable row IDs to rewritten rows; Lance treats them as new rows.
           Assertions.assertTrue(
               lastUpdated > beforeLastUpdated.get(1),
               "id=1 last_updated must advance across UPDATE branch (before="
@@ -273,7 +277,9 @@ public abstract class BaseMergeIntoTest {
                   + lastUpdated
                   + ")");
           Assertions.assertEquals(
-              lastUpdated, createdAt, "id=1 created_at must match the merge commit");
+              lastUpdated,
+              createdAt,
+              "id=1 created_at must equal last_updated (merge commit version) after MERGE INTO");
           mergeCommitLastUpdated = lastUpdated;
           break;
         case 3:
@@ -290,14 +296,16 @@ public abstract class BaseMergeIntoTest {
           break;
         case 5:
         case 6:
-          // INSERT branch sharing the merge commit: created_at and last_updated both equal the
-          // UPDATE branch's last_updated (single commit).
+          // INSERT branch: both created_at and last_updated must equal the merge commit version
+          // (fixed in lance-format/lance#6774).
           Assertions.assertEquals(
-              mergeCommitLastUpdated == null ? lastUpdated : mergeCommitLastUpdated.longValue(),
+              mergeCommitLastUpdated.longValue(),
               lastUpdated,
-              "id=" + id + " inserted row last_updated must match the merge commit");
+              "id=" + id + " inserted row last_updated must equal the merge commit version");
           Assertions.assertEquals(
-              lastUpdated, createdAt, "id=" + id + " inserted row created_at must match merge");
+              mergeCommitLastUpdated.longValue(),
+              createdAt,
+              "id=" + id + " inserted row created_at must equal the merge commit version");
           break;
         default:
           Assertions.fail("unexpected surviving id=" + id);

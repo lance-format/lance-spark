@@ -18,6 +18,10 @@ import org.lance.spark.utils.BlobUtils;
 import org.apache.arrow.vector.DateMilliVector;
 import org.apache.arrow.vector.FixedSizeBinaryVector;
 import org.apache.arrow.vector.LargeVarCharVector;
+import org.apache.arrow.vector.TimeMicroVector;
+import org.apache.arrow.vector.TimeMilliVector;
+import org.apache.arrow.vector.TimeNanoVector;
+import org.apache.arrow.vector.TimeSecVector;
 import org.apache.arrow.vector.TimeStampMilliTZVector;
 import org.apache.arrow.vector.TimeStampMilliVector;
 import org.apache.arrow.vector.TimeStampNanoTZVector;
@@ -34,6 +38,7 @@ import org.apache.arrow.vector.complex.LargeListVector;
 import org.apache.arrow.vector.complex.ListVector;
 import org.apache.arrow.vector.complex.MapVector;
 import org.apache.arrow.vector.complex.StructVector;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.Decimal;
 import org.apache.spark.sql.util.LanceArrowUtils;
 import org.apache.spark.sql.vectorized.ArrowColumnVector;
@@ -57,6 +62,7 @@ public class LanceArrowColumnVector extends ColumnVector {
   private Float2Accessor float2Accessor;
   private DateMilliAccessor dateMilliAccessor;
   private TimestampUnitAccessor timestampUnitAccessor;
+  private TimeUnitAccessor timeUnitAccessor;
   private LanceStructAccessor structAccessor;
   private ArrowColumnVector arrowColumnVector;
   private final boolean closeVectorOnClose;
@@ -66,7 +72,7 @@ public class LanceArrowColumnVector extends ColumnVector {
   }
 
   public LanceArrowColumnVector(ValueVector vector, boolean closeVectorOnClose) {
-    super(LanceArrowUtils.fromArrowField(vector.getField()));
+    super(computeDataType(vector));
     this.closeVectorOnClose = closeVectorOnClose;
 
     if (vector instanceof UInt1Vector) {
@@ -81,6 +87,8 @@ public class LanceArrowColumnVector extends ColumnVector {
       fixedSizeBinaryAccessor = new FixedSizeBinaryAccessor((FixedSizeBinaryVector) vector);
     } else if (vector instanceof FixedSizeListVector) {
       fixedSizeListAccessor = new FixedSizeListAccessor((FixedSizeListVector) vector);
+    } else if (vector instanceof StructVector && BlobUtils.isBlobV2ArrowField(vector.getField())) {
+      structAccessor = new LanceStructAccessor((StructVector) vector);
     } else if (vector instanceof StructVector && BlobUtils.isBlobArrowField(vector.getField())) {
       blobStructAccessor = new BlobStructAccessor((StructVector) vector);
     } else if (vector instanceof StructVector) {
@@ -108,6 +116,18 @@ public class LanceArrowColumnVector extends ColumnVector {
       timestampUnitAccessor = new TimestampUnitAccessor((TimeStampNanoVector) vector, 1L, 1_000L);
     } else if (vector instanceof TimeStampNanoTZVector) {
       timestampUnitAccessor = new TimestampUnitAccessor((TimeStampNanoTZVector) vector, 1L, 1_000L);
+    } else if (vector instanceof TimeNanoVector) {
+      // Spark 4.1 TimeType stores nanos internally; Arrow TimeNano also nanos
+      timeUnitAccessor = new TimeUnitAccessor((TimeNanoVector) vector, 1L, 1L);
+    } else if (vector instanceof TimeMicroVector) {
+      // Arrow TimeMicro stores micros; Spark expects nanos → multiply by 1_000
+      timeUnitAccessor = new TimeUnitAccessor((TimeMicroVector) vector, 1_000L, 1L);
+    } else if (vector instanceof TimeMilliVector) {
+      // Arrow TimeMilli stores millis; Spark expects nanos → multiply by 1_000_000
+      timeUnitAccessor = new TimeUnitAccessor((TimeMilliVector) vector, 1_000_000L, 1L);
+    } else if (vector instanceof TimeSecVector) {
+      // Arrow TimeSec stores seconds; Spark expects nanos → multiply by 1_000_000_000
+      timeUnitAccessor = new TimeUnitAccessor((TimeSecVector) vector, 1_000_000_000L, 1L);
     } else if (vector instanceof DateMilliVector) {
       dateMilliAccessor = new DateMilliAccessor((DateMilliVector) vector);
     } else if (vector.getClass().getName().equals("org.apache.arrow.vector.Float2Vector")) {
@@ -166,6 +186,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     if (timestampUnitAccessor != null) {
       timestampUnitAccessor.close();
     }
+    if (timeUnitAccessor != null) {
+      timeUnitAccessor.close();
+    }
     if (structAccessor != null) {
       structAccessor.close();
     }
@@ -217,6 +240,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (timestampUnitAccessor != null) {
       return timestampUnitAccessor.getNullCount() > 0;
+    }
+    if (timeUnitAccessor != null) {
+      return timeUnitAccessor.getNullCount() > 0;
     }
     if (structAccessor != null) {
       return structAccessor.getNullCount() > 0;
@@ -271,6 +297,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     if (timestampUnitAccessor != null) {
       return timestampUnitAccessor.getNullCount();
     }
+    if (timeUnitAccessor != null) {
+      return timeUnitAccessor.getNullCount();
+    }
     if (structAccessor != null) {
       return structAccessor.getNullCount();
     }
@@ -323,6 +352,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (timestampUnitAccessor != null) {
       return timestampUnitAccessor.isNullAt(rowId);
+    }
+    if (timeUnitAccessor != null) {
+      return timeUnitAccessor.isNullAt(rowId);
     }
     if (structAccessor != null) {
       return structAccessor.isNullAt(rowId);
@@ -384,6 +416,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (timestampUnitAccessor != null) {
       return timestampUnitAccessor.getLong(rowId);
+    }
+    if (timeUnitAccessor != null) {
+      return timeUnitAccessor.getLong(rowId);
     }
     if (arrowColumnVector != null) {
       return arrowColumnVector.getLong(rowId);
@@ -489,5 +524,12 @@ public class LanceArrowColumnVector extends ColumnVector {
    */
   public BlobStructAccessor getBlobStructAccessor() {
     return blobStructAccessor;
+  }
+
+  private static DataType computeDataType(ValueVector vector) {
+    if (vector instanceof StructVector && BlobUtils.isBlobV2ArrowField(vector.getField())) {
+      return BlobUtils.BLOB_DESCRIPTOR_STRUCT;
+    }
+    return LanceArrowUtils.fromArrowField(vector.getField());
   }
 }

@@ -115,8 +115,24 @@ public class FilterPushDown {
       if (!(children[i] instanceof Literal)) {
         return false;
       }
+      if (isTimeTypeLiteral((Literal<?>) children[i])) {
+        // Lance's custom SQL planner (lance-datafusion/src/planner.rs) does not yet support
+        // SQLDataType::Time in parse_type(), so TimeType literals can't be pushed down. Reject
+        // and let Spark evaluate the predicate post-scan.
+        return false;
+      }
     }
     return true;
+  }
+
+  /**
+   * Detects a Spark TimeType literal via class name to stay version-safe — {@code TimeType} only
+   * exists in Spark 4.1+, so a direct {@code instanceof TimeType} would not compile against older
+   * Spark versions in the base module.
+   */
+  private static boolean isTimeTypeLiteral(Literal<?> literal) {
+    return literal.dataType() != null
+        && "org.apache.spark.sql.types.TimeType".equals(literal.dataType().getClass().getName());
   }
 
   private static Optional<String> compilePredicate(Predicate predicate) {

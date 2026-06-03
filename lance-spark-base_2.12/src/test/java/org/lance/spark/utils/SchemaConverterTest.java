@@ -489,6 +489,88 @@ public class SchemaConverterTest {
   }
 
   @Test
+  public void testProcessSchemaAddsFixedSizeBinaryMetadata() {
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.IntegerType, false),
+              DataTypes.createStructField("hash", DataTypes.BinaryType, true),
+            });
+    Map<String, String> properties = new HashMap<>();
+    properties.put("hash.arrow.fixed-size-binary.byte-width", "16");
+
+    StructType result = SchemaConverter.processSchemaWithProperties(schema, properties);
+    StructField hashField = result.apply("hash");
+    // Spark type must remain BinaryType — Spark has no FixedSizeBinary — only the metadata changes.
+    assertEquals(DataTypes.BinaryType, hashField.dataType());
+    assertTrue(hashField.nullable());
+    assertTrue(
+        hashField.metadata().contains(FixedSizeBinaryUtils.ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY));
+    assertEquals(
+        16L,
+        hashField.metadata().getLong(FixedSizeBinaryUtils.ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY));
+  }
+
+  @Test
+  public void testFixedSizeBinaryMetadataRejectsNonBinaryType() {
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("name", DataTypes.StringType, true),
+            });
+    Map<String, String> properties = new HashMap<>();
+    properties.put("name.arrow.fixed-size-binary.byte-width", "16");
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> SchemaConverter.processSchemaWithProperties(schema, properties));
+  }
+
+  @Test
+  public void testFixedSizeBinaryMetadataRejectsNonNumericWidth() {
+    StructType schema =
+        new StructType(
+            new StructField[] {DataTypes.createStructField("hash", DataTypes.BinaryType, true)});
+    Map<String, String> properties = new HashMap<>();
+    properties.put("hash.arrow.fixed-size-binary.byte-width", "sixteen");
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> SchemaConverter.processSchemaWithProperties(schema, properties));
+    // Error must include the column name so users can locate the bad property.
+    assertTrue(
+        ex.getMessage().contains("hash"), "error must name the column; got: " + ex.getMessage());
+  }
+
+  @Test
+  public void testFixedSizeBinaryMetadataRejectsZeroAndNegativeWidth() {
+    StructType schema =
+        new StructType(
+            new StructField[] {DataTypes.createStructField("hash", DataTypes.BinaryType, true)});
+    for (String bad : new String[] {"0", "-1", "-16"}) {
+      Map<String, String> properties = new HashMap<>();
+      properties.put("hash.arrow.fixed-size-binary.byte-width", bad);
+      assertThrows(
+          IllegalArgumentException.class,
+          () -> SchemaConverter.processSchemaWithProperties(schema, properties),
+          "byte-width=" + bad + " must be rejected");
+    }
+  }
+
+  @Test
+  public void testFixedSizeBinaryMetadataRejectsOverflowWidth() {
+    // Arrow's FixedSizeBinary stores byte width as int; reject values that would overflow int.
+    StructType schema =
+        new StructType(
+            new StructField[] {DataTypes.createStructField("hash", DataTypes.BinaryType, true)});
+    Map<String, String> properties = new HashMap<>();
+    properties.put(
+        "hash.arrow.fixed-size-binary.byte-width", String.valueOf((long) Integer.MAX_VALUE + 1L));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> SchemaConverter.processSchemaWithProperties(schema, properties));
+  }
+
+  @Test
   public void testNegativeCompressionLevelThrows() {
     StructType schema =
         new StructType(

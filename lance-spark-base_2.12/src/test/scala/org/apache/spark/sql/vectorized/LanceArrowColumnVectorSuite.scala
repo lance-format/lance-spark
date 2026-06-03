@@ -524,6 +524,91 @@ class LanceArrowColumnVectorSuite extends AnyFunSuite {
     allocator.close()
   }
 
+  test("TimeNanoVector read") {
+    val allocator = ArrowUtils.rootAllocator.newChildAllocator("time_nano", 0, Long.MaxValue)
+    val vector = new TimeNanoVector("time", allocator)
+    vector.allocateNew()
+
+    // 00:00:00 = 0 nanos → Spark expects 0 nanos
+    vector.setSafe(0, 0L)
+    // 12:30:45.123456 = 45045123456000 nanos → Spark expects 45045123456000 nanos (pass through)
+    vector.setSafe(1, 45045123456000L)
+    // 23:59:59.999999 = 86399999999000 nanos → Spark expects 86399999999000 nanos (pass through)
+    vector.setSafe(2, 86399999999000L)
+    vector.setNull(3)
+    vector.setValueCount(4)
+
+    val columnVector = new LanceArrowColumnVector(vector)
+    assert(!columnVector.isNullAt(0))
+    assert(columnVector.getLong(0) === 0L)
+    assert(columnVector.getLong(1) === 45045123456000L) // nanos pass through unchanged
+    assert(columnVector.getLong(2) === 86399999999000L)
+    assert(columnVector.isNullAt(3))
+    assert(columnVector.numNulls === 1)
+
+    columnVector.close()
+    allocator.close()
+  }
+
+  test("TimeMicroVector read") {
+    val allocator = ArrowUtils.rootAllocator.newChildAllocator("time_micro", 0, Long.MaxValue)
+    val vector = new TimeMicroVector("time", allocator)
+    vector.allocateNew()
+
+    vector.setSafe(0, 0L) // midnight
+    vector.setSafe(1, 45045123456L) // 12:30:45.123456 in micros
+    vector.setNull(2)
+    vector.setValueCount(3)
+
+    val columnVector = new LanceArrowColumnVector(vector)
+    assert(columnVector.getLong(0) === 0L)
+    assert(columnVector.getLong(1) === 45045123456000L) // micros * 1_000 = nanos
+    assert(columnVector.isNullAt(2))
+
+    columnVector.close()
+    allocator.close()
+  }
+
+  test("TimeMilliVector read") {
+    val allocator = ArrowUtils.rootAllocator.newChildAllocator("time_milli", 0, Long.MaxValue)
+    val vector = new TimeMilliVector("time", allocator)
+    vector.allocateNew()
+
+    vector.setSafe(0, 0) // midnight
+    vector.setSafe(1, 45045123) // 12:30:45.123 in millis
+    vector.setNull(2)
+    vector.setValueCount(3)
+
+    val columnVector = new LanceArrowColumnVector(vector)
+    assert(columnVector.getLong(0) === 0L)
+    assert(columnVector.getLong(1) === 45045123000000L) // millis * 1_000_000 = nanos
+    assert(columnVector.isNullAt(2))
+
+    columnVector.close()
+    allocator.close()
+  }
+
+  test("TimeSecVector read") {
+    val allocator = ArrowUtils.rootAllocator.newChildAllocator("time_sec", 0, Long.MaxValue)
+    val vector = new TimeSecVector("time", allocator)
+    vector.allocateNew()
+
+    vector.setSafe(0, 0) // midnight
+    vector.setSafe(1, 45045) // 12:30:45 in seconds
+    vector.setSafe(2, 86399) // 23:59:59 in seconds
+    vector.setNull(3)
+    vector.setValueCount(4)
+
+    val columnVector = new LanceArrowColumnVector(vector)
+    assert(columnVector.getLong(0) === 0L)
+    assert(columnVector.getLong(1) === 45045000000000L) // secs * 1_000_000_000 = nanos
+    assert(columnVector.getLong(2) === 86399000000000L)
+    assert(columnVector.isNullAt(3))
+
+    columnVector.close()
+    allocator.close()
+  }
+
   test("non nullable struct") {
     val allocator = ArrowUtils.rootAllocator.newChildAllocator("struct", 0, Long.MaxValue)
     val schema = new StructType().add("int", IntegerType).add("long", LongType)
@@ -687,6 +772,37 @@ class LanceArrowColumnVectorSuite extends AnyFunSuite {
     assert(arrayRow1.numElements() === 2)
     assert(arrayRow1.getDouble(0) === 0.9)
     assert(arrayRow1.getDouble(1) === 0.7)
+
+    columnVector.close()
+    allocator.close()
+  }
+
+  test("fixed_size_binary") {
+    val allocator =
+      ArrowUtils.rootAllocator.newChildAllocator("fixed_size_binary", 0, Long.MaxValue)
+    val vector = new FixedSizeBinaryVector("hash", allocator, 16)
+    vector.allocateNew()
+
+    // Write 16-byte values (e.g., UUIDs or MD5 hashes)
+    (0 until 10).foreach { i =>
+      val bytes = new Array[Byte](16)
+      java.util.Arrays.fill(bytes, i.toByte)
+      vector.setSafe(i, bytes)
+    }
+    vector.setNull(10)
+    vector.setValueCount(11)
+
+    val columnVector = new LanceArrowColumnVector(vector)
+    assert(columnVector.dataType === BinaryType)
+    assert(columnVector.hasNull)
+    assert(columnVector.numNulls === 1)
+
+    (0 until 10).foreach { i =>
+      val expected = new Array[Byte](16)
+      java.util.Arrays.fill(expected, i.toByte)
+      assert(columnVector.getBinary(i) === expected)
+    }
+    assert(columnVector.isNullAt(10))
 
     columnVector.close()
     allocator.close()

@@ -303,7 +303,7 @@ public class LanceDataset
 
   @Override
   public StructType schema() {
-    return sparkSchema;
+    return BlobUtils.applyBlobV2DescriptorSchema(sparkSchema);
   }
 
   @Override
