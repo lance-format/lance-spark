@@ -13,7 +13,10 @@
  */
 package org.lance.spark;
 
+import org.apache.spark.ml.linalg.DenseMatrix;
 import org.apache.spark.ml.linalg.DenseVector;
+import org.apache.spark.ml.linalg.Matrix;
+import org.apache.spark.ml.linalg.MatrixUDT;
 import org.apache.spark.ml.linalg.SparseVector;
 import org.apache.spark.ml.linalg.Vector;
 import org.apache.spark.ml.linalg.VectorUDT;
@@ -465,23 +468,24 @@ public abstract class BaseSparkDataTypeRoundtripTest {
 
     Dataset<Row> result = writeAndRead(schema, data, "vector_udt");
 
-    // Read-back schema must lose the UDT wrapper — Arrow has no UDT concept, so the column comes
-    // back as VectorUDT's sqlType (a plain struct). Lock that contract here so a future change
-    // that accidentally preserves UDT in metadata is caught loudly.
-    assertFalse(
-        result.schema().apply("vec").dataType() instanceof VectorUDT,
-        "read-back column must not carry VectorUDT; expected the underlying struct sqlType");
+    // Write stamps the UDT FQN onto the Arrow field's `__udt` metadata; read consults it and
+    // rewraps the column back to VectorUDT. End-to-end the UDT survives without any opt-in.
     assertInstanceOf(
-        StructType.class,
+        VectorUDT.class,
         result.schema().apply("vec").dataType(),
-        "read-back column must be VectorUDT.sqlType (StructType)");
+        "read-back column must carry VectorUDT (preserved via __udt field metadata)");
+
+    // The `__udt` marker is consumed by the schema converter and stripped from the user-visible
+    // StructField metadata — surfacing it would be noise once the dataType is already the UDT.
+    assertFalse(
+        result.schema().apply("vec").metadata().contains("__udt"),
+        "the __udt marker must not leak into user-visible StructField metadata");
 
     List<Row> out = result.orderBy("id").collectAsList();
     assertEquals(2, out.size());
-
-    // Reconstruct vectors manually since VectorUDT.deserialize() expects InternalRow.
-    assertEquals(dense, reconstructVector(out.get(0).getStruct(1)));
-    assertEquals(sparse, reconstructVector(out.get(1).getStruct(1)));
+    // Spark materializes UDT columns as the user-facing class — Vector here.
+    assertEquals(dense, out.get(0).get(1));
+    assertEquals(sparse, out.get(1).get(1));
   }
 
   /**
@@ -501,47 +505,123 @@ public abstract class BaseSparkDataTypeRoundtripTest {
 
     List<Row> out = writeAndRead(schema, data, "vector_udt_null_row").orderBy("id").collectAsList();
     assertEquals(2, out.size());
-    assertEquals(dense, reconstructVector(out.get(0).getStruct(1)));
+    assertEquals(dense, out.get(0).get(1));
     assertTrue(out.get(1).isNullAt(1), "row 1 should round-trip as null");
   }
 
   /**
-   * Reconstruct an MLlib {@link Vector} from the struct row returned by Lance read-back. The struct
-   * follows VectorUDT's sqlType: (type: byte, size: int, indices: array&lt;int&gt;, values:
-   * array&lt;double&gt;). Type 0 = sparse, type 1 = dense.
+   * Idempotency: reading a UDT and writing it back must yield a dataset whose schema and rows are
+   * indistinguishable from the original. Guards against subtle metadata duplication or loss in the
+   * __udt round-trip — e.g., if `buildFieldMetadata` leaked `__udt` into Spark metadata, the second
+   * write would write it twice (once via metadata, once via `udt.getClass.getName`).
    */
-  private static Vector reconstructVector(Row struct) {
-    byte type = struct.getByte(0);
-    switch (type) {
-      case 1:
-        {
-          // Dense vector — values at index 3
-          List<Double> vals = struct.getList(3);
-          double[] arr = new double[vals.size()];
-          for (int i = 0; i < arr.length; i++) {
-            arr[i] = vals.get(i);
-          }
-          return new DenseVector(arr);
-        }
-      case 0:
-        {
-          // Sparse vector — size at 1, indices at 2, values at 3
-          int size = struct.getInt(1);
-          List<Integer> idxList = struct.getList(2);
-          List<Double> valList = struct.getList(3);
-          int[] indices = new int[idxList.size()];
-          double[] values = new double[valList.size()];
-          for (int i = 0; i < indices.length; i++) {
-            indices[i] = idxList.get(i);
-          }
-          for (int i = 0; i < values.length; i++) {
-            values[i] = valList.get(i);
-          }
-          return new SparseVector(size, indices, values);
-        }
-      default:
-        throw new IllegalArgumentException(
-            "unknown VectorUDT type byte: " + type + " (expected 0=sparse or 1=dense)");
-    }
+  @Test
+  public void testVectorUDTReWriteRoundtrip() {
+    VectorUDT vectorUDT = new VectorUDT();
+    StructType schema =
+        new StructType().add("id", DataTypes.IntegerType, false).add("vec", vectorUDT, true);
+    Vector dense = new DenseVector(new double[] {1.0, 2.0, 3.0});
+    List<Row> data = Arrays.asList(RowFactory.create(0, dense));
+
+    Dataset<Row> firstRead = writeAndRead(schema, data, "vector_udt_rewrite_v1");
+    String rewritePath = outputPath("vector_udt_rewrite_v2");
+    firstRead.write().format("lance").save(rewritePath);
+
+    Dataset<Row> secondRead = spark.read().format("lance").load(rewritePath);
+    assertInstanceOf(
+        VectorUDT.class,
+        secondRead.schema().apply("vec").dataType(),
+        "UDT must survive a read+write+read cycle (idempotency)");
+    assertFalse(
+        secondRead.schema().apply("vec").metadata().contains("__udt"),
+        "second-read StructField metadata must still be clean");
+    assertEquals(dense, secondRead.orderBy("id").collectAsList().get(0).get(1));
+  }
+
+  /**
+   * Generality check: the round-trip works for any {@code UserDefinedType}, not only {@code
+   * VectorUDT}. {@code MatrixUDT} has a different sqlType (7-field struct vs. 4-field) and a
+   * different user-facing class, so it exercises the same code path with different shape.
+   */
+  @Test
+  public void testMatrixUDTRoundtrip() {
+    MatrixUDT matrixUDT = new MatrixUDT();
+    StructType schema =
+        new StructType().add("id", DataTypes.IntegerType, false).add("mat", matrixUDT, true);
+
+    Matrix dense = new DenseMatrix(2, 2, new double[] {1.0, 2.0, 3.0, 4.0});
+    List<Row> data = Arrays.asList(RowFactory.create(0, dense));
+
+    Dataset<Row> result = writeAndRead(schema, data, "matrix_udt");
+
+    assertInstanceOf(
+        MatrixUDT.class,
+        result.schema().apply("mat").dataType(),
+        "read-back column must carry MatrixUDT (preserved via __udt field metadata)");
+
+    List<Row> out = result.orderBy("id").collectAsList();
+    assertEquals(1, out.size());
+    assertEquals(dense, out.get(0).get(1));
+  }
+
+  /**
+   * UDT nested inside a StructType also round-trips. Exercises the recursive UDT branch in {@code
+   * toArrowField} (the top-level case is covered by {@code testVectorUDTRoundtrip}).
+   */
+  @Test
+  public void testNestedUDTInStructRoundtrip() {
+    VectorUDT vectorUDT = new VectorUDT();
+    StructType nested =
+        new StructType().add("label", DataTypes.StringType, true).add("vec", vectorUDT, true);
+    StructType schema =
+        new StructType().add("id", DataTypes.IntegerType, false).add("payload", nested, true);
+
+    Vector dense = new DenseVector(new double[] {1.0, 2.0});
+    List<Row> data = Arrays.asList(RowFactory.create(0, RowFactory.create("hello", dense)));
+
+    Dataset<Row> result = writeAndRead(schema, data, "nested_udt_struct");
+
+    StructType payloadType = (StructType) result.schema().apply("payload").dataType();
+    assertInstanceOf(
+        VectorUDT.class,
+        payloadType.apply("vec").dataType(),
+        "nested vec field must carry VectorUDT after round-trip");
+
+    List<Row> out = result.orderBy("id").collectAsList();
+    Row payload = out.get(0).getStruct(1);
+    assertEquals("hello", payload.getString(0));
+    assertEquals(dense, payload.get(1));
+  }
+
+  /**
+   * UDT used as an array element also round-trips. Exercises the recursive UDT branch through
+   * {@code toArrowField}'s ArrayType handling.
+   */
+  @Test
+  public void testUDTAsArrayElementRoundtrip() {
+    VectorUDT vectorUDT = new VectorUDT();
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("vecs", DataTypes.createArrayType(vectorUDT, true), true);
+
+    Vector v1 = new DenseVector(new double[] {1.0, 2.0});
+    Vector v2 = new DenseVector(new double[] {3.0, 4.0});
+    List<Row> data = Arrays.asList(RowFactory.create(0, Arrays.asList(v1, v2)));
+
+    Dataset<Row> result = writeAndRead(schema, data, "udt_array_element");
+
+    org.apache.spark.sql.types.ArrayType arr =
+        (org.apache.spark.sql.types.ArrayType) result.schema().apply("vecs").dataType();
+    assertInstanceOf(
+        VectorUDT.class,
+        arr.elementType(),
+        "array element type must carry VectorUDT after round-trip");
+
+    List<Row> out = result.orderBy("id").collectAsList();
+    List<Object> got = out.get(0).getList(1);
+    assertEquals(2, got.size());
+    assertEquals(v1, got.get(0));
+    assertEquals(v2, got.get(1));
   }
 }

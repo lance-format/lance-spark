@@ -33,14 +33,14 @@ Lance provides SQL extensions that add additional functionality beyond standard 
 === "Spark Shell"
     ```shell
     spark-shell \
-      --packages org.lance:lance-spark-bundle-3.5_2.12:0.0.7 \
+      --packages org.lance:lance-spark-bundle-3.5_2.12:0.4.0 \
       --conf spark.sql.extensions=org.lance.spark.extensions.LanceSparkSessionExtensions
     ```
 
 === "Spark Submit"
     ```shell
     spark-submit \
-      --packages org.lance:lance-spark-bundle-3.5_2.12:0.0.7 \
+      --packages org.lance:lance-spark-bundle-3.5_2.12:0.4.0 \
       --conf spark.sql.extensions=org.lance.spark.extensions.LanceSparkSessionExtensions \
       your-application.jar
     ```
@@ -75,7 +75,7 @@ and namespace-specific options:
 === "Scala"
     ```scala
     import org.apache.spark.sql.SparkSession
-    
+
     val spark = SparkSession.builder()
         .appName("lance-dir-example")
         .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
@@ -87,7 +87,7 @@ and namespace-specific options:
 === "Java"
     ```java
     import org.apache.spark.sql.SparkSession;
-    
+
     SparkSession spark = SparkSession.builder()
         .appName("lance-dir-example")
         .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
@@ -99,7 +99,7 @@ and namespace-specific options:
 === "Spark Shell"
     ```shell
     spark-shell \
-      --packages org.lance:lance-spark-bundle-3.5_2.12:0.0.7 \
+      --packages org.lance:lance-spark-bundle-3.5_2.12:0.4.0 \
       --conf spark.sql.catalog.lance=org.lance.spark.LanceNamespaceSparkCatalog \
       --conf spark.sql.catalog.lance.impl=dir \
       --conf spark.sql.catalog.lance.root=/path/to/lance/database
@@ -108,7 +108,7 @@ and namespace-specific options:
 === "Spark Submit"
     ```shell
     spark-submit \
-      --packages org.lance:lance-spark-bundle-3.5_2.12:0.0.7 \
+      --packages org.lance:lance-spark-bundle-3.5_2.12:0.4.0 \
       --conf spark.sql.catalog.lance=org.lance.spark.LanceNamespaceSparkCatalog \
       --conf spark.sql.catalog.lance.impl=dir \
       --conf spark.sql.catalog.lance.root=/path/to/lance/database \
@@ -148,7 +148,7 @@ Example settings:
         .config("spark.sql.catalog.lance.storage.secret_access_key", "def")
         .config("spark.sql.catalog.lance.storage.session_token", "ghi") \
         .getOrCreate()
-    ```    
+    ```
 
 === "MinIO"
     ```python
@@ -209,7 +209,7 @@ Here we use LanceDB Cloud as an example of the REST namespace:
 === "Spark Shell"
     ```shell
     spark-shell \
-      --packages org.lance:lance-spark-bundle-3.5_2.12:0.0.7 \
+      --packages org.lance:lance-spark-bundle-3.5_2.12:0.4.0 \
       --conf spark.sql.catalog.lance=org.lance.spark.LanceNamespaceSparkCatalog \
       --conf spark.sql.catalog.lance.impl=rest \
       --conf spark.sql.catalog.lance.headers.x-api-key=your-api-key \
@@ -220,7 +220,7 @@ Here we use LanceDB Cloud as an example of the REST namespace:
 === "Spark Submit"
     ```shell
     spark-submit \
-      --packages org.lance:lance-spark-bundle-3.5_2.12:0.0.7 \
+      --packages org.lance:lance-spark-bundle-3.5_2.12:0.4.0 \
       --conf spark.sql.catalog.lance=org.lance.spark.LanceNamespaceSparkCatalog \
       --conf spark.sql.catalog.lance.impl=rest \
       --conf spark.sql.catalog.lance.headers.x-api-key=your-api-key \
@@ -291,7 +291,7 @@ Using the Glue namespace requires additional dependencies beyond the main Lance 
 Example with Spark Shell:
 ```shell
 spark-shell \
-  --packages org.lance:lance-spark-bundle-3.5_2.12:0.0.7,org.lance:lance-namespace-glue:0.0.7,software.amazon.awssdk:bundle:2.20.0 \
+  --packages org.lance:lance-spark-bundle-3.5_2.12:0.4.0,org.lance:lance-namespace-glue:0.3.0,software.amazon.awssdk:bundle:2.20.0 \
   --conf spark.sql.catalog.lance=org.lance.spark.LanceNamespaceSparkCatalog \
   --conf spark.sql.catalog.lance.impl=glue \
   --conf spark.sql.catalog.lance.root=s3://your-bucket/lance
@@ -401,7 +401,7 @@ Using Hive namespaces requires additional JARs beyond the main Lance Spark bundl
 Example with Spark Shell for Hive 3.x:
 ```shell
 spark-shell \
-  --packages org.lance:lance-spark-bundle-3.5_2.12:0.0.7,org.lance:lance-namespace-hive3:0.0.7 \
+  --packages org.lance:lance-spark-bundle-3.5_2.12:0.4.0,org.lance:lance-namespace-hive3:0.3.0 \
   --conf spark.sql.catalog.lance=org.lance.spark.LanceNamespaceSparkCatalog \
   --conf spark.sql.catalog.lance.impl=hive3 \
   --conf spark.sql.catalog.lance.hadoop.hive.metastore.uris=thrift://metastore:9083 \

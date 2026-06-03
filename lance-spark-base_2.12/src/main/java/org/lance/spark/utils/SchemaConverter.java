@@ -28,6 +28,7 @@ import java.util.Map;
 
 import static org.lance.spark.utils.BlobUtils.LANCE_ENCODING_BLOB_KEY;
 import static org.lance.spark.utils.BlobUtils.LANCE_ENCODING_BLOB_VALUE;
+import static org.lance.spark.utils.FixedSizeBinaryUtils.ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY;
 import static org.lance.spark.utils.Float16Utils.ARROW_FLOAT16_KEY;
 import static org.lance.spark.utils.Float16Utils.ARROW_FLOAT16_VALUE;
 import static org.lance.spark.utils.LargeVarCharUtils.ARROW_LARGE_VAR_CHAR_KEY;
@@ -59,7 +60,9 @@ public class SchemaConverter {
     StructType schemaWithFloat16 = addFloat16Metadata(schemaWithVectors, properties);
     StructType schemaWithBlobs = addBlobMetadata(schemaWithFloat16, properties);
     StructType schemaWithLargeVarChar = addLargeVarCharMetadata(schemaWithBlobs, properties);
-    return addCompressionMetadata(schemaWithLargeVarChar, properties);
+    StructType schemaWithFixedSizeBinary =
+        addFixedSizeBinaryMetadata(schemaWithLargeVarChar, properties);
+    return addCompressionMetadata(schemaWithFixedSizeBinary, properties);
   }
 
   /**
@@ -289,6 +292,83 @@ public class SchemaConverter {
     }
 
     return new StructType(newFields);
+  }
+
+  /**
+   * Adds metadata to BinaryType fields based on table properties for FixedSizeBinary columns.
+   * Properties with pattern "<column_name>.arrow.fixed-size-binary.byte-width" are applied to
+   * matching columns.
+   *
+   * @param sparkSchema the original Spark StructType
+   * @param properties table properties that may contain FixedSizeBinary column metadata
+   * @return StructType with metadata added for FixedSizeBinary columns
+   */
+  private static StructType addFixedSizeBinaryMetadata(
+      StructType sparkSchema, Map<String, String> properties) {
+    if (properties == null || properties.isEmpty()) {
+      return sparkSchema;
+    }
+
+    StructField[] newFields = new StructField[sparkSchema.fields().length];
+    for (int i = 0; i < sparkSchema.fields().length; i++) {
+      StructField field = sparkSchema.fields()[i];
+      String byteWidthProperty = FixedSizeBinaryUtils.createPropertyKey(field.name());
+
+      if (properties.containsKey(byteWidthProperty)) {
+        if (field.dataType() instanceof BinaryType) {
+          String raw = properties.get(byteWidthProperty);
+          int byteWidth = parseFixedSizeBinaryByteWidth(field.name(), raw);
+          Metadata newMetadata =
+              new MetadataBuilder()
+                  .withMetadata(field.metadata())
+                  .putLong(ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY, byteWidth)
+                  .build();
+          newFields[i] =
+              new StructField(field.name(), field.dataType(), field.nullable(), newMetadata);
+        } else {
+          throw new IllegalArgumentException(
+              "FixedSizeBinary column '"
+                  + field.name()
+                  + "' must have BINARY type, found: "
+                  + field.dataType());
+        }
+      } else {
+        newFields[i] = field;
+      }
+    }
+
+    return new StructType(newFields);
+  }
+
+  /**
+   * Parses and validates a FixedSizeBinary byte-width property value. Arrow's {@code
+   * FixedSizeBinary} requires a positive int; {@code 0}, negatives, and values above {@link
+   * Integer#MAX_VALUE} would produce cryptic failures deep inside Arrow, so reject at property-
+   * processing time with the column name in the message.
+   */
+  private static int parseFixedSizeBinaryByteWidth(String columnName, String raw) {
+    long byteWidth;
+    try {
+      byteWidth = Long.parseLong(raw);
+    } catch (NumberFormatException e) {
+      throw new IllegalArgumentException(
+          "FixedSizeBinary column '"
+              + columnName
+              + "' byte-width property must be an integer, found: '"
+              + raw
+              + "'",
+          e);
+    }
+    if (byteWidth <= 0 || byteWidth > Integer.MAX_VALUE) {
+      throw new IllegalArgumentException(
+          "FixedSizeBinary column '"
+              + columnName
+              + "' byte-width must be in the range [1, "
+              + Integer.MAX_VALUE
+              + "], found: "
+              + byteWidth);
+    }
+    return (int) byteWidth;
   }
 
   /**

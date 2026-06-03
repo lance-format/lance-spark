@@ -777,6 +777,37 @@ class LanceArrowColumnVectorSuite extends AnyFunSuite {
     allocator.close()
   }
 
+  test("fixed_size_binary") {
+    val allocator =
+      ArrowUtils.rootAllocator.newChildAllocator("fixed_size_binary", 0, Long.MaxValue)
+    val vector = new FixedSizeBinaryVector("hash", allocator, 16)
+    vector.allocateNew()
+
+    // Write 16-byte values (e.g., UUIDs or MD5 hashes)
+    (0 until 10).foreach { i =>
+      val bytes = new Array[Byte](16)
+      java.util.Arrays.fill(bytes, i.toByte)
+      vector.setSafe(i, bytes)
+    }
+    vector.setNull(10)
+    vector.setValueCount(11)
+
+    val columnVector = new LanceArrowColumnVector(vector)
+    assert(columnVector.dataType === BinaryType)
+    assert(columnVector.hasNull)
+    assert(columnVector.numNulls === 1)
+
+    (0 until 10).foreach { i =>
+      val expected = new Array[Byte](16)
+      java.util.Arrays.fill(expected, i.toByte)
+      assert(columnVector.getBinary(i) === expected)
+    }
+    assert(columnVector.isNullAt(10))
+
+    columnVector.close()
+    allocator.close()
+  }
+
   test("map") {
     val allocator = ArrowUtils.rootAllocator.newChildAllocator("map", 0, Long.MaxValue)
     val mapType = MapType(StringType, IntegerType, valueContainsNull = true)

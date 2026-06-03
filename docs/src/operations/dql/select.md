@@ -244,6 +244,10 @@ These options control how data is read from Lance datasets. They can be set usin
 | `pushDownFilters`     | Boolean | `true`  | Whether to push down filter predicates to the Lance reader for optimized scanning.                                |
 | `topN_push_down`      | Boolean | `true`  | Whether to push down TopN (ORDER BY ... LIMIT) operations to Lance for optimized sorting.                         |
 
+## User-Defined Types
+
+Spark UDT columns (e.g. MLlib's `VectorUDT`) round-trip transparently. On write the column is unwrapped to the UDT's `sqlType` (a struct) for storage, and the UDT's fully qualified class name is stamped onto the Arrow field's user metadata under the `__udt` key. On read, that marker is consulted and the schema is rewrapped to the original UDT automatically. No configuration needed; the user-facing class (e.g. `Vector` for `VectorUDT`) is materialized in rows as usual.
+
 ### Example: Reading with Options
 
 === "SQL"
