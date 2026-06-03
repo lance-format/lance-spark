@@ -674,13 +674,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
             shardingSpec);
       } catch (Exception e) {
         // Cleanup declared table on failure
-        DeregisterTableRequest deregisterRequest = new DeregisterTableRequest();
-        tableIdList.forEach(deregisterRequest::addIdItem);
-        try {
-          namespace.deregisterTable(deregisterRequest);
-        } catch (Exception cleanupEx) {
-          logger.warn("Failed to cleanup declared table after creation failure", cleanupEx);
-        }
+        deregisterQuietly(tableIdList);
         throw new RuntimeException("Failed to create table at location: " + location, e);
       }
     }
@@ -814,7 +808,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       try (Dataset ds = Utils.openDatasetBuilder(probeOptions).build()) {
         return true;
       }
-    } catch (Exception e) {
+    } catch (IllegalArgumentException e) {
       return false;
     }
   }
@@ -863,14 +857,19 @@ public abstract class BaseLanceNamespaceSparkCatalog
           tableProperties,
           shardingSpec);
     } catch (Exception e) {
-      DeregisterTableRequest deregisterRequest = new DeregisterTableRequest();
-      tableIdList.forEach(deregisterRequest::addIdItem);
-      try {
-        namespace.deregisterTable(deregisterRequest);
-      } catch (Exception cleanupEx) {
-        logger.warn("Failed to cleanup registered table after failure", cleanupEx);
-      }
+      deregisterQuietly(tableIdList);
       throw new RuntimeException("Failed to register existing table at location: " + location, e);
+    }
+  }
+
+  /** Best-effort rollback: deregister a table from the namespace, logging any failure. */
+  private void deregisterQuietly(List<String> tableIdList) {
+    try {
+      DeregisterTableRequest request = new DeregisterTableRequest();
+      tableIdList.forEach(request::addIdItem);
+      namespace.deregisterTable(request);
+    } catch (Exception cleanupEx) {
+      logger.warn("Failed to deregister table during rollback", cleanupEx);
     }
   }
 
