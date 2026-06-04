@@ -606,14 +606,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Map<String, String> tableProperties = copyUserTableProperties(properties);
 
       if (lanceDatasetExists(userLocation)) {
-        // Register existing dataset
         return registerExistingTable(
-            userLocation,
-            tableIdList,
-            processedSchema,
-            tableProperties,
-            fileFormatVersion,
-            shardingSpec);
+            userLocation, tableIdList, processedSchema, tableProperties, null, shardingSpec);
       }
 
       // Create new table at custom location
