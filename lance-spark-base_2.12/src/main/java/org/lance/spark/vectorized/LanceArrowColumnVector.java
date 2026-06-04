@@ -42,6 +42,7 @@ import org.apache.arrow.vector.complex.MapVector;
 import org.apache.arrow.vector.complex.StructVector;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.Decimal;
+import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.util.LanceArrowUtils;
 import org.apache.spark.sql.vectorized.ArrowColumnVector;
 import org.apache.spark.sql.vectorized.ColumnVector;
@@ -71,11 +72,19 @@ public class LanceArrowColumnVector extends ColumnVector {
   private final boolean closeVectorOnClose;
 
   public LanceArrowColumnVector(ValueVector vector) {
-    this(vector, true);
+    this(vector, true, null);
   }
 
   public LanceArrowColumnVector(ValueVector vector, boolean closeVectorOnClose) {
-    super(computeDataType(vector));
+    this(vector, closeVectorOnClose, null);
+  }
+
+  public LanceArrowColumnVector(
+      ValueVector vector, boolean closeVectorOnClose, StructField sparkField) {
+    super(
+        BlobUtils.isBlobV2SparkField(sparkField)
+            ? BlobUtils.BLOB_DESCRIPTOR_STRUCT
+            : computeDataType(vector));
     this.closeVectorOnClose = closeVectorOnClose;
 
     if (vector instanceof UInt1Vector) {
@@ -90,7 +99,7 @@ public class LanceArrowColumnVector extends ColumnVector {
       fixedSizeBinaryAccessor = new FixedSizeBinaryAccessor((FixedSizeBinaryVector) vector);
     } else if (vector instanceof FixedSizeListVector) {
       fixedSizeListAccessor = new FixedSizeListAccessor((FixedSizeListVector) vector);
-    } else if (vector instanceof StructVector && BlobUtils.isBlobV2ArrowField(vector.getField())) {
+    } else if (vector instanceof StructVector && BlobUtils.isBlobV2SparkField(sparkField)) {
       structAccessor = new LanceStructAccessor((StructVector) vector);
     } else if (vector instanceof StructVector && BlobUtils.isBlobArrowField(vector.getField())) {
       blobStructAccessor = new BlobStructAccessor((StructVector) vector);
@@ -547,9 +556,6 @@ public class LanceArrowColumnVector extends ColumnVector {
   }
 
   private static DataType computeDataType(ValueVector vector) {
-    if (vector instanceof StructVector && BlobUtils.isBlobV2ArrowField(vector.getField())) {
-      return BlobUtils.BLOB_DESCRIPTOR_STRUCT;
-    }
     return LanceArrowUtils.fromArrowField(vector.getField());
   }
 
