@@ -15,7 +15,7 @@ package org.apache.spark.sql.catalyst.plans.logical
 
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.FunctionIdentifier
-import org.apache.spark.sql.catalyst.analysis.FunctionRegistryBase
+import org.apache.spark.sql.catalyst.analysis.{FunctionRegistryBase, Resolver}
 import org.apache.spark.sql.catalyst.analysis.TableFunctionRegistry.TableFunctionBuilder
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, Expression, ExpressionInfo, Literal, SortOrder}
 import org.apache.spark.sql.connector.catalog.{Identifier, LookupCatalog, TableCatalog}
@@ -23,15 +23,14 @@ import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.lance.ipc.Query
-import org.lance.spark.{LanceDataset, LanceSparkReadOptions}
-import org.lance.spark.utils.QueryUtils
+import org.lance.spark.{LanceConstant, LanceDataset, LanceSparkReadOptions}
+import org.lance.spark.utils.{QueryUtils, VectorUtils}
 
 import scala.collection.JavaConverters._
 
 object LanceTableValuedFunctions {
 
   val VECTOR_SEARCH = "vector_search"
-  private val VECTOR_DISTANCE = "_distance"
 
   val supportedFnNames: Seq[String] = Seq(VECTOR_SEARCH)
 
@@ -74,11 +73,12 @@ object LanceTableValuedFunctions {
 
     val resolver = spark.sessionState.conf.resolver
     val sourceSchema = resolvedTable.table.schema()
-    if (sourceSchema.fields.exists(field => resolver(field.name, VECTOR_DISTANCE))) {
+    if (sourceSchema.fields.exists(field => resolver(field.name, LanceConstant.VECTOR_DISTANCE))) {
       throw new IllegalArgumentException(
         s"$VECTOR_SEARCH cannot read a table that already contains "
-          + s"$VECTOR_DISTANCE; the name is reserved for vector search distance.")
+          + s"${LanceConstant.VECTOR_DISTANCE}; the name is reserved for vector search distance.")
     }
+    validateVectorColumn(sourceSchema, nearestQuery, resolver)
 
     val scanOptions =
       new CaseInsensitiveStringMap(
@@ -90,16 +90,17 @@ object LanceTableValuedFunctions {
         resolvedTable.identifier,
         scanOptions)
 
-    val distanceAttr = relation.output.find(attr => resolver(attr.name, VECTOR_DISTANCE))
-      .getOrElse {
-        throw new IllegalStateException(
-          s"Internal column $VECTOR_DISTANCE is missing from vector_search plan.")
-      }
+    val distanceAttr =
+      relation.output.find(attr => resolver(attr.name, LanceConstant.VECTOR_DISTANCE))
+        .getOrElse {
+          throw new IllegalStateException(
+            s"Internal column ${LanceConstant.VECTOR_DISTANCE} is missing from vector_search plan.")
+        }
 
     val sorted = Sort(Seq(SortOrder(distanceAttr, Ascending)), global = true, relation)
     val limited = GlobalLimit(Literal(limit), LocalLimit(Literal(limit), sorted))
     Project(
-      limited.output.filterNot(attr => resolver(attr.name, VECTOR_DISTANCE)),
+      limited.output.filterNot(attr => resolver(attr.name, LanceConstant.VECTOR_DISTANCE)),
       limited)
   }
 
@@ -127,15 +128,38 @@ object LanceTableValuedFunctions {
     limit
   }
 
+  private def validateVectorColumn(
+      schema: StructType,
+      query: Query,
+      resolver: Resolver): Unit = {
+    val columnName = query.getColumn
+    if (columnName == null || columnName.isEmpty) {
+      throw new IllegalArgumentException(
+        s"$VECTOR_SEARCH nearest query must specify a 'column'.")
+    }
+    val field = schema.fields.find(f => resolver(f.name, columnName)).getOrElse {
+      throw new IllegalArgumentException(
+        s"$VECTOR_SEARCH column '$columnName' does not exist in table schema. "
+          + s"Available columns: ${schema.fieldNames.mkString(", ")}")
+    }
+    if (!VectorUtils.isVectorField(field)) {
+      throw new IllegalArgumentException(
+        s"$VECTOR_SEARCH column '$columnName' is not a vector column "
+          + s"(FixedSizeList of Float/Double); got ${field.dataType.simpleString}.")
+    }
+    val key = query.getKey
+    if (key != null) {
+      val dim = VectorUtils.getVectorDimension(field)
+      if (dim > 0 && key.length != dim) {
+        throw new IllegalArgumentException(
+          s"$VECTOR_SEARCH query vector length ${key.length} does not match "
+            + s"column '$columnName' dimension $dim.")
+      }
+    }
+  }
+
   private def withDistanceColumn(table: LanceDataset): LanceDataset = {
-    new LanceDataset(
-      table.readOptions(),
-      table.schema().add(VECTOR_DISTANCE, DataTypes.FloatType, true),
-      table.getInitialStorageOptions,
-      table.getNamespaceImpl,
-      table.getNamespaceProperties,
-      table.getManagedVersioning,
-      table.getFileFormatVersion)
+    table.withSchema(table.schema().add(LanceConstant.VECTOR_DISTANCE, DataTypes.FloatType, true))
   }
 
   private case class ResolvedLanceTable(

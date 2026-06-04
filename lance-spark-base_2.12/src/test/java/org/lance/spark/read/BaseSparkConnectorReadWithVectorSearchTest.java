@@ -25,11 +25,13 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.execution.SparkPlan;
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec;
+import org.apache.spark.sql.functions;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
-import java.lang.reflect.Field;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
@@ -133,16 +135,16 @@ public abstract class BaseSparkConnectorReadWithVectorSearchTest {
   }
 
   @Test
-  public void testVectorSearchDefaultsToExactL2Query() throws Exception {
+  public void testVectorSearchPropagatesExactL2QueryFromJson() {
     Query query = scanNearestQuery(vectorSearch("i", nearestQuery(5)));
 
-    assertFalse(query.isUseIndex(), "vector_search should default to exact search");
+    assertFalse(query.isUseIndex(), "vector_search should propagate useIndex=false from JSON");
     assertTrue(query.getDistanceType().isPresent(), "vector_search should set distance type");
     assertEquals(DistanceType.L2, query.getDistanceType().get());
   }
 
   @Test
-  public void testVectorSearchAcceptsDistanceTypeWithoutUseIndex() throws Exception {
+  public void testVectorSearchAcceptsDistanceTypeWithoutUseIndex() {
     Query.Builder builder = nearestQueryBuilder(5);
     builder.setDistanceType(DistanceType.Dot);
     Query query = scanNearestQuery(vectorSearch("i", builder.build()));
@@ -153,7 +155,7 @@ public abstract class BaseSparkConnectorReadWithVectorSearchTest {
   }
 
   @Test
-  public void testVectorSearchAcceptsExplicitUseIndex() throws Exception {
+  public void testVectorSearchAcceptsExplicitUseIndex() {
     Query.Builder builder = nearestQueryBuilder(5);
     builder.setDistanceType(DistanceType.Cosine);
     builder.setUseIndex(true);
@@ -179,21 +181,121 @@ public abstract class BaseSparkConnectorReadWithVectorSearchTest {
   @Test
   public void testVectorSearchRejectsInvalidLimit() {
     String nearestJson =
-        "{\"column\":\"vec\",\"k\":0,\"key\":["
+        "{\"column\":\"vec\",\"k\":-1,\"key\":["
             + queryVector32()
             + "],\"distanceType\":\"L2\",\"useIndex\":false}";
 
-    assertThrows(
-        Exception.class,
-        () ->
-            spark
-                .sql(
+    Exception ex =
+        assertThrows(
+            Exception.class,
+            () ->
+                spark
+                    .sql(
+                        "SELECT * FROM vector_search('"
+                            + testDataset5Uri()
+                            + "', '"
+                            + nearestJson
+                            + "')")
+                    .collect());
+
+    assertTrue(
+        ex.getMessage().contains("nearest"),
+        "Expected nearest-query error for invalid k, got: " + ex.getMessage());
+  }
+
+  @Test
+  public void testVectorSearchRejectsNonexistentColumn() {
+    String nearestJson =
+        "{\"column\":\"does_not_exist\",\"k\":1,\"key\":["
+            + queryVector32()
+            + "],\"distanceType\":\"L2\",\"useIndex\":false}";
+
+    Exception ex =
+        assertThrows(
+            Exception.class,
+            () ->
+                spark.sql(
                     "SELECT * FROM vector_search('"
                         + testDataset5Uri()
                         + "', '"
                         + nearestJson
-                        + "')")
-                .collect());
+                        + "')"));
+
+    assertTrue(
+        ex.getMessage().contains("does not exist in table schema"),
+        "Expected unknown-column error, got: " + ex.getMessage());
+  }
+
+  @Test
+  public void testVectorSearchRejectsScalarColumn() {
+    String nearestJson =
+        "{\"column\":\"i\",\"k\":1,\"key\":["
+            + queryVector32()
+            + "],\"distanceType\":\"L2\",\"useIndex\":false}";
+
+    Exception ex =
+        assertThrows(
+            Exception.class,
+            () ->
+                spark.sql(
+                    "SELECT * FROM vector_search('"
+                        + testDataset5Uri()
+                        + "', '"
+                        + nearestJson
+                        + "')"));
+
+    assertTrue(
+        ex.getMessage().contains("is not a vector column"),
+        "Expected non-vector-column error, got: " + ex.getMessage());
+  }
+
+  @Test
+  public void testVectorSearchRejectsTableWithReservedDistanceColumn(@TempDir Path tmpDir) {
+    String distanceTableUri = tmpDir.resolve("distance_collision.lance").toUri().toString();
+    spark
+        .range(5)
+        .toDF("id")
+        .withColumn("_distance", functions.lit(0.0f))
+        .write()
+        .format(LanceDataSource.name)
+        .save(distanceTableUri);
+
+    String tableId = "`lance_default`.`" + escapeSqlIdentifier(distanceTableUri) + "`";
+    String nearestJson =
+        "{\"column\":\"id\",\"k\":1,\"key\":[1.0],\"distanceType\":\"L2\",\"useIndex\":false}";
+
+    Exception ex =
+        assertThrows(
+            Exception.class,
+            () ->
+                spark.sql("SELECT * FROM vector_search('" + tableId + "', '" + nearestJson + "')"));
+
+    assertTrue(
+        ex.getMessage().contains("_distance"),
+        "Expected _distance reservation error, got: " + ex.getMessage());
+  }
+
+  @Test
+  public void testVectorSearchRejectsNonLanceTable() {
+    String tableName = "not_lance_for_vector_search_test";
+    spark.sql("DROP TABLE IF EXISTS " + tableName);
+    spark.range(5).toDF("id").write().mode("overwrite").saveAsTable(tableName);
+    try {
+      String nearestJson =
+          "{\"column\":\"id\",\"k\":1,\"key\":[1.0],\"distanceType\":\"L2\",\"useIndex\":false}";
+      Exception ex =
+          assertThrows(
+              Exception.class,
+              () ->
+                  spark.sql(
+                      "SELECT * FROM vector_search('" + tableName + "', '" + nearestJson + "')"));
+      assertTrue(
+          ex.getMessage().contains("only supports Lance tables")
+              || ex.getMessage().contains("only supports table catalogs"),
+          "Expected Lance-only error, got: " + ex.getMessage());
+    } finally {
+      spark.sql("DROP TABLE IF EXISTS " + tableName);
+    }
   }
 
   private static Dataset<Row> vectorSearch(String selectList, Query query) {
@@ -211,12 +313,9 @@ public abstract class BaseSparkConnectorReadWithVectorSearchTest {
     return spark.sql(sql.toString());
   }
 
-  private static Query scanNearestQuery(Dataset<Row> result) throws Exception {
+  private static Query scanNearestQuery(Dataset<Row> result) {
     LanceScan scan = lanceScan(result);
-    Field readOptionsField = LanceScan.class.getDeclaredField("readOptions");
-    readOptionsField.setAccessible(true);
-    LanceSparkReadOptions readOptions = (LanceSparkReadOptions) readOptionsField.get(scan);
-    Query query = readOptions.getNearest();
+    Query query = scan.getReadOptions().getNearest();
     assertNotNull(query, "Expected vector_search to configure nearest query");
     return query;
   }
@@ -287,7 +386,7 @@ public abstract class BaseSparkConnectorReadWithVectorSearchTest {
       if (i > 0) {
         builder.append(", ");
       }
-      builder.append(i + 32).append(".0f");
+      builder.append(i + 32).append(".0");
     }
     return builder.toString();
   }

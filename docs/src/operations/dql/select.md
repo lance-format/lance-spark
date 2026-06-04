@@ -66,27 +66,31 @@ vector_search(table, nearest)
 
 Arguments:
 
-- `table` - A catalog table identifier or direct Lance dataset path, passed as a string.
+- `table` - A Spark multi-part identifier (catalog-qualified table name), passed as a
+  single-quoted SQL string literal. Bare filesystem paths are **not** accepted - they
+  are rejected when the identifier is parsed. To target a Lance dataset by path,
+  register a `LanceNamespaceSparkCatalog` (e.g. as `lance_default`) and quote the path
+  part with backticks inside the outer single-quoted string.
 - `nearest` - A Lance nearest-neighbor query JSON string. Include `column`, `key`,
   and `k`; optional fields such as `distanceType` and `useIndex` are passed through
   to Lance. The `k` value is also used as Spark's final global TopK limit.
 
-Catalog table example:
+Path-based catalog example (mirrors the test fixtures):
 
 ```sql
 SELECT id, title
 FROM vector_search(
-  'lance.default.documents',
+  '`lance_default`.`file:/data/lance/documents.lance`',
   '{"column":"embedding","key":[0.12,0.34,0.56],"k":10,"distanceType":"Cosine","useIndex":true}'
 );
 ```
 
-Direct path example:
+Namespace-backed catalog example:
 
 ```sql
-SELECT id
+SELECT id, title
 FROM vector_search(
-  '/data/lance/documents.lance',
+  'lance_prod.reports.documents',
   '{"column":"embedding","key":[0.12,0.34,0.56],"k":10}'
 );
 ```

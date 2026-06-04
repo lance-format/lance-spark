@@ -85,4 +85,19 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
         getFileFormatVersion(),
         properties());
   }
+
+  @Override
+  public LancePositionDeltaDataset withSchema(StructType newSchema) {
+    return new LancePositionDeltaDataset(
+        readOptions(),
+        newSchema,
+        getInitialStorageOptions(),
+        getNamespaceImpl(),
+        getNamespaceProperties(),
+        getManagedVersioning(),
+        getStagedCommit(),
+        getFileFormatVersion(),
+        getTableProperties(),
+        getShardingSpec());
+  }
 }

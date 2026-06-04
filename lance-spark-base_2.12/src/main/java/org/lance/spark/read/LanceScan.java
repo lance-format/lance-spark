@@ -147,6 +147,11 @@ public class LanceScan
     this.namespaceProperties = namespaceProperties;
   }
 
+  /** Visible for tests in the same package; not part of the public API. */
+  LanceSparkReadOptions getReadOptions() {
+    return readOptions;
+  }
+
   @Override
   public Batch toBatch() {
     return this;

@@ -272,6 +272,42 @@ public class LanceDataset
     return fileFormatVersion;
   }
 
+  public StagedCommit getStagedCommit() {
+    return stagedCommit;
+  }
+
+  public Map<String, String> getTableProperties() {
+    return tableProperties;
+  }
+
+  public ShardingSpec getShardingSpec() {
+    return shardingSpec;
+  }
+
+  /**
+   * Returns a copy of this dataset with the given Spark schema, preserving every other piece of
+   * state (read options, namespace credentials, staged commit, file format version, table
+   * properties, sharding spec).
+   *
+   * <p>Used by callers that need to extend the projected schema without losing dataset
+   * configuration -- for example, vector_search adds a synthetic {@code _distance} column.
+   *
+   * <p>Subclasses should override to preserve their runtime type and any extra contracts.
+   */
+  public LanceDataset withSchema(StructType newSchema) {
+    return new LanceDataset(
+        readOptions,
+        newSchema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        managedVersioning,
+        stagedCommit,
+        fileFormatVersion,
+        tableProperties,
+        shardingSpec);
+  }
+
   @Override
   public ScanBuilder newScanBuilder(CaseInsensitiveStringMap caseInsensitiveStringMap) {
     // Merge scan-time options with the existing read options
