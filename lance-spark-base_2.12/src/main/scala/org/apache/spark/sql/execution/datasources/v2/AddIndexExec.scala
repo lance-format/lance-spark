@@ -947,7 +947,8 @@ object IndexUtils {
 
   // Options consumed at the Spark execution layer that must not be forwarded to the Lance
   // index backend as index parameters.
-  private val SparkOnlyOptions: Set[String] = Set("train", "build_mode", "rows_per_range", "num_segments")
+  private val SparkOnlyOptions: Set[String] =
+    Set("train", "build_mode", "rows_per_range", "num_segments")
 
   def toJson(args: Seq[LanceNamedArgument]): String = {
     val indexArgs = args.filterNot(a => SparkOnlyOptions.contains(a.name))
