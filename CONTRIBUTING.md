@@ -88,7 +88,7 @@ make docker-test SPARK_VERSION=3.5 SCALA_VERSION=2.13 \
   PYTEST_CMD="pytest /home/lance/tests/test_lance_spark.py::TestDQLSearchTableFunctions -v --timeout=180"
 ```
 
-The `Spark Search Docker` GitHub Actions workflow runs the same targeted Docker tests. Pull requests run the directory namespace coverage automatically. Use workflow dispatch with `backends=local,rest-dir` to run both directory and REST-directory coverage; provide `rest-uri` for an already-running server, or configure the repository secret `SOPHON_REPO_TOKEN` so the workflow can build and start Sophon Phalanx.
+The `Spark Search Docker` GitHub Actions workflow runs the same targeted Docker tests. Pull requests run the directory namespace coverage automatically. Use workflow dispatch with `backends=local,rest-dir` and `rest-uri` to run both directory and REST-directory coverage against a compatible REST namespace server.
 
 ## Documentation
 

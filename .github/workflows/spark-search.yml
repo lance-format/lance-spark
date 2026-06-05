@@ -43,23 +43,19 @@ on:
       backends:
         description: "Comma-separated test backends: local or local,rest-dir"
         required: true
-        default: "local,rest-dir"
+        default: "local"
       rest-uri:
-        description: "Existing REST namespace URI. Leave empty to build and start Sophon Phalanx."
+        description: "REST namespace URI. Required when backends includes rest-dir."
         required: false
         default: ""
       rest-database:
-        description: "x-lancedb-database header for rest-dir"
+        description: "Optional database header value for rest-dir"
         required: false
         default: "lance_spark_ci"
       docker-run-args:
         description: "Extra docker run args for docker-test"
         required: false
         default: ""
-      sophon-ref:
-        description: "Sophon ref to build when rest-uri is empty"
-        required: false
-        default: "main"
 
 permissions:
   contents: read
@@ -69,10 +65,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: "0"
-  CARGO_BUILD_JOBS: "1"
-  RUSTFLAGS: "-C debuginfo=line-tables-only -C opt-level=1"
   SPARK_VERSION: ${{ github.event.inputs['spark-version'] || '3.5' }}
   SCALA_VERSION: ${{ github.event.inputs['scala-version'] || '2.13' }}
   SEARCH_TEST_BACKENDS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.backends || 'local' }}
@@ -133,84 +125,27 @@ jobs:
             SCALA_VERSION=${SCALA_VERSION} \
             TEST_BACKENDS=local \
             PYTEST_CMD="${SEARCH_PYTEST_CMD}"
-      - name: Resolve REST namespace server
+      - name: Resolve REST namespace URI
         id: rest
         if: ${{ contains(env.SEARCH_TEST_BACKENDS, 'rest-dir') }}
         env:
           INPUT_REST_URI: ${{ github.event.inputs['rest-uri'] }}
           INPUT_DOCKER_RUN_ARGS: ${{ github.event.inputs['docker-run-args'] }}
-          SOPHON_REPO_TOKEN: ${{ secrets.SOPHON_REPO_TOKEN }}
         run: |
           rest_uri="${INPUT_REST_URI}"
           docker_run_args="${INPUT_DOCKER_RUN_ARGS}"
-          start_sophon=false
 
           if [ -z "${rest_uri}" ]; then
-            if [ -z "${SOPHON_REPO_TOKEN}" ]; then
-              echo "::error::rest-dir requires either workflow input rest-uri or repository secret SOPHON_REPO_TOKEN"
-              exit 1
-            fi
-            rest_uri="http://host.docker.internal:10024"
-            docker_run_args="${docker_run_args:+${docker_run_args} }--add-host=host.docker.internal:host-gateway"
-            start_sophon=true
+            echo "::error::rest-dir requires workflow input rest-uri for a running compatible REST namespace server"
+            exit 1
           fi
 
           echo "uri=${rest_uri}" >> "$GITHUB_OUTPUT"
-          echo "start_sophon=${start_sophon}" >> "$GITHUB_OUTPUT"
           {
             echo "docker_run_args<<EOF"
             echo "${docker_run_args}"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-      - name: Checkout Sophon
-        if: ${{ steps.rest.outputs.start_sophon == 'true' }}
-        uses: actions/checkout@v4
-        with:
-          repository: lancedb/sophon
-          ref: ${{ github.event.inputs['sophon-ref'] || 'main' }}
-          path: sophon
-          token: ${{ secrets.SOPHON_REPO_TOKEN }}
-          submodules: recursive
-      - name: Build Sophon Phalanx image
-        if: ${{ steps.rest.outputs.start_sophon == 'true' }}
-        uses: docker/build-push-action@v6
-        with:
-          context: sophon
-          file: sophon/docker/phalanx.Dockerfile
-          target: phalanx-runtime
-          load: true
-          tags: sophon-phalanx:local
-          build-args: |
-            CARGO_PROFILE=dev
-            RUSTFLAGS=${{ env.RUSTFLAGS }}
-            CARGO_BUILD_JOBS=${{ env.CARGO_BUILD_JOBS }}
-            TARGET_CPU=generic
-          cache-from: type=gha,scope=sophon-phalanx-dir-rest
-          cache-to: type=gha,mode=max,scope=sophon-phalanx-dir-rest
-      - name: Start Sophon Phalanx
-        if: ${{ steps.rest.outputs.start_sophon == 'true' }}
-        run: |
-          docker rm -f phalanx >/dev/null 2>&1 || true
-          docker run -d --name phalanx -p 10024:10024 \
-            -e PHALANX_ROOT_URI=/tmp/phalanx/root_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT} \
-            -e PHALANX_TMP_URI=/tmp/phalanx/tmp \
-            -e PHALANX_CACHE_DIR=/tmp/phalanx/cache \
-            -e PHALANX_MAGIC_TOKENS=sk_localtest \
-            -e PHALANX_EVENT_BUS_TYPE=stdout \
-            -e RUST_LOG=info \
-            -e RUST_BACKTRACE=full \
-            sophon-phalanx:local \
-            --stack-name=local-minimum
-
-          for _ in $(seq 1 90); do
-            if timeout 1 bash -c '</dev/tcp/127.0.0.1/10024' >/dev/null 2>&1; then
-              exit 0
-            fi
-            sleep 2
-          done
-
-          docker logs phalanx || true
-          exit 1
       - name: Run REST directory namespace search tests
         if: ${{ contains(env.SEARCH_TEST_BACKENDS, 'rest-dir') }}
         env:
@@ -228,6 +163,3 @@ jobs:
             LANCE_SPARK_REST_DATABASE="${LANCE_SPARK_REST_DATABASE}" \
             DOCKER_RUN_ARGS="${DOCKER_RUN_ARGS}" \
             PYTEST_CMD="${SEARCH_PYTEST_CMD}"
-      - name: Dump Phalanx logs
-        if: ${{ always() && steps.rest.outputs.start_sophon == 'true' }}
-        run: docker logs phalanx || true
