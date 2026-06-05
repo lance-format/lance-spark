@@ -117,6 +117,54 @@ public abstract class BaseSparkSearchRestNamespaceSmokeTest {
     List<Integer> ids = ftsRows.stream().map(row -> row.getInt(0)).collect(Collectors.toList());
     assertEquals(java.util.Arrays.asList(1, 3), ids);
     assertTrue(ftsRows.get(0).getFloat(1) > 0.0f);
+
+    String hybridTable = fullTableName("hybrid_search");
+    spark.sql(
+        "CREATE TABLE "
+            + hybridTable
+            + " (id INT NOT NULL, body STRING, vector ARRAY<FLOAT> NOT NULL) USING lance "
+            + "TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '4')");
+    spark.sql(
+        "INSERT INTO "
+            + hybridTable
+            + " VALUES "
+            + "(1, 'lance vector search', array(0.0, 0.0, 0.0, 0.0)), "
+            + "(2, 'spark connector table function', array(1.0, 1.0, 1.0, 1.0)), "
+            + "(3, 'lance full text search', array(10.0, 10.0, 10.0, 10.0))");
+    spark.sql(
+        "ALTER TABLE "
+            + hybridTable
+            + " CREATE INDEX body_fts USING fts (body) WITH ("
+            + "base_tokenizer='simple', "
+            + "language='English', "
+            + "max_token_length=40, "
+            + "lower_case=true, "
+            + "stem=false, "
+            + "remove_stop_words=false, "
+            + "ascii_folding=false, "
+            + "with_position=true)");
+
+    List<Row> hybridRows =
+        spark
+            .sql(
+                "SELECT id, _distance, _score, _relevance_score FROM HYBRID_SEARCH("
+                    + "table => '"
+                    + hybridTable
+                    + "', "
+                    + "query_vector => array(0.0, 0.0, 0.0, 0.0), "
+                    + "query => 'lance', "
+                    + "columns => array('id'), "
+                    + "num_results => 3, "
+                    + "candidates => 3, "
+                    + "rrf_k => 1.0) "
+                    + "ORDER BY _relevance_score DESC, id")
+            .collectAsList();
+    List<Integer> hybridIds =
+        hybridRows.stream().map(row -> row.getInt(0)).collect(Collectors.toList());
+    assertEquals(java.util.Arrays.asList(1, 3, 2), hybridIds);
+    assertEquals(0.0f, hybridRows.get(0).getFloat(1), 0.001f);
+    assertTrue(hybridRows.get(0).getFloat(2) > 0.0f);
+    assertTrue(hybridRows.get(2).isNullAt(2));
   }
 
   private String fullTableName(String prefix) {

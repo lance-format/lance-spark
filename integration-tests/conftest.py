@@ -21,6 +21,10 @@ from pyspark.sql import SparkSession
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "requires_rest: test only runs on REST-based backends")
+    config.addinivalue_line(
+        "markers",
+        "rest_dir_compatible: test can run against a local REST namespace backed by dir",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +181,9 @@ LANCEDB_DB = os.environ.get("LANCEDB_DB")
 LANCEDB_API_KEY = os.environ.get("LANCEDB_API_KEY")
 LANCEDB_HOST_OVERRIDE = os.environ.get("LANCEDB_HOST_OVERRIDE")
 LANCEDB_REGION = os.environ.get("LANCEDB_REGION", "us-east-1")
+LANCE_SPARK_REST_URI = os.environ.get("LANCE_SPARK_REST_URI")
+LANCE_SPARK_REST_API_KEY = os.environ.get("LANCE_SPARK_REST_API_KEY")
+LANCE_SPARK_REST_DATABASE = os.environ.get("LANCE_SPARK_REST_DATABASE")
 AWS_S3_BUCKET_NAME = os.environ.get("AWS_S3_BUCKET_NAME")
 AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
 AWS_GLUE_CATALOG_ID = os.environ.get("AWS_GLUE_CATALOG_ID")
@@ -193,6 +200,8 @@ AWS_GLUE_ROOT = os.environ.get("AWS_GLUE_ROOT") or (
 _all_backends = ["local", "azurite", "minio"]
 if LANCEDB_DB and LANCEDB_API_KEY:
     _all_backends.append("lancedb")
+if LANCE_SPARK_REST_URI:
+    _all_backends.append("rest-dir")
 if AWS_S3_BUCKET_NAME:
     _all_backends.append("glue")
 _backends = os.environ.get("TEST_BACKENDS", ",".join(_all_backends)).split(",")
@@ -218,6 +227,8 @@ def spark(request):
     - **minio** – S3-compatible storage via the MinIO emulator
     - **lancedb** – LanceDB Cloud via REST API (requires ``LANCEDB_DB`` and
       ``LANCEDB_API_KEY`` env vars; skipped otherwise)
+    - **rest-dir** – local REST namespace backed by a directory namespace
+      (requires ``LANCE_SPARK_REST_URI`` and compatible tests)
     - **glue** – AWS Glue Data Catalog with S3 storage (requires
       ``AWS_S3_BUCKET_NAME`` and AWS credentials from the default AWS provider
       chain)
@@ -252,6 +263,25 @@ def spark(request):
                 f"spark.sql.catalog.{CATALOG}.headers.x-lancedb-database", LANCEDB_DB,
             )
         )
+    elif backend == "rest-dir":
+        if not LANCE_SPARK_REST_URI:
+            pytest.skip("LANCE_SPARK_REST_URI is required for rest-dir backend")
+
+        builder = (
+            builder
+            .config(f"spark.sql.catalog.{CATALOG}.impl", "rest")
+            .config(f"spark.sql.catalog.{CATALOG}.uri", LANCE_SPARK_REST_URI)
+        )
+        if LANCE_SPARK_REST_API_KEY:
+            builder = builder.config(
+                f"spark.sql.catalog.{CATALOG}.headers.x-api-key",
+                LANCE_SPARK_REST_API_KEY,
+            )
+        if LANCE_SPARK_REST_DATABASE:
+            builder = builder.config(
+                f"spark.sql.catalog.{CATALOG}.headers.x-lancedb-database",
+                LANCE_SPARK_REST_DATABASE,
+            )
     elif backend == "glue":
         if not AWS_S3_BUCKET_NAME or not AWS_GLUE_ROOT:
             pytest.skip("AWS_S3_BUCKET_NAME is required for Glue backend")
@@ -350,8 +380,11 @@ def test_table(request, spark):
 @pytest.fixture(autouse=True)
 def _skip_by_backend(request, spark):
     """Auto-skip tests marked ``requires_rest`` on non-REST backends."""
+    backend = getattr(spark, "_lance_backend", None)
+    if backend == "rest-dir" and not request.node.get_closest_marker("rest_dir_compatible"):
+        pytest.skip("rest-dir backend is only enabled for compatible tests")
     if request.node.get_closest_marker("requires_rest"):
-        if getattr(spark, "_lance_backend", None) != "lancedb":
+        if backend not in ("lancedb", "rest-dir"):
             pytest.skip("requires REST-based backend")
 
 

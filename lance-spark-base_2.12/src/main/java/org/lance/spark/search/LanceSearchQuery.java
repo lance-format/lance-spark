@@ -230,7 +230,7 @@ public class LanceSearchQuery implements Serializable {
       return this;
     }
 
-    public Builder k(Integer k) {
+    public Builder topK(Integer k) {
       this.k = k;
       return this;
     }
@@ -332,6 +332,9 @@ public class LanceSearchQuery implements Serializable {
       }
       if (k == null || k <= 0) {
         throw new IllegalArgumentException("k must be positive");
+      }
+      if (offset != null && offset < 0) {
+        throw new IllegalArgumentException("offset must be non-negative");
       }
       if (searchType == SearchType.VECTOR && (vector == null || vector.isEmpty())) {
         throw new IllegalArgumentException("query_vector is required");

@@ -40,6 +40,7 @@ object LanceSearchTableFunctions {
   private val SearchColumnsArg = "search_columns"
   private val DistanceMetricColumn = "_distance"
   private val FtsScoreColumn = "_score"
+  private val HybridScoreColumn = "_relevance_score"
   private val RowIdColumn = "_rowid"
   private val NamedArgumentExpressionClass =
     "org.apache.spark.sql.catalyst.expressions.NamedArgumentExpression"
@@ -55,10 +56,15 @@ object LanceSearchTableFunctions {
     val outputColumns = optionalStringArray(parsed, ColumnsArg).getOrElse(Seq.empty)
     val filter = optionalString(parsed, "filter").orNull
     val withRowId = effectiveWithRowId(parsed, outputColumns)
-    val resolved = resolveLanceTable(tableName)
+    val offset = optionalInt(parsed, "offset")
+    val version = optionalLong(parsed, "version")
+    val requestK = offset
+      .map(value => Integer.valueOf(Math.addExact(k.intValue(), value.intValue())))
+      .getOrElse(k)
+    val resolved = resolveLanceTable(tableName, version)
     val schemaColumns =
       requestOutputColumns(resolved.table.schema(), outputColumns, DistanceMetricColumn)
-    val requestColumns = if (filter == null) namespaceOutputColumns(schemaColumns) else Seq.empty
+    val requestColumns = namespaceOutputColumns(schemaColumns)
     val schema =
       outputSchema(resolved.table.schema(), schemaColumns, DistanceMetricColumn, withRowId)
 
@@ -69,12 +75,12 @@ object LanceSearchTableFunctions {
       .namespaceProperties(resolved.table.getNamespaceProperties)
       .outputColumns(requestColumns.asJava)
       .vector(queryVector.asJava)
-      .k(k)
+      .topK(requestK)
       .vectorColumn(optionalString(parsed, "vector_column").orNull)
       .distanceType(optionalString(parsed, "distance_type").orNull)
       .filter(filter)
-      .offset(optionalInt(parsed, "offset").orNull)
-      .version(optionalLong(parsed, "version").orNull)
+      .offset(offset.orNull)
+      .version(version.orNull)
       .withRowId(withRowId.orNull)
       .nprobes(optionalInt(parsed, "nprobes").orNull)
       .ef(optionalInt(parsed, "ef").orNull)
@@ -101,9 +107,10 @@ object LanceSearchTableFunctions {
     val outputColumns = optionalStringArray(parsed, ColumnsArg).getOrElse(Seq.empty)
     val filter = optionalString(parsed, "filter").orNull
     val withRowId = effectiveWithRowId(parsed, outputColumns)
-    val resolved = resolveLanceTable(tableName)
+    val version = optionalLong(parsed, "version")
+    val resolved = resolveLanceTable(tableName, version)
     val schemaColumns = requestOutputColumns(resolved.table.schema(), outputColumns, FtsScoreColumn)
-    val requestColumns = if (filter == null) namespaceOutputColumns(schemaColumns) else Seq.empty
+    val requestColumns = namespaceOutputColumns(schemaColumns)
     val schema = outputSchema(resolved.table.schema(), schemaColumns, FtsScoreColumn, withRowId)
 
     val builder = LanceSearchQuery
@@ -114,13 +121,100 @@ object LanceSearchTableFunctions {
       .outputColumns(requestColumns.asJava)
       .textQuery(queryText)
       .searchColumns(optionalStringArray(parsed, SearchColumnsArg).getOrElse(Seq.empty).asJava)
-      .k(k)
+      .topK(k)
       .filter(filter)
       .offset(optionalInt(parsed, "offset").orNull)
-      .version(optionalLong(parsed, "version").orNull)
+      .version(version.orNull)
       .withRowId(withRowId.orNull)
 
     relation("SEARCH", schema, builder.build(), resolved)
+  }
+
+  def hybridSearch(args: Seq[Expression]): LogicalPlan = {
+    val parsed = parseArgs("HYBRID_SEARCH", args, Seq(TableArg, QueryVectorArg, QueryArg, "k"))
+    val tableName = requiredString(parsed, TableArg)
+    val queryVector = requiredFloatArray(parsed, QueryVectorArg)
+    val queryText = optionalString(parsed, QueryArg)
+      .orElse(optionalString(parsed, SearchQueryArg))
+      .getOrElse(throw new IllegalArgumentException("HYBRID_SEARCH requires query"))
+    val k = optionalInt(parsed, "num_results")
+      .orElse(optionalInt(parsed, "limit"))
+      .orElse(optionalInt(parsed, "k"))
+      .getOrElse(DefaultK)
+    val offset = optionalInt(parsed, "offset").getOrElse(Integer.valueOf(0))
+    val candidateK = optionalInt(parsed, "candidates")
+      .orElse(optionalInt(parsed, "num_candidates"))
+      .orElse(optionalInt(parsed, "candidate_count"))
+      .map(value => Integer.valueOf(math.max(value.intValue(), k.intValue() + offset.intValue())))
+      .getOrElse(Integer.valueOf(k.intValue() + offset.intValue()))
+    val outputColumns = optionalStringArray(parsed, ColumnsArg).getOrElse(Seq.empty)
+    val filter = optionalString(parsed, "filter").orNull
+    val withRowId = effectiveWithRowId(parsed, outputColumns)
+    val rrfK = optionalFloat(parsed, "rrf_k").getOrElse(java.lang.Float.valueOf(60.0f))
+    val version = optionalLong(parsed, "version")
+
+    val resolved = resolveLanceTable(tableName, version)
+    val vectorSchemaColumns =
+      hybridSideOutputColumns(resolved.table.schema(), outputColumns, DistanceMetricColumn)
+    val ftsSchemaColumns =
+      hybridSideOutputColumns(resolved.table.schema(), outputColumns, FtsScoreColumn)
+    val vectorSchema =
+      outputSchema(
+        resolved.table.schema(),
+        vectorSchemaColumns,
+        DistanceMetricColumn,
+        Some(java.lang.Boolean.TRUE))
+    val ftsSchema =
+      outputSchema(
+        resolved.table.schema(),
+        ftsSchemaColumns,
+        FtsScoreColumn,
+        Some(java.lang.Boolean.TRUE))
+    val schema = hybridOutputSchema(resolved.table.schema(), outputColumns, withRowId)
+
+    val vectorRequestColumns = namespaceOutputColumns(vectorSchemaColumns)
+    val ftsRequestColumns = namespaceOutputColumns(ftsSchemaColumns)
+
+    val vectorQuery = LanceSearchQuery
+      .builder(SearchType.VECTOR)
+      .tableId(resolved.table.readOptions().getTableId)
+      .namespaceImpl(resolved.table.getNamespaceImpl)
+      .namespaceProperties(resolved.table.getNamespaceProperties)
+      .outputColumns(vectorRequestColumns.asJava)
+      .vector(queryVector.asJava)
+      .topK(candidateK)
+      .vectorColumn(optionalString(parsed, "vector_column").orNull)
+      .distanceType(optionalString(parsed, "distance_type").orNull)
+      .filter(filter)
+      .version(version.orNull)
+      .withRowId(java.lang.Boolean.TRUE)
+      .nprobes(optionalInt(parsed, "nprobes").orNull)
+      .ef(optionalInt(parsed, "ef").orNull)
+      .refineFactor(optionalInt(parsed, "refine_factor").orNull)
+      .lowerBound(optionalFloat(parsed, "lower_bound").orNull)
+      .upperBound(optionalFloat(parsed, "upper_bound").orNull)
+      .bypassVectorIndex(optionalBoolean(parsed, "bypass_vector_index").orNull)
+      .fastSearch(optionalBoolean(parsed, "fast_search").orNull)
+      .prefilter(optionalBoolean(parsed, "prefilter").orNull)
+      .build()
+
+    val ftsQuery = LanceSearchQuery
+      .builder(SearchType.FULL_TEXT)
+      .tableId(resolved.table.readOptions().getTableId)
+      .namespaceImpl(resolved.table.getNamespaceImpl)
+      .namespaceProperties(resolved.table.getNamespaceProperties)
+      .outputColumns(ftsRequestColumns.asJava)
+      .textQuery(queryText)
+      .searchColumns(optionalStringArray(parsed, SearchColumnsArg).getOrElse(Seq.empty).asJava)
+      .topK(candidateK)
+      .filter(filter)
+      .version(version.orNull)
+      .withRowId(java.lang.Boolean.TRUE)
+      .build()
+
+    val hybridQuery =
+      new LanceHybridSearchQuery(vectorQuery, ftsQuery, vectorSchema, ftsSchema, k, offset, rrfK)
+    hybridRelation("HYBRID_SEARCH", schema, hybridQuery, resolved)
   }
 
   private def relation(
@@ -129,6 +223,19 @@ object LanceSearchTableFunctions {
       query: LanceSearchQuery,
       resolved: ResolvedLanceTable): LogicalPlan = {
     val table = new LanceSearchTable(functionName, schema, query)
+    DataSourceV2Relation.create(
+      table,
+      Some(resolved.catalog),
+      Some(resolved.identifier),
+      CaseInsensitiveStringMap.empty())
+  }
+
+  private def hybridRelation(
+      functionName: String,
+      schema: StructType,
+      query: LanceHybridSearchQuery,
+      resolved: ResolvedLanceTable): LogicalPlan = {
+    val table = new LanceHybridSearchTable(functionName, schema, query)
     DataSourceV2Relation.create(
       table,
       Some(resolved.catalog),
@@ -283,6 +390,29 @@ object LanceSearchTableFunctions {
     }
   }
 
+  private def hybridSideOutputColumns(
+      baseSchema: StructType,
+      columns: Seq[String],
+      metricName: String): Seq[String] = {
+    val normalizedColumns = normalizeOutputColumns(columns)
+    if (normalizedColumns.isEmpty) {
+      normalizedColumns
+    } else {
+      val resolvedColumns = normalizedColumns.flatMap { column =>
+        if (isHybridMetricColumn(column) || column.equalsIgnoreCase(RowIdColumn)) {
+          None
+        } else {
+          Some(findField(baseSchema, column).name)
+        }
+      }
+      if (resolvedColumns.exists(_.equalsIgnoreCase(metricName))) {
+        resolvedColumns
+      } else {
+        resolvedColumns :+ metricName
+      }
+    }
+  }
+
   private def namespaceOutputColumns(columns: Seq[String]): Seq[String] =
     normalizeOutputColumns(columns).filterNot(_.equalsIgnoreCase(RowIdColumn))
 
@@ -326,12 +456,59 @@ object LanceSearchTableFunctions {
     new StructType(result.toArray)
   }
 
+  private def hybridOutputSchema(
+      baseSchema: StructType,
+      columns: Seq[String],
+      withRowId: Option[java.lang.Boolean]): StructType = {
+    val normalizedColumns = normalizeOutputColumns(columns)
+    val fields =
+      if (normalizedColumns.isEmpty) {
+        baseSchema.fields.toSeq
+      } else {
+        normalizedColumns.map { column =>
+          if (column.equalsIgnoreCase(DistanceMetricColumn)) {
+            StructField(DistanceMetricColumn, DataTypes.FloatType, nullable = true)
+          } else if (column.equalsIgnoreCase(FtsScoreColumn)) {
+            StructField(FtsScoreColumn, DataTypes.FloatType, nullable = true)
+          } else if (column.equalsIgnoreCase(HybridScoreColumn)) {
+            StructField(HybridScoreColumn, DataTypes.FloatType, nullable = false)
+          } else if (column.equalsIgnoreCase(RowIdColumn)) {
+            StructField(RowIdColumn, DataTypes.LongType, nullable = true)
+          } else {
+            findField(baseSchema, column)
+          }
+        }
+      }
+    val result = ArrayBuffer(fields: _*)
+    if (!result.exists(_.name.equalsIgnoreCase(DistanceMetricColumn))) {
+      result += StructField(DistanceMetricColumn, DataTypes.FloatType, nullable = true)
+    }
+    if (!result.exists(_.name.equalsIgnoreCase(FtsScoreColumn))) {
+      result += StructField(FtsScoreColumn, DataTypes.FloatType, nullable = true)
+    }
+    if (!result.exists(_.name.equalsIgnoreCase(HybridScoreColumn))) {
+      result += StructField(HybridScoreColumn, DataTypes.FloatType, nullable = false)
+    }
+    if (withRowId.contains(java.lang.Boolean.TRUE) &&
+      !result.exists(_.name.equalsIgnoreCase(RowIdColumn))) {
+      result += StructField(RowIdColumn, DataTypes.LongType, nullable = true)
+    }
+    new StructType(result.toArray)
+  }
+
+  private def isHybridMetricColumn(column: String): Boolean =
+    column.equalsIgnoreCase(DistanceMetricColumn) ||
+      column.equalsIgnoreCase(FtsScoreColumn) ||
+      column.equalsIgnoreCase(HybridScoreColumn)
+
   private def findField(schema: StructType, column: String): StructField =
     schema.fields
       .find(_.name.equalsIgnoreCase(column))
       .getOrElse(throw new IllegalArgumentException(s"Unknown column '$column'"))
 
-  private def resolveLanceTable(tableName: String): ResolvedLanceTable = {
+  private def resolveLanceTable(
+      tableName: String,
+      version: Option[java.lang.Long]): ResolvedLanceTable = {
     val spark = SparkSession.active
     val parts = spark.sessionState.sqlParser.parseMultipartIdentifier(tableName).toArray
     if (parts.isEmpty) {
@@ -355,7 +532,11 @@ object LanceSearchTableFunctions {
         throw new IllegalArgumentException(s"Catalog '${other.name()}' is not a table catalog")
     }
 
-    tableCatalog.loadTable(identifier) match {
+    val table =
+      version
+        .map(value => tableCatalog.loadTable(identifier, value.toString))
+        .getOrElse(tableCatalog.loadTable(identifier))
+    table match {
       case table: LanceDataset =>
         if (table.getNamespaceImpl == null || table.readOptions().getTableId == null) {
           throw new IllegalArgumentException(

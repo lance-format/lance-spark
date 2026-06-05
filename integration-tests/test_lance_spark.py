@@ -117,6 +117,12 @@ def _assert_lance_index_metadata(spark, table_name, index_name, expected_type):
     return metadata
 
 
+def _require_sql_search_backend(spark):
+    backend = getattr(spark, "_lance_backend", None)
+    if backend not in ("local", "rest-dir"):
+        pytest.skip("SQL search table functions are covered on local dir and rest-dir backends")
+
+
 # =============================================================================
 # DDL (Data Definition Language) Tests
 # =============================================================================
@@ -1582,6 +1588,166 @@ class TestDDLPrimaryKey:
 # =============================================================================
 # DQL (Data Query Language) Tests
 # =============================================================================
+
+@pytest.mark.rest_dir_compatible
+class TestDQLSearchTableFunctions:
+    """Test namespace-backed SQL search table functions."""
+
+    def test_vector_search_table_function(self, spark):
+        """Test VECTOR_SEARCH against namespace query execution."""
+        _require_sql_search_backend(spark)
+
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT NOT NULL,
+                vector ARRAY<FLOAT> NOT NULL
+            ) USING lance
+            TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '4')
+        """)
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (0, array(0.0, 0.0, 0.0, 0.0)),
+            (1, array(1.0, 1.0, 1.0, 1.0)),
+            (2, array(10.0, 10.0, 10.0, 10.0))
+        """)
+
+        rows = spark.sql("""
+            SELECT id, _distance
+            FROM VECTOR_SEARCH('default.test_table', array(0.0, 0.0, 0.0, 0.0), 2)
+            ORDER BY _distance, id
+        """).collect()
+
+        assert [row.id for row in rows] == [0, 1]
+        assert rows[0]["_distance"] == pytest.approx(0.0)
+        assert rows[1]["_distance"] > rows[0]["_distance"]
+
+    def test_search_table_function(self, spark):
+        """Test SEARCH against a Lance FTS index."""
+        _require_sql_search_backend(spark)
+
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT NOT NULL,
+                body STRING
+            ) USING lance
+        """)
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (1, 'lance vector search'),
+            (2, 'spark connector table function'),
+            (3, 'lance full text search')
+        """)
+        spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX body_fts USING fts (body)
+            WITH (
+                base_tokenizer='simple',
+                language='English',
+                max_token_length=40,
+                lower_case=true,
+                stem=false,
+                remove_stop_words=false,
+                ascii_folding=false,
+                with_position=true
+            )
+        """)
+
+        rows = spark.sql("""
+            SELECT id, body, _score
+            FROM SEARCH('default.test_table', 'lance', 10)
+            ORDER BY id
+        """).collect()
+
+        assert [row.id for row in rows] == [1, 3]
+        assert "lance" in rows[0].body
+        assert rows[0]["_score"] > 0.0
+
+    def test_hybrid_search_table_function(self, spark):
+        """Test HYBRID_SEARCH client-side RRF fusion over namespace results."""
+        _require_sql_search_backend(spark)
+
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT NOT NULL,
+                body STRING,
+                vector ARRAY<FLOAT> NOT NULL
+            ) USING lance
+            TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '4')
+        """)
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (1, 'lance vector search', array(0.0, 0.0, 0.0, 0.0)),
+            (2, 'spark connector table function', array(1.0, 1.0, 1.0, 1.0)),
+            (3, 'lance full text search', array(10.0, 10.0, 10.0, 10.0))
+        """)
+        spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX body_fts USING fts (body)
+            WITH (
+                base_tokenizer='simple',
+                language='English',
+                max_token_length=40,
+                lower_case=true,
+                stem=false,
+                remove_stop_words=false,
+                ascii_folding=false,
+                with_position=true
+            )
+        """)
+
+        rows = spark.sql("""
+            SELECT id, body, _distance, _score, _relevance_score
+            FROM HYBRID_SEARCH('default.test_table', array(0.0, 0.0, 0.0, 0.0), 'lance', 3)
+            ORDER BY _relevance_score DESC, id
+        """).collect()
+
+        assert [row.id for row in rows] == [1, 3, 2]
+        assert rows[0]["_distance"] == pytest.approx(0.0)
+        assert rows[0]["_score"] > 0.0
+        assert rows[0]["_relevance_score"] > rows[1]["_relevance_score"]
+        assert rows[1]["_score"] > 0.0
+        assert rows[2]["_score"] is None
+        assert rows[2]["_distance"] > rows[0]["_distance"]
+
+    def test_vector_search_named_args_projection_rowid_and_offset(self, spark):
+        """Test named vector options used by Databricks-style SQL calls."""
+        _require_sql_search_backend(spark)
+        if SPARK_VERSION < Version("3.5"):
+            pytest.skip("named table function arguments require Spark 3.5+")
+
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT NOT NULL,
+                vector ARRAY<FLOAT> NOT NULL
+            ) USING lance
+            TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '4')
+        """)
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (0, array(0.0, 0.0, 0.0, 0.0)),
+            (1, array(1.0, 1.0, 1.0, 1.0)),
+            (2, array(10.0, 10.0, 10.0, 10.0))
+        """)
+
+        rows = spark.sql("""
+            SELECT id, _rowid, _distance
+            FROM VECTOR_SEARCH(
+                table => 'default.test_table',
+                query_vector => array(0.0, 0.0, 0.0, 0.0),
+                vector_column => 'vector',
+                columns => array('id'),
+                num_results => 1,
+                offset => 1,
+                with_row_id => true
+            )
+            ORDER BY _distance, id
+        """).collect()
+
+        assert len(rows) == 1
+        assert rows[0].id == 1
+        assert rows[0]["_rowid"] >= 0
+        assert rows[0]["_distance"] > 0.0
+
 
 class TestDQLSelect:
     """Test DQL SELECT operations."""

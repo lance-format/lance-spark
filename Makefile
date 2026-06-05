@@ -42,6 +42,7 @@ endif
 DOCKER_CACHE_FROM ?=
 DOCKER_CACHE_TO ?=
 LANCE_NAMESPACE_IMPL_VERSION ?= $(shell sed -n 's:.*<lance-namespace-impl.version>\(.*\)</lance-namespace-impl.version>.*:\1:p' pom.xml | head -n 1)
+PYTEST_CMD ?= pytest /home/lance/tests/ -v --timeout=180
 
 DOCKER_COMPOSE := $(shell \
 	if docker compose version >/dev/null 2>&1; then \
@@ -190,6 +191,9 @@ docker-test:
 		$(if $(LANCEDB_API_KEY),-e LANCEDB_API_KEY=$(LANCEDB_API_KEY)) \
 		$(if $(LANCEDB_HOST_OVERRIDE),-e LANCEDB_HOST_OVERRIDE=$(LANCEDB_HOST_OVERRIDE)) \
 		$(if $(LANCEDB_REGION),-e LANCEDB_REGION=$(LANCEDB_REGION)) \
+		$(if $(LANCE_SPARK_REST_URI),-e LANCE_SPARK_REST_URI=$(LANCE_SPARK_REST_URI)) \
+		$(if $(LANCE_SPARK_REST_API_KEY),-e LANCE_SPARK_REST_API_KEY=$(LANCE_SPARK_REST_API_KEY)) \
+		$(if $(LANCE_SPARK_REST_DATABASE),-e LANCE_SPARK_REST_DATABASE=$(LANCE_SPARK_REST_DATABASE)) \
 		$(if $(TEST_BACKENDS),-e TEST_BACKENDS=$(TEST_BACKENDS)) \
 		$(if $(LANCE_FTS_FORMAT_VERSION),-e LANCE_FTS_FORMAT_VERSION=$(LANCE_FTS_FORMAT_VERSION)) \
 		$(if $(AWS_REGION),-e AWS_REGION=$(AWS_REGION)) \
@@ -203,8 +207,9 @@ docker-test:
 		$(if $(AWS_SESSION_TOKEN),-e AWS_SESSION_TOKEN=$(AWS_SESSION_TOKEN)) \
 		$(if $(AWS_PROFILE),-e AWS_PROFILE=$(AWS_PROFILE)) \
 		$(if $(AWS_PROFILE),-v $(HOME)/.aws:/root/.aws:ro) \
+		$(DOCKER_RUN_ARGS) \
 		lance-spark-test:$(SPARK_VERSION)_$(SCALA_VERSION) \
-		"pytest /home/lance/tests/ -v --timeout=180"
+		"$(PYTEST_CMD)"
 
 # =============================================================================
 # Benchmark
@@ -295,6 +300,7 @@ help:
 	@echo "  docker-build-test-base - Build test base image (system deps + Spark)"
 	@echo "  docker-build-test      - Build test image (base + bundle JAR)"
 	@echo "  docker-test            - Run integration tests in lance-spark-test container"
+	@echo "                           Override PYTEST_CMD to run a targeted pytest command"
 	@echo ""
 	@echo "Benchmark:"
 	@echo "  benchmark-build         - Build benchmark jar (shared by TPC-DS and TPC-H)"

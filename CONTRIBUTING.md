@@ -58,6 +58,38 @@ To auto-format the code, run:
 make format
 ```
 
+## Docker Integration Tests
+
+Build the Spark bundle and Docker integration-test image before running Docker tests:
+
+```shell
+make bundle SPARK_VERSION=3.5 SCALA_VERSION=2.13
+make docker-build-test SPARK_VERSION=3.5 SCALA_VERSION=2.13
+make docker-test SPARK_VERSION=3.5 SCALA_VERSION=2.13
+```
+
+Use `PYTEST_CMD` to run a targeted pytest path in the Docker image. For example, run only the SQL search table-function tests against the directory namespace:
+
+```shell
+make docker-test SPARK_VERSION=3.5 SCALA_VERSION=2.13 \
+  TEST_BACKENDS=local \
+  PYTEST_CMD="pytest /home/lance/tests/test_lance_spark.py::TestDQLSearchTableFunctions -v --timeout=180"
+```
+
+To also validate a REST namespace backed by a directory namespace, start a compatible REST namespace server and pass its URI into the test container:
+
+```shell
+make docker-test SPARK_VERSION=3.5 SCALA_VERSION=2.13 \
+  TEST_BACKENDS=local,rest-dir \
+  LANCE_SPARK_REST_URI=http://host.docker.internal:10024 \
+  LANCE_SPARK_REST_API_KEY=sk_localtest \
+  LANCE_SPARK_REST_DATABASE=lance_spark_ci \
+  DOCKER_RUN_ARGS="--add-host=host.docker.internal:host-gateway" \
+  PYTEST_CMD="pytest /home/lance/tests/test_lance_spark.py::TestDQLSearchTableFunctions -v --timeout=180"
+```
+
+The `Spark Search Docker` GitHub Actions workflow runs the same targeted Docker tests. Pull requests run the directory namespace coverage automatically. Use workflow dispatch with `backends=local,rest-dir` to run both directory and REST-directory coverage; provide `rest-uri` for an already-running server, or configure the repository secret `SOPHON_REPO_TOKEN` so the workflow can build and start Sophon Phalanx.
+
 ## Documentation
 
 ### Setup

@@ -47,6 +47,13 @@ class LanceSparkSessionExtensions extends (SparkSessionExtensions => Unit) {
           "org.lance.spark.search.LanceSearchTableFunctions",
           "search"),
         LanceSearchTableFunctions.search _))
+    extensions.injectTableFunction(
+      (
+        FunctionIdentifier("hybrid_search"),
+        new ExpressionInfo(
+          "org.lance.spark.search.LanceSearchTableFunctions",
+          "hybrid_search"),
+        LanceSearchTableFunctions.hybridSearch _))
 
     extensions.injectPlannerStrategy(LanceDataSourceV2Strategy(_))
   }

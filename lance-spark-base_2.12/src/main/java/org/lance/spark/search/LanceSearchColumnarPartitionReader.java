@@ -27,6 +27,7 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.vectorized.ColumnVector;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
@@ -82,10 +83,16 @@ public class LanceSearchColumnarPartitionReader implements PartitionReader<Colum
     if (namespace == null) {
       throw new IOException("Lance namespace is required for search");
     }
-    byte[] bytes = namespace.queryTable(query.toQueryTableRequest());
-    arrowReader =
-        new ArrowFileReader(
-            new ByteArrayReadableSeekableByteChannel(bytes), LanceRuntime.allocator());
+    try {
+      byte[] bytes = namespace.queryTable(query.toQueryTableRequest());
+      arrowReader =
+          new ArrowFileReader(
+              new ByteArrayReadableSeekableByteChannel(bytes), LanceRuntime.allocator());
+    } finally {
+      if (namespace instanceof Closeable) {
+        ((Closeable) namespace).close();
+      }
+    }
   }
 
   private ColumnarBatch toColumnarBatch(VectorSchemaRoot root, StructType schema) {
