@@ -23,7 +23,13 @@ statement
     | ALTER TABLE multipartIdentifier UPDATE COLUMNS columnList FROM identifier                 #updateColumnsBackfill
     | ALTER TABLE multipartIdentifier CREATE INDEX indexName=identifier USING method=identifier '(' columnList ')' (WITH '(' (namedArgument (',' namedArgument)*)? ')')? #createIndex
     | ALTER TABLE multipartIdentifier DROP INDEX indexName=identifier                             #dropIndex
+    | ALTER TABLE multipartIdentifier CREATE BRANCH branchName=identifier                       #createBranch
+    | ALTER TABLE multipartIdentifier DROP BRANCH branchName=identifier                         #dropBranch
+    | ALTER TABLE multipartIdentifier CREATE TAG tagName=identifier                             #createTag
+    | ALTER TABLE multipartIdentifier DROP TAG tagName=identifier                               #dropTag
     | SHOW (INDEXES | INDEX) (FROM | IN) multipartIdentifier                                    #showIndexes
+    | SHOW BRANCHES (FROM | IN) multipartIdentifier                                             #showBranches
+    | SHOW TAGS (FROM | IN) multipartIdentifier                                                 #showTags
     | OPTIMIZE multipartIdentifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')?        #optimize
     | VACUUM multipartIdentifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')?          #vacuum
     | ALTER TABLE multipartIdentifier SET UNENFORCED PRIMARY KEY '(' columnList ')'             #setUnenforcedPrimaryKey
@@ -68,6 +74,8 @@ number
 
 ADD: 'ADD';
 ALTER: 'ALTER';
+BRANCH: 'BRANCH';
+BRANCHES: 'BRANCHES';
 COLUMNS: 'COLUMNS';
 CREATE: 'CREATE';
 DROP: 'DROP';
@@ -81,6 +89,8 @@ PRIMARY: 'PRIMARY';
 SET: 'SET';
 SHOW: 'SHOW';
 TABLE: 'TABLE';
+TAG: 'TAG';
+TAGS: 'TAGS';
 UNENFORCED: 'UNENFORCED';
 UPDATE: 'UPDATE';
 USING: 'USING';

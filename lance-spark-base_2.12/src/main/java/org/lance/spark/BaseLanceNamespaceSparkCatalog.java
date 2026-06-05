@@ -1462,6 +1462,16 @@ public abstract class BaseLanceNamespaceSparkCatalog
       return loadTableFromPath(ident, timestamp, version);
     }
 
+    // Handle branch-based access
+    if (isBranchBasedIdentifier(ident)) {
+      return loadTableAtBranch(ident, timestamp, version);
+    }
+
+    // Handle tag-based access
+    if (isTagBasedIdentifier(ident)) {
+      return loadTableAtTag(ident, timestamp, version);
+    }
+
     ResolvedTable resolved = resolveIdentifier(ident);
     DescribeTableResponse describeResponse = resolved.describeResponse;
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
@@ -1506,6 +1516,153 @@ public abstract class BaseLanceNamespaceSparkCatalog
     boolean managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
     return createDataset(
         readOptions,
+        schema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        managedVersioning,
+        fileFormatVersion,
+        tableProperties,
+        null);
+  }
+
+  private static final String BRANCH_KEY = "__branch__";
+
+  private static boolean isBranchBasedIdentifier(Identifier identifier) {
+    return identifier.name().toLowerCase().indexOf(BRANCH_KEY) > 0;
+  }
+
+  private Table loadTableAtBranch(
+      Identifier ident, Optional<Long> timestamp, Optional<String> version)
+      throws NoSuchTableException {
+    int pos = ident.name().indexOf(BRANCH_KEY);
+    String actualName = ident.name().substring(0, pos);
+    String branchName = ident.name().substring(pos + BRANCH_KEY.length());
+    if (branchName == null || branchName.isBlank()) {
+      throw new IllegalArgumentException("No specified branch name in:" + ident.name());
+    }
+
+    ident = Identifier.of(ident.namespace(), actualName);
+    Identifier actualIdent = transformIdentifierForApi(ident);
+    List<String> tableIdList = buildTableId(actualIdent);
+    DescribeTableRequest describeRequest = new DescribeTableRequest();
+    tableIdList.forEach(describeRequest::addIdItem);
+    DescribeTableResponse describeResponse = describeTableOrThrow(describeRequest, ident);
+    String location = describeResponse.getLocation();
+    LanceSparkReadOptions readOptions =
+        createReadOptions(
+            location,
+            catalogConfig,
+            Optional.empty(),
+            Optional.of(namespace),
+            Optional.of(tableIdList),
+            name,
+            Optional.of(branchName),
+            Optional.empty());
+
+    Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
+
+    Optional<Long> versionId = Optional.empty();
+    if (timestamp.isPresent()) {
+      try (Dataset dataset = Utils.openDatasetBuilder(readOptions).build()) {
+        versionId = Optional.of(Utils.findVersion(dataset.listVersions(), timestamp.get()));
+      } catch (TableNotFoundException e) {
+        throw new NoSuchTableException(ident);
+      }
+    } else if (version.isPresent()) {
+      versionId = Optional.of(Utils.parseVersion(version.get()));
+    }
+
+    // If time travel requested, rebuild readOptions with the resolved version
+    LanceSparkReadOptions branchReadOptions;
+    if (versionId.isPresent()) {
+      branchReadOptions =
+          createReadOptions(
+              describeResponse.getLocation(),
+              catalogConfig,
+              versionId,
+              Optional.of(namespace),
+              Optional.of(tableIdList),
+              name,
+              Optional.of(branchName),
+              Optional.empty());
+    } else {
+      branchReadOptions = readOptions;
+    }
+
+    // Read schema, file format version, and config from the dataset
+    String fileFormatVersion;
+    StructType schema;
+    Map<String, String> tableProperties;
+    try (Dataset dataset = Utils.openDatasetBuilder(readOptions).build()) {
+      schema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
+      fileFormatVersion = dataset.getLanceFileFormatVersion();
+      tableProperties = dataset.getConfig();
+    }
+
+    // Create read options with namespace support
+    boolean managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
+    return createDataset(
+        branchReadOptions,
+        schema,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        managedVersioning,
+        fileFormatVersion,
+        tableProperties,
+        null);
+  }
+
+  private static final String TAG_KEY = "__tag__";
+
+  private static boolean isTagBasedIdentifier(Identifier identifier) {
+    return identifier.name().toLowerCase().indexOf(TAG_KEY) > 0;
+  }
+
+  private Table loadTableAtTag(Identifier ident, Optional<Long> timestamp, Optional<String> version)
+      throws NoSuchTableException {
+    int pos = ident.name().indexOf(TAG_KEY);
+    String actualName = ident.name().substring(0, pos);
+    String tagName = ident.name().substring(pos + TAG_KEY.length());
+    if (tagName == null || tagName.isBlank()) {
+      throw new IllegalArgumentException("No specified tag name in:" + ident.name());
+    }
+
+    ident = Identifier.of(ident.namespace(), actualName);
+    Identifier actualIdent = transformIdentifierForApi(ident);
+    List<String> tableIdList = buildTableId(actualIdent);
+    DescribeTableRequest describeRequest = new DescribeTableRequest();
+    tableIdList.forEach(describeRequest::addIdItem);
+    DescribeTableResponse describeResponse = describeTableOrThrow(describeRequest, ident);
+    String location = describeResponse.getLocation();
+    LanceSparkReadOptions tagReadOptions =
+        createReadOptions(
+            location,
+            catalogConfig,
+            Optional.empty(),
+            Optional.of(namespace),
+            Optional.of(tableIdList),
+            name,
+            Optional.empty(),
+            Optional.of(tagName));
+
+    Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
+
+    // Read schema, file format version, and config from the dataset
+    String fileFormatVersion;
+    StructType schema;
+    Map<String, String> tableProperties;
+    try (Dataset dataset = Utils.openDatasetBuilder(tagReadOptions).build()) {
+      schema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
+      fileFormatVersion = dataset.getLanceFileFormatVersion();
+      tableProperties = dataset.getConfig();
+    }
+
+    // Create read options with namespace support
+    boolean managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
+    return createDataset(
+        tagReadOptions,
         schema,
         initialStorageOptions,
         namespaceImpl,

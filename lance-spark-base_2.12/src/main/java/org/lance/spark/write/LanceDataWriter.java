@@ -305,7 +305,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
             try (ArrowArrayStream arrowStream =
                 ArrowArrayStream.allocateNew(LanceRuntime.allocator())) {
               Data.exportArrayStream(LanceRuntime.allocator(), bufferRef, arrowStream);
-              return Fragment.create(writeOptions.getDatasetUri(), arrowStream, params);
+              return Fragment.create(writeOptions.getActualDatasetUri(), arrowStream, params);
             }
           };
       FutureTask<List<FragmentMetadata>> task = writeBuffer.createTrackedTask(fragmentCreator);

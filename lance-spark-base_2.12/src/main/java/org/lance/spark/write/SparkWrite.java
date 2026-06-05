@@ -246,6 +246,7 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
                   .storageOptions(writeOptions.getStorageOptions())
                   .namespace(writeOptions.getNamespace())
                   .tableId(writeOptions.getTableId())
+                  .branchName(writeOptions.getBranchName())
                   .batchSize(writeOptions.getBatchSize())
                   .datasetUri(writeOptions.getDatasetUri())
                   .fileFormatVersion(writeOptions.getFileFormatVersion())

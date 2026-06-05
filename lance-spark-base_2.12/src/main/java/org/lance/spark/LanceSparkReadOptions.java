@@ -16,6 +16,7 @@ package org.lance.spark;
 import org.lance.ReadOptions;
 import org.lance.ipc.Query;
 import org.lance.namespace.LanceNamespace;
+import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.QueryUtils;
 
 import com.google.common.base.Preconditions;
@@ -105,6 +106,8 @@ public class LanceSparkReadOptions implements Serializable {
   private final String datasetUri;
   private final String dbPath;
   private final String datasetName;
+  private final Optional<String> branchName;
+  private final Optional<String> tagName;
   private final boolean pushDownFilters;
   private final Integer blockSize;
   private final Long version;
@@ -135,6 +138,8 @@ public class LanceSparkReadOptions implements Serializable {
     String[] paths = extractDbPathAndDatasetName(datasetUri);
     this.dbPath = paths[0];
     this.datasetName = paths[1];
+    this.branchName = builder.branchName;
+    this.tagName = builder.tagName;
     this.pushDownFilters = builder.pushDownFilters;
     this.blockSize = builder.blockSize;
     this.version = builder.version;
@@ -228,6 +233,14 @@ public class LanceSparkReadOptions implements Serializable {
 
   public String getDatasetName() {
     return datasetName;
+  }
+
+  public Optional<String> getBranchName() {
+    return branchName;
+  }
+
+  public Optional<String> getTagName() {
+    return tagName;
   }
 
   public boolean isPushDownFilters() {
@@ -326,6 +339,8 @@ public class LanceSparkReadOptions implements Serializable {
         .storageOptions(this.storageOptions)
         .namespace(this.namespace)
         .tableId(this.tableId)
+        .branchName(this.branchName)
+        .tagName(this.tagName)
         .catalogName(this.catalogName)
         .executorCredentialRefresh(this.executorCredentialRefresh)
         .build();
@@ -408,6 +423,8 @@ public class LanceSparkReadOptions implements Serializable {
   /** Builder for creating LanceSparkReadOptions instances. */
   public static class Builder {
     private String datasetUri;
+    private Optional<String> branchName = Optional.empty();
+    private Optional<String> tagName = Optional.empty();
     private boolean pushDownFilters = DEFAULT_PUSH_DOWN_FILTERS;
     private Integer blockSize;
     private Query nearest;
@@ -426,6 +443,16 @@ public class LanceSparkReadOptions implements Serializable {
 
     public Builder datasetUri(String datasetUri) {
       this.datasetUri = datasetUri;
+      return this;
+    }
+
+    public Builder branchName(Optional<String> branchName) {
+      this.branchName = branchName;
+      return this;
+    }
+
+    public Builder tagName(Optional<String> tagName) {
+      this.tagName = tagName;
       return this;
     }
 

@@ -15,6 +15,7 @@ package org.lance.spark.utils;
 
 import org.lance.Dataset;
 import org.lance.ReadOptions;
+import org.lance.Ref;
 import org.lance.Version;
 import org.lance.namespace.LanceNamespace;
 import org.lance.spark.LanceRuntime;
@@ -70,6 +71,8 @@ public class Utils {
     private final String uri;
     private final LanceNamespace namespace;
     private final List<String> tableId;
+    private final Optional<String> branchName;
+    private final Optional<String> tagName;
     private final Map<String, String> storageOptions;
     private final String catalogName;
     private final Long version;
@@ -89,6 +92,8 @@ public class Utils {
       this.catalogName = opts.getCatalogName();
       this.namespace = opts.getNamespace();
       this.tableId = opts.getTableId();
+      this.branchName = opts.getBranchName();
+      this.tagName = opts.getTagName();
       this.blockSize = opts.getBlockSize();
       this.indexCacheSize = opts.getIndexCacheSize();
       this.metadataCacheSize = opts.getMetadataCacheSize();
@@ -99,6 +104,8 @@ public class Utils {
       this.storageOptions = opts.getStorageOptions();
       this.namespace = opts.getNamespace();
       this.tableId = opts.getTableId();
+      this.branchName = opts.getBranchName();
+      this.tagName = Optional.empty();
       this.catalogName = null;
       this.version = opts.getVersion();
       this.blockSize = null;
@@ -130,7 +137,7 @@ public class Utils {
               .setStorageOptions(merged)
               .setSession(
                   catalogName != null ? LanceRuntime.session(catalogName) : LanceRuntime.session());
-      if (version != null) {
+      if (version != null && branchName.isEmpty()) {
         roBuilder.setVersion(version);
       }
       if (blockSize != null) {
@@ -143,32 +150,56 @@ public class Utils {
         roBuilder.setMetadataCacheSize(metadataCacheSize);
       }
 
+      Dataset ds = null;
       if (namespace != null && tableId != null) {
-        return Dataset.open()
-            .allocator(LanceRuntime.allocator())
-            .namespaceClient(namespace)
-            .tableId(tableId)
-            .readOptions(roBuilder.build())
-            .build();
-      }
-      if (runtimeNamespaceImpl != null) {
+        ds =
+            Dataset.open()
+                .allocator(LanceRuntime.allocator())
+                .namespaceClient(namespace)
+                .tableId(tableId)
+                .readOptions(roBuilder.build())
+                .build();
+      } else if (runtimeNamespaceImpl != null) {
         LanceNamespace runtimeNamespace =
             LanceRuntime.getOrCreateNamespace(runtimeNamespaceImpl, runtimeNamespaceProperties);
         List<String> effectiveTableId = runtimeTableId != null ? runtimeTableId : tableId;
         if (runtimeNamespace != null && effectiveTableId != null) {
-          return Dataset.open()
-              .allocator(LanceRuntime.allocator())
-              .namespaceClient(runtimeNamespace)
-              .tableId(effectiveTableId)
-              .readOptions(roBuilder.build())
-              .build();
+          ds =
+              Dataset.open()
+                  .allocator(LanceRuntime.allocator())
+                  .namespaceClient(runtimeNamespace)
+                  .tableId(effectiveTableId)
+                  .readOptions(roBuilder.build())
+                  .build();
         }
       }
-      return Dataset.open()
-          .allocator(LanceRuntime.allocator())
-          .uri(uri)
-          .readOptions(roBuilder.build())
-          .build();
+      if (ds == null) {
+        ds =
+            Dataset.open()
+                .allocator(LanceRuntime.allocator())
+                .uri(uri)
+                .readOptions(roBuilder.build())
+                .build();
+      }
+
+      Ref ref = null;
+      if (branchName.isPresent()) {
+        if (version != null) {
+          ref = Ref.ofBranch(branchName.get(), version);
+        } else {
+          ref = Ref.ofBranch(branchName.get());
+        }
+      } else if (tagName.isPresent()) {
+        ref = Ref.ofTag(tagName.get());
+      }
+
+      if (ref != null) {
+        Dataset newDs = ds.checkout(ref);
+        ds.close();
+        return newDs;
+      }
+
+      return ds;
     }
   }
 
@@ -205,6 +236,49 @@ public class Utils {
     if (namespace.isPresent()) {
       builder.namespace(namespace.get());
     }
+
+    return builder.build();
+  }
+
+  /**
+   * Creates LanceSparkReadOptions for this catalog.
+   *
+   * @param location the dataset URI
+   * @param catalogConfig catalog configuration
+   * @param versionId optional dataset version id
+   * @param namespace optional namespace for credential vending
+   * @param tableId optional table identifier
+   * @param catalogName catalog name for cache isolation
+   * @param branchName branch name
+   * @param tagName tag name
+   * @return a new LanceSparkReadOptions with catalog settings
+   */
+  public static LanceSparkReadOptions createReadOptions(
+      String location,
+      LanceSparkCatalogConfig catalogConfig,
+      Optional<Long> versionId,
+      Optional<LanceNamespace> namespace,
+      Optional<List<String>> tableId,
+      String catalogName,
+      Optional<String> branchName,
+      Optional<String> tagName) {
+    LanceSparkReadOptions.Builder builder =
+        LanceSparkReadOptions.builder()
+            .datasetUri(location)
+            .withCatalogDefaults(catalogConfig)
+            .catalogName(catalogName);
+
+    if (versionId.isPresent()) {
+      builder.version(versionId.get().intValue());
+    }
+    if (tableId.isPresent()) {
+      builder.tableId(tableId.get());
+    }
+    if (namespace.isPresent()) {
+      builder.namespace(namespace.get());
+    }
+    builder.branchName(branchName);
+    builder.tagName(tagName);
 
     return builder.build();
   }

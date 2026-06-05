@@ -292,7 +292,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
             try (ArrowArrayStream arrowStream =
                 ArrowArrayStream.allocateNew(LanceRuntime.allocator())) {
               Data.exportArrayStream(LanceRuntime.allocator(), writeBuffer, arrowStream);
-              return Fragment.create(writeOptions.getDatasetUri(), arrowStream, params);
+              return Fragment.create(writeOptions.getActualDatasetUri(), arrowStream, params);
             }
           };
       FutureTask<List<FragmentMetadata>> fragmentCreationTask =

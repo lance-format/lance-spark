@@ -16,6 +16,7 @@ package org.lance.spark;
 import org.lance.WriteParams;
 import org.lance.WriteParams.WriteMode;
 import org.lance.namespace.LanceNamespace;
+import org.lance.spark.utils.Optional;
 
 import com.google.common.base.Preconditions;
 
@@ -70,6 +71,7 @@ public class LanceSparkWriteOptions implements Serializable {
   public static final long DEFAULT_MAX_BATCH_BYTES = 256L * 1024 * 1024;
 
   private final String datasetUri;
+  private final Optional<String> branchName;
   private final WriteMode writeMode;
   private final Integer maxRowsPerFile;
   private final Integer maxRowsPerGroup;
@@ -98,6 +100,7 @@ public class LanceSparkWriteOptions implements Serializable {
 
   private LanceSparkWriteOptions(Builder builder) {
     this.datasetUri = builder.datasetUri;
+    this.branchName = builder.branchName;
     this.writeMode = builder.writeMode;
     this.maxRowsPerFile = builder.maxRowsPerFile;
     this.maxRowsPerGroup = builder.maxRowsPerGroup;
@@ -146,6 +149,17 @@ public class LanceSparkWriteOptions implements Serializable {
 
   public String getDatasetUri() {
     return datasetUri;
+  }
+
+  public String getActualDatasetUri() {
+    if (branchName.isEmpty()) {
+      return getDatasetUri();
+    }
+    return getDatasetUri() + "/tree/" + branchName.get();
+  }
+
+  public Optional<String> getBranchName() {
+    return branchName;
   }
 
   public WriteMode getWriteMode() {
@@ -218,6 +232,7 @@ public class LanceSparkWriteOptions implements Serializable {
   public Builder toBuilder() {
     return builder()
         .datasetUri(datasetUri)
+        .branchName(branchName)
         .writeMode(writeMode)
         .maxRowsPerFile(maxRowsPerFile)
         .maxRowsPerGroup(maxRowsPerGroup)
@@ -352,6 +367,7 @@ public class LanceSparkWriteOptions implements Serializable {
   /** Builder for creating LanceSparkWriteOptions instances. */
   public static class Builder {
     private String datasetUri;
+    private Optional<String> branchName = Optional.empty();
     private WriteMode writeMode = DEFAULT_WRITE_MODE;
     private Integer maxRowsPerFile;
     private Integer maxRowsPerGroup;
@@ -373,6 +389,11 @@ public class LanceSparkWriteOptions implements Serializable {
 
     public Builder datasetUri(String datasetUri) {
       this.datasetUri = datasetUri;
+      return this;
+    }
+
+    public Builder branchName(Optional<String> branchName) {
+      this.branchName = branchName;
       return this;
     }
 

@@ -15,7 +15,7 @@ package org.apache.spark.sql.catalyst.parser.extensions
 
 import org.apache.spark.sql.catalyst.analysis.{UnresolvedIdentifier, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.parser.ParserInterface
-import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, LanceDropIndex, LanceNamedArgument, LogicalPlan, Optimize, SetUnenforcedPrimaryKey, ShowIndexes, UpdateColumnsBackfill, Vacuum}
+import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, CreateBranch, CreateTag, DropBranch, DropTag, LanceDropIndex, LanceNamedArgument, LogicalPlan, Optimize, SetUnenforcedPrimaryKey, ShowBranches, ShowIndexes, ShowTags, UpdateColumnsBackfill, Vacuum}
 import org.lance.spark.utils.ParserUtils
 
 import scala.jdk.CollectionConverters._
@@ -103,6 +103,42 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
     val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
     val indexName = cleanIdentifier(ctx.indexName.getText)
     LanceDropIndex(table, indexName)
+  }
+
+  override def visitShowBranches(ctx: LanceSqlExtensionsParser.ShowBranchesContext)
+      : ShowBranches = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    ShowBranches(table)
+  }
+
+  override def visitCreateBranch(ctx: LanceSqlExtensionsParser.CreateBranchContext)
+      : CreateBranch = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val branchName = cleanIdentifier(ctx.branchName.getText)
+    CreateBranch(table, branchName)
+  }
+
+  override def visitDropBranch(ctx: LanceSqlExtensionsParser.DropBranchContext): DropBranch = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val branchName = cleanIdentifier(ctx.branchName.getText)
+    DropBranch(table, branchName)
+  }
+
+  override def visitShowTags(ctx: LanceSqlExtensionsParser.ShowTagsContext): ShowTags = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    ShowTags(table)
+  }
+
+  override def visitCreateTag(ctx: LanceSqlExtensionsParser.CreateTagContext): CreateTag = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val tagName = cleanIdentifier(ctx.tagName.getText)
+    CreateTag(table, tagName)
+  }
+
+  override def visitDropTag(ctx: LanceSqlExtensionsParser.DropTagContext): DropTag = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val tagName = cleanIdentifier(ctx.tagName.getText)
+    DropTag(table, tagName)
   }
 
   override def visitSetUnenforcedPrimaryKey(
