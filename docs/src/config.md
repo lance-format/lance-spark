@@ -514,4 +514,48 @@ A column is treated as blob v2 when the Arrow field carries `ARROW:extension:nam
 
 Filter pushdown for SQL `WHERE` is disabled on blob v2 tables; Spark evaluates predicates after the scan. Zonemap-based fragment pruning still runs.
 
-The connector does not materialize blob bytes on read; queries against descriptor fields fetch metadata only.
+The connector does not materialize blob bytes on read; queries against descriptor fields fetch metadata only. See [Blob v2 Writes](#blob-v2-writes) below for the write path.
+
+## Blob v2 Writes
+
+To write blob v2 columns, set `file_format_version` to `2.2` or higher and set
+`<column>.lance.encoding = blob` in `TBLPROPERTIES`.
+
+Spark still sees the column as `BINARY` when writing. The connector converts that binary
+value into the Arrow blob write struct during encoding.
+
+On reads, blob v2 columns are exposed as descriptor structs. See
+[Blob v2 Reads](#blob-v2-reads). For writes, `INSERT` and DataFrame append still take
+`BINARY`.
+
+```sql
+CREATE TABLE lance.mydb.users (
+    id INT NOT NULL,
+    content BINARY
+) USING lance
+TBLPROPERTIES (
+    'content.lance.encoding' = 'blob',
+    'file_format_version' = '2.2'
+);
+```
+
+With `file_format_version = '2.2'` or higher, blob columns are written using blob v2
+encoding and `ARROW:extension:name = lance.blob.v2 metadata`.
+
+With an older version, or when `file_format_version` is not set, blob columns use the
+legacy v1 encoding with `lance-encoding:blob = true` metadata.
+
+Blob encoding requires a numeric `file_format_version`, such as `2.2`.
+
+Blob v2 writes must go through the catalog path. Use SQL DDL with `TBLPROPERTIES`, as
+shown above, or use the `DataFrameWriterV2` API:
+
+```python
+df.writeTo("lance.ns.users") \
+    .tableProperty("content.lance.encoding", "blob") \
+    .tableProperty("file_format_version", "2.2") \
+    .create()
+```
+
+Setting only `file_format_version` does not enable blob encoding. Without
+`<column>.lance.encoding = blob`, the column is written as plain `BINARY`.

@@ -467,6 +467,19 @@ object LanceArrowUtils {
           null,
           meta.asJava)
         new Field(name, fieldType, Seq.empty[Field].asJava)
+      case _: BinaryType
+          if BLOB_V2_EXT_NAME.equals(meta.getOrElse(ARROW_EXT_NAME_KEY, "")) =>
+        // Blob v2 writes the struct lance-core expects: data, uri, position, size.
+        val structFieldType =
+          new FieldType(nullable, ArrowType.Struct.INSTANCE, null, meta.asJava)
+        new Field(
+          name,
+          structFieldType,
+          Seq(
+            toArrowField("data", BinaryType, nullable = true, timeZoneId, largeVarTypes = true),
+            toArrowField("uri", StringType, nullable = true, timeZoneId),
+            arrowUInt64Field("position"),
+            arrowUInt64Field("size")).asJava)
       case dataType =>
         val fieldType =
           new FieldType(nullable, toArrowType(dataType, timeZoneId, large, name), null, meta.asJava)
@@ -655,6 +668,12 @@ object LanceArrowUtils {
       "true".equalsIgnoreCase(metadata.get(ENCODING_BLOB))) ||
     BLOB_V2_EXT_NAME.equals(metadata.get(ARROW_EXT_NAME_KEY))
   }
+
+  private def arrowUInt64Field(name: String): Field =
+    new Field(
+      name,
+      new FieldType(true, new ArrowType.Int(64, false), null, Map.empty[String, String].asJava),
+      Seq.empty[Field].asJava)
 }
 
 /**

@@ -338,6 +338,33 @@ To create a table with blob columns, use the table property pattern `<column_nam
         .createOrReplace();
     ```
 
+### Blob v2 Columns
+
+To create blob v2 columns, set the blob encoding property and use `file_format_version = '2.2'` or higher.
+
+Spark writes blob v2 columns as `BINARY`. On reads, the same columns are exposed as
+descriptor structs. See [Blob v2 Reads](../../config.md#blob-v2-reads).
+
+=== "SQL"
+    ```sql
+    CREATE TABLE documents (
+        id INT NOT NULL,
+        content BINARY
+    ) USING lance
+    TBLPROPERTIES (
+        'content.lance.encoding' = 'blob',
+        'file_format_version' = '2.2'
+    );
+    ```
+
+=== "Python"
+    ```python
+    df.writeTo("documents") \
+        .tableProperty("content.lance.encoding", "blob") \
+        .tableProperty("file_format_version", "2.2") \
+        .createOrReplace()
+    ```
+
 ## Large String Columns
 
 Lance supports large string columns for storing very large text data. By default, Arrow uses `Utf8` (VarChar) type with 32-bit offsets, which limits total string data to 2GB per batch. For columns containing very large strings (e.g., document content, base64-encoded data), you can use `LargeUtf8` (LargeVarChar) with 64-bit offsets.

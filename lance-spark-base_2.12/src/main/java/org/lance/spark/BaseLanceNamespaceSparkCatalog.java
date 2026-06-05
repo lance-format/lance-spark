@@ -599,7 +599,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
     // Build the table ID for credential vending
     List<String> tableIdList = buildTableId(actualIdent);
 
-    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
+    StructType processedSchema =
+        SchemaConverter.processSchemaWithProperties(schema, properties, fileFormatVersion);
 
     // Create dataset using namespace - WriteDatasetBuilder handles declareTable internally
     // and properly leverages namespace client for credential vending
@@ -613,7 +615,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
             .mode(WriteParams.WriteMode.CREATE)
             .enableStableRowIds(catalogConfig.isEnableStableRowIds(properties))
             .storageOptions(catalogConfig.getStorageOptions());
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
     if (fileFormatVersion != null) {
       writeBuilder.dataStorageVersion(fileFormatVersion);
     }
@@ -672,12 +673,13 @@ public abstract class BaseLanceNamespaceSparkCatalog
       throws TableAlreadyExistsException {
     String datasetUri = getDatasetUri(ident);
 
-    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
+    StructType processedSchema =
+        SchemaConverter.processSchemaWithProperties(schema, properties, fileFormatVersion);
     LanceSparkReadOptions readOptions =
         createReadOptions(
             datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
 
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
     Map<String, String> tableProperties = copyUserTableProperties(properties);
     try {
       WriteDatasetBuilder writeBuilder =
@@ -895,7 +897,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     Identifier actualIdent = transformIdentifierForApi(ident);
     List<String> tableIdList = buildTableId(actualIdent);
-    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
+    StructType processedSchema =
+        SchemaConverter.processSchemaWithProperties(schema, properties, fileFormatVersion);
 
     DeclareTableRequest declareRequest = new DeclareTableRequest();
     tableIdList.forEach(declareRequest::addIdItem);
@@ -925,7 +929,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
             managedVersioning);
     StagedCommit stagedCommit = StagedCommit.forNewTable(arrowSchema, location, commitOptions);
     stagedCommit.setShardingSpec(shardingSpec);
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
     return createStagedDataset(
         readOptions,
         processedSchema,
@@ -946,7 +949,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Map<String, String> properties,
       ShardingSpec shardingSpec) {
     String datasetUri = getDatasetUri(ident);
-    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
+    StructType processedSchema =
+        SchemaConverter.processSchemaWithProperties(schema, properties, fileFormatVersion);
 
     LanceSparkReadOptions readOptions =
         createReadOptions(
@@ -958,7 +963,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
             catalogConfig.getStorageOptions(), catalogConfig.isEnableStableRowIds(properties));
     StagedCommit stagedCommit = StagedCommit.forNewTable(arrowSchema, datasetUri, commitOptions);
     stagedCommit.setShardingSpec(shardingSpec);
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
     return createStagedDataset(
         readOptions,
         processedSchema,
@@ -986,7 +990,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     ResolvedTable resolved = resolveIdentifier(ident);
     DescribeTableResponse describeResponse = resolved.describeResponse;
-    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
+    StructType processedSchema =
+        SchemaConverter.processSchemaWithProperties(schema, properties, fileFormatVersion);
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
     boolean managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
 
@@ -1004,7 +1010,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
     StagedCommit stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
     stagedCommit.setShardingSpec(shardingSpec);
     // Use specified file format version, or fall back to existing table's version
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
     if (fileFormatVersion == null) {
       fileFormatVersion = ds.getLanceFileFormatVersion();
     }
@@ -1029,7 +1034,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
       ShardingSpec shardingSpec)
       throws NoSuchTableException {
     String datasetUri = getDatasetUri(ident);
-    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
+    StructType processedSchema =
+        SchemaConverter.processSchemaWithProperties(schema, properties, fileFormatVersion);
 
     LanceSparkReadOptions readOptions =
         createReadOptions(
@@ -1049,7 +1056,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
     StagedCommit stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
     stagedCommit.setShardingSpec(shardingSpec);
     // Use specified file format version, or fall back to existing table's version
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
     if (fileFormatVersion == null) {
       fileFormatVersion = ds.getLanceFileFormatVersion();
     }
@@ -1086,7 +1092,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     Identifier actualIdent = transformIdentifierForApi(ident);
     List<String> tableIdList = buildTableId(actualIdent);
-    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
+    StructType processedSchema =
+        SchemaConverter.processSchemaWithProperties(schema, properties, fileFormatVersion);
 
     boolean exists = tableExists(ident);
     String location;
@@ -1120,7 +1128,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     // Use specified file format version, or fall back to existing table's version
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
     final StagedCommitOptions commitOptions =
@@ -1161,7 +1168,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Map<String, String> properties,
       ShardingSpec shardingSpec) {
     String datasetUri = getDatasetUri(ident);
-    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
+    StructType processedSchema =
+        SchemaConverter.processSchemaWithProperties(schema, properties, fileFormatVersion);
 
     LanceSparkReadOptions readOptions =
         createReadOptions(
@@ -1174,7 +1183,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
             catalogConfig.getStorageOptions(), catalogConfig.isEnableStableRowIds(properties));
     StagedCommit stagedCommit;
     // Use specified file format version, or fall back to existing table's version
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
     if (exists) {
       Dataset ds = Utils.openDatasetBuilder(readOptions).build();
       stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
