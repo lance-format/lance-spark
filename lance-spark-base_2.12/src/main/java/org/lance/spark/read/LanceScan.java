@@ -298,7 +298,6 @@ public class LanceScan
    *   <li>Filters are present (unknown selectivity makes row count estimation unreliable)
    *   <li>TopN sort orders are present (all fragments needed for global sort)
    *   <li>Aggregation is pushed (e.g., COUNT(*) LIMIT — row counts don't apply)
-   *   <li>Vector search (nearest) is active (needs global search across all fragments)
    *   <li>Fragment row counts are unavailable
    * </ul>
    *
@@ -312,7 +311,6 @@ public class LanceScan
         || whereConditions.isPresent()
         || topNSortOrders.isPresent()
         || pushedAggregation.isPresent()
-        || readOptions.getNearest() != null
         || fragmentRowCounts.isEmpty()) {
       return allSplits;
     }
