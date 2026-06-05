@@ -82,7 +82,7 @@ env:
 
 jobs:
   search-docker-test:
-    name: Search Docker Test Spark ${{ env.SPARK_VERSION }} / Scala ${{ env.SCALA_VERSION }}
+    name: Search Docker Test
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
