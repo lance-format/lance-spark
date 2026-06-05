@@ -102,17 +102,25 @@ class IndexUtilsTest {
   }
 
   @Test
+  def toJson_filtersNumSegmentsFromOutput(): Unit = {
+    val args = Seq(LanceNamedArgument("num_segments", java.lang.Integer.valueOf(4)))
+    assertEquals("{}", IndexUtils.toJson(args))
+  }
+
+  @Test
   def toJson_filtersAllSparkOnlyOptionsLeavingIndexParams(): Unit = {
     val args = Seq(
       LanceNamedArgument("train", java.lang.Boolean.FALSE),
       LanceNamedArgument("build_mode", "range"),
       LanceNamedArgument("rows_per_range", java.lang.Long.valueOf(1000000L)),
+      LanceNamedArgument("num_segments", java.lang.Integer.valueOf(8)),
       LanceNamedArgument("base_tokenizer", "simple"),
       LanceNamedArgument("language", "English"))
     val json = IndexUtils.toJson(args)
     assertFalse(json.contains("train"), "train must be stripped from JSON params")
     assertFalse(json.contains("build_mode"), "build_mode must be stripped from JSON params")
     assertFalse(json.contains("rows_per_range"), "rows_per_range must be stripped from JSON params")
+    assertFalse(json.contains("num_segments"), "num_segments must be stripped from JSON params")
     assertTrue(json.contains("base_tokenizer"), "index param base_tokenizer must be present")
     assertTrue(json.contains("language"), "index param language must be present")
   }

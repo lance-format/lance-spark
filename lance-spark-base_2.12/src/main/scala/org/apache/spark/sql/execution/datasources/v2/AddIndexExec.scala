@@ -60,11 +60,12 @@ import scala.collection.JavaConverters._
  * processing occurs. An empty index is committed directly on the driver with an empty fragment
  * bitmap, meaning all existing rows appear as unindexed. A subsequent {@code OPTIMIZE} call
  * (or {@code refreshIndex} in the SDK) will cover them incrementally. This option is not
- * supported for ZONEMAP indexes (which are already metadata-only) and is silently ignored for
- * empty tables.
+ * supported for ZONEMAP indexes (which use a dedicated distributed segment build path via
+ * {@link ZonemapIndexJob}) and is silently ignored for empty tables.
  *
  * <p>The following options are consumed at the Spark execution layer and are never forwarded
- * to the Lance index backend: {@code train}, {@code build_mode}, {@code rows_per_range}.
+ * to the Lance index backend: {@code train}, {@code build_mode}, {@code rows_per_range},
+ * {@code num_segments}.
  */
 case class AddIndexExec(
     catalog: TableCatalog,
@@ -946,7 +947,7 @@ object IndexUtils {
 
   // Options consumed at the Spark execution layer that must not be forwarded to the Lance
   // index backend as index parameters.
-  private val SparkOnlyOptions: Set[String] = Set("train", "build_mode", "rows_per_range")
+  private val SparkOnlyOptions: Set[String] = Set("train", "build_mode", "rows_per_range", "num_segments")
 
   def toJson(args: Seq[LanceNamedArgument]): String = {
     val indexArgs = args.filterNot(a => SparkOnlyOptions.contains(a.name))
