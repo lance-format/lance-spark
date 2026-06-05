@@ -595,82 +595,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
           "Namespace not configured. Use 'impl' config for namespace-based access.");
     }
 
-    // Extract user-specified LOCATION before properties are filtered
+    // Custom LOCATION: register an existing dataset, or create a new one at the given path.
     String userLocation = properties.get(CREATE_TABLE_PROPERTY_LOCATION);
-
     if (userLocation != null && !userLocation.trim().isEmpty()) {
-      Identifier actualIdent = transformIdentifierForApi(ident);
-      List<String> tableIdList = buildTableId(actualIdent);
-      StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
-      String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
-      Map<String, String> tableProperties = copyUserTableProperties(properties);
-
-      if (lanceDatasetExists(userLocation)) {
-        return registerExistingTable(
-            userLocation, tableIdList, processedSchema, tableProperties, null, shardingSpec);
-      }
-
-      // Create new table at custom location
-      // We use the server-returned location (not userLocation) for both reads and writes so that
-      // the write URI matches what the catalog recorded. The server may normalize the path
-      // (e.g., trailing slash, URI scheme canonicalization).
-      DeclareTableRequest declareRequest = new DeclareTableRequest();
-      tableIdList.forEach(declareRequest::addIdItem);
-      declareRequest.setLocation(userLocation);
-      DeclareTableResponse declareResponse = namespace.declareTable(declareRequest);
-      String location = declareResponse.getLocation();
-      Map<String, String> initialStorageOptions = declareResponse.getStorageOptions();
-      boolean managedVersioning = Boolean.TRUE.equals(declareResponse.getManagedVersioning());
-
-      try {
-        Map<String, String> merged =
-            LanceRuntime.mergeStorageOptions(
-                catalogConfig.getStorageOptions(), initialStorageOptions);
-        WriteDatasetBuilder writeBuilder =
-            Dataset.write()
-                .allocator(LanceRuntime.allocator())
-                .uri(location)
-                .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true))
-                .mode(WriteParams.WriteMode.CREATE)
-                .enableStableRowIds(catalogConfig.isEnableStableRowIds(properties))
-                .storageOptions(merged);
-        if (fileFormatVersion != null) {
-          writeBuilder.dataStorageVersion(fileFormatVersion);
-        }
-        try (Dataset dataset = writeBuilder.execute()) {
-          SparkLanceShardingUtils.initializeMemWal(
-              dataset,
-              SparkLanceShardingUtils.fromSparkTransforms(partitions, dataset.getLanceSchema()));
-          Map<String, String> propertiesToPersist =
-              tablePropertiesToPersistOnCreate(properties, managedVersioning);
-          if (!propertiesToPersist.isEmpty()) {
-            persistTableProperties(dataset, propertiesToPersist, managedVersioning, tableIdList);
-          }
-        }
-
-        LanceSparkReadOptions readOptions =
-            createReadOptions(
-                location,
-                catalogConfig,
-                Optional.empty(),
-                Optional.of(namespace),
-                Optional.of(tableIdList),
-                name);
-        return createDataset(
-            readOptions,
-            processedSchema,
-            initialStorageOptions,
-            namespaceImpl,
-            namespaceProperties,
-            managedVersioning,
-            fileFormatVersion,
-            tableProperties,
-            shardingSpec);
-      } catch (Exception e) {
-        // Cleanup declared table on failure
-        deregisterQuietly(tableIdList);
-        throw new RuntimeException("Failed to create table at location: " + location, e);
-      }
+      return createTableAtLocation(
+          ident, schema, partitions, properties, userLocation, shardingSpec);
     }
 
     Identifier actualIdent = transformIdentifierForApi(ident);
@@ -737,6 +666,92 @@ public abstract class BaseLanceNamespaceSparkCatalog
         fileFormatVersion,
         tableProperties,
         null);
+  }
+
+  /**
+   * Handles {@code CREATE TABLE ... LOCATION '<path>'} for namespace-based catalogs. If a Lance
+   * dataset already exists at {@code userLocation}, it is registered as an external table;
+   * otherwise a new dataset is created at that location.
+   */
+  private Table createTableAtLocation(
+      Identifier ident,
+      StructType schema,
+      Transform[] partitions,
+      Map<String, String> properties,
+      String userLocation,
+      ShardingSpec shardingSpec) {
+    Identifier actualIdent = transformIdentifierForApi(ident);
+    List<String> tableIdList = buildTableId(actualIdent);
+    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+    Map<String, String> tableProperties = copyUserTableProperties(properties);
+
+    if (lanceDatasetExists(userLocation)) {
+      return registerExistingTable(
+          userLocation, tableIdList, processedSchema, tableProperties, null, shardingSpec);
+    }
+
+    // Create a new dataset at the requested location.
+    // We use the server-returned location (not userLocation) for both reads and writes so that
+    // the write URI matches what the catalog recorded. The server may normalize the path
+    // (e.g., trailing slash, URI scheme canonicalization).
+    DeclareTableRequest declareRequest = new DeclareTableRequest();
+    tableIdList.forEach(declareRequest::addIdItem);
+    declareRequest.setLocation(userLocation);
+    DeclareTableResponse declareResponse = namespace.declareTable(declareRequest);
+    String location = declareResponse.getLocation();
+    Map<String, String> initialStorageOptions = declareResponse.getStorageOptions();
+    boolean managedVersioning = Boolean.TRUE.equals(declareResponse.getManagedVersioning());
+    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
+
+    try {
+      Map<String, String> merged =
+          LanceRuntime.mergeStorageOptions(
+              catalogConfig.getStorageOptions(), initialStorageOptions);
+      WriteDatasetBuilder writeBuilder =
+          Dataset.write()
+              .allocator(LanceRuntime.allocator())
+              .uri(location)
+              .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true))
+              .mode(WriteParams.WriteMode.CREATE)
+              .enableStableRowIds(catalogConfig.isEnableStableRowIds(properties))
+              .storageOptions(merged);
+      if (fileFormatVersion != null) {
+        writeBuilder.dataStorageVersion(fileFormatVersion);
+      }
+      try (Dataset dataset = writeBuilder.execute()) {
+        SparkLanceShardingUtils.initializeMemWal(
+            dataset,
+            SparkLanceShardingUtils.fromSparkTransforms(partitions, dataset.getLanceSchema()));
+        Map<String, String> propertiesToPersist =
+            tablePropertiesToPersistOnCreate(properties, managedVersioning);
+        if (!propertiesToPersist.isEmpty()) {
+          persistTableProperties(dataset, propertiesToPersist, managedVersioning, tableIdList);
+        }
+      }
+
+      LanceSparkReadOptions readOptions =
+          createReadOptions(
+              location,
+              catalogConfig,
+              Optional.empty(),
+              Optional.of(namespace),
+              Optional.of(tableIdList),
+              name);
+      return createDataset(
+          readOptions,
+          processedSchema,
+          initialStorageOptions,
+          namespaceImpl,
+          namespaceProperties,
+          managedVersioning,
+          fileFormatVersion,
+          tableProperties,
+          shardingSpec);
+    } catch (Exception e) {
+      // Cleanup declared table on failure
+      deregisterQuietly(tableIdList);
+      throw new RuntimeException("Failed to create table at location: " + location, e);
+    }
   }
 
   /**
