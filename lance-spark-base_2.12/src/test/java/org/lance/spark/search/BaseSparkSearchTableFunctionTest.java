@@ -22,6 +22,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.UUID;
@@ -54,7 +55,7 @@ public abstract class BaseSparkSearchTableFunctionTest {
   }
 
   @AfterEach
-  void tearDown() {
+  void tearDown() throws IOException {
     if (spark != null) {
       spark.close();
     }

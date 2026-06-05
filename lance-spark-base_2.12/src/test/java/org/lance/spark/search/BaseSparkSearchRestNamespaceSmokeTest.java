@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -55,7 +56,7 @@ public abstract class BaseSparkSearchRestNamespaceSmokeTest {
   }
 
   @AfterEach
-  void tearDown() {
+  void tearDown() throws IOException {
     if (spark != null) {
       spark.close();
     }
