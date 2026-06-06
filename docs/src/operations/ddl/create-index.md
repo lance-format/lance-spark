@@ -147,6 +147,8 @@ Create an FTS index on a text column:
     );
     ```
 
+Query the indexed column with the [SEARCH](../dql/search.md) table function.
+
 ## Output
 
 The `CREATE INDEX` command returns the following information about the operation:
