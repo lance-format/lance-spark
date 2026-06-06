@@ -58,9 +58,13 @@ public class LanceSparkWriteOptions implements Serializable {
   public static final String CONFIG_USE_LARGE_VAR_TYPES = "use_large_var_types";
   public static final String CONFIG_MAX_BATCH_BYTES = "max_batch_bytes";
   public static final String CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD = "blob_pack_file_size_threshold";
+  public static final String CONFIG_USE_NAMESPACE_INSERT = "use_namespace_insert";
+  public static final String CONFIG_NAMESPACE_INSERT_PARALLELISM = "namespace_insert_parallelism";
 
   private static final WriteMode DEFAULT_WRITE_MODE = WriteMode.APPEND;
   private static final boolean DEFAULT_USE_QUEUED_WRITE_BUFFER = false;
+  private static final boolean DEFAULT_USE_NAMESPACE_INSERT = false;
+  private static final int DEFAULT_NAMESPACE_INSERT_PARALLELISM = 0;
   private static final int DEFAULT_QUEUE_DEPTH = 8;
   // Changed from 512 to 8192 for better write performance consistency with read path
   private static final int DEFAULT_BATCH_SIZE = 8192;
@@ -85,6 +89,8 @@ public class LanceSparkWriteOptions implements Serializable {
   private final long maxBatchBytes;
   // Boxed: null means "unset" so lance-core uses its own default (1 GiB as of 6.0.0-beta.1).
   private final Long blobPackFileSizeThreshold;
+  private final boolean useNamespaceInsert;
+  private final int namespaceInsertParallelism;
   private final Map<String, String> storageOptions;
 
   /** The namespace for credential vending. Transient as LanceNamespace is not serializable. */
@@ -110,6 +116,8 @@ public class LanceSparkWriteOptions implements Serializable {
     this.useLargeVarTypes = builder.useLargeVarTypes;
     this.maxBatchBytes = builder.maxBatchBytes;
     this.blobPackFileSizeThreshold = builder.blobPackFileSizeThreshold;
+    this.useNamespaceInsert = builder.useNamespaceInsert;
+    this.namespaceInsertParallelism = builder.namespaceInsertParallelism;
     this.storageOptions = new HashMap<>(builder.storageOptions);
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
@@ -198,6 +206,14 @@ public class LanceSparkWriteOptions implements Serializable {
     return blobPackFileSizeThreshold;
   }
 
+  public boolean isUseNamespaceInsert() {
+    return useNamespaceInsert;
+  }
+
+  public int getNamespaceInsertParallelism() {
+    return namespaceInsertParallelism;
+  }
+
   public Map<String, String> getStorageOptions() {
     return storageOptions;
   }
@@ -230,6 +246,8 @@ public class LanceSparkWriteOptions implements Serializable {
         .enableStableRowIds(enableStableRowIds)
         .useLargeVarTypes(useLargeVarTypes)
         .blobPackFileSizeThreshold(blobPackFileSizeThreshold)
+        .useNamespaceInsert(useNamespaceInsert)
+        .namespaceInsertParallelism(namespaceInsertParallelism)
         .storageOptions(storageOptions)
         .namespace(namespace)
         .tableId(tableId)
@@ -315,6 +333,8 @@ public class LanceSparkWriteOptions implements Serializable {
         && batchSize == that.batchSize
         && useLargeVarTypes == that.useLargeVarTypes
         && maxBatchBytes == that.maxBatchBytes
+        && useNamespaceInsert == that.useNamespaceInsert
+        && namespaceInsertParallelism == that.namespaceInsertParallelism
         && Objects.equals(datasetUri, that.datasetUri)
         && writeMode == that.writeMode
         && Objects.equals(maxRowsPerFile, that.maxRowsPerFile)
@@ -344,6 +364,8 @@ public class LanceSparkWriteOptions implements Serializable {
         useLargeVarTypes,
         maxBatchBytes,
         blobPackFileSizeThreshold,
+        useNamespaceInsert,
+        namespaceInsertParallelism,
         storageOptions,
         tableId,
         version);
@@ -364,6 +386,8 @@ public class LanceSparkWriteOptions implements Serializable {
     private boolean useLargeVarTypes = DEFAULT_USE_LARGE_VAR_TYPES;
     private long maxBatchBytes = DEFAULT_MAX_BATCH_BYTES;
     private Long blobPackFileSizeThreshold;
+    private boolean useNamespaceInsert = DEFAULT_USE_NAMESPACE_INSERT;
+    private int namespaceInsertParallelism = DEFAULT_NAMESPACE_INSERT_PARALLELISM;
     private Map<String, String> storageOptions = new HashMap<>();
     private LanceNamespace namespace;
     private List<String> tableId;
@@ -440,6 +464,18 @@ public class LanceSparkWriteOptions implements Serializable {
       return this;
     }
 
+    public Builder useNamespaceInsert(boolean useNamespaceInsert) {
+      this.useNamespaceInsert = useNamespaceInsert;
+      return this;
+    }
+
+    public Builder namespaceInsertParallelism(int namespaceInsertParallelism) {
+      Preconditions.checkArgument(
+          namespaceInsertParallelism >= 0, "namespace_insert_parallelism must be non-negative");
+      this.namespaceInsertParallelism = namespaceInsertParallelism;
+      return this;
+    }
+
     public Builder storageOptions(Map<String, String> storageOptions) {
       this.storageOptions = new HashMap<>(storageOptions);
       return this;
@@ -469,6 +505,8 @@ public class LanceSparkWriteOptions implements Serializable {
      */
     public Builder fromOptions(Map<String, String> options) {
       this.storageOptions = new HashMap<>(options);
+      this.storageOptions.remove(CONFIG_USE_NAMESPACE_INSERT);
+      this.storageOptions.remove(CONFIG_NAMESPACE_INSERT_PARALLELISM);
       if (options.containsKey(CONFIG_WRITE_MODE)) {
         this.writeMode = WriteMode.valueOf(options.get(CONFIG_WRITE_MODE).toUpperCase());
       }
@@ -511,6 +549,15 @@ public class LanceSparkWriteOptions implements Serializable {
         long parsed = Long.parseLong(options.get(CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD));
         Preconditions.checkArgument(parsed > 0, "blob_pack_file_size_threshold must be positive");
         this.blobPackFileSizeThreshold = parsed;
+      }
+      if (options.containsKey(CONFIG_USE_NAMESPACE_INSERT)) {
+        this.useNamespaceInsert = Boolean.parseBoolean(options.get(CONFIG_USE_NAMESPACE_INSERT));
+      }
+      if (options.containsKey(CONFIG_NAMESPACE_INSERT_PARALLELISM)) {
+        int parsedParallelism = Integer.parseInt(options.get(CONFIG_NAMESPACE_INSERT_PARALLELISM));
+        Preconditions.checkArgument(
+            parsedParallelism >= 0, "namespace_insert_parallelism must be non-negative");
+        this.namespaceInsertParallelism = parsedParallelism;
       }
       return this;
     }

@@ -143,7 +143,9 @@ final class ShardingBatchKeyEvaluator implements AutoCloseable {
   private void allocateBatch() {
     root = VectorSchemaRoot.create(arrowSchema, allocator);
     root.allocateNew();
-    arrowWriter = org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(root, sparkSchema);
+    arrowWriter =
+        org.lance.spark.arrow.LanceArrowWriteBridge$.MODULE$.createWithoutResolver(
+            root, sparkSchema);
   }
 
   private void closeBatch() {

@@ -71,6 +71,23 @@ and namespace-specific options:
 | `spark.sql.catalog.{name}.parent`           | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                             |
 | `spark.sql.catalog.{name}.parent_delimiter` | String | ✗        | Delimiter for parent prefix (default: `.`). See [Note on Namespace Levels](#note-on-namespace-levels).                           |
 
+## Write Options
+
+Write options can be set on DataFrame writes. Catalog-level values are also used as defaults when
+they are present in the Spark catalog configuration.
+
+| Option                         | Type    | Default | Description                                                                                              |
+|--------------------------------|---------|---------|----------------------------------------------------------------------------------------------------------|
+| `use_namespace_insert`         | Boolean | `false` | Use the Lance Namespace insert API for eligible append writes to namespace-backed tables.                 |
+| `namespace_insert_parallelism` | Integer | `0`     | Number of writer tasks to request from Spark for namespace insert writes. `0` preserves Spark's plan. For sharded tables Spark uses the sharding distribution; for unsharded tables Spark repartitions by the first output column. |
+| `batch_size`                   | Integer | `8192`  | Maximum rows per Arrow batch/request before flushing.                                                    |
+| `max_batch_bytes`              | Long    | `268435456` | Maximum approximate bytes per Arrow batch/request before flushing.                                  |
+
+Namespace insert writes are intended for append ingestion through a namespace implementation,
+including REST namespaces. Each insert request is committed by the namespace as it runs, so this mode
+does not provide the same Spark driver-side atomic commit behavior as the default writer. If a Spark
+task or driver fails after some requests complete, those rows may already be visible.
+
 ## Example Namespace Implementations
 
 ### Directory Namespace

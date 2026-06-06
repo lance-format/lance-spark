@@ -191,7 +191,8 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
       // batch grow until resolution OOMs the executor.
       currentBatchBytes =
           (this.allocator.getAllocatedMemory() - batchStartBytes)
-              + arrowWriter.estimatedBufferedBytes();
+              + org.lance.spark.arrow.LanceArrowWriteBridge$.MODULE$.estimatedBufferedBytes(
+                  arrowWriter);
       count++;
 
       if (isBatchFull()) {
@@ -232,7 +233,8 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
     }
     root.setRowCount(0);
     arrowWriter =
-        org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(root, sparkSchema, resolver);
+        org.lance.spark.arrow.LanceArrowWriteBridge$.MODULE$.createWithResolver(
+            root, sparkSchema, resolver);
     lock.lock();
     try {
       count = 0;

@@ -24,6 +24,7 @@ import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.connector.distributions.Distribution;
 import org.apache.spark.sql.connector.distributions.Distributions;
+import org.apache.spark.sql.connector.expressions.Expressions;
 import org.apache.spark.sql.connector.expressions.NamedReference;
 import org.apache.spark.sql.connector.expressions.SortOrder;
 import org.apache.spark.sql.connector.write.BatchWrite;
@@ -127,6 +128,10 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
   public Distribution requiredDistribution() {
     ShardingSpec spec = shardingSpec();
     if (SparkLanceShardingUtils.isEmpty(spec)) {
+      if (useNamespaceInsertParallelism()) {
+        NamedReference firstColumn = Expressions.column(schema.fields()[0].name());
+        return Distributions.clustered(new NamedReference[] {firstColumn});
+      }
       return Distributions.unspecified();
     }
     NamedReference[] refs =
@@ -148,8 +153,27 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
   }
 
   @Override
+  public int requiredNumPartitions() {
+    if (useNamespaceInsertParallelism()) {
+      return writeOptions.getNamespaceInsertParallelism();
+    }
+    return RequiresDistributionAndOrdering.super.requiredNumPartitions();
+  }
+
+  @Override
   public BatchWrite toBatch() {
     ShardingSpec spec = shardingSpec();
+    if (useNamespaceInsertBatchWrite()) {
+      return new NamespaceInsertBatchWrite(
+          schema,
+          writeOptions,
+          initialStorageOptions,
+          namespaceImpl,
+          namespaceProperties,
+          tableId,
+          spec,
+          blobSourceContexts);
+    }
     return new LanceBatchWrite(
         schema,
         writeOptions,
@@ -162,6 +186,21 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
         stagedCommit,
         spec,
         blobSourceContexts);
+  }
+
+  private boolean useNamespaceInsertBatchWrite() {
+    return writeOptions.isUseNamespaceInsert()
+        && stagedCommit == null
+        && !overwrite
+        && !writeOptions.isOverwrite()
+        && namespaceImpl != null
+        && tableId != null;
+  }
+
+  private boolean useNamespaceInsertParallelism() {
+    return useNamespaceInsertBatchWrite()
+        && writeOptions.getNamespaceInsertParallelism() > 0
+        && schema.fields().length > 0;
   }
 
   @Override
@@ -242,22 +281,7 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
       LanceSparkWriteOptions options =
           !overwrite
               ? writeOptions
-              : LanceSparkWriteOptions.builder()
-                  .storageOptions(writeOptions.getStorageOptions())
-                  .namespace(writeOptions.getNamespace())
-                  .tableId(writeOptions.getTableId())
-                  .batchSize(writeOptions.getBatchSize())
-                  .datasetUri(writeOptions.getDatasetUri())
-                  .fileFormatVersion(writeOptions.getFileFormatVersion())
-                  .maxBytesPerFile(writeOptions.getMaxBytesPerFile())
-                  .maxRowsPerFile(writeOptions.getMaxRowsPerFile())
-                  .maxRowsPerGroup(writeOptions.getMaxRowsPerGroup())
-                  .queueDepth(writeOptions.getQueueDepth())
-                  .useQueuedWriteBuffer(writeOptions.isUseQueuedWriteBuffer())
-                  .useLargeVarTypes(writeOptions.isUseLargeVarTypes())
-                  .enableStableRowIds(writeOptions.getEnableStableRowIds())
-                  .writeMode(WriteParams.WriteMode.OVERWRITE)
-                  .build();
+              : writeOptions.toBuilder().writeMode(WriteParams.WriteMode.OVERWRITE).build();
 
       return new SparkWrite(
           schema,
