@@ -43,15 +43,15 @@ on:
       backends:
         description: "Comma-separated test backends: local or local,rest-dir"
         required: true
-        default: "local"
+        default: "local,rest-dir"
       rest-uri:
-        description: "REST namespace URI. Required when backends includes rest-dir."
+        description: "Optional REST namespace URI. If omitted, tests start a local REST directory namespace."
         required: false
         default: ""
       rest-database:
-        description: "Optional database header value for rest-dir"
+        description: "Optional database header value for an external REST namespace"
         required: false
-        default: "lance_spark_ci"
+        default: ""
       docker-run-args:
         description: "Extra docker run args for docker-test"
         required: false
@@ -67,7 +67,7 @@ concurrency:
 env:
   SPARK_VERSION: ${{ github.event.inputs['spark-version'] || '3.5' }}
   SCALA_VERSION: ${{ github.event.inputs['scala-version'] || '2.13' }}
-  SEARCH_TEST_BACKENDS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.backends || 'local' }}
+  SEARCH_TEST_BACKENDS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.backends || 'local,rest-dir' }}
   SEARCH_PYTEST_CMD: >-
     pytest /home/lance/tests/test_lance_spark.py::TestDQLSearchTableFunctions
     -v --timeout=180
@@ -134,13 +134,21 @@ jobs:
         run: |
           rest_uri="${INPUT_REST_URI}"
           docker_run_args="${INPUT_DOCKER_RUN_ARGS}"
+          start_rest_dir="false"
+          rest_dir_root=""
+          rest_dir_port=""
 
           if [ -z "${rest_uri}" ]; then
-            echo "::error::rest-dir requires workflow input rest-uri for a running compatible REST namespace server"
-            exit 1
+            rest_dir_port="10024"
+            rest_dir_root="/home/lance/rest-data"
+            rest_uri="http://127.0.0.1:${rest_dir_port}"
+            start_rest_dir="true"
           fi
 
           echo "uri=${rest_uri}" >> "$GITHUB_OUTPUT"
+          echo "start_rest_dir=${start_rest_dir}" >> "$GITHUB_OUTPUT"
+          echo "rest_dir_root=${rest_dir_root}" >> "$GITHUB_OUTPUT"
+          echo "rest_dir_port=${rest_dir_port}" >> "$GITHUB_OUTPUT"
           {
             echo "docker_run_args<<EOF"
             echo "${docker_run_args}"
@@ -150,8 +158,11 @@ jobs:
         if: ${{ contains(env.SEARCH_TEST_BACKENDS, 'rest-dir') }}
         env:
           LANCE_SPARK_REST_URI: ${{ steps.rest.outputs.uri }}
-          LANCE_SPARK_REST_API_KEY: ${{ secrets.LANCE_SPARK_REST_API_KEY || 'sk_localtest' }}
-          LANCE_SPARK_REST_DATABASE: ${{ github.event.inputs['rest-database'] || 'lance_spark_ci' }}
+          LANCE_SPARK_REST_API_KEY: ${{ secrets.LANCE_SPARK_REST_API_KEY }}
+          LANCE_SPARK_REST_DATABASE: ${{ github.event.inputs['rest-database'] }}
+          LANCE_SPARK_START_REST_DIR: ${{ steps.rest.outputs.start_rest_dir }}
+          LANCE_SPARK_REST_DIR_ROOT: ${{ steps.rest.outputs.rest_dir_root }}
+          LANCE_SPARK_REST_DIR_PORT: ${{ steps.rest.outputs.rest_dir_port }}
           DOCKER_RUN_ARGS: ${{ steps.rest.outputs.docker_run_args }}
         run: |
           make docker-test \
@@ -161,5 +172,8 @@ jobs:
             LANCE_SPARK_REST_URI="${LANCE_SPARK_REST_URI}" \
             LANCE_SPARK_REST_API_KEY="${LANCE_SPARK_REST_API_KEY}" \
             LANCE_SPARK_REST_DATABASE="${LANCE_SPARK_REST_DATABASE}" \
+            LANCE_SPARK_START_REST_DIR="${LANCE_SPARK_START_REST_DIR}" \
+            LANCE_SPARK_REST_DIR_ROOT="${LANCE_SPARK_REST_DIR_ROOT}" \
+            LANCE_SPARK_REST_DIR_PORT="${LANCE_SPARK_REST_DIR_PORT}" \
             DOCKER_RUN_ARGS="${DOCKER_RUN_ARGS}" \
             PYTEST_CMD="${SEARCH_PYTEST_CMD}"

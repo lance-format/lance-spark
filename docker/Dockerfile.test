@@ -35,6 +35,7 @@ RUN mkdir -p /home/lance/warehouse /home/lance/spark-events /home/lance/data
 # Copy tests
 RUN mkdir -p /home/lance/tests
 COPY integration-tests/ /home/lance/tests/
+RUN javac -cp "${SPARK_HOME}/jars/*" /home/lance/tests/LanceRestDirNamespaceServer.java
 
 WORKDIR ${SPARK_HOME}
 COPY docker/entrypoint.sh .

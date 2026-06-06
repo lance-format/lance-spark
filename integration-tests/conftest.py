@@ -9,11 +9,13 @@ automatically exercised against all available backends.
 """
 
 import os
+import socket
 import subprocess
 import time
 import uuid
-import urllib.request
 import urllib.error
+import urllib.parse
+import urllib.request
 
 import pytest
 from pyspark.sql import SparkSession
@@ -184,6 +186,16 @@ LANCEDB_REGION = os.environ.get("LANCEDB_REGION", "us-east-1")
 LANCE_SPARK_REST_URI = os.environ.get("LANCE_SPARK_REST_URI")
 LANCE_SPARK_REST_API_KEY = os.environ.get("LANCE_SPARK_REST_API_KEY")
 LANCE_SPARK_REST_DATABASE = os.environ.get("LANCE_SPARK_REST_DATABASE")
+LANCE_SPARK_START_REST_DIR = os.environ.get("LANCE_SPARK_START_REST_DIR", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+LANCE_SPARK_REST_DIR_ROOT = os.environ.get(
+    "LANCE_SPARK_REST_DIR_ROOT",
+    "/home/lance/rest-data",
+)
+LANCE_SPARK_REST_DIR_PORT = int(os.environ.get("LANCE_SPARK_REST_DIR_PORT", "10024"))
 AWS_S3_BUCKET_NAME = os.environ.get("AWS_S3_BUCKET_NAME")
 AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
 AWS_GLUE_CATALOG_ID = os.environ.get("AWS_GLUE_CATALOG_ID")
@@ -200,7 +212,7 @@ AWS_GLUE_ROOT = os.environ.get("AWS_GLUE_ROOT") or (
 _all_backends = ["local", "azurite", "minio"]
 if LANCEDB_DB and LANCEDB_API_KEY:
     _all_backends.append("lancedb")
-if LANCE_SPARK_REST_URI:
+if LANCE_SPARK_REST_URI or LANCE_SPARK_START_REST_DIR:
     _all_backends.append("rest-dir")
 if AWS_S3_BUCKET_NAME:
     _all_backends.append("glue")
@@ -264,13 +276,12 @@ def spark(request):
             )
         )
     elif backend == "rest-dir":
-        if not LANCE_SPARK_REST_URI:
-            pytest.skip("LANCE_SPARK_REST_URI is required for rest-dir backend")
+        rest_dir = request.getfixturevalue("rest_dir_namespace")
 
         builder = (
             builder
             .config(f"spark.sql.catalog.{CATALOG}.impl", "rest")
-            .config(f"spark.sql.catalog.{CATALOG}.uri", LANCE_SPARK_REST_URI)
+            .config(f"spark.sql.catalog.{CATALOG}.uri", rest_dir["uri"])
         )
         if LANCE_SPARK_REST_API_KEY:
             builder = builder.config(
@@ -357,6 +368,44 @@ def spark(request):
     session.stop()
 
 
+@pytest.fixture(scope="session")
+def rest_dir_namespace():
+    """Provide a REST namespace backed by the local directory namespace."""
+    if not LANCE_SPARK_START_REST_DIR:
+        if not LANCE_SPARK_REST_URI:
+            pytest.skip("LANCE_SPARK_REST_URI is required for rest-dir backend")
+        yield {"uri": LANCE_SPARK_REST_URI}
+        return
+
+    os.makedirs(LANCE_SPARK_REST_DIR_ROOT, exist_ok=True)
+    uri = LANCE_SPARK_REST_URI or f"http://127.0.0.1:{LANCE_SPARK_REST_DIR_PORT}"
+    parsed = urllib.parse.urlparse(uri)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or LANCE_SPARK_REST_DIR_PORT
+    log_path = "/tmp/lance-rest-dir-namespace.log"
+    classpath = "/home/lance/tests:/opt/spark/jars/*"
+
+    with open(log_path, "w", encoding="utf-8") as log:
+        proc = subprocess.Popen(
+            [
+                "java",
+                "-cp",
+                classpath,
+                "LanceRestDirNamespaceServer",
+                LANCE_SPARK_REST_DIR_ROOT,
+                "127.0.0.1",
+                str(port),
+            ],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            _wait_for_tcp(host, port, proc, "Lance REST directory namespace")
+            yield {"uri": uri}
+        finally:
+            _stop_process(proc)
+
+
 @pytest.fixture
 def test_table(request, spark):
     """Provide a unique table name for each test to avoid isolation issues.
@@ -423,3 +472,17 @@ def _stop_process(proc, timeout=10):
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
+
+
+def _wait_for_tcp(host, port, proc, name, timeout=30):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                return
+        except OSError:
+            if proc.poll() is not None:
+                raise RuntimeError(f"{name} exited unexpectedly")
+            time.sleep(0.5)
+    _stop_process(proc)
+    raise RuntimeError(f"{name} did not become healthy within {timeout} s")

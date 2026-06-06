@@ -165,4 +165,4 @@ Named arguments are recommended when supported. For simple calls and Spark 3.4 c
 
 ## Validation
 
-The Docker integration suite covers `VECTOR_SEARCH`, `SEARCH`, and `HYBRID_SEARCH` against the directory namespace and can also run against a REST namespace backed by a directory namespace. Contributor documentation includes the local Docker commands and the `Spark Search Docker` GitHub Actions workflow.
+The Docker integration suite covers `VECTOR_SEARCH`, `SEARCH`, and `HYBRID_SEARCH` against the directory namespace and a REST namespace backed by a directory namespace. The `Spark Search Docker` GitHub Actions workflow runs both backends for pull requests.

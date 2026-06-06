@@ -76,19 +76,19 @@ make docker-test SPARK_VERSION=3.5 SCALA_VERSION=2.13 \
   PYTEST_CMD="pytest /home/lance/tests/test_lance_spark.py::TestDQLSearchTableFunctions -v --timeout=180"
 ```
 
-To also validate a REST namespace backed by a directory namespace, start a compatible REST namespace server and pass its URI into the test container:
+To also validate a REST namespace backed by a directory namespace, let the Docker test container start the OSS Lance REST adapter:
 
 ```shell
 make docker-test SPARK_VERSION=3.5 SCALA_VERSION=2.13 \
   TEST_BACKENDS=local,rest-dir \
-  LANCE_SPARK_REST_URI=http://host.docker.internal:10024 \
-  LANCE_SPARK_REST_API_KEY=sk_localtest \
-  LANCE_SPARK_REST_DATABASE=lance_spark_ci \
-  DOCKER_RUN_ARGS="--add-host=host.docker.internal:host-gateway" \
+  LANCE_SPARK_START_REST_DIR=true \
+  LANCE_SPARK_REST_URI=http://127.0.0.1:10024 \
   PYTEST_CMD="pytest /home/lance/tests/test_lance_spark.py::TestDQLSearchTableFunctions -v --timeout=180"
 ```
 
-The `Spark Search Docker` GitHub Actions workflow runs the same targeted Docker tests. Pull requests run the directory namespace coverage automatically. Use workflow dispatch with `backends=local,rest-dir` and `rest-uri` to run both directory and REST-directory coverage against a compatible REST namespace server.
+To run against an already-running compatible REST namespace server instead, omit `LANCE_SPARK_START_REST_DIR` and pass that server's URI with `LANCE_SPARK_REST_URI`.
+
+The `Spark Search Docker` GitHub Actions workflow runs the same targeted Docker tests. Pull requests run directory namespace and REST-directory namespace coverage automatically. Use workflow dispatch with `rest-uri` only when validating against an external REST namespace server.
 
 ## Documentation
 
