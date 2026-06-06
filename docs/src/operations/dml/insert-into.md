@@ -85,6 +85,16 @@ namespace service.
 
 `use_namespace_insert` applies to append writes to existing namespace-backed tables. Create,
 replace, overwrite, path-based writes, and schema backfill operations use the default writer.
+
+### Expected Behavior
+
+For users, namespace insert writes look like a normal DataFrame append with two optional write
+options. Existing `INSERT INTO` statements and `.append()` calls keep using the default Spark writer
+unless `use_namespace_insert` is set. When enabled, Spark still plans executor-side writer tasks, but
+each task sends Arrow batches to the configured Lance namespace instead of committing Lance fragments
+directly from the driver. This lets directory and REST namespaces handle ingestion through the same
+namespace API.
+
 When `namespace_insert_parallelism` is greater than `0`, Spark creates that many writer tasks. For
 sharded tables Spark uses the table sharding distribution; for unsharded tables Spark repartitions
 by the first output column.
