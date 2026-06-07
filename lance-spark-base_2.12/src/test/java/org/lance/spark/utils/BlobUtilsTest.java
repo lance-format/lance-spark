@@ -20,6 +20,8 @@ import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
 
+import java.util.Collections;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -49,6 +51,33 @@ public class BlobUtilsTest {
               field("id", DataTypes.IntegerType), blobV2Field(),
             });
     assertTrue(BlobUtils.hasBlobV2Fields(schema));
+  }
+
+  @Test
+  public void testBlobV2ColumnNamesExcludesNonBlobAndV1() {
+    Metadata v1 =
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build();
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              field("id", DataTypes.IntegerType),
+              new StructField("attachment", DataTypes.BinaryType, true, v1),
+              blobV2Field(),
+            });
+    assertEquals(Collections.singleton("payload"), BlobUtils.blobV2ColumnNames(schema));
+  }
+
+  @Test
+  public void testIsBlobReadColumnCoversV1AndV2() {
+    Metadata v1 =
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build();
+    assertTrue(BlobUtils.isBlobReadColumn(new StructField("v1", DataTypes.BinaryType, true, v1)));
+    assertTrue(BlobUtils.isBlobReadColumn(blobV2Field()));
+    assertFalse(BlobUtils.isBlobReadColumn(field("id", DataTypes.IntegerType)));
   }
 
   @Test

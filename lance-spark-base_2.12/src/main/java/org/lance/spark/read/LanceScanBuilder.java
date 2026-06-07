@@ -77,9 +77,16 @@ public class LanceScanBuilder
   /** Full table schema before column pruning; used to widen nested structs for vectorized reads. */
   private final StructType fullSchema;
 
+  /** Blob v2 column names in the read schema. Filters on these cannot push to Lance. */
+  private final Set<String> blobV2Columns;
+
   private StructType schema;
 
   private Predicate[] pushedPredicates = new Predicate[0];
+
+  // Set when pushPredicates leaves filters for Spark. pushLimit and friends read this after
+  // pushPredicates because Spark pushes filters before those operators.
+  private boolean hasResidualPredicates = false;
   private Optional<Integer> limit = Optional.empty();
   private Optional<Integer> offset = Optional.empty();
   private Optional<List<ColumnOrdering>> topNSortOrders = Optional.empty();
@@ -119,6 +126,7 @@ public class LanceScanBuilder
       java.util.Map<String, String> namespaceProperties,
       ShardingSpec shardingSpec) {
     this.fullSchema = BlobUtils.applyBlobV2DescriptorSchema(schema);
+    this.blobV2Columns = BlobUtils.blobV2ColumnNames(this.fullSchema);
     this.schema = this.fullSchema;
     this.readOptions = readOptions;
     this.initialStorageOptions = initialStorageOptions;
@@ -280,12 +288,30 @@ public class LanceScanBuilder
 
   @Override
   public Predicate[] pushPredicates(Predicate[] predicates) {
+    Predicate[] pushed;
+    Predicate[] residual;
     if (!readOptions.isPushDownFilters()) {
-      return predicates;
+      pushed = new Predicate[0];
+      residual = predicates;
+    } else {
+      List<Predicate> pushedList = new ArrayList<>();
+      List<Predicate> residualList = new ArrayList<>();
+      // Push supported predicates unless they touch a blob v2 column. Those read back as descriptor
+      // structs, so Lance cannot evaluate filters on them. Normal-column filters still prune.
+      for (Predicate predicate : predicates) {
+        if (FilterPushDown.isPredicateSupported(predicate)
+            && !FilterPushDown.referencesAny(predicate, blobV2Columns)) {
+          pushedList.add(predicate);
+        } else {
+          residualList.add(predicate);
+        }
+      }
+      pushed = pushedList.toArray(new Predicate[0]);
+      residual = residualList.toArray(new Predicate[0]);
     }
-    Predicate[][] processed = FilterPushDown.processPredicates(predicates);
-    pushedPredicates = processed[0];
-    return processed[1];
+    this.pushedPredicates = pushed;
+    this.hasResidualPredicates = residual.length > 0;
+    return residual;
   }
 
   @Override
@@ -295,12 +321,18 @@ public class LanceScanBuilder
 
   @Override
   public boolean pushLimit(int limit) {
+    if (hasResidualPredicates) {
+      return false;
+    }
     this.limit = Optional.of(limit);
     return true;
   }
 
   @Override
   public boolean pushOffset(int offset) {
+    if (hasResidualPredicates) {
+      return false;
+    }
     // Only one data file can be pushed down the offset.
     List<Integer> fragmentIds =
         getOrOpenDataset().getFragments().stream()
@@ -323,7 +355,7 @@ public class LanceScanBuilder
   public boolean pushTopN(SortOrder[] orders, int limit) {
     // The Order by operator will use compute thread in lance.
     // So it's better to have an option to enable it.
-    if (!readOptions.isTopNPushDown()) {
+    if (!readOptions.isTopNPushDown() || hasResidualPredicates) {
       return false;
     }
     this.limit = Optional.of(limit);
@@ -345,6 +377,9 @@ public class LanceScanBuilder
 
   @Override
   public boolean pushAggregation(Aggregation aggregation) {
+    if (hasResidualPredicates) {
+      return false;
+    }
     AggregateFunc[] funcs = aggregation.aggregateExpressions();
     if (aggregation.groupByExpressions().length > 0) {
       return false;

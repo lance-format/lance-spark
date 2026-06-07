@@ -18,6 +18,9 @@ import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
+import java.util.HashSet;
+import java.util.Set;
+
 public class BlobUtils {
 
   public static final String LANCE_ENCODING_BLOB_KEY = "lance-encoding:blob";
@@ -99,15 +102,28 @@ public class BlobUtils {
         && ARROW_EXTENSION_BLOB_V2.equals(metadata.getString(ARROW_EXTENSION_NAME_KEY));
   }
 
-  /** Returns true if any field in {@code schema} is a blob v2 column. */
-  public static boolean hasBlobV2Fields(StructType schema) {
+  /** Names of the blob v2 columns in {@code schema}, identified by the lance.blob.v2 extension. */
+  public static Set<String> blobV2ColumnNames(StructType schema) {
+    Set<String> names = new HashSet<>();
     for (StructField field : schema.fields()) {
       if (isBlobV2SparkField(field)) {
-        return true;
+        names.add(field.name());
       }
     }
+    return names;
+  }
 
-    return false;
+  /** Returns true if any field in {@code schema} is a blob v2 column. */
+  public static boolean hasBlobV2Fields(StructType schema) {
+    return !blobV2ColumnNames(schema).isEmpty();
+  }
+
+  /**
+   * Returns true for blob columns in the Spark read schema, v1 or v2. Drives {@code _rowaddr} and
+   * the unloaded-blob read path in the scan.
+   */
+  public static boolean isBlobReadColumn(StructField field) {
+    return isBlobSparkField(field) || isBlobV2SparkField(field);
   }
 
   /** Rewrites blob v2 columns to the descriptor struct returned by Lance. */

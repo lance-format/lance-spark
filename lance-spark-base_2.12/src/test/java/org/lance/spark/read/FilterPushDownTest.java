@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 import java.sql.Date;
 import java.sql.Timestamp;
+import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -244,10 +245,13 @@ public class FilterPushDownTest {
     assertFalse(FilterPushDown.isPredicateSupported(timeGt));
 
     Predicate intGt = TestPredicates.gt("age", 30);
-    Predicate[][] processed = FilterPushDown.processPredicates(new Predicate[] {timeGt, intGt});
-    assertEquals(1, processed[0].length);
-    assertEquals(1, processed[1].length);
-    assertEquals(intGt, processed[0][0]);
-    assertEquals(timeGt, processed[1][0]);
+    assertTrue(FilterPushDown.isPredicateSupported(intGt));
+  }
+
+  @Test
+  public void testReferencesAnyMatchesTopLevelColumn() {
+    Predicate onPayload = TestPredicates.gt("payload", 1L);
+    assertTrue(FilterPushDown.referencesAny(onPayload, Collections.singleton("payload")));
+    assertFalse(FilterPushDown.referencesAny(onPayload, Collections.singleton("id")));
   }
 }

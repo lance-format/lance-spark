@@ -103,21 +103,20 @@ public class LanceFragmentScanner implements AutoCloseable {
       }
       ScanOptions.Builder scanOptions = new ScanOptions.Builder();
 
-      // Detect blob columns in the schema
-      Set<String> blobColumnNames = getBlobColumnNames(inputPartition.getSchema());
+      StructType scanSchema = inputPartition.getSchema();
+      Set<String> blobColumnNames = getBlobColumnNames(scanSchema);
       boolean hasBlobColumns = !blobColumnNames.isEmpty();
 
-      List<String> projectedColumns = getColumnNames(inputPartition.getSchema());
-      if (projectedColumns.isEmpty() && inputPartition.getSchema().isEmpty()) {
+      List<String> projectedColumns = getColumnNames(scanSchema);
+      if (projectedColumns.isEmpty() && scanSchema.isEmpty()) {
         scanOptions.withRowId(true);
       }
-      if (hasField(inputPartition.getSchema(), LanceConstant.ROW_ID)) {
+      if (hasField(scanSchema, LanceConstant.ROW_ID)) {
         scanOptions.withRowId(true);
       }
 
       // Request _rowaddr when blob columns are present so we can build blob references.
-      boolean userRequestedRowAddr =
-          hasField(inputPartition.getSchema(), LanceConstant.ROW_ADDRESS);
+      boolean userRequestedRowAddr = hasField(scanSchema, LanceConstant.ROW_ADDRESS);
       boolean withRowAddrForBlobs = hasBlobColumns && !userRequestedRowAddr;
       if (hasBlobColumns || userRequestedRowAddr) {
         scanOptions.withRowAddress(true);
@@ -137,8 +136,7 @@ public class LanceFragmentScanner implements AutoCloseable {
       if (inputPartition.getTopNSortOrders().isPresent()) {
         scanOptions.setColumnOrderings(inputPartition.getTopNSortOrders().get());
       }
-      boolean withFragmentId =
-          inputPartition.getSchema().getFieldIndex(LanceConstant.FRAGMENT_ID).nonEmpty();
+      boolean withFragmentId = scanSchema.getFieldIndex(LanceConstant.FRAGMENT_ID).nonEmpty();
       long scanCreateStart = System.nanoTime();
       lanceScanner = fragment.newScan(scanOptions.build());
       long scanCreateTimeNs = System.nanoTime() - scanCreateStart;
@@ -251,7 +249,7 @@ public class LanceFragmentScanner implements AutoCloseable {
   private static Set<String> getBlobColumnNames(StructType schema) {
     Set<String> blobColumns = new HashSet<>();
     for (StructField field : schema.fields()) {
-      if (BlobUtils.isBlobSparkField(field)) {
+      if (BlobUtils.isBlobReadColumn(field)) {
         blobColumns.add(field.name());
       }
     }

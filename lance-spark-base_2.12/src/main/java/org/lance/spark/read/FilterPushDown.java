@@ -29,6 +29,7 @@ import java.sql.Date;
 import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 public class FilterPushDown {
@@ -54,25 +55,18 @@ public class FilterPushDown {
     return Optional.of(whereClause);
   }
 
-  /**
-   * @param predicates predicates to check for Lance push-down support
-   * @return accepted push-down predicates (row 0) and rejected post-scan predicates (row 1)
-   */
-  public static Predicate[][] processPredicates(Predicate[] predicates) {
-    List<Predicate> accepted = new ArrayList<>();
-    List<Predicate> rejected = new ArrayList<>();
-
-    for (Predicate predicate : predicates) {
-      if (isPredicateSupported(predicate)) {
-        accepted.add(predicate);
-      } else {
-        rejected.add(predicate);
+  /** Returns true if {@code predicate} references any of the given top-level columns. */
+  public static boolean referencesAny(Predicate predicate, Set<String> columns) {
+    if (columns.isEmpty()) {
+      return false;
+    }
+    for (NamedReference ref : predicate.references()) {
+      String[] names = ref.fieldNames();
+      if (names.length > 0 && columns.contains(names[0])) {
+        return true;
       }
     }
-
-    return new Predicate[][] {
-      accepted.toArray(new Predicate[0]), rejected.toArray(new Predicate[0])
-    };
+    return false;
   }
 
   public static boolean isPredicateSupported(Predicate predicate) {
