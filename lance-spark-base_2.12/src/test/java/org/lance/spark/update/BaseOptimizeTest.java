@@ -122,11 +122,39 @@ public abstract class BaseOptimizeTest {
                     + "num_threads=2,"
                     + "batch_size=2000,"
                     + "defer_index_remap=true,"
-                    + "max_source_fragments=128"
+                    + "max_source_fragments=128,"
+                    + "compaction_mode='try_binary_copy',"
+                    + "binary_copy_read_batch_bytes=1048576"
                     + ")",
                 fullTable));
 
     Assertions.assertEquals("[10,1,10,1]", result.collectAsList().get(0).toString());
+  }
+
+  @Test
+  public void testCompactionModeTryBinaryCopy() {
+    prepareDataset();
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "optimize %s with (target_rows_per_fragment=20000, "
+                    + "compaction_mode='try_binary_copy')",
+                fullTable));
+
+    Assertions.assertEquals("[10,1,10,1]", result.collectAsList().get(0).toString());
+  }
+
+  @Test
+  public void testInvalidCompactionMode() {
+    prepareDataset();
+
+    Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            spark
+                .sql(String.format("optimize %s with (compaction_mode='bogus')", fullTable))
+                .collectAsList());
   }
 
   @Test

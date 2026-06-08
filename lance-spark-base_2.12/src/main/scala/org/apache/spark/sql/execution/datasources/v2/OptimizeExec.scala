@@ -18,7 +18,7 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
 import org.apache.spark.sql.catalyst.plans.logical.{LanceNamedArgument, OptimizeOutputType}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
-import org.lance.compaction.{Compaction, CompactionOptions, CompactionTask, RewriteResult}
+import org.lance.compaction.{Compaction, CompactionMode, CompactionOptions, CompactionTask, RewriteResult}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceSparkReadOptions}
 import org.lance.spark.utils.Utils
 
@@ -51,6 +51,16 @@ case class OptimizeExec(
       builder.withDeferIndexRemap(t.value.asInstanceOf[Boolean]))
     argsMap.get("max_source_fragments").map(t =>
       builder.withMaxSourceFragments(t.value.asInstanceOf[Long]))
+    argsMap.get("compaction_mode").map { t =>
+      val modeStr = t.value.asInstanceOf[String]
+      val mode = CompactionMode.values().find(_.getValue == modeStr).getOrElse(
+        throw new IllegalArgumentException(
+          s"Unknown compaction_mode '$modeStr'. Valid values: " +
+            CompactionMode.values().map(_.getValue).mkString(", ")))
+      builder.withCompactionMode(mode)
+    }
+    argsMap.get("binary_copy_read_batch_bytes").map(t =>
+      builder.withBinaryCopyReadBatchBytes(t.value.asInstanceOf[Long]))
 
     builder.build()
   }

@@ -31,6 +31,16 @@ The `OPTIMIZE` command supports several options to control compaction behavior:
 | `batch_size` | Long | Batch size for processing |
 | `defer_index_remap` | Boolean | Whether to defer index remapping |
 | `max_source_fragments` | Long | Maximum number of source fragments to compact in a single task |
+| `compaction_mode` | String | How data is rewritten: `reencode` (default), `try_binary_copy`, or `force_binary_copy` |
+| `binary_copy_read_batch_bytes` | Long | Read batch size in bytes used during binary-copy compaction |
+
+### Compaction modes
+
+The `compaction_mode` option controls how fragments are rewritten:
+
+- `reencode` (default) — decode and re-encode the data.
+- `try_binary_copy` — binary-copy compatible fragments (skipping decode/re-encode), falling back to `reencode` otherwise. Much cheaper when fragments are compatible.
+- `force_binary_copy` — use binary copy, or fail if fragments are not compatible.
 
 ### Examples
 
@@ -51,6 +61,13 @@ Optimize with multiple options:
         materialize_deletions = TRUE,
         num_threads = 4
     );
+    ```
+
+Optimize using binary copy when fragments are compatible:
+
+=== "SQL"
+    ```sql
+    OPTIMIZE lance.db.users WITH (compaction_mode = 'try_binary_copy');
     ```
 
 ## Output
