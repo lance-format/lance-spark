@@ -716,9 +716,9 @@ class TestDDLColumnCompression:
 
 
 class TestDDLBlobV2:
-    def test_blob_v2_table_reads_content_as_descriptor(self, spark):
-        spark.sql("""
-            CREATE TABLE default.test_blob_v2 (
+    def test_blob_v2_table_reads_content_as_descriptor(self, spark, test_table):
+        spark.sql(f"""
+            CREATE TABLE {test_table} (
                 id INT NOT NULL,
                 content BINARY
             ) USING lance
@@ -732,13 +732,13 @@ class TestDDLBlobV2:
         second_content = b"SQL insert content 2"
 
         spark.sql(
-            f"INSERT INTO default.test_blob_v2 VALUES (1, {_sql_binary_literal(first_content)})"
+            f"INSERT INTO {test_table} VALUES (1, {_sql_binary_literal(first_content)})"
         )
         spark.sql(
-            f"INSERT INTO default.test_blob_v2 VALUES (2, {_sql_binary_literal(second_content)})"
+            f"INSERT INTO {test_table} VALUES (2, {_sql_binary_literal(second_content)})"
         )
 
-        describe_rows = spark.sql("DESCRIBE default.test_blob_v2").collect()
+        describe_rows = spark.sql(f"DESCRIBE {test_table}").collect()
         content_field = next(row for row in describe_rows if row.col_name == "content")
         content_type = content_field.data_type.lower()
 
@@ -746,9 +746,9 @@ class TestDDLBlobV2:
         assert "kind" in content_type
         assert "blob_uri" in content_type
 
-        rows = spark.sql("""
+        rows = spark.sql(f"""
             SELECT id, content.size, content.kind, content.blob_id, content.blob_uri
-            FROM default.test_blob_v2
+            FROM {test_table}
             ORDER BY id
         """).collect()
 
@@ -762,9 +762,9 @@ class TestDDLBlobV2:
         assert rows[1].size == len(second_content)
         assert rows[1].kind == 0
 
-    def test_blob_v2_insert_rejects_non_binary_content(self, spark):
-        spark.sql("""
-            CREATE TABLE default.test_blob_v2_bad_insert (
+    def test_blob_v2_insert_rejects_non_binary_content(self, spark, test_table):
+        spark.sql(f"""
+            CREATE TABLE {test_table} (
                 id INT NOT NULL,
                 content BINARY
             ) USING lance
@@ -775,8 +775,8 @@ class TestDDLBlobV2:
         """)
 
         with pytest.raises(Exception, match="got string"):
-            spark.sql("""
-                INSERT INTO default.test_blob_v2_bad_insert
+            spark.sql(f"""
+                INSERT INTO {test_table}
                 VALUES (1, 'not-binary')
             """)
 
@@ -3020,14 +3020,14 @@ class TestStableRowIds:
 
 
     @requires_update_or_merge
-    def test_update_preserves_row_ids(self, spark):
+    def test_update_preserves_row_ids(self, spark, test_table):
         """Test that UPDATE preserves _rowid values when stable row IDs are enabled.
 
         Verifies the native DeltaWriter.update() path with RowIdMeta attachment
         keeps row IDs stable across updates, including multi-fragment scenarios.
         """
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {test_table} (
                 id INT,
                 name STRING,
                 value INT
@@ -3035,31 +3035,31 @@ class TestStableRowIds:
         """)
 
         # Insert across two fragments
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {test_table} VALUES
             (1, 'Alice', 100),
             (2, 'Bob', 200),
             (3, 'Charlie', 300)
         """)
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {test_table} VALUES
             (4, 'Dave', 400),
             (5, 'Eve', 500)
         """)
 
         # Capture row IDs before update
-        before = spark.sql("""
-            SELECT id, _rowid FROM default.test_table ORDER BY id
+        before = spark.sql(f"""
+            SELECT id, _rowid FROM {test_table} ORDER BY id
         """).collect()
         row_ids_before = {row.id: row._rowid for row in before}
         assert len(row_ids_before) == 5
 
         # Update rows spanning both fragments
-        spark.sql("UPDATE default.test_table SET value = value + 1 WHERE value >= 200")
+        spark.sql(f"UPDATE {test_table} SET value = value + 1 WHERE value >= 200")
 
         # Capture row IDs after update
-        after = spark.sql("""
-            SELECT id, _rowid, value FROM default.test_table ORDER BY id
+        after = spark.sql(f"""
+            SELECT id, _rowid, value FROM {test_table} ORDER BY id
         """).collect()
         row_ids_after = {row.id: row._rowid for row in after}
 
