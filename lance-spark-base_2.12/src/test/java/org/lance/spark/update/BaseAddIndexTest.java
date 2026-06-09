@@ -1161,6 +1161,31 @@ public abstract class BaseAddIndexTest {
     }
   }
 
+  /**
+   * Asserts a vector index has the requested IVF subtype. {@link Index#indexType()} reports the
+   * umbrella {@code VECTOR} for all IVF variants; the concrete {@code IVF_FLAT}/{@code
+   * IVF_PQ}/{@code IVF_SQ} subtype is only exposed via {@link org.lance.Dataset#describeIndices()}.
+   * Asserting the subtype catches regressions where the connector silently builds the wrong variant
+   * for the requested USING method.
+   */
+  private void assertVectorSubtype(String indexName, String expectedSubtype) {
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      IndexDescription desc =
+          lanceDataset.describeIndices().stream()
+              .filter(d -> indexName.equals(d.getName()))
+              .findFirst()
+              .orElseThrow(
+                  () -> new AssertionError("Index description for '" + indexName + "' not found"));
+      Assertions.assertEquals(
+          expectedSubtype,
+          desc.getIndexType().toUpperCase(),
+          "Vector index '" + indexName + "' subtype mismatch");
+    } finally {
+      lanceDataset.close();
+    }
+  }
+
   private void checkFtsIndex(String indexName) {
     Index index = checkIndex(indexName);
     Assertions.assertEquals(IndexType.INVERTED, index.indexType());
@@ -1232,11 +1257,12 @@ public abstract class BaseAddIndexTest {
     Assertions.assertTrue(fragmentsIndexed >= 2, "Expected at least 2 fragments indexed");
     Assertions.assertEquals("test_ivf_flat", indexName);
 
-    // lance reports the umbrella IVF type as VECTOR via Index#indexType(); the concrete
-    // sub-quantizer (FLAT/PQ/SQ) lives in indexDetails (opaque protobuf) — only the build
-    // path knew it was IVF_FLAT. Asserting VECTOR is the most we can portably check here.
-    Index index = checkIndex("test_ivf_flat");
-    Assertions.assertEquals(IndexType.VECTOR, index.indexType());
+    // Manifest Index#indexType() reports the umbrella VECTOR. The concrete subtype
+    // (IVF_FLAT/IVF_PQ/IVF_SQ) is exposed via describeIndices.getIndexType() — assert
+    // both, so a regression that, say, builds IVF_FLAT when the user asked for IVF_PQ
+    // would fail here.
+    checkIndex("test_ivf_flat");
+    assertVectorSubtype("test_ivf_flat", "IVF_FLAT");
   }
 
   @Test
@@ -1255,8 +1281,8 @@ public abstract class BaseAddIndexTest {
     Assertions.assertTrue(fragmentsIndexed >= 2);
     Assertions.assertEquals("test_ivf_pq", row.getString(1));
 
-    Index index = checkIndex("test_ivf_pq");
-    Assertions.assertEquals(IndexType.VECTOR, index.indexType());
+    checkIndex("test_ivf_pq");
+    assertVectorSubtype("test_ivf_pq", "IVF_PQ");
   }
 
   @Test
@@ -1277,8 +1303,8 @@ public abstract class BaseAddIndexTest {
     Assertions.assertTrue(fragmentsIndexed >= 2);
     Assertions.assertEquals("test_ivf_sq", row.getString(1));
 
-    Index index = checkIndex("test_ivf_sq");
-    Assertions.assertEquals(IndexType.VECTOR, index.indexType());
+    checkIndex("test_ivf_sq");
+    assertVectorSubtype("test_ivf_sq", "IVF_SQ");
   }
 
   @Test
@@ -1292,8 +1318,91 @@ public abstract class BaseAddIndexTest {
             fullTable);
     spark.sql(createSql);
     checkIndex("test_ivf_pq_repeat");
+
+    // Capture segment UUIDs after first run (mirrors
+    // testRepeatedCreateZonemapIndexReplacesExistingSegments).
+    Set<UUID> firstRunUuids;
+    org.lance.Dataset ds1 = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      firstRunUuids =
+          ds1.getIndexes().stream()
+              .filter(idx -> "test_ivf_pq_repeat".equals(idx.name()))
+              .map(Index::uuid)
+              .collect(Collectors.toSet());
+    } finally {
+      ds1.close();
+    }
+    Assertions.assertFalse(firstRunUuids.isEmpty(), "First run should produce segments");
+
     spark.sql(createSql);
     checkIndex("test_ivf_pq_repeat");
+
+    // Verify replace semantics: fresh UUIDs, segments cover every fragment exactly once,
+    // no accumulation.
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int fragmentCount = lanceDataset.getFragments().size();
+      List<Index> segments =
+          lanceDataset.getIndexes().stream()
+              .filter(idx -> "test_ivf_pq_repeat".equals(idx.name()))
+              .collect(Collectors.toList());
+      Set<UUID> secondRunUuids = segments.stream().map(Index::uuid).collect(Collectors.toSet());
+      int coveredFragments =
+          segments.stream()
+              .map(idx -> idx.fragments().orElse(Collections.emptyList()).size())
+              .mapToInt(Integer::intValue)
+              .sum();
+      Assertions.assertEquals(
+          fragmentCount,
+          coveredFragments,
+          "Recreated IVF segments must cover all fragments exactly once (saw "
+              + segments.size()
+              + " segments covering "
+              + coveredFragments
+              + " slots, expected "
+              + fragmentCount
+              + ")");
+      Assertions.assertTrue(
+          Collections.disjoint(firstRunUuids, secondRunUuids),
+          "Recreate must produce fresh segment UUIDs, not reuse first-run ones");
+    } finally {
+      lanceDataset.close();
+    }
+  }
+
+  @Test
+  public void testIvfRejectsMultipleColumns() {
+    prepareVectorDataset();
+    Assertions.assertThrows(
+        Exception.class,
+        () ->
+            spark.sql(
+                String.format(
+                    "alter table %s create index idx_multi_vec using ivf_pq (id, embedding) "
+                        + "with (num_partitions=4)",
+                    fullTable)));
+  }
+
+  @Test
+  public void testCreateIvfPqWithBadMetricTypeFails() {
+    prepareVectorDataset();
+
+    RuntimeException exception =
+        Assertions.assertThrows(
+            RuntimeException.class,
+            () ->
+                spark
+                    .sql(
+                        String.format(
+                            "alter table %s create index test_ivf_pq_bad_metric using ivf_pq (embedding) "
+                                + "with (num_partitions=4, num_sub_vectors=4, metric_type='manhattan')",
+                            fullTable))
+                    .collect());
+
+    Assertions.assertTrue(
+        exception.getMessage().toLowerCase().contains("metric")
+            || exception.getMessage().contains("manhattan"),
+        "Expected error to mention bad metric_type, got: " + exception.getMessage());
   }
 
   @Test
@@ -1315,6 +1424,114 @@ public abstract class BaseAddIndexTest {
     Assertions.assertTrue(
         exception.getMessage().contains("num_partitions"),
         "Expected error to mention missing num_partitions, got: " + exception.getMessage());
+  }
+
+  @Test
+  public void testIvfPqCosineRecallOnClusteredData() {
+    // Real recall test: build IVF_PQ with metric_type='cosine' on clustered embeddings,
+    // query with each cluster centroid via VECTOR_SEARCH, assert top-K is mostly the
+    // matching cluster. This is the test that would have caught the lance 6 silent-L2
+    // bug — without it, the metric_type plumbing is unverified end-to-end.
+    int dim = 8;
+    int numClusters = 8;
+    int rowsPerCluster = 64;
+    int totalRows = numClusters * rowsPerCluster; // 512
+
+    String table =
+        catalogName + ".default.recall_test_" + UUID.randomUUID().toString().replace("-", "");
+    spark.sql(
+        String.format(
+            "create table %s (id int, cluster_id int, vector array<float>) using lance "
+                + "TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '%d')",
+            table, dim));
+
+    Random rng = new Random(7L);
+    float[][] centers = new float[numClusters][dim];
+    for (int c = 0; c < numClusters; c++) {
+      for (int j = 0; j < dim; j++) {
+        centers[c][j] = (rng.nextFloat() - 0.5f) * 10.0f;
+      }
+    }
+
+    // Two inserts to get two fragments.
+    insertClustered(table, centers, 0, totalRows / 2, dim, rowsPerCluster, 100L);
+    insertClustered(table, centers, totalRows / 2, totalRows, dim, rowsPerCluster, 200L);
+
+    // num_partitions=8 matches cluster count; num_sub_vectors=4 divides dim=8 evenly.
+    spark.sql(
+        String.format(
+            "alter table %s create index recall_idx using ivf_pq (vector) "
+                + "with (num_partitions=8, num_sub_vectors=4, num_bits=8, metric_type='cosine')",
+            table));
+
+    int k = 10;
+    int hits = 0;
+    int totalQueried = 0;
+    for (int c = 0; c < numClusters; c++) {
+      final int cluster = c;
+      String queryVec =
+          "array("
+              + IntStream.range(0, dim)
+                  .mapToObj(j -> Float.toString(centers[cluster][j]))
+                  .collect(Collectors.joining(", "))
+              + ")";
+      List<Row> results =
+          spark
+              .sql(
+                  "SELECT cluster_id FROM VECTOR_SEARCH('"
+                      + table
+                      + "', "
+                      + queryVec
+                      + ", "
+                      + k
+                      + ")")
+              .collectAsList();
+      Assertions.assertEquals(k, results.size(), "VECTOR_SEARCH must return k results");
+      for (Row r : results) {
+        if (r.getInt(0) == cluster) hits++;
+        totalQueried++;
+      }
+    }
+    double recall = (double) hits / totalQueried;
+    Assertions.assertTrue(
+        recall >= 0.5,
+        "IVF_PQ cosine recall on clustered data must be >= 0.5, got "
+            + String.format("%.3f", recall)
+            + " ("
+            + hits
+            + "/"
+            + totalQueried
+            + " correct cluster hits)");
+  }
+
+  private void insertClustered(
+      String table,
+      float[][] centers,
+      int idStart,
+      int idEnd,
+      int dim,
+      int rowsPerCluster,
+      long seed) {
+    Random rng = new Random(seed);
+    int numClusters = centers.length;
+    String values =
+        IntStream.range(idStart, idEnd)
+            .mapToObj(
+                i -> {
+                  int cluster = (i / rowsPerCluster) % numClusters;
+                  StringBuilder sb = new StringBuilder("array(");
+                  for (int j = 0; j < dim; j++) {
+                    if (j > 0) sb.append(", ");
+                    // Tight cluster (sigma=0.1) so cosine direction strongly correlates
+                    // with cluster — recall on this should be near 1 for a working index.
+                    float v = centers[cluster][j] + (float) (rng.nextGaussian() * 0.1);
+                    sb.append(v);
+                  }
+                  sb.append(")");
+                  return String.format("(%d, %d, %s)", i, cluster, sb);
+                })
+            .collect(Collectors.joining(","));
+    spark.sql(String.format("insert into %s (id, cluster_id, vector) values %s", table, values));
   }
 
   @Test
