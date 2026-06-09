@@ -36,6 +36,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
+import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -1171,5 +1172,171 @@ public abstract class BaseAddIndexTest {
 
   private int fieldId(org.lance.Dataset dataset, String path) {
     return FieldPathUtils.resolveLeafField(dataset.getLanceSchema(), path).getId();
+  }
+
+  private static final int VECTOR_DIM = 16;
+  // PQ training with num_bits=8 needs >= 256 rows (2^8 centroids per subspace).
+  private static final int VECTOR_ROWS_PER_FRAGMENT = 256;
+
+  /**
+   * Build a 2-fragment vector dataset with an `embedding` fixed-size-list column. Vectors are
+   * deterministic per seed so tests are reproducible across runs.
+   */
+  private void prepareVectorDataset() {
+    spark.sql(
+        String.format(
+            "create table %s (id int, embedding array<float>) using lance "
+                + "TBLPROPERTIES ('embedding.arrow.fixed-size-list.size' = '%d')",
+            fullTable, VECTOR_DIM));
+    insertVectors(0, VECTOR_ROWS_PER_FRAGMENT, 42L);
+    insertVectors(VECTOR_ROWS_PER_FRAGMENT, 2 * VECTOR_ROWS_PER_FRAGMENT, 43L);
+  }
+
+  private void insertVectors(int fromId, int toId, long seed) {
+    Random rng = new Random(seed);
+    String values =
+        IntStream.range(fromId, toId)
+            .mapToObj(
+                i -> {
+                  StringBuilder sb = new StringBuilder("array(");
+                  for (int j = 0; j < VECTOR_DIM; j++) {
+                    if (j > 0) sb.append(", ");
+                    sb.append(rng.nextFloat());
+                  }
+                  sb.append(")");
+                  return String.format("(%d, %s)", i, sb);
+                })
+            .collect(Collectors.joining(","));
+    spark.sql(String.format("insert into %s (id, embedding) values %s", fullTable, values));
+  }
+
+  @Test
+  public void testCreateIvfFlatIndex() {
+    prepareVectorDataset();
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index test_ivf_flat using ivf_flat (embedding) "
+                    + "with (num_partitions=4, metric_type='l2')",
+                fullTable));
+
+    Assertions.assertEquals(
+        "StructType(StructField(fragments_indexed,LongType,true),StructField(index_name,StringType,true))",
+        result.schema().toString());
+
+    Row row = result.collectAsList().get(0);
+    long fragmentsIndexed = row.getLong(0);
+    String indexName = row.getString(1);
+
+    Assertions.assertTrue(fragmentsIndexed >= 2, "Expected at least 2 fragments indexed");
+    Assertions.assertEquals("test_ivf_flat", indexName);
+
+    // lance reports the umbrella IVF type as VECTOR via Index#indexType(); the concrete
+    // sub-quantizer (FLAT/PQ/SQ) lives in indexDetails (opaque protobuf) — only the build
+    // path knew it was IVF_FLAT. Asserting VECTOR is the most we can portably check here.
+    Index index = checkIndex("test_ivf_flat");
+    Assertions.assertEquals(IndexType.VECTOR, index.indexType());
+  }
+
+  @Test
+  public void testCreateIvfPqIndex() {
+    prepareVectorDataset();
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index test_ivf_pq using ivf_pq (embedding) "
+                    + "with (num_partitions=4, num_sub_vectors=4, num_bits=8, metric_type='l2')",
+                fullTable));
+
+    Row row = result.collectAsList().get(0);
+    long fragmentsIndexed = row.getLong(0);
+    Assertions.assertTrue(fragmentsIndexed >= 2);
+    Assertions.assertEquals("test_ivf_pq", row.getString(1));
+
+    Index index = checkIndex("test_ivf_pq");
+    Assertions.assertEquals(IndexType.VECTOR, index.indexType());
+  }
+
+  @Test
+  public void testCreateIvfSqIndex() {
+    prepareVectorDataset();
+
+    // metric_type='cosine' specifically: lance 6 silently built L2 centroids here, recall
+    // would have degraded. Lance 7 honors DistanceType end-to-end. This test guards that.
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index test_ivf_sq using ivf_sq (embedding) "
+                    + "with (num_partitions=4, num_bits=8, metric_type='cosine')",
+                fullTable));
+
+    Row row = result.collectAsList().get(0);
+    long fragmentsIndexed = row.getLong(0);
+    Assertions.assertTrue(fragmentsIndexed >= 2);
+    Assertions.assertEquals("test_ivf_sq", row.getString(1));
+
+    Index index = checkIndex("test_ivf_sq");
+    Assertions.assertEquals(IndexType.VECTOR, index.indexType());
+  }
+
+  @Test
+  public void testRecreateIvfPqIndexReplacesOld() {
+    prepareVectorDataset();
+
+    String createSql =
+        String.format(
+            "alter table %s create index test_ivf_pq_repeat using ivf_pq (embedding) "
+                + "with (num_partitions=4, num_sub_vectors=4, num_bits=8, metric_type='l2')",
+            fullTable);
+    spark.sql(createSql);
+    checkIndex("test_ivf_pq_repeat");
+    spark.sql(createSql);
+    checkIndex("test_ivf_pq_repeat");
+  }
+
+  @Test
+  public void testCreateIvfPqWithoutNumPartitionsFails() {
+    prepareVectorDataset();
+
+    RuntimeException exception =
+        Assertions.assertThrows(
+            RuntimeException.class,
+            () ->
+                spark
+                    .sql(
+                        String.format(
+                            "alter table %s create index test_ivf_pq_missing using ivf_pq (embedding) "
+                                + "with (num_sub_vectors=4)",
+                            fullTable))
+                    .collect());
+
+    Assertions.assertTrue(
+        exception.getMessage().contains("num_partitions"),
+        "Expected error to mention missing num_partitions, got: " + exception.getMessage());
+  }
+
+  @Test
+  public void testUseResidualWithArgIsRejected() {
+    prepareVectorDataset();
+
+    // use_residual is a no-op upstream and we reject it explicitly to avoid silent recall
+    // degradation. If lance-core later honors the flag this test's expectation should flip.
+    RuntimeException exception =
+        Assertions.assertThrows(
+            RuntimeException.class,
+            () ->
+                spark
+                    .sql(
+                        String.format(
+                            "alter table %s create index test_ivf_pq_resid using ivf_pq (embedding) "
+                                + "with (num_partitions=4, use_residual=true)",
+                            fullTable))
+                    .collect());
+
+    Assertions.assertTrue(
+        exception.getMessage().contains("use_residual"),
+        "Expected error to mention use_residual, got: " + exception.getMessage());
   }
 }
