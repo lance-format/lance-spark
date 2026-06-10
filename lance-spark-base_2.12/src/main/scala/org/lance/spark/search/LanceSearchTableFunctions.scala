@@ -16,10 +16,12 @@ package org.lance.spark.search
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
+import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, Expression, ExpressionInfo, Literal, SortOrder}
 import org.apache.spark.sql.catalyst.expressions.{CreateArray, Expression, Literal}
-import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.catalyst.plans.logical.{GlobalLimit, LocalLimit, LogicalPlan, Offset, Project, Sort}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
+import org.apache.spark.sql.types._
 import org.apache.spark.sql.types.{DataTypes, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.lance.spark.LanceDataset
@@ -222,12 +224,74 @@ object LanceSearchTableFunctions {
       schema: StructType,
       query: LanceSearchQuery,
       resolved: ResolvedLanceTable): LogicalPlan = {
-    val table = new LanceSearchTable(functionName, schema, query)
-    DataSourceV2Relation.create(
+    val distributed = shouldUseDistributed(query)
+
+    val table =
+      if (distributed) {
+        new LanceSearchTable(
+          functionName,
+          schema,
+          query,
+          /* distributed = */ true,
+          resolved.table.readOptions(),
+          resolved.table.getNamespaceImpl,
+          resolved.table.getNamespaceProperties,
+          resolved.table.getInitialStorageOptions)
+      } else {
+        new LanceSearchTable(
+          functionName,
+          schema,
+          query,
+          /* distributed = */ false,
+          null,
+          null,
+          null,
+          null)
+      }
+
+    val rel = DataSourceV2Relation.create(
       table,
       Some(resolved.catalog),
       Some(resolved.identifier),
       CaseInsensitiveStringMap.empty())
+
+    if (distributed) {
+      val distanceAttr =
+        rel.output
+          .find(attr => attr.name == DistanceMetricColumn)
+          .getOrElse {
+            throw new IllegalStateException(
+              s"Internal column ${DistanceMetricColumn} is missing from vector_search plan.")
+          }
+      val sorted = Sort(Seq(SortOrder(distanceAttr, Ascending)), global = true, rel)
+      // Each worker over-fetches `k + offset` rows (LanceSearchQuery.k = userK + offset, set by
+      // LanceSearchTableFunctions.vectorSearch). Globally we sort, drop the first `offset` rows,
+      // then take `userK`.
+      val totalCandidates = query.getK
+      val effectiveOffset =
+        if (query.getOffset != null) query.getOffset.intValue() else 0
+      val userK = math.max(totalCandidates - effectiveOffset, 0)
+      val candidateLimited =
+        GlobalLimit(Literal(totalCandidates), LocalLimit(Literal(totalCandidates), sorted))
+      if (effectiveOffset > 0) {
+        GlobalLimit(
+          Literal(userK),
+          LocalLimit(Literal(userK), Offset(Literal(effectiveOffset), candidateLimited)))
+      } else {
+        candidateLimited
+      }
+    } else {
+      rel
+    }
+  }
+
+  private def shouldUseDistributed(query: LanceSearchQuery): Boolean = {
+    val spark = SparkSession.active
+    val enabled = spark.conf.get("spark.sql.lance.search.distributed.enabled", "true").toBoolean
+    if (!enabled) return false
+    if (query.getSearchType != SearchType.VECTOR) return false
+    if (java.lang.Boolean.TRUE == query.getBypassVectorIndex) return false
+    true
   }
 
   private def hybridRelation(
