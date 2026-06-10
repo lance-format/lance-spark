@@ -18,7 +18,6 @@ import com.fasterxml.jackson.databind.node.ObjectNode
 import org.apache.arrow.c.{ArrowArrayStream, Data}
 import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.arrow.vector.ipc.ArrowReader
-import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
 import org.apache.spark.sql.catalyst.plans.logical.{AddIndexOutputType, LanceNamedArgument}
@@ -115,20 +114,60 @@ case class AddIndexExec(
       }
     }
 
-    // Zonemap uses logical segment commit path
+    // Logical segment commit path: ZONEMAP and IVF_*
     if (useLogicalSegmentCommit) {
       val (nsImpl, nsProps, tableId, initialStorageOpts) =
         extractNamespaceInfo(lanceDataset, readOptions)
-      val zonemapJob = new ZonemapIndexJob(
-        this,
-        readOptions,
-        fragmentIds,
-        validatedNumSegments,
-        nsImpl,
-        nsProps,
-        tableId,
-        initialStorageOpts)
-      val segments = zonemapJob.run()
+
+      val segments: Seq[Index] = indexType match {
+        case IndexType.ZONEMAP =>
+          val zonemapJob = new ZonemapIndexJob(
+            this,
+            readOptions,
+            fragmentIds,
+            validatedNumSegments,
+            nsImpl,
+            nsProps,
+            tableId,
+            initialStorageOpts)
+          zonemapJob.run()
+
+        case IndexType.IVF_FLAT
+            | IndexType.IVF_PQ
+            | IndexType.IVF_SQ
+            | IndexType.IVF_HNSW_PQ
+            | IndexType.IVF_HNSW_SQ =>
+          if (columns.size != 1) {
+            throw new UnsupportedOperationException(
+              s"$indexType currently supports a single vector column only")
+          }
+          val plan = VectorIndexParamsResolver.resolve(
+            indexType,
+            args,
+            readOptions,
+            initialStorageOpts,
+            nsImpl,
+            nsProps,
+            tableId,
+            columns.head)
+          val vectorJob = new VectorIndexJob(
+            this,
+            readOptions,
+            fragmentIds,
+            plan,
+            indexName,
+            columns,
+            validatedNumSegments,
+            nsImpl,
+            nsProps,
+            tableId,
+            initialStorageOpts)
+          vectorJob.runSegments()
+
+        case other =>
+          throw new IllegalStateException(s"Unexpected logical-segment type: $other")
+      }
+
       // Atomic add+remove via Lance core; see commitIndexSegments
       commitIndexSegments(readOptions, columns.head, segments)
       return Seq(new GenericInternalRow(Array[Any](
@@ -635,14 +674,17 @@ class ZonemapIndexJob(
     nsImpl: Option[String],
     nsProps: Option[Map[String, String]],
     tableId: Option[List[String]],
-    initialStorageOpts: Option[Map[String, String]])
-  extends Logging {
+    initialStorageOpts: Option[Map[String, String]]) {
 
   def run(): Seq[Index] = {
     val encodedReadOptions = encode(readOptions)
     val columns = addIndexExec.columns.toList
     val argsJson = IndexUtils.toJson(addIndexExec.args)
-    val fragmentBatches = batchFragments(fragmentIds, numSegments)
+    val fragmentBatches =
+      IndexUtils.batchFragments(
+        fragmentIds,
+        numSegments,
+        addIndexExec.session.sparkContext.defaultParallelism)
 
     val tasks = fragmentBatches.map { batch =>
       ZonemapIndexTask(
@@ -672,30 +714,6 @@ class ZonemapIndexJob(
             "visible to readers and will not affect query correctness.",
           e)
     }
-  }
-
-  private def batchFragments(
-      fragmentIds: List[Integer],
-      numSegments: Option[Int]): Seq[List[Integer]] = {
-    val n = fragmentIds.size
-    val k = numSegments match {
-      case Some(requested) =>
-        val clamped = math.max(1, math.min(n, requested))
-        if (clamped != requested) {
-          logInfo(
-            s"num_segments=$requested clamped to $clamped " +
-              s"(fragment count=$n)")
-        }
-        clamped
-      case None => math.max(
-          1,
-          math.min(n, addIndexExec.session.sparkContext.defaultParallelism))
-    }
-    (0 until k).map { i =>
-      fragmentIds.slice(
-        (i.toLong * n / k).toInt,
-        ((i.toLong + 1) * n / k).toInt)
-    }.filter(_.nonEmpty)
   }
 }
 
@@ -762,6 +780,11 @@ object IndexUtils {
       case "btree" => IndexType.BTREE
       case "zonemap" => IndexType.ZONEMAP
       case "fts" => IndexType.INVERTED
+      case "ivf_flat" => IndexType.IVF_FLAT
+      case "ivf_pq" => IndexType.IVF_PQ
+      case "ivf_sq" => IndexType.IVF_SQ
+      case "ivf_hnsw_pq" => IndexType.IVF_HNSW_PQ
+      case "ivf_hnsw_sq" => IndexType.IVF_HNSW_SQ
       case other => throw new UnsupportedOperationException(s"Unsupported index method: $other")
     }
   }
@@ -790,8 +813,14 @@ object IndexUtils {
     }
   }
 
-  def useLogicalSegmentCommit(indexType: IndexType): Boolean = {
-    indexType == IndexType.ZONEMAP
+  def useLogicalSegmentCommit(indexType: IndexType): Boolean = indexType match {
+    case IndexType.ZONEMAP => true
+    case IndexType.IVF_FLAT => true
+    case IndexType.IVF_PQ => true
+    case IndexType.IVF_SQ => true
+    case IndexType.IVF_HNSW_PQ => true
+    case IndexType.IVF_HNSW_SQ => true
+    case _ => false
   }
 
   /** Extracts the commit metadata from a newly created Index. */
@@ -855,6 +884,40 @@ object IndexUtils {
       }
       jsonMapper.writeValueAsString(node)
     }
+  }
+
+  /**
+   * Split fragment ids into roughly equal batches for parallel index segment
+   * builds. Used by zonemap and IVF_* logical-segment commit paths.
+   *
+   * @param fragmentIds       fragments to split (preserves input order)
+   * @param numSegments       caller-supplied N; clamped to [1, fragmentIds.size]
+   *                          and emits a warn when clamping happens
+   * @param defaultParallelism fallback when numSegments is None
+   * @return non-empty batches; sum of sizes equals fragmentIds.size
+   */
+  def batchFragments(
+      fragmentIds: List[Integer],
+      numSegments: Option[Int],
+      defaultParallelism: Int): Seq[List[Integer]] = {
+    val n = fragmentIds.size
+    if (n == 0) return Seq.empty
+    val k = numSegments match {
+      case Some(req) =>
+        val clamped = math.max(1, math.min(n, req))
+        if (clamped != req) {
+          // Same wording as the existing zonemap path so users see one message.
+          org.slf4j.LoggerFactory.getLogger(
+            "org.apache.spark.sql.execution.datasources.v2.IndexUtils")
+            .warn(s"num_segments=$req clamped to $clamped (fragment count=$n)")
+        }
+        clamped
+      case None =>
+        math.max(1, math.min(n, defaultParallelism))
+    }
+    (0 until k).map { i =>
+      fragmentIds.slice((i.toLong * n / k).toInt, ((i.toLong + 1) * n / k).toInt)
+    }.filter(_.nonEmpty)
   }
 
 }
