@@ -17,6 +17,7 @@ import org.lance.index.Index;
 import org.lance.index.IndexCriteria;
 import org.lance.index.IndexDescription;
 import org.lance.index.IndexType;
+import org.lance.spark.utils.FieldPathUtils;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
@@ -99,6 +100,29 @@ public abstract class BaseAddIndexTest {
                 .boxed()
                 .map(i -> String.format("(%d, 'text_%d')", i, i))
                 .collect(Collectors.joining(","))));
+  }
+
+  private void prepareNestedDataset() {
+    spark.sql(
+        String.format(
+            "create table %s ("
+                + "id int, "
+                + "left_payload struct<value:int>, "
+                + "right_payload struct<value:int>, "
+                + "dot_payload struct<`literal.dot`:int>, "
+                + "special_payload struct<`user-id`:int, `display name`:int>"
+                + ") using lance;",
+            fullTable));
+    spark.sql(
+        String.format(
+            "insert into %s values "
+                + "(1, named_struct('value', 10), named_struct('value', 100), "
+                + "named_struct('literal.dot', 1000), "
+                + "named_struct('user-id', 10000, 'display name', 10001)), "
+                + "(2, named_struct('value', 20), named_struct('value', 200), "
+                + "named_struct('literal.dot', 2000), "
+                + "named_struct('user-id', 20000, 'display name', 20001))",
+            fullTable));
   }
 
   @Test
@@ -485,6 +509,91 @@ public abstract class BaseAddIndexTest {
   }
 
   @Test
+  public void testCreateBTreeIndexOnNestedFieldsUsesLeafFieldIds() {
+    prepareNestedDataset();
+
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_left_value using btree (left_payload.value)",
+            fullTable));
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_right_value using btree (right_payload.value)",
+            fullTable));
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int leftFieldId = fieldId(lanceDataset, "left_payload.value");
+      int rightFieldId = fieldId(lanceDataset, "right_payload.value");
+
+      Assertions.assertEquals(
+          Collections.singletonList(leftFieldId), checkIndex("idx_left_value").fields());
+      Assertions.assertEquals(
+          Collections.singletonList(rightFieldId), checkIndex("idx_right_value").fields());
+      Assertions.assertNotEquals(
+          leftFieldId,
+          rightFieldId,
+          "Same leaf names under different parents must resolve to different field ids");
+    } finally {
+      lanceDataset.close();
+    }
+  }
+
+  @Test
+  public void testCreateBTreeIndexOnNestedLiteralDotFieldShowsCanonicalPath() {
+    prepareNestedDataset();
+
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_literal_dot using btree (dot_payload.`literal.dot`)",
+            fullTable));
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int literalDotFieldId = fieldId(lanceDataset, "dot_payload.`literal.dot`");
+      Assertions.assertEquals(
+          Collections.singletonList(literalDotFieldId), checkIndex("idx_literal_dot").fields());
+    } finally {
+      lanceDataset.close();
+    }
+
+    List<Row> rows = spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+    Row row =
+        rows.stream()
+            .filter(r -> "idx_literal_dot".equals(r.getString(0)))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("SHOW INDEXES did not return idx_literal_dot"));
+    Assertions.assertEquals(Collections.singletonList("dot_payload.`literal.dot`"), row.getList(1));
+  }
+
+  @Test
+  public void testCreateBTreeIndexOnNestedSpecialCharacterFieldShowsCanonicalPath() {
+    prepareNestedDataset();
+
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_user_id using btree (special_payload.`user-id`)",
+            fullTable));
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int userIdFieldId = fieldId(lanceDataset, "special_payload.`user-id`");
+      Assertions.assertEquals(
+          Collections.singletonList(userIdFieldId), checkIndex("idx_user_id").fields());
+    } finally {
+      lanceDataset.close();
+    }
+
+    List<Row> rows = spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+    Row row =
+        rows.stream()
+            .filter(r -> "idx_user_id".equals(r.getString(0)))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("SHOW INDEXES did not return idx_user_id"));
+    Assertions.assertEquals(Collections.singletonList("special_payload.`user-id`"), row.getList(1));
+  }
+
+  @Test
   public void testCreateBTreeIndexWithUnrecognizedBuildMode() {
     prepareDataset();
 
@@ -809,5 +918,9 @@ public abstract class BaseAddIndexTest {
     if ("2".equals(System.getenv("LANCE_FTS_FORMAT_VERSION"))) {
       Assertions.assertEquals(2, index.indexVersion());
     }
+  }
+
+  private int fieldId(org.lance.Dataset dataset, String path) {
+    return FieldPathUtils.resolveLeafField(dataset.getLanceSchema(), path).getId();
   }
 }

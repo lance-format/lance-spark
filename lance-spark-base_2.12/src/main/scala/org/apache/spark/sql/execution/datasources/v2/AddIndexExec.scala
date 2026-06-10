@@ -33,7 +33,7 @@ import org.lance.index.scalar.{BTreeIndexParams, ScalarIndexParams}
 import org.lance.operation.{CreateIndex => AddIndexOperation}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceRuntime, LanceSparkReadOptions}
 import org.lance.spark.arrow.LanceArrowWriter
-import org.lance.spark.utils.{CloseableUtil, Utils}
+import org.lance.spark.utils.{CloseableUtil, FieldPathUtils, Utils}
 import org.lance.spark.write.SingleBatchArrowReader
 
 import java.time.Instant
@@ -68,11 +68,16 @@ case class AddIndexExec(
 
     val readOptions = lanceDataset.readOptions()
 
-    // Get all fragment id list from dataset
-    val fragmentIds = {
+    val (fragmentIds, canonicalColumns) = {
       val ds = Utils.openDatasetBuilder(readOptions).build()
       try {
-        ds.getFragments.asScala.map(_.getId).map(Integer.valueOf).toList
+        val canonical = columns.map { column =>
+          val field = FieldPathUtils.resolveLeafField(ds.getLanceSchema, column)
+          FieldPathUtils.pathByFieldId(ds.getLanceSchema, field.getId)
+        }
+        (
+          ds.getFragments.asScala.map(_.getId).map(Integer.valueOf).toList,
+          canonical)
       } finally {
         ds.close()
       }
@@ -85,7 +90,7 @@ case class AddIndexExec(
 
     val indexType = IndexUtils.buildIndexType(method)
 
-    if (indexType == IndexType.ZONEMAP && columns.size != 1) {
+    if (indexType == IndexType.ZONEMAP && canonicalColumns.size != 1) {
       throw new UnsupportedOperationException(
         "Zonemap index currently supports a single column only")
     }
@@ -120,7 +125,7 @@ case class AddIndexExec(
       val (nsImpl, nsProps, tableId, initialStorageOpts) =
         extractNamespaceInfo(lanceDataset, readOptions)
       val zonemapJob = new ZonemapIndexJob(
-        this,
+        this.copy(columns = canonicalColumns),
         readOptions,
         fragmentIds,
         validatedNumSegments,
@@ -130,7 +135,7 @@ case class AddIndexExec(
         initialStorageOpts)
       val segments = zonemapJob.run()
       // Atomic add+remove via Lance core; see commitIndexSegments
-      commitIndexSegments(readOptions, columns.head, segments)
+      commitIndexSegments(readOptions, canonicalColumns.head, segments)
       return Seq(new GenericInternalRow(Array[Any](
         fragmentIds.size.toLong,
         UTF8String.fromString(indexName))))
@@ -146,19 +151,15 @@ case class AddIndexExec(
         readOptions,
         uuid.toString,
         fragmentIds,
+        canonicalColumns,
         btreeBuildMode).run()
 
     try {
       // Merge index metadata after all fragments are indexed
       dataset.mergeIndexMetadata(uuid.toString, indexType, Optional.empty())
 
-      val fieldIdByName = dataset.getLanceSchema.fields().asScala
-        .map(f => f.getName -> f.getId)
-        .toMap
-      val fieldIds = columns.map { column =>
-        fieldIdByName.getOrElse(
-          column,
-          throw new IllegalArgumentException(s"Cannot find index column in Lance schema: $column"))
+      val fieldIds = canonicalColumns.map { column =>
+        FieldPathUtils.resolveLeafField(dataset.getLanceSchema, column).getId
       }.toList
 
       val datasetVersion = dataset.version()
@@ -248,6 +249,7 @@ case class AddIndexExec(
       readOptions: LanceSparkReadOptions,
       uuid: String,
       fragmentIds: List[Integer],
+      canonicalColumns: Seq[String],
       btreeBuildMode: Option[String]): IndexJob = {
     val (nsImpl, nsProps, tableId, initialStorageOpts) =
       extractNamespaceInfo(lanceDataset, readOptions)
@@ -257,7 +259,7 @@ case class AddIndexExec(
         btreeBuildMode match {
           case Some("range") =>
             return new RangeBasedBTreeIndexJob(
-              this,
+              this.copy(columns = canonicalColumns),
               readOptions,
               uuid,
               nsImpl,
@@ -268,7 +270,7 @@ case class AddIndexExec(
 
           case Some("fragment") | None =>
             new FragmentBasedIndexJob(
-              this,
+              this.copy(columns = canonicalColumns),
               readOptions,
               uuid,
               fragmentIds,
@@ -280,7 +282,7 @@ case class AddIndexExec(
 
       case _ =>
         new FragmentBasedIndexJob(
-          this,
+          this.copy(columns = canonicalColumns),
           readOptions,
           uuid,
           fragmentIds,
