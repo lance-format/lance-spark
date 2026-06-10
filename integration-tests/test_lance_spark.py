@@ -16,7 +16,16 @@ import os
 import time
 import pytest
 from packaging.version import Version
-from pyspark.sql.types import StructType, StructField, IntegerType, StringType, DoubleType, BinaryType
+from pyspark.sql.types import (
+    ArrayType,
+    BinaryType,
+    DoubleType,
+    FloatType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
+)
 
 SPARK_VERSION = Version(os.environ.get("SPARK_VERSION", "3.5"))
 
@@ -121,6 +130,12 @@ def _require_sql_search_backend(spark):
     backend = getattr(spark, "_lance_backend", None)
     if backend not in ("local", "rest-dir"):
         pytest.skip("SQL search table functions are covered on local dir and rest-dir backends")
+
+
+def _require_namespace_insert_backend(spark):
+    backend = getattr(spark, "_lance_backend", None)
+    if backend not in ("local", "rest-dir"):
+        pytest.skip("Namespace insert writes are covered on local dir and rest-dir backends")
 
 
 # =============================================================================
@@ -1987,6 +2002,91 @@ class TestDMLInsert:
 
         count = spark.table("default.test_table").count()
         assert count == 4
+
+
+@pytest.mark.rest_dir_compatible
+class TestDMLNamespaceInsert:
+    """Test append writes through the Lance namespace insert API."""
+
+    def test_namespace_insert_append_data(self, spark):
+        """Test DataFrame append through namespace insert with multiple writer tasks."""
+        _require_namespace_insert_backend(spark)
+
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING,
+                value DOUBLE
+            )
+        """)
+
+        df = (
+            spark.range(0, 24)
+            .repartition(6)
+            .selectExpr(
+                "CAST(id AS INT) AS id",
+                "concat('name-', id) AS name",
+                "CAST(id * 1.5 AS DOUBLE) AS value",
+            )
+        )
+
+        (
+            df.writeTo("default.test_table")
+            .option("use_namespace_insert", "true")
+            .option("namespace_insert_parallelism", "3")
+            .option("batch_size", "5")
+            .append()
+        )
+
+        rows = spark.sql("""
+            SELECT COUNT(*) AS count_rows, SUM(id) AS sum_id, SUM(value) AS sum_value
+            FROM default.test_table
+        """).collect()
+
+        assert rows[0].count_rows == 24
+        assert rows[0].sum_id == sum(range(24))
+        assert rows[0].sum_value == pytest.approx(sum(i * 1.5 for i in range(24)))
+
+    def test_namespace_insert_append_vector_data(self, spark):
+        """Test namespace insert preserves fixed-size-list vector writes."""
+        _require_namespace_insert_backend(spark)
+
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                vector ARRAY<FLOAT>
+            ) USING lance
+            TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '4')
+        """)
+
+        schema = StructType([
+            StructField("id", IntegerType(), True),
+            StructField("vector", ArrayType(FloatType()), True),
+        ])
+        df = spark.createDataFrame(
+            [
+                (1, [1.0, 0.0, 0.0, 0.0]),
+                (2, [0.0, 1.0, 0.0, 0.0]),
+                (3, [0.0, 0.0, 1.0, 0.0]),
+                (4, [0.0, 0.0, 0.0, 1.0]),
+            ],
+            schema,
+        ).repartition(2)
+
+        (
+            df.writeTo("default.test_table")
+            .option("use_namespace_insert", "true")
+            .option("namespace_insert_parallelism", "2")
+            .append()
+        )
+
+        rows = spark.sql("""
+            SELECT id, vector FROM default.test_table ORDER BY id
+        """).collect()
+
+        assert [row.id for row in rows] == [1, 2, 3, 4]
+        assert rows[0].vector == [1.0, 0.0, 0.0, 0.0]
+        assert rows[3].vector == [0.0, 0.0, 0.0, 1.0]
 
 
 @requires_update_or_merge

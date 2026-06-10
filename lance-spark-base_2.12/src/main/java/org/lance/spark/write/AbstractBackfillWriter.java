@@ -104,7 +104,8 @@ public abstract class AbstractBackfillWriter implements DataWriter<InternalRow> 
                   VectorSchemaRoot.create(
                       LanceArrowUtils.toArrowSchema(writerSchema, "UTC", false), allocator);
               org.lance.spark.arrow.LanceArrowWriter writer =
-                  org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(data, writerSchema);
+                  org.lance.spark.arrow.LanceArrowWriteBridge$.MODULE$.createWithoutResolver(
+                      data, writerSchema);
               return new FragmentBuffer(data, writer);
             });
 

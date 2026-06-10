@@ -23,6 +23,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Tests for {@link LanceSparkWriteOptions}. */
@@ -149,5 +150,47 @@ public class LanceSparkWriteOptionsTest {
     assertEquals(256, writeOptions.getBatchSize());
     assertTrue(writeOptions.getEnableStableRowIds());
     assertEquals(Long.valueOf(2147483648L), writeOptions.getBlobPackFileSizeThreshold());
+  }
+
+  @Test
+  public void testNamespaceInsertOptionsParsedFromOptions() {
+    final Map<String, String> options = new HashMap<>();
+    options.put("path", TEMP_URL);
+    options.put("use_namespace_insert", "true");
+    options.put("namespace_insert_parallelism", "4");
+
+    final LanceSparkWriteOptions writeOptions =
+        LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(options).build();
+
+    assertTrue(writeOptions.isUseNamespaceInsert());
+    assertEquals(4, writeOptions.getNamespaceInsertParallelism());
+    assertFalse(writeOptions.getStorageOptions().containsKey("use_namespace_insert"));
+    assertFalse(writeOptions.getStorageOptions().containsKey("namespace_insert_parallelism"));
+  }
+
+  @Test
+  public void testNamespaceInsertOptionsCopiedByToBuilder() {
+    final LanceSparkWriteOptions writeOptions =
+        LanceSparkWriteOptions.builder()
+            .datasetUri(TEMP_URL)
+            .useNamespaceInsert(true)
+            .namespaceInsertParallelism(8)
+            .build()
+            .toBuilder()
+            .build();
+
+    assertTrue(writeOptions.isUseNamespaceInsert());
+    assertEquals(8, writeOptions.getNamespaceInsertParallelism());
+  }
+
+  @Test
+  public void testNamespaceInsertParallelismMustBeNonNegative() {
+    final Map<String, String> options = new HashMap<>();
+    options.put("path", TEMP_URL);
+    options.put("namespace_insert_parallelism", "-1");
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(options).build());
   }
 }

@@ -236,7 +236,8 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
       throw e;
     }
     currentArrowWriter =
-        org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(currentBatch, sparkSchema, resolver);
+        org.lance.spark.arrow.LanceArrowWriteBridge$.MODULE$.createWithResolver(
+            currentBatch, sparkSchema, resolver);
     currentBatchRowCount.set(0);
   }
 
@@ -248,7 +249,9 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
     // Include bytes buffered outside the vector (unresolved blob references resolve to far larger
     // bytes on finish); sizing only the ~200-byte references would let the batch grow until
     // resolution OOMs the executor.
-    return currentBatchAllocator.getAllocatedMemory() + currentArrowWriter.estimatedBufferedBytes()
+    return currentBatchAllocator.getAllocatedMemory()
+            + org.lance.spark.arrow.LanceArrowWriteBridge$.MODULE$.estimatedBufferedBytes(
+                currentArrowWriter)
         >= maxBatchBytes;
   }
 

@@ -16,11 +16,19 @@ package org.lance.spark.write;
 import org.lance.Dataset;
 import org.lance.WriteParams;
 import org.lance.memwal.InitializeMemWalParams;
+import org.lance.namespace.DirectoryNamespace;
+import org.lance.namespace.model.CreateNamespaceRequest;
+import org.lance.namespace.model.CreateTableRequest;
+import org.lance.namespace.model.CreateTableResponse;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.VarCharVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.ipc.ArrowStreamWriter;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
@@ -36,9 +44,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -70,6 +81,44 @@ public class SparkWriteTest {
       dataset.initializeMemWal(new InitializeMemWalParams().withIdentitySharding("name"));
     }
     return datasetUri;
+  }
+
+  private byte[] createNamespaceTableData(BufferAllocator allocator) throws IOException {
+    try (VectorSchemaRoot root = VectorSchemaRoot.create(ARROW_SCHEMA, allocator)) {
+      IntVector idVector = (IntVector) root.getVector("id");
+      VarCharVector nameVector = (VarCharVector) root.getVector("name");
+      idVector.allocateNew(2);
+      nameVector.allocateNew(2);
+      idVector.set(0, 1);
+      idVector.set(1, 2);
+      nameVector.set(0, "Alice".getBytes());
+      nameVector.set(1, "Bob".getBytes());
+      idVector.setValueCount(2);
+      nameVector.setValueCount(2);
+      root.setRowCount(2);
+
+      ByteArrayOutputStream out = new ByteArrayOutputStream();
+      try (ArrowStreamWriter writer = new ArrowStreamWriter(root, null, out)) {
+        writer.start();
+        writer.writeBatch();
+        writer.end();
+      }
+      return out.toByteArray();
+    }
+  }
+
+  private String createNamespaceTable(String namespaceName, String tableName) throws IOException {
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
+        DirectoryNamespace namespace = new DirectoryNamespace()) {
+      namespace.initialize(Collections.singletonMap("root", tempDir.toString()), allocator);
+      namespace.createNamespace(
+          new CreateNamespaceRequest().id(Collections.singletonList(namespaceName)));
+      CreateTableResponse response =
+          namespace.createTable(
+              new CreateTableRequest().id(Arrays.asList(namespaceName, tableName)),
+              createNamespaceTableData(allocator));
+      return response.getLocation();
+    }
   }
 
   private SparkWrite.SparkWriteBuilder createBuilder(String datasetUri) {
@@ -176,6 +225,28 @@ public class SparkWriteTest {
     return (SparkWrite) builder.build();
   }
 
+  private SparkWrite createNamespaceInsertWrite(
+      String datasetUri, List<String> tableId, int parallelism) {
+    LanceSparkWriteOptions writeOptions =
+        LanceSparkWriteOptions.builder()
+            .datasetUri(datasetUri)
+            .useNamespaceInsert(true)
+            .namespaceInsertParallelism(parallelism)
+            .build();
+    SparkWrite.SparkWriteBuilder builder =
+        new SparkWrite.SparkWriteBuilder(
+            SPARK_SCHEMA,
+            writeOptions,
+            Collections.emptyMap(),
+            "dir",
+            Collections.singletonMap("root", tempDir.toString()),
+            tableId,
+            false,
+            null,
+            Collections.emptyMap());
+    return (SparkWrite) builder.build();
+  }
+
   @Test
   public void testRequiredDistributionWithMemWalSharding(TestInfo testInfo) {
     String datasetUri = createIdentityShardedDataset(testInfo.getTestMethod().get().getName());
@@ -195,6 +266,21 @@ public class SparkWriteTest {
     Distribution dist = write.requiredDistribution();
     // Unspecified distribution — no clustering required
     assertFalse(dist instanceof ClusteredDistribution);
+  }
+
+  @Test
+  public void testNamespaceInsertParallelismWithoutShardingUsesClusteredDistribution(
+      TestInfo testInfo) throws IOException {
+    String namespaceName = "workspace";
+    String tableName = testInfo.getTestMethod().get().getName();
+    String datasetUri = createNamespaceTable(namespaceName, tableName);
+    SparkWrite write =
+        createNamespaceInsertWrite(datasetUri, Arrays.asList(namespaceName, tableName), 3);
+
+    Distribution dist = write.requiredDistribution();
+    assertInstanceOf(ClusteredDistribution.class, dist);
+    assertEquals(1, ((ClusteredDistribution) dist).clustering().length);
+    assertEquals(3, write.requiredNumPartitions());
   }
 
   @Test

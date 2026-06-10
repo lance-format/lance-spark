@@ -155,6 +155,21 @@ object LanceArrowWriter {
   }
 }
 
+object LanceArrowWriteBridge {
+  // Java write paths use this bridge to avoid Scala overload/accessor differences across
+  // Spark/Scala cross-builds.
+  def createWithResolver(
+      root: VectorSchemaRoot,
+      sparkSchema: StructType,
+      resolver: BlobReferenceResolver): LanceArrowWriter =
+    LanceArrowWriter.create(root, sparkSchema, resolver)
+
+  def createWithoutResolver(root: VectorSchemaRoot, sparkSchema: StructType): LanceArrowWriter =
+    LanceArrowWriter.create(root, sparkSchema)
+
+  def estimatedBufferedBytes(writer: LanceArrowWriter): Long = writer.estimatedBufferedBytes
+}
+
 /**
  * Writer that converts Spark InternalRow data to Arrow format.
  * Copied from Spark's ArrowWriter to support custom field writers for FixedSizeList.

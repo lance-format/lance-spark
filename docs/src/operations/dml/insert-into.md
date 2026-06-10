@@ -59,6 +59,50 @@ Add data to existing Lance tables using SQL or DataFrames.
     newDF.write().mode("append").saveAsTable("users");
     ```
 
+## Namespace Insert Writes
+
+For namespace-backed tables, append writes can use the Lance Namespace insert API. This is useful
+when the namespace implementation can execute ingestion close to the table storage, such as a REST
+namespace service.
+
+=== "Python"
+    ```python
+    df.writeTo("users") \
+        .option("use_namespace_insert", "true") \
+        .option("namespace_insert_parallelism", "8") \
+        .option("batch_size", "4096") \
+        .append()
+    ```
+
+=== "Scala"
+    ```scala
+    df.writeTo("users")
+        .option("use_namespace_insert", "true")
+        .option("namespace_insert_parallelism", "8")
+        .option("batch_size", "4096")
+        .append()
+    ```
+
+`use_namespace_insert` applies to append writes to existing namespace-backed tables. Create,
+replace, overwrite, path-based writes, and schema backfill operations use the default writer.
+
+### Expected Behavior
+
+For users, namespace insert writes look like a normal DataFrame append with two optional write
+options. Existing `INSERT INTO` statements and `.append()` calls keep using the default Spark writer
+unless `use_namespace_insert` is set. When enabled, Spark still plans executor-side writer tasks, but
+each task sends Arrow batches to the configured Lance namespace instead of committing Lance fragments
+directly from the driver. This lets directory and REST namespaces handle ingestion through the same
+namespace API.
+
+When `namespace_insert_parallelism` is greater than `0`, Spark creates that many writer tasks. For
+sharded tables Spark uses the table sharding distribution; for unsharded tables Spark repartitions
+by the first output column.
+
+Each namespace insert request is committed as it runs. If a Spark task or driver fails after some
+requests complete, those rows may already be visible. Use the default writer when you need Spark's
+driver-side atomic commit behavior.
+
 ## Insert with Column Specification
 
 === "SQL"
