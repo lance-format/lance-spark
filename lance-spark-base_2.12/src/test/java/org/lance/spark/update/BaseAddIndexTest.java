@@ -463,6 +463,65 @@ public abstract class BaseAddIndexTest {
   }
 
   @Test
+  public void testRepeatedCreateBTreeRangeIndex() {
+    prepareDataset();
+
+    String sql =
+        String.format(
+            "alter table %s create index test_range_repeat using btree (id) with (build_mode='range')",
+            fullTable);
+
+    spark.sql(sql);
+    checkIndex("test_range_repeat");
+
+    int fragmentCount;
+    Set<UUID> firstRunUuids;
+    org.lance.Dataset ds1 = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      fragmentCount = ds1.getFragments().size();
+      firstRunUuids =
+          ds1.getIndexes().stream()
+              .filter(index -> "test_range_repeat".equals(index.name()))
+              .map(Index::uuid)
+              .collect(Collectors.toSet());
+    } finally {
+      ds1.close();
+    }
+    Assertions.assertEquals(
+        fragmentCount,
+        firstRunUuids.size(),
+        "Expected one disjoint range segment per fragment on first create");
+
+    // Re-create with the same name: exercises replace(false) on the segment builds plus
+    // atomic replacement at commit time. The old segments must be replaced, not duplicated.
+    spark.sql(sql);
+    checkIndex("test_range_repeat");
+
+    org.lance.Dataset ds2 = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      List<Index> segments =
+          ds2.getIndexes().stream()
+              .filter(index -> "test_range_repeat".equals(index.name()))
+              .collect(Collectors.toList());
+      Set<UUID> secondRunUuids = segments.stream().map(Index::uuid).collect(Collectors.toSet());
+      Assertions.assertEquals(
+          fragmentCount,
+          segments.size(),
+          "Expected recreated range index to replace existing segments instead of duplicating them");
+      Assertions.assertTrue(
+          Collections.disjoint(firstRunUuids, secondRunUuids),
+          "Expected the recreated range index to produce fresh segment UUIDs");
+    } finally {
+      ds2.close();
+    }
+
+    // Index must remain queryable after the replacement.
+    Dataset<Row> query = spark.sql(String.format("select * from %s where id=15", fullTable));
+    Assertions.assertEquals(1L, query.count());
+    Assertions.assertEquals("text_15", query.collectAsList().get(0).getString(1));
+  }
+
+  @Test
   public void testCreateBTreeIndexWithRowsPerRange() {
     prepareDataset();
     Dataset<Row> result =
