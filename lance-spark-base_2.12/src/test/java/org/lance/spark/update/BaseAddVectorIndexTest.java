@@ -21,6 +21,7 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -646,6 +647,11 @@ public abstract class BaseAddVectorIndexTest {
 
   @Test
   public void testVectorSearchUsesIndex() {
+    // Spark 3.4 does not support TVF named-argument syntax (`table => ...`); SPARK-44059 added
+    // it in 3.5. Skip on 3.4 to mirror BaseSparkSearchTableFunctionTest#supportsNamedArguments.
+    Assumptions.assumeFalse(
+        spark.version().startsWith("3.4."),
+        "VECTOR_SEARCH named-argument syntax requires Spark 3.5+");
     prepareVectorDataset();
     spark.sql(
         String.format(
