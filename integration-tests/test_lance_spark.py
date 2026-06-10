@@ -925,7 +925,7 @@ class TestDDLIndex:
 
         rows = spark.sql("""
             SELECT id FROM default.nested_index_table
-            WHERE dot_payload.`literal.dot` = 2000
+            WHERE left_payload.value = 20
         """).collect()
         assert [row.id for row in rows] == [2]
 
