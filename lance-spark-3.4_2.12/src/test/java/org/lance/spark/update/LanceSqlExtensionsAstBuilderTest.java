@@ -139,7 +139,7 @@ public class LanceSqlExtensionsAstBuilderTest {
         List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
     assertEquals("my-idx", plan.indexName());
     assertEquals("BTREE", plan.method());
-    assertEquals(List.of("col-a"), JavaConverters.seqAsJavaList(plan.columns()));
+    assertEquals(List.of("`col-a`"), JavaConverters.seqAsJavaList(plan.columns()));
   }
 
   @Test

@@ -20,7 +20,7 @@ import org.apache.spark.sql.catalyst.util.GenericArrayData
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.unsafe.types.UTF8String
 import org.lance.spark.LanceDataset
-import org.lance.spark.utils.Utils
+import org.lance.spark.utils.{FieldPathUtils, Utils}
 
 import scala.collection.JavaConverters._
 
@@ -47,9 +47,7 @@ case class ShowIndexesExec(
     val dataset = Utils.openDatasetBuilder(readOptions).build()
     try {
       val indexes = dataset.describeIndices().asScala.toSeq
-      val fieldIdToName = dataset.getLanceSchema().fields().asScala
-        .map(f => (java.lang.Integer.valueOf(f.getId), f.getName))
-        .toMap
+      val lanceSchema = dataset.getLanceSchema()
 
       indexes.map { idx =>
         val fieldIds = idx.getFieldIds
@@ -58,7 +56,8 @@ case class ShowIndexesExec(
             null
           } else {
             val names = fieldIds.asScala.map { id =>
-              val colName = fieldIdToName.getOrElse(id, id.toString)
+              val colName = Option(FieldPathUtils.pathByFieldId(lanceSchema, id))
+                .getOrElse(id.toString)
               UTF8String.fromString(colName)
             }
             new GenericArrayData(names.toArray[AnyRef])

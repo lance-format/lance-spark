@@ -16,6 +16,7 @@ package org.lance.spark.write;
 import org.lance.Dataset;
 import org.lance.WriteParams;
 import org.lance.memwal.InitializeMemWalParams;
+import org.lance.namespace.LanceNamespace;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
 
@@ -39,6 +40,8 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -132,13 +135,30 @@ public class SparkWriteTest {
   }
 
   @Test
-  public void testTruncatePreservesUseLargeVarTypes(TestInfo testInfo) {
+  public void testTruncatePreservesWriteOptionsAndOverwritesMode(TestInfo testInfo) {
     String datasetUri = createDataset(testInfo.getTestMethod().get().getName());
+    Map<String, String> storageOptions = new HashMap<>();
+    storageOptions.put("region", "us-west-2");
+    LanceNamespace stubNamespace = TestUtils.stubNamespace();
     LanceSparkWriteOptions writeOptions =
         LanceSparkWriteOptions.builder()
             .datasetUri(datasetUri)
             .writeMode(WriteParams.WriteMode.APPEND)
+            .maxRowsPerFile(1000)
+            .maxRowsPerGroup(500)
+            .maxBytesPerFile(1048576L)
+            .fileFormatVersion("2.0")
+            .useQueuedWriteBuffer(true)
+            .queueDepth(3)
+            .batchSize(256)
+            .enableStableRowIds(true)
             .useLargeVarTypes(true)
+            .maxBatchBytes(4096L)
+            .blobPackFileSizeThreshold(8192L)
+            .storageOptions(storageOptions)
+            .namespace(stubNamespace)
+            .tableId(Arrays.asList("default", "test_table"))
+            .version(7L)
             .build();
     SparkWrite.SparkWriteBuilder builder =
         new SparkWrite.SparkWriteBuilder(
@@ -153,9 +173,33 @@ public class SparkWriteTest {
             Collections.emptyMap());
     builder.truncate();
     SparkWrite sparkWrite = (SparkWrite) builder.build();
+    LanceSparkWriteOptions truncatedOptions = sparkWrite.getWriteOptions();
+
+    assertEquals(WriteParams.WriteMode.OVERWRITE, truncatedOptions.getWriteMode());
+    assertEquals(datasetUri, truncatedOptions.getDatasetUri());
+    assertEquals(1000, truncatedOptions.getMaxRowsPerFile());
+    assertEquals(500, truncatedOptions.getMaxRowsPerGroup());
+    assertEquals(1048576L, truncatedOptions.getMaxBytesPerFile());
+    assertEquals("2.0", truncatedOptions.getFileFormatVersion());
+    assertTrue(truncatedOptions.isUseQueuedWriteBuffer());
+    assertEquals(3, truncatedOptions.getQueueDepth());
+    assertEquals(256, truncatedOptions.getBatchSize());
+    assertTrue(truncatedOptions.getEnableStableRowIds());
     assertTrue(
-        sparkWrite.getWriteOptions().isUseLargeVarTypes(),
+        truncatedOptions.isUseLargeVarTypes(),
         "useLargeVarTypes should be preserved after truncate()");
+    assertEquals(
+        4096L,
+        truncatedOptions.getMaxBatchBytes(),
+        "maxBatchBytes should be preserved after truncate()");
+    assertEquals(
+        Long.valueOf(8192L),
+        truncatedOptions.getBlobPackFileSizeThreshold(),
+        "blobPackFileSizeThreshold should be preserved after truncate()");
+    assertEquals(storageOptions, truncatedOptions.getStorageOptions());
+    assertSame(stubNamespace, truncatedOptions.getNamespace());
+    assertEquals(Arrays.asList("default", "test_table"), truncatedOptions.getTableId());
+    assertEquals(7L, truncatedOptions.getVersion());
   }
 
   // --- requiredDistribution / requiredOrdering tests ---

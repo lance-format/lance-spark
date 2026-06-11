@@ -13,9 +13,6 @@
  */
 package org.lance.spark.utils;
 
-import org.apache.arrow.vector.types.pojo.ArrowType;
-import org.apache.arrow.vector.types.pojo.Field;
-import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.MetadataBuilder;
@@ -23,7 +20,6 @@ import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
 
-import java.util.Arrays;
 import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -48,17 +44,6 @@ public class BlobUtilsTest {
   }
 
   @Test
-  public void testBlobV2ArrowFieldRejectsUnrelated() {
-    Field f =
-        new Field(
-            "payload",
-            new FieldType(true, ArrowType.Binary.INSTANCE, null, Collections.emptyMap()),
-            null);
-    assertFalse(BlobUtils.isBlobV2ArrowField(f));
-    assertFalse(BlobUtils.isBlobV2ArrowField(null));
-  }
-
-  @Test
   public void testHasBlobV2FieldsInSchema() {
     StructType schema =
         new StructType(
@@ -66,6 +51,33 @@ public class BlobUtilsTest {
               field("id", DataTypes.IntegerType), blobV2Field(),
             });
     assertTrue(BlobUtils.hasBlobV2Fields(schema));
+  }
+
+  @Test
+  public void testBlobV2ColumnNamesExcludesNonBlobAndV1() {
+    Metadata v1 =
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build();
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              field("id", DataTypes.IntegerType),
+              new StructField("attachment", DataTypes.BinaryType, true, v1),
+              blobV2Field(),
+            });
+    assertEquals(Collections.singleton("payload"), BlobUtils.blobV2ColumnNames(schema));
+  }
+
+  @Test
+  public void testIsBlobReadColumnCoversV1AndV2() {
+    Metadata v1 =
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build();
+    assertTrue(BlobUtils.isBlobReadColumn(new StructField("v1", DataTypes.BinaryType, true, v1)));
+    assertTrue(BlobUtils.isBlobReadColumn(blobV2Field()));
+    assertFalse(BlobUtils.isBlobReadColumn(field("id", DataTypes.IntegerType)));
   }
 
   @Test
@@ -100,34 +112,6 @@ public class BlobUtilsTest {
             });
     StructType rewritten = BlobUtils.applyBlobV2DescriptorSchema(schema);
     assertEquals(DataTypes.BinaryType, rewritten.apply("payload").dataType());
-  }
-
-  @Test
-  public void testUnloadedDescriptorStructRecognizedAsBlobV2() {
-    Field f =
-        new Field(
-            "payload",
-            new FieldType(true, ArrowType.Struct.INSTANCE, null, Collections.emptyMap()),
-            Arrays.asList(
-                intChild("kind"),
-                intChild("position"),
-                intChild("size"),
-                intChild("blob_id"),
-                utf8Child("blob_uri")));
-    assertTrue(BlobUtils.isBlobV2ArrowField(f));
-    assertFalse(BlobUtils.isBlobArrowField(f));
-  }
-
-  private static Field intChild(String name) {
-    return new Field(
-        name,
-        new FieldType(true, new ArrowType.Int(64, false), null, Collections.emptyMap()),
-        null);
-  }
-
-  private static Field utf8Child(String name) {
-    return new Field(
-        name, new FieldType(true, ArrowType.Utf8.INSTANCE, null, Collections.emptyMap()), null);
   }
 
   private static StructField field(String name, org.apache.spark.sql.types.DataType dt) {

@@ -9,11 +9,13 @@ automatically exercised against all available backends.
 """
 
 import os
+import socket
 import subprocess
 import time
 import uuid
-import urllib.request
 import urllib.error
+import urllib.parse
+import urllib.request
 
 import pytest
 from pyspark.sql import SparkSession
@@ -21,6 +23,10 @@ from pyspark.sql import SparkSession
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "requires_rest: test only runs on REST-based backends")
+    config.addinivalue_line(
+        "markers",
+        "rest_dir_compatible: test can run against a local REST namespace backed by dir",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +183,19 @@ LANCEDB_DB = os.environ.get("LANCEDB_DB")
 LANCEDB_API_KEY = os.environ.get("LANCEDB_API_KEY")
 LANCEDB_HOST_OVERRIDE = os.environ.get("LANCEDB_HOST_OVERRIDE")
 LANCEDB_REGION = os.environ.get("LANCEDB_REGION", "us-east-1")
+LANCE_SPARK_REST_URI = os.environ.get("LANCE_SPARK_REST_URI")
+LANCE_SPARK_REST_API_KEY = os.environ.get("LANCE_SPARK_REST_API_KEY")
+LANCE_SPARK_REST_DATABASE = os.environ.get("LANCE_SPARK_REST_DATABASE")
+LANCE_SPARK_START_REST_DIR = os.environ.get("LANCE_SPARK_START_REST_DIR", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+LANCE_SPARK_REST_DIR_ROOT = os.environ.get(
+    "LANCE_SPARK_REST_DIR_ROOT",
+    "/home/lance/rest-data",
+)
+LANCE_SPARK_REST_DIR_PORT = int(os.environ.get("LANCE_SPARK_REST_DIR_PORT", "10024"))
 AWS_S3_BUCKET_NAME = os.environ.get("AWS_S3_BUCKET_NAME")
 AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
 AWS_GLUE_CATALOG_ID = os.environ.get("AWS_GLUE_CATALOG_ID")
@@ -193,6 +212,8 @@ AWS_GLUE_ROOT = os.environ.get("AWS_GLUE_ROOT") or (
 _all_backends = ["local", "azurite", "minio"]
 if LANCEDB_DB and LANCEDB_API_KEY:
     _all_backends.append("lancedb")
+if LANCE_SPARK_REST_URI or LANCE_SPARK_START_REST_DIR:
+    _all_backends.append("rest-dir")
 if AWS_S3_BUCKET_NAME:
     _all_backends.append("glue")
 _backends = os.environ.get("TEST_BACKENDS", ",".join(_all_backends)).split(",")
@@ -218,6 +239,8 @@ def spark(request):
     - **minio** – S3-compatible storage via the MinIO emulator
     - **lancedb** – LanceDB Cloud via REST API (requires ``LANCEDB_DB`` and
       ``LANCEDB_API_KEY`` env vars; skipped otherwise)
+    - **rest-dir** – local REST namespace backed by a directory namespace
+      (requires ``LANCE_SPARK_REST_URI`` and compatible tests)
     - **glue** – AWS Glue Data Catalog with S3 storage (requires
       ``AWS_S3_BUCKET_NAME`` and AWS credentials from the default AWS provider
       chain)
@@ -252,6 +275,24 @@ def spark(request):
                 f"spark.sql.catalog.{CATALOG}.headers.x-lancedb-database", LANCEDB_DB,
             )
         )
+    elif backend == "rest-dir":
+        rest_dir = request.getfixturevalue("rest_dir_namespace")
+
+        builder = (
+            builder
+            .config(f"spark.sql.catalog.{CATALOG}.impl", "rest")
+            .config(f"spark.sql.catalog.{CATALOG}.uri", rest_dir["uri"])
+        )
+        if LANCE_SPARK_REST_API_KEY:
+            builder = builder.config(
+                f"spark.sql.catalog.{CATALOG}.headers.x-api-key",
+                LANCE_SPARK_REST_API_KEY,
+            )
+        if LANCE_SPARK_REST_DATABASE:
+            builder = builder.config(
+                f"spark.sql.catalog.{CATALOG}.headers.x-lancedb-database",
+                LANCE_SPARK_REST_DATABASE,
+            )
     elif backend == "glue":
         if not AWS_S3_BUCKET_NAME or not AWS_GLUE_ROOT:
             pytest.skip("AWS_S3_BUCKET_NAME is required for Glue backend")
@@ -327,6 +368,44 @@ def spark(request):
     session.stop()
 
 
+@pytest.fixture(scope="session")
+def rest_dir_namespace():
+    """Provide a REST namespace backed by the local directory namespace."""
+    if not LANCE_SPARK_START_REST_DIR:
+        if not LANCE_SPARK_REST_URI:
+            pytest.skip("LANCE_SPARK_REST_URI is required for rest-dir backend")
+        yield {"uri": LANCE_SPARK_REST_URI}
+        return
+
+    os.makedirs(LANCE_SPARK_REST_DIR_ROOT, exist_ok=True)
+    uri = LANCE_SPARK_REST_URI or f"http://127.0.0.1:{LANCE_SPARK_REST_DIR_PORT}"
+    parsed = urllib.parse.urlparse(uri)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or LANCE_SPARK_REST_DIR_PORT
+    log_path = "/tmp/lance-rest-dir-namespace.log"
+    classpath = "/home/lance/tests:/opt/spark/jars/*"
+
+    with open(log_path, "w", encoding="utf-8") as log:
+        proc = subprocess.Popen(
+            [
+                "java",
+                "-cp",
+                classpath,
+                "LanceRestDirNamespaceServer",
+                LANCE_SPARK_REST_DIR_ROOT,
+                "127.0.0.1",
+                str(port),
+            ],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            _wait_for_tcp(host, port, proc, "Lance REST directory namespace")
+            yield {"uri": uri}
+        finally:
+            _stop_process(proc)
+
+
 @pytest.fixture
 def test_table(request, spark):
     """Provide a unique table name for each test to avoid isolation issues.
@@ -350,8 +429,11 @@ def test_table(request, spark):
 @pytest.fixture(autouse=True)
 def _skip_by_backend(request, spark):
     """Auto-skip tests marked ``requires_rest`` on non-REST backends."""
+    backend = getattr(spark, "_lance_backend", None)
+    if backend == "rest-dir" and not request.node.get_closest_marker("rest_dir_compatible"):
+        pytest.skip("rest-dir backend is only enabled for compatible tests")
     if request.node.get_closest_marker("requires_rest"):
-        if getattr(spark, "_lance_backend", None) != "lancedb":
+        if backend not in ("lancedb", "rest-dir"):
             pytest.skip("requires REST-based backend")
 
 
@@ -361,7 +443,10 @@ def cleanup_tables(spark):
     spark.sql("DROP TABLE IF EXISTS default.test_table PURGE")
     spark.sql("DROP TABLE IF EXISTS default.test_table_renamed PURGE")
     spark.sql("DROP TABLE IF EXISTS default.test_table_new PURGE")
+    spark.sql("DROP TABLE IF EXISTS default.nested_index_table PURGE")
     spark.sql("DROP TABLE IF EXISTS default.employees PURGE")
+    spark.sql("DROP TABLE IF EXISTS default.test_blob_v2 PURGE")
+    spark.sql("DROP TABLE IF EXISTS default.test_blob_v2_bad_insert PURGE")
     # TODO - reenable once `tableExists` works on Spark 4.0
     #spark.catalog.dropTempView("source") if spark.catalog.tableExists("source") else None
     #spark.catalog.dropTempView("tmp_view") if spark.catalog.tableExists("tmp_view") else None
@@ -371,7 +456,10 @@ def cleanup_tables(spark):
     spark.sql("DROP TABLE IF EXISTS default.test_table PURGE")
     spark.sql("DROP TABLE IF EXISTS default.test_table_renamed PURGE")
     spark.sql("DROP TABLE IF EXISTS default.test_table_new PURGE")
+    spark.sql("DROP TABLE IF EXISTS default.nested_index_table PURGE")
     spark.sql("DROP TABLE IF EXISTS default.employees PURGE")
+    spark.sql("DROP TABLE IF EXISTS default.test_blob_v2 PURGE")
+    spark.sql("DROP TABLE IF EXISTS default.test_blob_v2_bad_insert PURGE")
     # TODO - reenable once `tableExists` works on Spark 4.0
     #spark.catalog.dropTempView("source") if spark.catalog.tableExists("source") else None
     #spark.catalog.dropTempView("tmp_view") if spark.catalog.tableExists("tmp_view") else None
@@ -390,3 +478,17 @@ def _stop_process(proc, timeout=10):
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
+
+
+def _wait_for_tcp(host, port, proc, name, timeout=30):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                return
+        except OSError:
+            if proc.poll() is not None:
+                raise RuntimeError(f"{name} exited unexpectedly")
+            time.sleep(0.5)
+    _stop_process(proc)
+    raise RuntimeError(f"{name} did not become healthy within {timeout} s")

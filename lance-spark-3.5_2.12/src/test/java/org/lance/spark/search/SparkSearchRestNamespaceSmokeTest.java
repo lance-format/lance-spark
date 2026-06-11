@@ -11,7 +11,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.lance.spark.read;
+package org.lance.spark.search;
 
-public class SparkConnectorReadWithVectorSearchTest
-    extends BaseSparkConnectorReadWithVectorSearchTest {}
+public class SparkSearchRestNamespaceSmokeTest extends BaseSparkSearchRestNamespaceSmokeTest {}

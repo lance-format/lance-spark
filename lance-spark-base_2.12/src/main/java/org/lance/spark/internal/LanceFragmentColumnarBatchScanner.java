@@ -156,7 +156,7 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
           throw new IllegalStateException(
               "Lance scan did not return expected field '" + fieldName + "'");
         }
-        LanceArrowColumnVector colVec = new LanceArrowColumnVector(vector, false);
+        LanceArrowColumnVector colVec = new LanceArrowColumnVector(vector, false, field);
 
         // Set blob reference context so getBinary() produces blob references
         if (rowAddresses != null && blobColumnNames.contains(fieldName)) {

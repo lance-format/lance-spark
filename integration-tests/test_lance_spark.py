@@ -117,6 +117,12 @@ def _assert_lance_index_metadata(spark, table_name, index_name, expected_type):
     return metadata
 
 
+def _require_sql_search_backend(spark):
+    backend = getattr(spark, "_lance_backend", None)
+    if backend not in ("local", "rest-dir"):
+        pytest.skip("SQL search table functions are covered on local dir and rest-dir backends")
+
+
 # =============================================================================
 # DDL (Data Definition Language) Tests
 # =============================================================================
@@ -710,9 +716,9 @@ class TestDDLColumnCompression:
 
 
 class TestDDLBlobV2:
-    def test_blob_v2_table_reads_content_as_descriptor(self, spark):
-        spark.sql("""
-            CREATE TABLE default.test_blob_v2 (
+    def test_blob_v2_table_reads_content_as_descriptor(self, spark, test_table):
+        spark.sql(f"""
+            CREATE TABLE {test_table} (
                 id INT NOT NULL,
                 content BINARY
             ) USING lance
@@ -726,13 +732,13 @@ class TestDDLBlobV2:
         second_content = b"SQL insert content 2"
 
         spark.sql(
-            f"INSERT INTO default.test_blob_v2 VALUES (1, {_sql_binary_literal(first_content)})"
+            f"INSERT INTO {test_table} VALUES (1, {_sql_binary_literal(first_content)})"
         )
         spark.sql(
-            f"INSERT INTO default.test_blob_v2 VALUES (2, {_sql_binary_literal(second_content)})"
+            f"INSERT INTO {test_table} VALUES (2, {_sql_binary_literal(second_content)})"
         )
 
-        describe_rows = spark.sql("DESCRIBE default.test_blob_v2").collect()
+        describe_rows = spark.sql(f"DESCRIBE {test_table}").collect()
         content_field = next(row for row in describe_rows if row.col_name == "content")
         content_type = content_field.data_type.lower()
 
@@ -740,9 +746,9 @@ class TestDDLBlobV2:
         assert "kind" in content_type
         assert "blob_uri" in content_type
 
-        rows = spark.sql("""
+        rows = spark.sql(f"""
             SELECT id, content.size, content.kind, content.blob_id, content.blob_uri
-            FROM default.test_blob_v2
+            FROM {test_table}
             ORDER BY id
         """).collect()
 
@@ -756,9 +762,9 @@ class TestDDLBlobV2:
         assert rows[1].size == len(second_content)
         assert rows[1].kind == 0
 
-    def test_blob_v2_insert_rejects_non_binary_content(self, spark):
-        spark.sql("""
-            CREATE TABLE default.test_blob_v2_bad_insert (
+    def test_blob_v2_insert_rejects_non_binary_content(self, spark, test_table):
+        spark.sql(f"""
+            CREATE TABLE {test_table} (
                 id INT NOT NULL,
                 content BINARY
             ) USING lance
@@ -769,8 +775,8 @@ class TestDDLBlobV2:
         """)
 
         with pytest.raises(Exception, match="got string"):
-            spark.sql("""
-                INSERT INTO default.test_blob_v2_bad_insert
+            spark.sql(f"""
+                INSERT INTO {test_table}
                 VALUES (1, 'not-binary')
             """)
 
@@ -883,6 +889,45 @@ class TestDDLIndex:
         """).collect()
         assert len(query_result) == 1
         assert query_result[0].id == 50
+
+    def test_create_btree_index_on_nested_literal_dot_field(self, spark):
+        """Test CREATE INDEX on nested struct fields, including literal dots."""
+        spark.sql("""
+            CREATE TABLE default.nested_index_table (
+                id INT,
+                left_payload STRUCT<value: INT>,
+                right_payload STRUCT<value: INT>,
+                dot_payload STRUCT<`literal.dot`: INT>
+            )
+        """)
+
+        spark.sql("""
+            INSERT INTO default.nested_index_table VALUES
+            (1, named_struct('value', 10), named_struct('value', 100), named_struct('literal.dot', 1000)),
+            (2, named_struct('value', 20), named_struct('value', 200), named_struct('literal.dot', 2000))
+        """)
+
+        spark.sql("""
+            ALTER TABLE default.nested_index_table
+            CREATE INDEX idx_left_value USING btree (left_payload.value)
+        """).collect()
+        spark.sql("""
+            ALTER TABLE default.nested_index_table
+            CREATE INDEX idx_literal_dot USING btree (dot_payload.`literal.dot`)
+        """).collect()
+
+        indexes = spark.sql("""
+            SHOW INDEXES IN default.nested_index_table
+        """).collect()
+        fields_by_name = {row["name"]: list(row["fields"]) for row in indexes}
+        assert fields_by_name["idx_left_value"] == ["left_payload.value"]
+        assert fields_by_name["idx_literal_dot"] == ["dot_payload.`literal.dot`"]
+
+        rows = spark.sql("""
+            SELECT id FROM default.nested_index_table
+            WHERE left_payload.value = 20
+        """).collect()
+        assert [row.id for row in rows] == [2]
 
     def test_create_fts_index(self, spark):
         """Test CREATE INDEX with full-text search (FTS)."""
@@ -1582,6 +1627,166 @@ class TestDDLPrimaryKey:
 # =============================================================================
 # DQL (Data Query Language) Tests
 # =============================================================================
+
+@pytest.mark.rest_dir_compatible
+class TestDQLSearchTableFunctions:
+    """Test namespace-backed SQL search table functions."""
+
+    def test_vector_search_table_function(self, spark):
+        """Test VECTOR_SEARCH against namespace query execution."""
+        _require_sql_search_backend(spark)
+
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT NOT NULL,
+                vector ARRAY<FLOAT> NOT NULL
+            ) USING lance
+            TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '4')
+        """)
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (0, array(0.0, 0.0, 0.0, 0.0)),
+            (1, array(1.0, 1.0, 1.0, 1.0)),
+            (2, array(10.0, 10.0, 10.0, 10.0))
+        """)
+
+        rows = spark.sql("""
+            SELECT id, _distance
+            FROM VECTOR_SEARCH('default.test_table', array(0.0, 0.0, 0.0, 0.0), 2)
+            ORDER BY _distance, id
+        """).collect()
+
+        assert [row.id for row in rows] == [0, 1]
+        assert rows[0]["_distance"] == pytest.approx(0.0)
+        assert rows[1]["_distance"] > rows[0]["_distance"]
+
+    def test_search_table_function(self, spark):
+        """Test SEARCH against a Lance FTS index."""
+        _require_sql_search_backend(spark)
+
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT NOT NULL,
+                body STRING
+            ) USING lance
+        """)
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (1, 'lance vector search'),
+            (2, 'spark connector table function'),
+            (3, 'lance full text search')
+        """)
+        spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX body_fts USING fts (body)
+            WITH (
+                base_tokenizer='simple',
+                language='English',
+                max_token_length=40,
+                lower_case=true,
+                stem=false,
+                remove_stop_words=false,
+                ascii_folding=false,
+                with_position=true
+            )
+        """)
+
+        rows = spark.sql("""
+            SELECT id, body, _score
+            FROM SEARCH('default.test_table', 'lance', 10)
+            ORDER BY id
+        """).collect()
+
+        assert [row.id for row in rows] == [1, 3]
+        assert "lance" in rows[0].body
+        assert rows[0]["_score"] > 0.0
+
+    def test_hybrid_search_table_function(self, spark):
+        """Test HYBRID_SEARCH client-side RRF fusion over namespace results."""
+        _require_sql_search_backend(spark)
+
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT NOT NULL,
+                body STRING,
+                vector ARRAY<FLOAT> NOT NULL
+            ) USING lance
+            TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '4')
+        """)
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (1, 'lance vector search', array(0.0, 0.0, 0.0, 0.0)),
+            (2, 'spark connector table function', array(1.0, 1.0, 1.0, 1.0)),
+            (3, 'lance full text search', array(10.0, 10.0, 10.0, 10.0))
+        """)
+        spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX body_fts USING fts (body)
+            WITH (
+                base_tokenizer='simple',
+                language='English',
+                max_token_length=40,
+                lower_case=true,
+                stem=false,
+                remove_stop_words=false,
+                ascii_folding=false,
+                with_position=true
+            )
+        """)
+
+        rows = spark.sql("""
+            SELECT id, body, _distance, _score, _relevance_score
+            FROM HYBRID_SEARCH('default.test_table', array(0.0, 0.0, 0.0, 0.0), 'lance', 3)
+            ORDER BY _relevance_score DESC, id
+        """).collect()
+
+        assert [row.id for row in rows] == [1, 3, 2]
+        assert rows[0]["_distance"] == pytest.approx(0.0)
+        assert rows[0]["_score"] > 0.0
+        assert rows[0]["_relevance_score"] > rows[1]["_relevance_score"]
+        assert rows[1]["_score"] > 0.0
+        assert rows[2]["_score"] is None
+        assert rows[2]["_distance"] > rows[0]["_distance"]
+
+    def test_vector_search_named_args_projection_rowid_and_offset(self, spark):
+        """Test named vector options used by Databricks-style SQL calls."""
+        _require_sql_search_backend(spark)
+        if SPARK_VERSION < Version("3.5"):
+            pytest.skip("named table function arguments require Spark 3.5+")
+
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT NOT NULL,
+                vector ARRAY<FLOAT> NOT NULL
+            ) USING lance
+            TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '4')
+        """)
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (0, array(0.0, 0.0, 0.0, 0.0)),
+            (1, array(1.0, 1.0, 1.0, 1.0)),
+            (2, array(10.0, 10.0, 10.0, 10.0))
+        """)
+
+        rows = spark.sql("""
+            SELECT id, _rowid, _distance
+            FROM VECTOR_SEARCH(
+                table => 'default.test_table',
+                query_vector => array(0.0, 0.0, 0.0, 0.0),
+                vector_column => 'vector',
+                columns => array('id'),
+                num_results => 1,
+                offset => 1,
+                with_row_id => true
+            )
+            ORDER BY _distance, id
+        """).collect()
+
+        assert len(rows) == 1
+        assert rows[0].id == 1
+        assert rows[0]["_rowid"] >= 0
+        assert rows[0]["_distance"] > 0.0
+
 
 class TestDQLSelect:
     """Test DQL SELECT operations."""
@@ -2854,14 +3059,14 @@ class TestStableRowIds:
 
 
     @requires_update_or_merge
-    def test_update_preserves_row_ids(self, spark):
+    def test_update_preserves_row_ids(self, spark, test_table):
         """Test that UPDATE preserves _rowid values when stable row IDs are enabled.
 
         Verifies the native DeltaWriter.update() path with RowIdMeta attachment
         keeps row IDs stable across updates, including multi-fragment scenarios.
         """
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {test_table} (
                 id INT,
                 name STRING,
                 value INT
@@ -2869,31 +3074,31 @@ class TestStableRowIds:
         """)
 
         # Insert across two fragments
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {test_table} VALUES
             (1, 'Alice', 100),
             (2, 'Bob', 200),
             (3, 'Charlie', 300)
         """)
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {test_table} VALUES
             (4, 'Dave', 400),
             (5, 'Eve', 500)
         """)
 
         # Capture row IDs before update
-        before = spark.sql("""
-            SELECT id, _rowid FROM default.test_table ORDER BY id
+        before = spark.sql(f"""
+            SELECT id, _rowid FROM {test_table} ORDER BY id
         """).collect()
         row_ids_before = {row.id: row._rowid for row in before}
         assert len(row_ids_before) == 5
 
         # Update rows spanning both fragments
-        spark.sql("UPDATE default.test_table SET value = value + 1 WHERE value >= 200")
+        spark.sql(f"UPDATE {test_table} SET value = value + 1 WHERE value >= 200")
 
         # Capture row IDs after update
-        after = spark.sql("""
-            SELECT id, _rowid, value FROM default.test_table ORDER BY id
+        after = spark.sql(f"""
+            SELECT id, _rowid, value FROM {test_table} ORDER BY id
         """).collect()
         row_ids_after = {row.id: row._rowid for row in after}
 

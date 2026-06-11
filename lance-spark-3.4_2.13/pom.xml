@@ -5,7 +5,7 @@
     <parent>
         <groupId>org.lance</groupId>
         <artifactId>lance-spark-root</artifactId>
-        <version>0.5.0-beta.1</version>
+        <version>0.5.1</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
@@ -119,6 +119,7 @@
                         <configuration>
                             <sources>
                                 <source>../lance-spark-base_2.12/src/test/java</source>
+                                <source>../lance-spark-3.4_2.12/src/test/java</source>
                             </sources>
                         </configuration>
                     </execution>

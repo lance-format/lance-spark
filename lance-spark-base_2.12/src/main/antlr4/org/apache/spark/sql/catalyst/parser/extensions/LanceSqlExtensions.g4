@@ -21,7 +21,7 @@ singleStatement
 statement
     : ALTER TABLE multipartIdentifier ADD COLUMNS columnList FROM identifier                    #addColumnsBackfill
     | ALTER TABLE multipartIdentifier UPDATE COLUMNS columnList FROM identifier                 #updateColumnsBackfill
-    | ALTER TABLE multipartIdentifier CREATE INDEX indexName=identifier USING method=identifier '(' columnList ')' (WITH '(' (namedArgument (',' namedArgument)*)? ')')? #createIndex
+    | ALTER TABLE multipartIdentifier CREATE INDEX indexName=identifier USING method=identifier '(' fieldPathList ')' (WITH '(' (namedArgument (',' namedArgument)*)? ')')? #createIndex
     | ALTER TABLE multipartIdentifier DROP INDEX indexName=identifier                             #dropIndex
     | SHOW (INDEXES | INDEX) (FROM | IN) multipartIdentifier                                    #showIndexes
     | OPTIMIZE multipartIdentifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')?        #optimize
@@ -44,6 +44,14 @@ quotedIdentifier
 
 columnList
     : columns+=identifier (',' columns+=identifier)*
+    ;
+
+fieldPathList
+    : columns+=fieldPath (',' columns+=fieldPath)*
+    ;
+
+fieldPath
+    : parts+=identifier ('.' parts+=identifier)*
     ;
 
 namedArgument
@@ -134,5 +142,4 @@ fragment DIGIT
 fragment LETTER
     : [A-Z]
     ;
-
 

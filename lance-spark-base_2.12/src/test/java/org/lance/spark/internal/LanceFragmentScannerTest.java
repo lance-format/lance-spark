@@ -17,10 +17,12 @@ import org.lance.namespace.LanceNamespace;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.read.LanceInputPartition;
+import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Optional;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
@@ -256,6 +258,31 @@ public class LanceFragmentScannerTest {
         0,
         RecordingNamespace.INITIALIZE_CALLS.get(),
         "executor_credential_refresh=false must not load or initialize the namespace impl");
+  }
+
+  @Test
+  public void getBlobColumnNamesIncludesBlobV2ReadColumns() throws Exception {
+    Method method =
+        LanceFragmentScanner.class.getDeclaredMethod("getBlobColumnNames", StructType.class);
+    method.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    java.util.Set<String> names =
+        (java.util.Set<String>)
+            method.invoke(
+                null,
+                new StructType(
+                    new StructField[] {
+                      new StructField(
+                          "payload",
+                          BlobUtils.BLOB_DESCRIPTOR_STRUCT,
+                          true,
+                          new MetadataBuilder()
+                              .putString(
+                                  BlobUtils.ARROW_EXTENSION_NAME_KEY,
+                                  BlobUtils.ARROW_EXTENSION_BLOB_V2)
+                              .build())
+                    }));
+    assertEquals(java.util.Collections.singleton("payload"), names);
   }
 
   /**

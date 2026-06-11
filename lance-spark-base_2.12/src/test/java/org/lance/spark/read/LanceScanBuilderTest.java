@@ -15,6 +15,7 @@ package org.lance.spark.read;
 
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.utils.BlobUtils;
 
 import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.FieldReference;
@@ -29,6 +30,8 @@ import org.apache.spark.sql.connector.expressions.filter.Predicate;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
@@ -122,6 +125,46 @@ public class LanceScanBuilderTest {
   }
 
   @Test
+  public void testBlobV2FilterStaysResidualWhileOtherColumnsPushDown() {
+    Metadata blobV2Metadata =
+        new MetadataBuilder()
+            .putString(BlobUtils.ARROW_EXTENSION_NAME_KEY, BlobUtils.ARROW_EXTENSION_BLOB_V2)
+            .build();
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.LongType, true),
+              new StructField("payload", DataTypes.BinaryType, true, blobV2Metadata)
+            });
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            schema,
+            TestUtils.TestTable1Config.readOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+
+    Predicate onId = TestPredicates.gt("id", 1L);
+    Predicate onBlob = TestPredicates.gt("payload", 1L);
+    Predicate[] postScan = builder.pushPredicates(new Predicate[] {onId, onBlob});
+
+    // Blob v2 filters stay in Spark. Normal-column filters still push to Lance.
+    assertArrayEquals(new Predicate[] {onBlob}, postScan);
+    assertArrayEquals(new Predicate[] {onId}, builder.pushedPredicates());
+    assertFalse(builder.pushLimit(10));
+  }
+
+  @Test
+  public void testResidualPredicateBlocksLimitPushdownWithoutBlobColumn() {
+    LanceScanBuilder builder = createBuilder();
+    // Unsupported CONTAINS stays in Spark even on a table with no blob columns.
+    Predicate[] postScan =
+        builder.pushPredicates(new Predicate[] {TestPredicates.contains("b", "x")});
+    assertEquals(1, postScan.length);
+    assertFalse(builder.pushLimit(10));
+  }
+
+  @Test
   public void testPushPredicatesWithNestedArrayOfStruct() {
     // Filters on non-Array<Struct> columns should be pushed down normally.
     StructType nestedSchema =
@@ -154,7 +197,7 @@ public class LanceScanBuilderTest {
   // --- pushLimit ---
 
   @Test
-  public void testPushLimitAlwaysSucceeds() {
+  public void testPushLimitWhenNoResidualPredicates() {
     LanceScanBuilder builder = createBuilder();
     assertTrue(builder.pushLimit(100));
   }

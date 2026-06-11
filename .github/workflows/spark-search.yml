@@ -1,0 +1,179 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Spark Search Docker
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - ready_for_review
+      - reopened
+    paths:
+      - ".github/workflows/spark-search.yml"
+      - "Makefile"
+      - "docker/**"
+      - "integration-tests/**"
+      - "lance-spark-base_2.12/src/main/java/org/lance/spark/search/**"
+      - "lance-spark-base_2.12/src/main/scala/org/lance/spark/search/**"
+      - "lance-spark-base_2.12/src/test/java/org/lance/spark/search/**"
+      - "lance-spark-*/src/main/scala/org/lance/spark/extensions/**"
+      - "pom.xml"
+      - "*/pom.xml"
+  workflow_dispatch:
+    inputs:
+      spark-version:
+        description: "Spark version to test"
+        required: true
+        default: "3.5"
+      scala-version:
+        description: "Scala version to test"
+        required: true
+        default: "2.13"
+      backends:
+        description: "Comma-separated test backends: local or local,rest-dir"
+        required: true
+        default: "local,rest-dir"
+      rest-uri:
+        description: "Optional REST namespace URI. If omitted, tests start a local REST directory namespace."
+        required: false
+        default: ""
+      rest-database:
+        description: "Optional database header value for an external REST namespace"
+        required: false
+        default: ""
+      docker-run-args:
+        description: "Extra docker run args for docker-test"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  SPARK_VERSION: ${{ github.event.inputs['spark-version'] || '3.5' }}
+  SCALA_VERSION: ${{ github.event.inputs['scala-version'] || '2.13' }}
+  SEARCH_TEST_BACKENDS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.backends || 'local,rest-dir' }}
+  SEARCH_PYTEST_CMD: >-
+    pytest /home/lance/tests/test_lance_spark.py::TestDQLSearchTableFunctions
+    -v --timeout=180
+
+jobs:
+  search-docker-test:
+    name: Search Docker Test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: "maven"
+      - name: Resolve Docker build args
+        id: docker-args
+        run: |
+          make print-docker-build-args SPARK_VERSION=${SPARK_VERSION} SCALA_VERSION=${SCALA_VERSION} >> $GITHUB_OUTPUT
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build test-base image (cached)
+        uses: docker/build-push-action@v7
+        with:
+          context: docker
+          file: docker/Dockerfile.test-base
+          load: true
+          tags: lance-spark-test-base:${{ env.SPARK_VERSION }}_${{ env.SCALA_VERSION }}
+          build-args: |
+            SPARK_DOWNLOAD_VERSION=${{ steps.docker-args.outputs.spark-download-version }}
+            SPARK_MAJOR_VERSION=${{ env.SPARK_VERSION }}
+            SCALA_VERSION=${{ env.SCALA_VERSION }}
+            PY4J_VERSION=${{ steps.docker-args.outputs.py4j-version }}
+            SPARK_SCALA_SUFFIX=${{ steps.docker-args.outputs.spark-scala-suffix }}
+          cache-from: type=gha,scope=search-test-base-${{ env.SPARK_VERSION }}_${{ env.SCALA_VERSION }}
+          cache-to: type=gha,mode=max,scope=search-test-base-${{ env.SPARK_VERSION }}_${{ env.SCALA_VERSION }}
+      - name: Build bundle
+        run: make bundle SPARK_VERSION=${SPARK_VERSION} SCALA_VERSION=${SCALA_VERSION}
+      - name: Build test image
+        run: |
+          make docker-build-test \
+            SPARK_VERSION=${SPARK_VERSION} \
+            SCALA_VERSION=${SCALA_VERSION} \
+            LANCE_NAMESPACE_IMPL_VERSION=${{ steps.docker-args.outputs.lance-namespace-impl-version }}
+      - name: Run directory namespace search tests
+        if: ${{ contains(env.SEARCH_TEST_BACKENDS, 'local') }}
+        run: |
+          make docker-test \
+            SPARK_VERSION=${SPARK_VERSION} \
+            SCALA_VERSION=${SCALA_VERSION} \
+            TEST_BACKENDS=local \
+            PYTEST_CMD="${SEARCH_PYTEST_CMD}"
+      - name: Resolve REST namespace URI
+        id: rest
+        if: ${{ contains(env.SEARCH_TEST_BACKENDS, 'rest-dir') }}
+        env:
+          INPUT_REST_URI: ${{ github.event.inputs['rest-uri'] }}
+          INPUT_DOCKER_RUN_ARGS: ${{ github.event.inputs['docker-run-args'] }}
+        run: |
+          rest_uri="${INPUT_REST_URI}"
+          docker_run_args="${INPUT_DOCKER_RUN_ARGS}"
+          start_rest_dir="false"
+          rest_dir_root=""
+          rest_dir_port=""
+
+          if [ -z "${rest_uri}" ]; then
+            rest_dir_port="10024"
+            rest_dir_root="/home/lance/rest-data"
+            rest_uri="http://127.0.0.1:${rest_dir_port}"
+            start_rest_dir="true"
+          fi
+
+          echo "uri=${rest_uri}" >> "$GITHUB_OUTPUT"
+          echo "start_rest_dir=${start_rest_dir}" >> "$GITHUB_OUTPUT"
+          echo "rest_dir_root=${rest_dir_root}" >> "$GITHUB_OUTPUT"
+          echo "rest_dir_port=${rest_dir_port}" >> "$GITHUB_OUTPUT"
+          {
+            echo "docker_run_args<<EOF"
+            echo "${docker_run_args}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - name: Run REST directory namespace search tests
+        if: ${{ contains(env.SEARCH_TEST_BACKENDS, 'rest-dir') }}
+        env:
+          LANCE_SPARK_REST_URI: ${{ steps.rest.outputs.uri }}
+          LANCE_SPARK_REST_API_KEY: ${{ secrets.LANCE_SPARK_REST_API_KEY }}
+          LANCE_SPARK_REST_DATABASE: ${{ github.event.inputs['rest-database'] }}
+          LANCE_SPARK_START_REST_DIR: ${{ steps.rest.outputs.start_rest_dir }}
+          LANCE_SPARK_REST_DIR_ROOT: ${{ steps.rest.outputs.rest_dir_root }}
+          LANCE_SPARK_REST_DIR_PORT: ${{ steps.rest.outputs.rest_dir_port }}
+          DOCKER_RUN_ARGS: ${{ steps.rest.outputs.docker_run_args }}
+        run: |
+          make docker-test \
+            SPARK_VERSION=${SPARK_VERSION} \
+            SCALA_VERSION=${SCALA_VERSION} \
+            TEST_BACKENDS=rest-dir \
+            LANCE_SPARK_REST_URI="${LANCE_SPARK_REST_URI}" \
+            LANCE_SPARK_REST_API_KEY="${LANCE_SPARK_REST_API_KEY}" \
+            LANCE_SPARK_REST_DATABASE="${LANCE_SPARK_REST_DATABASE}" \
+            LANCE_SPARK_START_REST_DIR="${LANCE_SPARK_START_REST_DIR}" \
+            LANCE_SPARK_REST_DIR_ROOT="${LANCE_SPARK_REST_DIR_ROOT}" \
+            LANCE_SPARK_REST_DIR_PORT="${LANCE_SPARK_REST_DIR_PORT}" \
+            DOCKER_RUN_ARGS="${DOCKER_RUN_ARGS}" \
+            PYTEST_CMD="${SEARCH_PYTEST_CMD}"

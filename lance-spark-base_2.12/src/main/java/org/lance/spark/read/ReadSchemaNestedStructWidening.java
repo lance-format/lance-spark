@@ -13,9 +13,12 @@
  */
 package org.lance.spark.read;
 
+import org.lance.spark.utils.BlobUtils;
+
 import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.MapType;
+import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
@@ -53,7 +56,12 @@ final class ReadSchemaNestedStructWidening {
 
   private static StructField widenField(StructField required, StructField tableFull) {
     DataType widened = widenDataType(required.dataType(), tableFull.dataType());
-    return new StructField(required.name(), widened, required.nullable(), required.metadata());
+    // Column pruning rebuilds required fields from Catalyst attributes and drops custom metadata.
+    // For blob v2 descriptor columns keep the lance.blob.v2 flag from the table field so the
+    // scanner detects them by flag, not struct shape.
+    Metadata metadata =
+        BlobUtils.isBlobV2SparkField(tableFull) ? tableFull.metadata() : required.metadata();
+    return new StructField(required.name(), widened, required.nullable(), metadata);
   }
 
   private static DataType widenDataType(DataType required, DataType tableFull) {

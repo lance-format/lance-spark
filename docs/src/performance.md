@@ -106,7 +106,7 @@ Set via Spark write option `max_row_per_file` (default: 1,000,000).
 Controls the maximum number of rows per Lance fragment file.
 There is no specific recommended value, but be aware the default is 1 million rows.
 If you store many multimodal data columns (images, audio, embeddings)
-without using [Lance blob encoding](operations/dml/dataframe-write.md#writing-blob-data),
+without using [Lance blob encoding](operations/dml/insert-into.md#writing-blob-data),
 or store a lot of long text columns, the file size might become very large.
 From Lance's perspective, having very large files does not impact your read performance.
 But you may want to reduce this value depending on the limits in your choice of object storage.

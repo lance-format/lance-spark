@@ -13,10 +13,7 @@
  */
 package org.lance.spark;
 
-import org.lance.index.DistanceType;
-import org.lance.ipc.Query;
 import org.lance.spark.utils.Float16Utils;
-import org.lance.spark.utils.QueryUtils;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
@@ -57,6 +54,8 @@ public abstract class BaseFloat16VectorTest {
                 "spark.sql.catalog." + catalogName, "org.lance.spark.LanceNamespaceSparkCatalog")
             .config("spark.sql.catalog." + catalogName + ".impl", "dir")
             .config("spark.sql.catalog." + catalogName + "." + "root", tempDir.toString())
+            .config(
+                "spark.sql.extensions", "org.lance.spark.extensions.LanceSparkSessionExtensions")
             .getOrCreate();
     spark.sql("CREATE NAMESPACE IF NOT EXISTS " + catalogName + ".default");
   }
@@ -519,52 +518,37 @@ public abstract class BaseFloat16VectorTest {
     Assumptions.assumeTrue(
         Float16Utils.isFloat2VectorAvailable(), "Float16 requires Arrow 18+ (Spark 4.0+)");
 
-    // Create a float16 vector dataset via DataSource API so the URI is deterministic.
-    String datasetUri = tempDir.toString() + "/float16_knn_dataset";
+    String tableName = "float16_knn_" + System.currentTimeMillis();
+    String fullName = catalogName + ".default." + tableName;
+    spark.sql(
+        "CREATE TABLE "
+            + fullName
+            + " (id INT NOT NULL, vec ARRAY<FLOAT> NOT NULL) USING lance "
+            + "TBLPROPERTIES ("
+            + "'vec.arrow.fixed-size-list.size' = '4', "
+            + "'vec.arrow.float16' = 'true'"
+            + ")");
+    spark.sql(
+        "INSERT INTO "
+            + fullName
+            + " VALUES "
+            + "(0, array(0.0, 0.0, 0.0, 0.0)), "
+            + "(1, array(1.0, 1.0, 1.0, 1.0)), "
+            + "(2, array(10.0, 10.0, 10.0, 10.0)), "
+            + "(3, array(100.0, 100.0, 100.0, 100.0))");
 
-    // Build rows with known vectors so we can predict KNN results.
-    // Vector 0: [0, 0, 0, 0]  — closest to query [0, 0, 0, 0]
-    // Vector 1: [1, 1, 1, 1]  — L2 distance = 4
-    // Vector 2: [10, 10, 10, 10] — L2 distance = 400
-    // Vector 3: [100, 100, 100, 100] — L2 distance = 40000
-    List<Row> writeRows = new ArrayList<>();
-    writeRows.add(RowFactory.create(0, new float[] {0.0f, 0.0f, 0.0f, 0.0f}));
-    writeRows.add(RowFactory.create(1, new float[] {1.0f, 1.0f, 1.0f, 1.0f}));
-    writeRows.add(RowFactory.create(2, new float[] {10.0f, 10.0f, 10.0f, 10.0f}));
-    writeRows.add(RowFactory.create(3, new float[] {100.0f, 100.0f, 100.0f, 100.0f}));
-
-    Metadata vecMetadata =
-        new MetadataBuilder()
-            .putLong("arrow.fixed-size-list.size", 4)
-            .putString("arrow.float16", "true")
-            .build();
-    StructType schema =
-        new StructType(
-            new StructField[] {
-              DataTypes.createStructField("id", DataTypes.IntegerType, false),
-              DataTypes.createStructField(
-                  "vec", DataTypes.createArrayType(DataTypes.FloatType, false), false, vecMetadata)
-            });
-
-    Dataset<Row> df = spark.createDataFrame(writeRows, schema);
-    df.write().format(LanceDataSource.name).save(datasetUri);
-
-    // Build KNN query: find 2 nearest neighbors to [0, 0, 0, 0]
-    Query.Builder builder = new Query.Builder();
-    builder.setK(2);
-    builder.setColumn("vec");
-    builder.setKey(new float[] {0.0f, 0.0f, 0.0f, 0.0f});
-    builder.setUseIndex(false); // brute-force scan (no index needed)
-    builder.setDistanceType(DistanceType.L2);
-
-    // Read via DataSource API with vector search
     Dataset<Row> result =
-        spark
-            .read()
-            .format(LanceDataSource.name)
-            .option(LanceSparkReadOptions.CONFIG_NEAREST, QueryUtils.queryToString(builder.build()))
-            .option(LanceSparkReadOptions.CONFIG_DATASET_URI, datasetUri)
-            .load();
+        spark.sql(
+            "SELECT * FROM VECTOR_SEARCH("
+                + "table => '"
+                + fullName
+                + "', "
+                + "query_vector => array(0.0, 0.0, 0.0, 0.0), "
+                + "vector_column => 'vec', "
+                + "num_results => 2, "
+                + "distance_type => 'l2', "
+                + "bypass_vector_index => true, "
+                + "columns => array('id', 'vec'))");
 
     List<Row> rows = result.collectAsList();
     // K=2, so we expect 2 results

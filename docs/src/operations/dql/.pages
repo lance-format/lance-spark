@@ -1,3 +1,6 @@
 title: DQL
 nav:
   - select.md
+  - vector-search.md
+  - search.md
+  - hybrid-search.md

@@ -14,9 +14,12 @@
 package org.lance.spark.extensions
 
 import org.apache.spark.sql.SparkSessionExtensions
+import org.apache.spark.sql.catalyst.FunctionIdentifier
+import org.apache.spark.sql.catalyst.expressions.ExpressionInfo
 import org.apache.spark.sql.catalyst.optimizer.{LanceBlobSourceContextRule, LanceFragmentAwareJoinRule}
 import org.apache.spark.sql.catalyst.parser.extensions.LanceSparkSqlExtensionsParser
 import org.apache.spark.sql.execution.datasources.v2.LanceDataSourceV2Strategy
+import org.lance.spark.search.LanceSearchTableFunctions
 
 class LanceSparkSessionExtensions extends (SparkSessionExtensions => Unit) {
 
@@ -29,6 +32,28 @@ class LanceSparkSessionExtensions extends (SparkSessionExtensions => Unit) {
 
     // propagate blob source credentials from read scans to the write side
     extensions.injectOptimizerRule(_ => LanceBlobSourceContextRule())
+
+    extensions.injectTableFunction(
+      (
+        FunctionIdentifier("vector_search"),
+        new ExpressionInfo(
+          "org.lance.spark.search.LanceSearchTableFunctions",
+          "vector_search"),
+        LanceSearchTableFunctions.vectorSearch _))
+    extensions.injectTableFunction(
+      (
+        FunctionIdentifier("search"),
+        new ExpressionInfo(
+          "org.lance.spark.search.LanceSearchTableFunctions",
+          "search"),
+        LanceSearchTableFunctions.search _))
+    extensions.injectTableFunction(
+      (
+        FunctionIdentifier("hybrid_search"),
+        new ExpressionInfo(
+          "org.lance.spark.search.LanceSearchTableFunctions",
+          "hybrid_search"),
+        LanceSearchTableFunctions.hybridSearch _))
 
     extensions.injectPlannerStrategy(LanceDataSourceV2Strategy(_))
   }
