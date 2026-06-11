@@ -63,7 +63,10 @@ public class LanceScanTest {
   private static final String NAMESPACE_PROPERTY_KEY = "root";
   private static final String NAMESPACE_PROPERTY_VALUE = "/tmp/native";
   private static final String STORAGE_OPTION_KEY = "native.option";
-  private static final String STORAGE_OPTION_VALUE = "driver";
+  private static final String STORAGE_OPTION_INITIAL_VALUE = "initial";
+  private static final String STORAGE_OPTION_READ_VALUE = "read";
+  private static final String STORAGE_OPTION_INITIAL_ONLY_KEY = "native.initial.only";
+  private static final String STORAGE_OPTION_INITIAL_ONLY_VALUE = "driver";
   private static final String TABLE_NAMESPACE = "default";
   private static final String TABLE_NAME = "table";
 
@@ -161,13 +164,17 @@ public class LanceScanTest {
         LanceSparkReadOptions.builder()
             .datasetUri(TestUtils.TestTable1Config.datasetUri)
             .batchSize(NATIVE_BATCH_SIZE)
+            .storageOptions(Collections.singletonMap(STORAGE_OPTION_KEY, STORAGE_OPTION_READ_VALUE))
             .tableId(Arrays.asList(TABLE_NAMESPACE, TABLE_NAME))
             .catalogName(CATALOG_NAME)
             .build();
+    Map<String, String> initialStorageOptions = new HashMap<>();
+    initialStorageOptions.put(STORAGE_OPTION_KEY, STORAGE_OPTION_INITIAL_VALUE);
+    initialStorageOptions.put(STORAGE_OPTION_INITIAL_ONLY_KEY, STORAGE_OPTION_INITIAL_ONLY_VALUE);
     LanceScan scan =
         buildScan(
             readOptions,
-            Collections.singletonMap(STORAGE_OPTION_KEY, STORAGE_OPTION_VALUE),
+            initialStorageOptions,
             NAMESPACE_IMPL,
             Collections.singletonMap(NAMESPACE_PROPERTY_KEY, NAMESPACE_PROPERTY_VALUE));
 
@@ -186,7 +193,10 @@ public class LanceScanTest {
     assertFalse(plan.hasLimit());
     assertFalse(plan.hasOffset());
     assertEquals(NATIVE_BATCH_SIZE, plan.getBatchSize());
-    assertEquals(STORAGE_OPTION_VALUE, plan.getStorageOptions().get(STORAGE_OPTION_KEY));
+    assertEquals(STORAGE_OPTION_READ_VALUE, plan.getStorageOptions().get(STORAGE_OPTION_KEY));
+    assertEquals(
+        STORAGE_OPTION_INITIAL_ONLY_VALUE,
+        plan.getStorageOptions().get(STORAGE_OPTION_INITIAL_ONLY_KEY));
     assertEquals(NAMESPACE_IMPL, plan.getNamespaceImpl());
     assertEquals(
         NAMESPACE_PROPERTY_VALUE, plan.getNamespaceProperties().get(NAMESPACE_PROPERTY_KEY));
@@ -198,7 +208,7 @@ public class LanceScanTest {
     }
     assertThrows(
         UnsupportedOperationException.class,
-        () -> plan.getStorageOptions().put(STORAGE_OPTION_KEY, STORAGE_OPTION_VALUE));
+        () -> plan.getStorageOptions().put(STORAGE_OPTION_KEY, STORAGE_OPTION_READ_VALUE));
     assertThrows(UnsupportedOperationException.class, () -> plan.getTableId().add(TABLE_NAME));
     assertThrows(
         UnsupportedOperationException.class,

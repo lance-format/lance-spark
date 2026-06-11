@@ -321,11 +321,11 @@ public class LanceScan
 
   private java.util.Map<String, String> nativeStorageOptions() {
     java.util.Map<String, String> storageOptions = new HashMap<>();
-    if (readOptions.getStorageOptions() != null) {
-      storageOptions.putAll(readOptions.getStorageOptions());
-    }
     if (initialStorageOptions != null) {
       storageOptions.putAll(initialStorageOptions);
+    }
+    if (readOptions.getStorageOptions() != null) {
+      storageOptions.putAll(readOptions.getStorageOptions());
     }
     return storageOptions;
   }
