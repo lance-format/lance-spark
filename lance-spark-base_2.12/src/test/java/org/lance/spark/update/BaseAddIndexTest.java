@@ -17,6 +17,7 @@ import org.lance.index.Index;
 import org.lance.index.IndexCriteria;
 import org.lance.index.IndexDescription;
 import org.lance.index.IndexType;
+import org.lance.index.OptimizeOptions;
 import org.lance.spark.utils.FieldPathUtils;
 
 import org.apache.spark.sql.Dataset;
@@ -398,6 +399,100 @@ public abstract class BaseAddIndexTest {
             spark.sql(
                 String.format(
                     "alter table %s create index idx_multi using zonemap (id, text)", fullTable)));
+  }
+
+  /**
+   * Deferred (train=false) ZONEMAP registers an empty index covering no fragments, then OPTIMIZE
+   * populates it. Unlike the eager path it commits a single driver-side index rather than
+   * distributed segments.
+   */
+  @Test
+  public void testCreateZonemapIndexDeferred() {
+    prepareDataset();
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index test_index_zonemap_deferred using zonemap (id) "
+                    + "with (train=false, rows_per_zone=4)",
+                fullTable));
+
+    // Deferred create processes no fragments.
+    Row row = result.collectAsList().get(0);
+    Assertions.assertEquals(0L, row.getLong(0), "Deferred create should index zero fragments");
+    Assertions.assertEquals("test_index_zonemap_deferred", row.getString(1));
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int fragmentCount = lanceDataset.getFragments().size();
+      Assertions.assertTrue(fragmentCount >= 2, "Expected multiple fragments");
+
+      List<Index> deferred =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> "test_index_zonemap_deferred".equals(index.name()))
+              .collect(Collectors.toList());
+
+      // A single empty index is committed on the driver (not distributed segments).
+      Assertions.assertEquals(
+          1, deferred.size(), "Deferred zonemap should commit a single empty index");
+      Assertions.assertEquals(IndexType.ZONEMAP, deferred.get(0).indexType());
+      Assertions.assertEquals(
+          0,
+          deferred.get(0).fragments().orElse(Collections.emptyList()).size(),
+          "Deferred zonemap should cover no fragments before OPTIMIZE");
+
+      // Query still returns correct results: the predicate falls back to a full scan
+      // because the index covers nothing yet.
+      Dataset<Row> beforeOptimize =
+          spark.sql(String.format("select * from %s where id=15", fullTable));
+      Assertions.assertEquals(1L, beforeOptimize.count());
+      Assertions.assertEquals("text_15", beforeOptimize.collectAsList().get(0).getString(1));
+
+      // OPTIMIZE populates the deferred index from the unindexed fragments.
+      lanceDataset.optimizeIndices(OptimizeOptions.builder().build());
+    } finally {
+      lanceDataset.close();
+    }
+
+    org.lance.Dataset optimized = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int fragmentCount = optimized.getFragments().size();
+      List<Index> populated =
+          optimized.getIndexes().stream()
+              .filter(index -> "test_index_zonemap_deferred".equals(index.name()))
+              .collect(Collectors.toList());
+      int coveredFragments =
+          populated.stream()
+              .map(index -> index.fragments().orElse(Collections.emptyList()).size())
+              .mapToInt(Integer::intValue)
+              .sum();
+      Assertions.assertEquals(
+          fragmentCount,
+          coveredFragments,
+          "Expected OPTIMIZE to populate the deferred zonemap over all fragments");
+    } finally {
+      optimized.close();
+    }
+
+    // Query remains correct after the index is populated.
+    Dataset<Row> afterOptimize =
+        spark.sql(String.format("select * from %s where id=15", fullTable));
+    Assertions.assertEquals(1L, afterOptimize.count());
+    Assertions.assertEquals("text_15", afterOptimize.collectAsList().get(0).getString(1));
+  }
+
+  /** num_segments is meaningless for a deferred build (no segmented build happens). */
+  @Test
+  public void testZonemapDeferredRejectsNumSegments() {
+    prepareDataset();
+    Assertions.assertThrows(
+        Exception.class,
+        () ->
+            spark.sql(
+                String.format(
+                    "alter table %s create index idx_defer_seg using zonemap (id) "
+                        + "with (train=false, num_segments=3)",
+                    fullTable)));
   }
 
   @Test

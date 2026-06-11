@@ -32,6 +32,14 @@ The following index methods are supported:
 
 The `CREATE INDEX` command supports options via the `WITH` clause to control index creation. These options are specific to the chosen index method.
 
+### Common Options
+
+These options apply to all index methods:
+
+| Option  | Type    | Description                                                                                                                                                                |
+|---------|---------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `train` | Boolean | When `false`, defer index training: register an empty index covering no rows without scanning any data, to be populated later. Default `true`. See [Deferred Index Creation](#deferred-index-creation). |
+
 ### ZoneMap Options
 
 For the `zonemap` method, the following options are supported:
@@ -149,6 +157,29 @@ Create an FTS index on a text column:
 
 Query the indexed column with the [SEARCH](../dql/search.md) table function.
 
+### Deferred Index Creation
+
+Register an index without scanning any data by setting `train = false`. This commits an empty index
+(covering no rows) instantly on the driver — useful when you want the index to exist immediately and
+fill it in later, or when you intend to build it incrementally:
+
+=== "SQL"
+    ```sql
+    ALTER TABLE lance.db.users CREATE INDEX idx_id USING zonemap (id) WITH (train = false);
+    ```
+
+A deferred index returns `fragments_indexed = 0` and is treated as fully unindexed: queries fall back
+to scanning the data until it is populated. Populate it with an index optimization through the SDK:
+
+```java
+dataset.optimizeIndices(OptimizeOptions.builder().build());
+```
+
+`train = false` is supported for all index methods (`btree`, `fts`, `zonemap`). For `zonemap`, the
+deferred index is later populated by the single-node index-update path rather than the distributed
+segment build used by an eager (`train = true`) build, so `num_segments` cannot be combined with
+`train = false`.
+
 ## Output
 
 The `CREATE INDEX` command returns the following information about the operation:
@@ -179,3 +210,4 @@ The `CREATE INDEX` command operates as follows:
 - **Index Methods**: The `zonemap`, `btree`, and `fts` methods are supported for scalar index creation.
 - **Zonemap Column Count**: Zonemap indexes currently support a single column only. The generic `CREATE INDEX` grammar accepts a column list, but Lance rejects multi-column zonemap creation.
 - **Index Replacement**: If you create an index with the same name as an existing one, the old index will be replaced by the new one.
+- **Deferred Training**: With `train = false` the index is registered empty and must be populated by a subsequent index optimization (`Dataset.optimizeIndices` in the SDK). The SQL `OPTIMIZE` command compacts fragments and does not train deferred indexes.
