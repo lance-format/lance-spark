@@ -114,6 +114,31 @@ public class BlobUtilsTest {
     assertEquals(DataTypes.BinaryType, rewritten.apply("payload").dataType());
   }
 
+  @Test
+  public void fileFormatSupportsBlobV2AcceptsTwoTwoAndNewer() {
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2("2.2"));
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2("2.10"));
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2("3.0"));
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2(" 2.2 "));
+  }
+
+  @Test
+  public void fileFormatSupportsBlobV2RejectsOlderAndNull() {
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2(null));
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2("2.0"));
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2("2.1"));
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2("2"));
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2("2."));
+  }
+
+  @Test
+  public void fileFormatSupportsBlobV2RejectsNamedAndMalformedVersions() {
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2("stable"));
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2(""));
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2("."));
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2("2.x"));
+  }
+
   private static StructField field(String name, org.apache.spark.sql.types.DataType dt) {
     return new StructField(name, dt, true, Metadata.empty());
   }

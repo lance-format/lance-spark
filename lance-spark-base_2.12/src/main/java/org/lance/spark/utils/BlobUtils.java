@@ -29,6 +29,9 @@ public class BlobUtils {
   public static final String ARROW_EXTENSION_NAME_KEY = "ARROW:extension:name";
   public static final String ARROW_EXTENSION_BLOB_V2 = "lance.blob.v2";
 
+  /** Lowest Lance file format version that can store blob v2 columns. */
+  public static final String MIN_BLOB_V2_FILE_FORMAT_VERSION = "2.2";
+
   /**
    * Spark struct type for a Lance blob v2 descriptor: {@code kind, position, size, blob_id,
    * blob_uri}.
@@ -143,5 +146,30 @@ public class BlobUtils {
     }
 
     return changed ? new StructType(fields) : schema;
+  }
+
+  /**
+   * True when {@code fileFormatVersion} is numeric {@code major[.minor]} of {@value
+   * #MIN_BLOB_V2_FILE_FORMAT_VERSION} or newer.
+   *
+   * <p>Null, named aliases like {@code stable}, and malformed strings return false. Lance validates
+   * version strings at dataset creation.
+   *
+   * <p>TODO: delegate to {@code LanceFileFormatVersion.isAtLeast()} in lance-core once version
+   * aliases are exposed to Java. Local parsing is conservative while {@code stable} resolves below
+   * 2.2.
+   */
+  public static boolean fileFormatSupportsBlobV2(String fileFormatVersion) {
+    if (fileFormatVersion == null) {
+      return false;
+    }
+    String[] parts = fileFormatVersion.trim().split("\\.");
+    try {
+      int major = Integer.parseInt(parts.length > 0 ? parts[0] : "");
+      int minor = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
+      return major > 2 || (major == 2 && minor >= 2);
+    } catch (NumberFormatException e) {
+      return false;
+    }
   }
 }

@@ -154,21 +154,6 @@ public class LanceSparkCatalogConfig {
     return tableOptions.get(TABLE_OPT_FILE_FORMAT_VERSION);
   }
 
-  /**
-   * Returns the file format version, allowing per-table TBLPROPERTIES to override the catalog-level
-   * default.
-   *
-   * @param tableProperties the TBLPROPERTIES from CREATE TABLE
-   * @return the file format version string, or null if not specified
-   */
-  public String getFileFormatVersion(Map<String, String> tableProperties) {
-    String override = tableProperties.get(TABLE_OPT_FILE_FORMAT_VERSION);
-    if (override != null) {
-      return override;
-    }
-    return getFileFormatVersion();
-  }
-
   @Override
   public boolean equals(Object o) {
     if (o == null || getClass() != o.getClass()) return false;

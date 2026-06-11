@@ -174,28 +174,4 @@ public class LanceSparkCatalogConfigTest {
 
     assertEquals("LEGACY", config.getFileFormatVersion());
   }
-
-  @Test
-  public void testFileFormatVersionTablePropertiesOverrideCatalogDefault() {
-    Map<String, String> catalogOptions = new HashMap<>();
-    catalogOptions.put("file_format_version", "LEGACY");
-    LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
-
-    Map<String, String> tableProperties = new HashMap<>();
-    tableProperties.put("file_format_version", "STABLE");
-
-    assertEquals("LEGACY", config.getFileFormatVersion());
-    assertEquals("STABLE", config.getFileFormatVersion(tableProperties));
-  }
-
-  @Test
-  public void testFileFormatVersionTablePropertiesFallsThroughToCatalogDefault() {
-    Map<String, String> catalogOptions = new HashMap<>();
-    catalogOptions.put("file_format_version", "LEGACY");
-    LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
-
-    Map<String, String> tableProperties = new HashMap<>();
-
-    assertEquals("LEGACY", config.getFileFormatVersion(tableProperties));
-  }
 }

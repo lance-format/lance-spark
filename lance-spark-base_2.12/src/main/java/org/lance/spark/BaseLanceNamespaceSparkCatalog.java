@@ -40,7 +40,6 @@ import org.lance.spark.function.LanceBucketFunction;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
 import org.lance.spark.utils.Optional;
-import org.lance.spark.utils.SchemaConverter;
 import org.lance.spark.utils.Utils;
 import org.lance.spark.write.StagedCommit;
 import org.lance.spark.write.StagedCommitOptions;
@@ -142,6 +141,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
         || name.startsWith("abfss://")
         || name.startsWith("file://")
         || name.startsWith("hdfs://");
+  }
+
+  /** Create-time schema and file format version resolution for every catalog create path. */
+  private CreateTableSpec resolveCreateSpec(StructType schema, Map<String, String> properties) {
+    return CreateTableSpec.resolve(schema, properties, catalogConfig.getFileFormatVersion());
   }
 
   /**
@@ -607,9 +611,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
     // Build the table ID for credential vending
     List<String> tableIdList = buildTableId(actualIdent);
 
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
-    StructType processedSchema =
-        SchemaConverter.processSchemaWithProperties(schema, properties, fileFormatVersion);
+    CreateTableSpec spec = resolveCreateSpec(schema, properties);
+    StructType processedSchema = spec.schema();
+    String fileFormatVersion = spec.fileFormatVersion();
 
     // Create dataset using namespace - WriteDatasetBuilder handles declareTable internally
     // and properly leverages namespace client for credential vending
@@ -683,7 +687,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
       ShardingSpec shardingSpec) {
     Identifier actualIdent = transformIdentifierForApi(ident);
     List<String> tableIdList = buildTableId(actualIdent);
-    StructType processedSchema = SchemaConverter.processSchemaWithProperties(schema, properties);
+    CreateTableSpec spec = resolveCreateSpec(schema, properties);
+    StructType processedSchema = spec.schema();
     Map<String, String> tableProperties = copyUserTableProperties(properties);
 
     if (lanceDatasetExists(userLocation)) {
@@ -702,7 +707,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     String location = declareResponse.getLocation();
     Map<String, String> initialStorageOptions = declareResponse.getStorageOptions();
     boolean managedVersioning = Boolean.TRUE.equals(declareResponse.getManagedVersioning());
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
+    String fileFormatVersion = spec.fileFormatVersion();
 
     try {
       Map<String, String> merged =
@@ -767,9 +772,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
       throws TableAlreadyExistsException {
     String datasetUri = getDatasetUri(ident);
 
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
-    StructType processedSchema =
-        SchemaConverter.processSchemaWithProperties(schema, properties, fileFormatVersion);
+    CreateTableSpec spec = resolveCreateSpec(schema, properties);
+    StructType processedSchema = spec.schema();
+    String fileFormatVersion = spec.fileFormatVersion();
     LanceSparkReadOptions readOptions =
         createReadOptions(
             datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
@@ -1067,9 +1072,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     Identifier actualIdent = transformIdentifierForApi(ident);
     List<String> tableIdList = buildTableId(actualIdent);
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
-    StructType processedSchema =
-        SchemaConverter.processSchemaWithProperties(schema, properties, fileFormatVersion);
+    CreateTableSpec spec = resolveCreateSpec(schema, properties);
+    StructType processedSchema = spec.schema();
+    String fileFormatVersion = spec.fileFormatVersion();
 
     DeclareTableRequest declareRequest = new DeclareTableRequest();
     tableIdList.forEach(declareRequest::addIdItem);
@@ -1122,9 +1127,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Map<String, String> properties,
       ShardingSpec shardingSpec) {
     String datasetUri = getDatasetUri(ident);
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
-    StructType processedSchema =
-        SchemaConverter.processSchemaWithProperties(schema, properties, fileFormatVersion);
+    CreateTableSpec spec = resolveCreateSpec(schema, properties);
+    StructType processedSchema = spec.schema();
+    String fileFormatVersion = spec.fileFormatVersion();
 
     LanceSparkReadOptions readOptions =
         createReadOptions(
@@ -1163,9 +1168,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     ResolvedTable resolved = resolveIdentifier(ident);
     DescribeTableResponse describeResponse = resolved.describeResponse;
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
-    StructType processedSchema =
-        SchemaConverter.processSchemaWithProperties(schema, properties, fileFormatVersion);
+    CreateTableSpec spec = resolveCreateSpec(schema, properties);
+    StructType processedSchema = spec.schema();
+    String fileFormatVersion = spec.fileFormatVersion();
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
     boolean managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
 
@@ -1207,9 +1212,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
       ShardingSpec shardingSpec)
       throws NoSuchTableException {
     String datasetUri = getDatasetUri(ident);
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
-    StructType processedSchema =
-        SchemaConverter.processSchemaWithProperties(schema, properties, fileFormatVersion);
+    CreateTableSpec spec = resolveCreateSpec(schema, properties);
+    StructType processedSchema = spec.schema();
+    String fileFormatVersion = spec.fileFormatVersion();
 
     LanceSparkReadOptions readOptions =
         createReadOptions(
@@ -1267,9 +1272,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     Identifier actualIdent = transformIdentifierForApi(ident);
     List<String> tableIdList = buildTableId(actualIdent);
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
-    StructType processedSchema =
-        SchemaConverter.processSchemaWithProperties(schema, properties, fileFormatVersion);
+    CreateTableSpec spec = resolveCreateSpec(schema, properties);
+    StructType processedSchema = spec.schema();
+    String fileFormatVersion = spec.fileFormatVersion();
 
     boolean exists = tableExists(ident);
     String location;
@@ -1346,9 +1351,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Map<String, String> properties,
       ShardingSpec shardingSpec) {
     String datasetUri = getDatasetUri(ident);
-    String fileFormatVersion = catalogConfig.getFileFormatVersion(properties);
-    StructType processedSchema =
-        SchemaConverter.processSchemaWithProperties(schema, properties, fileFormatVersion);
+    CreateTableSpec spec = resolveCreateSpec(schema, properties);
+    StructType processedSchema = spec.schema();
+    String fileFormatVersion = spec.fileFormatVersion();
 
     LanceSparkReadOptions readOptions =
         createReadOptions(
