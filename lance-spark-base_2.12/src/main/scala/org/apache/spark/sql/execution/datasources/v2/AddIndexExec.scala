@@ -58,14 +58,13 @@ import scala.collection.JavaConverters._
  *
  * <p><b>Deferred training ({@code WITH (train=false)})</b>: when this option is set, no data
  * processing occurs. An empty index is committed directly on the driver with an empty fragment
- * bitmap, meaning all existing rows appear as unindexed. A subsequent index optimization
- * ({@code Dataset.optimizeIndices} in the SDK) covers them incrementally; note the SQL
- * {@code OPTIMIZE} command compacts fragments and does not train deferred indexes. This is
- * supported for all index types (BTREE, FTS, ZONEMAP) and is ignored for empty tables. For
- * ZONEMAP, the deferred index is populated by the single-node index-update path rather than the
- * distributed segment build ({@link ZonemapIndexJob}) used for an eager (train=true) build, so it
- * is not parallelized across Spark tasks. The {@code num_segments} option is therefore rejected
- * when combined with {@code train=false}.
+ * bitmap, meaning all existing rows appear as unindexed. It is populated later either by re-running
+ * {@code CREATE INDEX} with the same name (a full distributed build that replaces the empty index)
+ * or, for incremental coverage of newly appended fragments, by {@code Dataset.optimizeIndices} in
+ * the SDK; note the SQL {@code OPTIMIZE} command compacts fragments and does not train deferred
+ * indexes. This is supported for all index types (BTREE, FTS, ZONEMAP) and is ignored for empty
+ * tables. Because the deferred commit performs no segmented build, the {@code num_segments} option
+ * is rejected when combined with {@code train=false}.
  *
  * <p>The following options are consumed at the Spark execution layer and are never forwarded
  * to the Lance index backend: {@code train}, {@code build_mode}, {@code rows_per_range},
@@ -150,10 +149,9 @@ case class AddIndexExec(
     // When train=false, skip data processing entirely and commit an empty index
     // directly on the driver. This applies uniformly to all index types (BTREE,
     // FTS, ZONEMAP): the index registers with an empty fragment bitmap so every
-    // existing row appears unindexed, and a subsequent index optimization
-    // (Dataset.optimizeIndices) covers them incrementally. Note the deferred
-    // ZONEMAP is populated by the single-node index-update path, not the
-    // distributed segment build used for an eager (train=true) ZONEMAP.
+    // existing row appears unindexed. It is populated later by re-running CREATE
+    // INDEX with the same name (a full distributed build that replaces this empty
+    // index) or, for incremental coverage, by Dataset.optimizeIndices.
     if (!train) {
       val uuid = UUID.randomUUID()
       val dataset = Utils.openDatasetBuilder(readOptions).build()

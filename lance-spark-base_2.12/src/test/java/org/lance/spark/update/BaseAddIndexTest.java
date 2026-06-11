@@ -481,6 +481,48 @@ public abstract class BaseAddIndexTest {
     Assertions.assertEquals("text_15", afterOptimize.collectAsList().get(0).getString(1));
   }
 
+  /**
+   * A deferred ZONEMAP can be populated by re-running CREATE INDEX (eager): the distributed segment
+   * build replaces the empty index and covers all fragments.
+   */
+  @Test
+  public void testDeferredZonemapPopulatedByEagerRecreate() {
+    prepareDataset();
+
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_dz using zonemap (id) with (train=false)", fullTable));
+
+    // Re-run eagerly with the same name: distributed build over all fragments.
+    spark.sql(String.format("alter table %s create index idx_dz using zonemap (id)", fullTable));
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int fragmentCount = lanceDataset.getFragments().size();
+      List<Index> segments =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> "idx_dz".equals(index.name()))
+              .collect(Collectors.toList());
+
+      // Distributed build emits more than one segment, and the empty deferred index is gone.
+      Assertions.assertTrue(
+          segments.size() > 1,
+          "Expected eager recreate to build distributed segments, got " + segments.size());
+      Assertions.assertTrue(
+          segments.stream().allMatch(s -> !s.fragments().orElse(Collections.emptyList()).isEmpty()),
+          "Expected no empty (deferred) segment to survive the eager recreate");
+      int coveredFragments =
+          segments.stream()
+              .map(index -> index.fragments().orElse(Collections.emptyList()).size())
+              .mapToInt(Integer::intValue)
+              .sum();
+      Assertions.assertEquals(
+          fragmentCount, coveredFragments, "Expected recreated zonemap to cover all fragments");
+    } finally {
+      lanceDataset.close();
+    }
+  }
+
   /** num_segments is meaningless for a deferred build (no segmented build happens). */
   @Test
   public void testZonemapDeferredRejectsNumSegments() {
