@@ -402,9 +402,8 @@ public abstract class BaseAddIndexTest {
   }
 
   /**
-   * Deferred (train=false) ZONEMAP registers an empty index covering no fragments, then OPTIMIZE
-   * populates it. Unlike the eager path it commits a single driver-side index rather than
-   * distributed segments.
+   * Deferred (train=false) ZONEMAP commits a single empty driver-side index (not distributed
+   * segments); optimizeIndices then populates it.
    */
   @Test
   public void testCreateZonemapIndexDeferred() {
@@ -448,7 +447,7 @@ public abstract class BaseAddIndexTest {
       Assertions.assertEquals(1L, beforeOptimize.count());
       Assertions.assertEquals("text_15", beforeOptimize.collectAsList().get(0).getString(1));
 
-      // OPTIMIZE populates the deferred index from the unindexed fragments.
+      // Populate the deferred index from the unindexed fragments.
       lanceDataset.optimizeIndices(OptimizeOptions.builder().build());
     } finally {
       lanceDataset.close();

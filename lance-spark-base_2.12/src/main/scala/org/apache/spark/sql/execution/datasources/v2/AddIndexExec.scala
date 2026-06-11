@@ -56,15 +56,13 @@ import scala.collection.JavaConverters._
  *   and commits the logical index on the driver.
  * </ul>
  *
- * <p><b>Deferred training ({@code WITH (train=false)})</b>: when this option is set, no data
- * processing occurs. An empty index is committed directly on the driver with an empty fragment
- * bitmap, meaning all existing rows appear as unindexed. It is populated later either by re-running
- * {@code CREATE INDEX} with the same name (a full distributed build that replaces the empty index)
- * or, for incremental coverage of newly appended fragments, by {@code Dataset.optimizeIndices} in
- * the SDK; note the SQL {@code OPTIMIZE} command compacts fragments and does not train deferred
- * indexes. This is supported for all index types (BTREE, FTS, ZONEMAP) and is ignored for empty
- * tables. Because the deferred commit performs no segmented build, the {@code num_segments} option
- * is rejected when combined with {@code train=false}.
+ * <p><b>Deferred training ({@code WITH (train=false)})</b>: commits an empty index on the driver
+ * with an empty fragment bitmap (all rows appear unindexed), skipping data processing. Supported
+ * for all index types; ignored for empty tables. Populate it later by re-running {@code CREATE
+ * INDEX} with the same name (a full distributed build that replaces the empty index) or, for
+ * incremental coverage of appended fragments, by {@code Dataset.optimizeIndices} (the SQL
+ * {@code OPTIMIZE} only compacts fragments). {@code num_segments} is rejected with this option,
+ * since no segmented build occurs.
  *
  * <p>The following options are consumed at the Spark execution layer and are never forwarded
  * to the Lance index backend: {@code train}, {@code build_mode}, {@code rows_per_range},
@@ -126,8 +124,7 @@ case class AddIndexExec(
     }
     if (numSegmentsOpt.isDefined && !train) {
       throw new IllegalArgumentException(
-        "num_segments is not supported with train=false: a deferred index performs no " +
-          "segmented build (its segments are produced later by OPTIMIZE)")
+        "num_segments is not supported with train=false: a deferred index performs no segmented build")
     }
     val validatedNumSegments: Option[Int] = numSegmentsOpt.map { arg =>
       arg.value match {
@@ -146,12 +143,8 @@ case class AddIndexExec(
       }
     }
 
-    // When train=false, skip data processing entirely and commit an empty index
-    // directly on the driver. This applies uniformly to all index types (BTREE,
-    // FTS, ZONEMAP): the index registers with an empty fragment bitmap so every
-    // existing row appears unindexed. It is populated later by re-running CREATE
-    // INDEX with the same name (a full distributed build that replaces this empty
-    // index) or, for incremental coverage, by Dataset.optimizeIndices.
+    // train=false: commit an empty index on the driver for any index type,
+    // skipping all data processing. See the class doc for how it is populated.
     if (!train) {
       val uuid = UUID.randomUUID()
       val dataset = Utils.openDatasetBuilder(readOptions).build()
@@ -294,12 +287,7 @@ case class AddIndexExec(
       UTF8String.fromString(indexName))))
   }
 
-  /**
-   * Commits an empty (untrained) index directly on the driver without launching Spark tasks.
-   *
-   * The resulting index has an empty fragment bitmap: all existing rows are unindexed and
-   * will be covered incrementally by a subsequent OPTIMIZE INDEX call.
-   */
+  /** Commits an empty (untrained) index on the driver, with an empty fragment bitmap. */
   private def commitEmptyIndex(
       dataset: Dataset,
       readOptions: LanceSparkReadOptions,
