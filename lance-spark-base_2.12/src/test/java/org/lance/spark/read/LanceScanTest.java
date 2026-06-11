@@ -13,12 +13,20 @@
  */
 package org.lance.spark.read;
 
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.read.nativeplan.LanceNativeScanFallbackReason;
+import org.lance.spark.read.nativeplan.LanceNativeScanFallbackReasonCode;
+import org.lance.spark.read.nativeplan.LanceNativeScanPlan;
+import org.lance.spark.read.nativeplan.LanceNativeScanSplit;
 
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.Expressions;
 import org.apache.spark.sql.connector.expressions.FieldReference;
+import org.apache.spark.sql.connector.expressions.NullOrdering;
+import org.apache.spark.sql.connector.expressions.SortDirection;
+import org.apache.spark.sql.connector.expressions.SortOrder;
 import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
 import org.apache.spark.sql.connector.expressions.aggregate.CountStar;
@@ -33,15 +41,31 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 public class LanceScanTest {
 
   private static final StructType TEST_SCHEMA = TestUtils.TestTable1Config.schema;
+  private static final int NATIVE_BATCH_SIZE = 1234;
+  private static final String CATALOG_NAME = "native_catalog";
+  private static final String NAMESPACE_IMPL = "dir";
+  private static final String NAMESPACE_PROPERTY_KEY = "root";
+  private static final String NAMESPACE_PROPERTY_VALUE = "/tmp/native";
+  private static final String STORAGE_OPTION_KEY = "native.option";
+  private static final String STORAGE_OPTION_VALUE = "driver";
+  private static final String TABLE_NAMESPACE = "default";
+  private static final String TABLE_NAME = "table";
 
   private LanceScan buildScan() {
     return (LanceScan)
@@ -51,6 +75,17 @@ public class LanceScanTest {
                 Collections.emptyMap(),
                 null,
                 Collections.emptyMap())
+            .build();
+  }
+
+  private LanceScan buildScan(
+      LanceSparkReadOptions readOptions,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties) {
+    return (LanceScan)
+        new LanceScanBuilder(
+                TEST_SCHEMA, readOptions, initialStorageOptions, namespaceImpl, namespaceProperties)
             .build();
   }
 
@@ -118,6 +153,119 @@ public class LanceScanTest {
     LanceInputPartition partition = (LanceInputPartition) scan.planInputPartitions()[0];
     assertTrue(partition.getLimit().isPresent());
     assertEquals(2, partition.getLimit().get());
+  }
+
+  @Test
+  public void testNativeScanPlanForEligibleOrdinaryRead() throws Exception {
+    LanceSparkReadOptions readOptions =
+        LanceSparkReadOptions.builder()
+            .datasetUri(TestUtils.TestTable1Config.datasetUri)
+            .batchSize(NATIVE_BATCH_SIZE)
+            .tableId(Arrays.asList(TABLE_NAMESPACE, TABLE_NAME))
+            .catalogName(CATALOG_NAME)
+            .build();
+    LanceScan scan =
+        buildScan(
+            readOptions,
+            Collections.singletonMap(STORAGE_OPTION_KEY, STORAGE_OPTION_VALUE),
+            NAMESPACE_IMPL,
+            Collections.singletonMap(NAMESPACE_PROPERTY_KEY, NAMESPACE_PROPERTY_VALUE));
+
+    java.util.Optional<LanceNativeScanPlan> maybePlan = scan.nativeScanPlan();
+    assertTrue(maybePlan.isPresent());
+    assertFalse(scan.nativeScanFallbackReason().isPresent());
+    LanceNativeScanPlan plan = maybePlan.get();
+
+    assertEquals(LanceNativeScanPlan.DESCRIPTOR_VERSION, plan.getDescriptorVersion());
+    assertNotNull(plan.getScanId());
+    assertEquals(TestUtils.TestTable1Config.datasetUri, plan.getDatasetUri());
+    assertTrue(plan.getResolvedVersion() > 0);
+    assertEquals(TEST_SCHEMA.json(), plan.getSparkReadSchemaJson());
+    assertEquals(TEST_SCHEMA.json(), plan.getProjectedReadSchemaJson());
+    assertFalse(plan.hasPushedFilterSql());
+    assertFalse(plan.hasLimit());
+    assertFalse(plan.hasOffset());
+    assertEquals(NATIVE_BATCH_SIZE, plan.getBatchSize());
+    assertEquals(STORAGE_OPTION_VALUE, plan.getStorageOptions().get(STORAGE_OPTION_KEY));
+    assertEquals(NAMESPACE_IMPL, plan.getNamespaceImpl());
+    assertEquals(
+        NAMESPACE_PROPERTY_VALUE, plan.getNamespaceProperties().get(NAMESPACE_PROPERTY_KEY));
+    assertEquals(Arrays.asList(TABLE_NAMESPACE, TABLE_NAME), plan.getTableId());
+    assertEquals(CATALOG_NAME, plan.getCatalogName());
+    assertFalse(plan.getSplits().isEmpty());
+    for (LanceNativeScanSplit split : plan.getSplits()) {
+      assertFalse(split.getFragmentIds().isEmpty());
+    }
+    assertThrows(
+        UnsupportedOperationException.class,
+        () -> plan.getStorageOptions().put(STORAGE_OPTION_KEY, STORAGE_OPTION_VALUE));
+    assertThrows(UnsupportedOperationException.class, () -> plan.getTableId().add(TABLE_NAME));
+    assertThrows(
+        UnsupportedOperationException.class,
+        () -> plan.getSplits().add(new LanceNativeScanSplit(0, Collections.singletonList(0))));
+
+    LanceNativeScanPlan roundTripped = roundTrip(plan);
+    assertEquals(plan.getDatasetUri(), roundTripped.getDatasetUri());
+    assertEquals(plan.getSplits().size(), roundTripped.getSplits().size());
+  }
+
+  @Test
+  public void testNativeScanPlanIncludesProjectedSchemaAndPushedOptions() {
+    StructType projectedSchema = new StructType().add("x", DataTypes.LongType);
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            TEST_SCHEMA,
+            TestUtils.TestTable1Config.readOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+    builder.pruneColumns(projectedSchema);
+    builder.pushPredicates(new Predicate[] {TestPredicates.gt("x", 0L)});
+    builder.pushLimit(2);
+
+    LanceScan scan = (LanceScan) builder.build();
+    java.util.Optional<LanceNativeScanPlan> maybePlan = scan.nativeScanPlan();
+    assertTrue(maybePlan.isPresent());
+    LanceNativeScanPlan plan = maybePlan.get();
+
+    assertEquals(TEST_SCHEMA.json(), plan.getSparkReadSchemaJson());
+    assertEquals(projectedSchema.json(), plan.getProjectedReadSchemaJson());
+    assertTrue(plan.hasPushedFilterSql());
+    assertNotNull(plan.getPushedFilterSql());
+    assertEquals(Integer.valueOf(2), plan.getLimit());
+    assertFalse(plan.hasOffset());
+  }
+
+  @Test
+  public void testNativeScanFallbackReasons() {
+    FallbackCase[] cases =
+        new FallbackCase[] {
+          new FallbackCase(
+              "aggregation",
+              this::buildPushedAggregationScan,
+              LanceNativeScanFallbackReasonCode.PUSHED_AGGREGATION),
+          new FallbackCase("topN", this::buildTopNScan, LanceNativeScanFallbackReasonCode.TOP_N),
+          new FallbackCase(
+              "missing version",
+              this::buildMissingResolvedVersionScan,
+              LanceNativeScanFallbackReasonCode.MISSING_RESOLVED_VERSION),
+          new FallbackCase(
+              "missing splits",
+              this::buildMissingSplitStateScan,
+              LanceNativeScanFallbackReasonCode.MISSING_SPLIT_STATE),
+          new FallbackCase(
+              "unsafe split",
+              this::buildUnsafeSplitStateScan,
+              LanceNativeScanFallbackReasonCode.UNSAFE_V1_STATE)
+        };
+
+    for (FallbackCase testCase : cases) {
+      LanceScan scan = testCase.scanSupplier.get();
+      java.util.Optional<LanceNativeScanFallbackReason> reason = scan.nativeScanFallbackReason();
+      assertTrue(reason.isPresent(), testCase.name);
+      assertEquals(testCase.expectedCode, reason.get().getCode(), testCase.name);
+      assertFalse(scan.nativeScanPlan().isPresent(), testCase.name);
+    }
   }
 
   @Test
@@ -327,5 +475,113 @@ public class LanceScanTest {
                 .build();
 
     assertNotEquals(scan1, scan2, "Scans with different schemas should not be equal");
+  }
+
+  private LanceScan buildPushedAggregationScan() {
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            TEST_SCHEMA,
+            TestUtils.TestTable1Config.readOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+    builder.pushPredicates(new Predicate[] {TestPredicates.gt("x", 0L)});
+    builder.pushAggregation(
+        new Aggregation(new AggregateFunc[] {new CountStar()}, new Expression[] {}));
+    return (LanceScan) builder.build();
+  }
+
+  private LanceScan buildTopNScan() {
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            TEST_SCHEMA,
+            TestUtils.TestTable1Config.readOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+    assertTrue(
+        builder.pushTopN(
+            new SortOrder[] {
+              Expressions.sort(
+                  Expressions.column("x"), SortDirection.ASCENDING, NullOrdering.NULLS_FIRST)
+            },
+            10));
+    return (LanceScan) builder.build();
+  }
+
+  private LanceScan buildMissingResolvedVersionScan() {
+    LanceSplit.ScanPlanResult plan = LanceSplit.planScan(TestUtils.TestTable1Config.readOptions);
+    return directScan(
+        TestUtils.TestTable1Config.readOptions, plan.getSplits(), plan.getFragmentRowCounts());
+  }
+
+  private LanceScan buildMissingSplitStateScan() {
+    LanceSparkReadOptions resolvedReadOptions = resolvedReadOptions();
+    return directScan(resolvedReadOptions, null, Collections.emptyMap());
+  }
+
+  private LanceScan buildUnsafeSplitStateScan() {
+    LanceSparkReadOptions resolvedReadOptions = resolvedReadOptions();
+    return directScan(
+        resolvedReadOptions,
+        Collections.singletonList(new LanceSplit(Collections.singletonList(-1))),
+        Collections.emptyMap());
+  }
+
+  private LanceScan directScan(
+      LanceSparkReadOptions readOptions,
+      List<LanceSplit> splits,
+      Map<Integer, Long> fragmentRowCounts) {
+    return new LanceScan(
+        TEST_SCHEMA,
+        readOptions,
+        org.lance.spark.utils.Optional.empty(),
+        org.lance.spark.utils.Optional.empty(),
+        org.lance.spark.utils.Optional.empty(),
+        org.lance.spark.utils.Optional.empty(),
+        org.lance.spark.utils.Optional.empty(),
+        new Predicate[0],
+        null,
+        Collections.emptyMap(),
+        null,
+        splits,
+        fragmentRowCounts,
+        null,
+        null,
+        Collections.emptyMap(),
+        null,
+        Collections.emptyMap());
+  }
+
+  private LanceSparkReadOptions resolvedReadOptions() {
+    LanceSplit.ScanPlanResult plan = LanceSplit.planScan(TestUtils.TestTable1Config.readOptions);
+    return TestUtils.TestTable1Config.readOptions.withVersion(plan.getResolvedVersion());
+  }
+
+  @SuppressWarnings("unchecked")
+  private static <T> T roundTrip(T value) throws Exception {
+    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    try (ObjectOutputStream out = new ObjectOutputStream(bytes)) {
+      out.writeObject(value);
+    }
+    try (ObjectInputStream in =
+        new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
+      return (T) in.readObject();
+    }
+  }
+
+  private static class FallbackCase {
+    private final String name;
+    private final Supplier<LanceScan> scanSupplier;
+    private final LanceNativeScanFallbackReasonCode expectedCode;
+
+    private FallbackCase(
+        String name,
+        Supplier<LanceScan> scanSupplier,
+        LanceNativeScanFallbackReasonCode expectedCode) {
+      this.name = name;
+      this.scanSupplier = scanSupplier;
+      this.expectedCode = expectedCode;
+    }
   }
 }

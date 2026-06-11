@@ -258,6 +258,7 @@ public class LanceScanBuilder
       Optional<String> whereCondition =
           FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);
       return new LanceScan(
+          fullSchema,
           schema,
           resolvedReadOptions,
           whereCondition,

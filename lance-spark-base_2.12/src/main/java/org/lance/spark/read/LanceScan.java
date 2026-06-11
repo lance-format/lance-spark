@@ -17,6 +17,10 @@ import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.read.metric.LanceCustomMetrics;
+import org.lance.spark.read.nativeplan.LanceNativeScanFallbackReason;
+import org.lance.spark.read.nativeplan.LanceNativeScanFallbackReasonCode;
+import org.lance.spark.read.nativeplan.LanceNativeScanPlan;
+import org.lance.spark.read.nativeplan.LanceNativeScanSplit;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
 import org.lance.spark.utils.Optional;
 
@@ -47,8 +51,10 @@ import org.slf4j.LoggerFactory;
 import scala.collection.immutable.Map;
 
 import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -66,6 +72,7 @@ public class LanceScan
   private static final long serialVersionUID = 947284762748623947L;
   private static final Logger LOG = LoggerFactory.getLogger(LanceScan.class);
 
+  private final StructType sparkReadSchema;
   private final StructType schema;
   private final LanceSparkReadOptions readOptions;
   private final Optional<String> whereConditions;
@@ -144,6 +151,49 @@ public class LanceScan
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
       java.util.Map<String, String> namespaceProperties) {
+    this(
+        schema,
+        schema,
+        readOptions,
+        whereConditions,
+        limit,
+        offset,
+        topNSortOrders,
+        pushedAggregation,
+        pushedPredicates,
+        statistics,
+        zonemapStats,
+        survivingFragmentIds,
+        precomputedSplits,
+        precomputedFragmentRowCounts,
+        activeShardingExpression,
+        fragmentShardingKeys,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties);
+  }
+
+  public LanceScan(
+      StructType sparkReadSchema,
+      StructType schema,
+      LanceSparkReadOptions readOptions,
+      Optional<String> whereConditions,
+      Optional<Integer> limit,
+      Optional<Integer> offset,
+      Optional<List<ColumnOrdering>> topNSortOrders,
+      Optional<Aggregation> pushedAggregation,
+      Predicate[] pushedPredicates,
+      LanceStatistics statistics,
+      java.util.Map<String, List<ZoneStats>> zonemapStats,
+      Set<Integer> survivingFragmentIds,
+      List<LanceSplit> precomputedSplits,
+      java.util.Map<Integer, Long> precomputedFragmentRowCounts,
+      Expression activeShardingExpression,
+      java.util.Map<Integer, Object> fragmentShardingKeys,
+      java.util.Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      java.util.Map<String, String> namespaceProperties) {
+    this.sparkReadSchema = sparkReadSchema;
     this.schema = schema;
     this.readOptions = readOptions;
     this.whereConditions = whereConditions;
@@ -168,6 +218,125 @@ public class LanceScan
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
+  }
+
+  public java.util.Optional<LanceNativeScanPlan> nativeScanPlan() {
+    if (nativeScanFallbackReason().isPresent()) {
+      return java.util.Optional.empty();
+    }
+    return java.util.Optional.of(
+        new LanceNativeScanPlan(
+            scanId,
+            readOptions.getDatasetUri(),
+            readOptions.getVersion(),
+            sparkReadSchema.json(),
+            schema.json(),
+            optionalValue(whereConditions),
+            optionalValue(limit),
+            optionalValue(offset),
+            readOptions.getBatchSize(),
+            nativeStorageOptions(),
+            namespaceImpl,
+            namespaceProperties,
+            readOptions.getTableId(),
+            readOptions.getCatalogName(),
+            nativeSplits()));
+  }
+
+  public java.util.Optional<LanceNativeScanFallbackReason> nativeScanFallbackReason() {
+    if (pushedAggregation == null) {
+      return fallback(
+          LanceNativeScanFallbackReasonCode.UNSAFE_V1_STATE, "pushed aggregation state is missing");
+    }
+    if (pushedAggregation.isPresent()) {
+      return fallback(
+          LanceNativeScanFallbackReasonCode.PUSHED_AGGREGATION,
+          "pushed aggregation is not representable in native scan descriptor v1");
+    }
+    if (topNSortOrders == null) {
+      return fallback(LanceNativeScanFallbackReasonCode.UNSAFE_V1_STATE, "TopN state is missing");
+    }
+    if (topNSortOrders.isPresent()) {
+      return fallback(
+          LanceNativeScanFallbackReasonCode.TOP_N,
+          "pushed TopN is not representable in native scan descriptor v1");
+    }
+    if (readOptions == null || readOptions.getDatasetUri() == null) {
+      return fallback(
+          LanceNativeScanFallbackReasonCode.UNSAFE_V1_STATE, "read options are incomplete");
+    }
+    if (readOptions.getVersion() == null) {
+      return fallback(
+          LanceNativeScanFallbackReasonCode.MISSING_RESOLVED_VERSION,
+          "read options are not pinned to a resolved Lance version");
+    }
+    if (precomputedSplits == null) {
+      return fallback(
+          LanceNativeScanFallbackReasonCode.MISSING_SPLIT_STATE,
+          "scan splits were not planned on the driver");
+    }
+    if (sparkReadSchema == null || schema == null || scanId == null) {
+      return fallback(
+          LanceNativeScanFallbackReasonCode.UNSAFE_V1_STATE, "schema or scan identity is missing");
+    }
+    if (whereConditions == null || limit == null || offset == null) {
+      return fallback(
+          LanceNativeScanFallbackReasonCode.UNSAFE_V1_STATE,
+          "filter, limit, or offset state is missing");
+    }
+    return validateSplitsForNativePlan(precomputedSplits);
+  }
+
+  private java.util.Optional<LanceNativeScanFallbackReason> validateSplitsForNativePlan(
+      List<LanceSplit> splits) {
+    for (int splitIndex = 0; splitIndex < splits.size(); splitIndex++) {
+      LanceSplit split = splits.get(splitIndex);
+      if (split == null || split.getFragments() == null) {
+        return fallback(
+            LanceNativeScanFallbackReasonCode.UNSAFE_V1_STATE,
+            "split " + splitIndex + " is missing fragment state");
+      }
+      for (Integer fragmentId : split.getFragments()) {
+        if (fragmentId == null || fragmentId < 0) {
+          return fallback(
+              LanceNativeScanFallbackReasonCode.UNSAFE_V1_STATE,
+              "split " + splitIndex + " contains an invalid fragment id");
+        }
+      }
+    }
+    return java.util.Optional.empty();
+  }
+
+  private List<LanceNativeScanSplit> nativeSplits() {
+    List<LanceSplit> prunedSplits = pruneByRowAddrFilters(precomputedSplits);
+    prunedSplits = pruneByZonemapStats(prunedSplits);
+    prunedSplits = pruneByLimit(prunedSplits, precomputedFragmentRowCounts);
+
+    List<LanceNativeScanSplit> nativeSplits = new ArrayList<>(prunedSplits.size());
+    for (int i = 0; i < prunedSplits.size(); i++) {
+      nativeSplits.add(new LanceNativeScanSplit(i, prunedSplits.get(i).getFragments()));
+    }
+    return nativeSplits;
+  }
+
+  private java.util.Map<String, String> nativeStorageOptions() {
+    java.util.Map<String, String> storageOptions = new HashMap<>();
+    if (readOptions.getStorageOptions() != null) {
+      storageOptions.putAll(readOptions.getStorageOptions());
+    }
+    if (initialStorageOptions != null) {
+      storageOptions.putAll(initialStorageOptions);
+    }
+    return storageOptions;
+  }
+
+  private static <T> T optionalValue(Optional<T> optional) {
+    return optional.isPresent() ? optional.get() : null;
+  }
+
+  private static java.util.Optional<LanceNativeScanFallbackReason> fallback(
+      LanceNativeScanFallbackReasonCode code, String message) {
+    return java.util.Optional.of(new LanceNativeScanFallbackReason(code, message));
   }
 
   @Override
