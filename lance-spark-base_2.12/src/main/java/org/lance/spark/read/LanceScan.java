@@ -170,6 +170,14 @@ public class LanceScan
     this.namespaceProperties = namespaceProperties;
   }
 
+  /**
+   * The read options this scan executes with, already pinned to the resolved dataset version by
+   * {@link LanceScanBuilder} for snapshot isolation.
+   */
+  public LanceSparkReadOptions readOptions() {
+    return readOptions;
+  }
+
   @Override
   public Batch toBatch() {
     return this;

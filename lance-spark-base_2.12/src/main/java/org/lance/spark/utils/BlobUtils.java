@@ -13,10 +13,12 @@
  */
 package org.lance.spark.utils;
 
+import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.unsafe.types.UTF8String;
 
 import java.util.HashSet;
 import java.util.Set;
@@ -43,6 +45,45 @@ public class BlobUtils {
           .add("size", DataTypes.LongType)
           .add("blob_id", DataTypes.LongType)
           .add("blob_uri", DataTypes.StringType);
+
+  /** Ordinal of the {@code size} field within {@link #BLOB_DESCRIPTOR_STRUCT}. */
+  public static final int BLOB_DESCRIPTOR_SIZE_ORDINAL = BLOB_DESCRIPTOR_STRUCT.fieldIndex("size");
+
+  private static final int BLOB_DESCRIPTOR_KIND_ORDINAL = BLOB_DESCRIPTOR_STRUCT.fieldIndex("kind");
+  private static final int BLOB_DESCRIPTOR_POSITION_ORDINAL =
+      BLOB_DESCRIPTOR_STRUCT.fieldIndex("position");
+  private static final int BLOB_DESCRIPTOR_BLOB_ID_ORDINAL =
+      BLOB_DESCRIPTOR_STRUCT.fieldIndex("blob_id");
+  private static final int BLOB_DESCRIPTOR_BLOB_URI_ORDINAL =
+      BLOB_DESCRIPTOR_STRUCT.fieldIndex("blob_uri");
+
+  /**
+   * True when a blob v2 descriptor row is Lance's null sentinel: inline kind with zero
+   * position/size, zero blob_id, and empty uri. Matches lance-core {@code collect_blob_entries_v2}
+   * and Python {@code _is_null_blob_description}. A SQL-null descriptor also counts as null.
+   */
+  public static boolean isNullBlobV2Descriptor(InternalRow descriptor) {
+    if (descriptor == null) {
+      return true;
+    }
+    if (descriptor.getShort(BLOB_DESCRIPTOR_KIND_ORDINAL) != 0) {
+      return false;
+    }
+    if (descriptor.getLong(BLOB_DESCRIPTOR_POSITION_ORDINAL) != 0L) {
+      return false;
+    }
+    if (descriptor.getLong(BLOB_DESCRIPTOR_SIZE_ORDINAL) != 0L) {
+      return false;
+    }
+    if (descriptor.getLong(BLOB_DESCRIPTOR_BLOB_ID_ORDINAL) != 0L) {
+      return false;
+    }
+    if (descriptor.isNullAt(BLOB_DESCRIPTOR_BLOB_URI_ORDINAL)) {
+      return true;
+    }
+    UTF8String uri = descriptor.getUTF8String(BLOB_DESCRIPTOR_BLOB_URI_ORDINAL);
+    return uri == null || uri.numBytes() == 0;
+  }
 
   /**
    * Check if a Spark field is a blob field based on its metadata.

@@ -13,14 +13,18 @@
  */
 package org.apache.spark.sql.catalyst.optimizer
 
-import org.apache.spark.sql.catalyst.plans.logical.AppendData
+import org.apache.spark.sql.catalyst.expressions.Literal
+import org.apache.spark.sql.catalyst.plans.logical.{AppendData, OverwriteByExpression, OverwritePartitionsDynamic}
 import org.apache.spark.sql.connector.catalog.{Table, TableCapability}
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.types.{BinaryType, DoubleType, IntegerType, MetadataBuilder, StructType}
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.Test
 import org.lance.spark.{LanceConstant, LanceDataset, LanceSparkReadOptions}
 import org.lance.spark.utils.BlobUtils
+
+import scala.collection.JavaConverters._
 
 /**
  * Unit tests for [[LanceBlobSourceContextRule]]'s application logic, exercised directly on logical
@@ -122,5 +126,62 @@ class LanceBlobSourceContextRuleTest {
     val twice = rule(once).asInstanceOf[AppendData]
     assertTrue(once.writeOptions.contains(key))
     assertEquals(once, twice)
+  }
+
+  @Test
+  def annotationPreservesV2WritesMergeInvariant(): Unit = {
+    // V2Writes.mergeOptions (Spark 4.x) asserts commandOptions == dsOptions or one side empty,
+    // reflecting the three writer APIs: SQL puts options on the relation, DataFrameWriterV2 on
+    // the command, and the V1 save() path on both, equal. Annotation must keep the invariant in
+    // every (command, relation) configuration.
+    val target = lanceTable("file:///target.lance", blobSchema)
+    val source = lanceTable("file:///src.lance", blobSchema)
+    val carried = Map("dataset_uri" -> "file:///target.lance")
+    val configs = Seq(
+      (Map.empty[String, String], Map.empty[String, String]), // SQL / writeTo without options
+      (carried, carried), // V1 save(): both channels, equal
+      (carried, Map.empty[String, String]), // DataFrameWriterV2 with command options
+      (Map.empty[String, String], carried)
+    ) // relation as the sole carrier
+    configs.foreach { case (commandOptions, relationOptions) =>
+      val targetRelation = DataSourceV2Relation.create(
+        target,
+        None,
+        None,
+        new CaseInsensitiveStringMap(relationOptions.asJava))
+      val plan = AppendData.byName(targetRelation, relation(source), commandOptions)
+      val result = rule(plan).asInstanceOf[AppendData]
+      val command = result.writeOptions
+      val ds = result.table.asInstanceOf[DataSourceV2Relation].options.asScala.toMap
+      assertTrue(
+        command.contains(key) || ds.contains(key),
+        s"context not attached for command=$commandOptions relation=$relationOptions")
+      assertTrue(
+        command == ds || command.isEmpty || ds.isEmpty,
+        s"V2Writes.mergeOptions invariant violated: command=$command ds=$ds")
+    }
+  }
+
+  @Test
+  def annotatesExactlyTheSupportedWriteCommands(): Unit = {
+    // The blob-write command matrix (single source of truth: BlobPlanUtils.V2BlobWrite):
+    //   AppendData                 -> context here, copy rewrite in LanceBlobV2CopyThroughRule
+    //   OverwriteByExpression      -> context here, copy rewrite in LanceBlobV2CopyThroughRule
+    //   CTAS / RTAS                -> both handled inside LanceBlobV2CopyThroughRule
+    //   OverwritePartitionsDynamic -> rejected at the capability check before any rule runs,
+    //                                 so this rule must not pretend to support it
+    val target = relation(lanceTable("file:///target.lance", blobSchema))
+    val source = relation(lanceTable("file:///src.lance", blobSchema))
+
+    val append = rule(AppendData.byName(target, source, Map.empty)).asInstanceOf[AppendData]
+    assertTrue(append.writeOptions.contains(key))
+
+    val overwrite = rule(
+      OverwriteByExpression.byName(target, source, Literal.TrueLiteral, Map.empty))
+      .asInstanceOf[OverwriteByExpression]
+    assertTrue(overwrite.writeOptions.contains(key))
+
+    val dynamic = OverwritePartitionsDynamic.byName(target, source, Map.empty)
+    assertEquals(dynamic, rule(dynamic))
   }
 }

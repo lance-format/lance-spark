@@ -13,11 +13,13 @@
  */
 package org.lance.spark.utils;
 
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.unsafe.types.UTF8String;
 import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
@@ -78,6 +80,27 @@ public class BlobUtilsTest {
     assertTrue(BlobUtils.isBlobReadColumn(new StructField("v1", DataTypes.BinaryType, true, v1)));
     assertTrue(BlobUtils.isBlobReadColumn(blobV2Field()));
     assertFalse(BlobUtils.isBlobReadColumn(field("id", DataTypes.IntegerType)));
+  }
+
+  @Test
+  public void testNullBlobV2DescriptorSentinel() {
+    // The sentinel is ALL five fields zero/empty; any single non-zero field means a real blob,
+    // so each field must participate in the detection (size == 0 alone is not enough).
+    Object[] sentinel = {(short) 0, 0L, 0L, 0L, UTF8String.fromString("")};
+    assertTrue(BlobUtils.isNullBlobV2Descriptor(new GenericInternalRow(sentinel)));
+    Object[][] realBlobs = {
+      {(short) 1, 0L, 0L, 0L, UTF8String.fromString("")},
+      {(short) 0, 8L, 0L, 0L, UTF8String.fromString("")},
+      {(short) 0, 0L, 16L, 0L, UTF8String.fromString("")},
+      {(short) 0, 0L, 0L, 7L, UTF8String.fromString("")},
+      {(short) 0, 0L, 0L, 0L, UTF8String.fromString("file:///b.blob")},
+    };
+    for (Object[] fields : realBlobs) {
+      assertFalse(
+          BlobUtils.isNullBlobV2Descriptor(new GenericInternalRow(fields)),
+          "must not classify a real descriptor as the null sentinel: "
+              + java.util.Arrays.toString(fields));
+    }
   }
 
   @Test

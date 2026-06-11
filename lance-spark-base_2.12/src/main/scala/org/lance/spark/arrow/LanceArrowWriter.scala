@@ -128,7 +128,9 @@ object LanceArrowWriter {
           resolver)
         new MapWriter(vector, structVector, keyWriter, valueWriter)
       case (BinaryType, vector: StructVector) if BlobUtils.isBlobV2SparkMetadata(metadata) =>
-        new BlobV2StructWriter(vector, createFieldWriter(vector.getChild("data"), BinaryType))
+        new BlobV2StructWriter(
+          vector,
+          createFieldWriter(vector.getChild("data"), BinaryType, null, resolver))
       case (StructType(fields), vector: StructVector) =>
         val children = fields.zipWithIndex.map { case (field, ordinal) =>
           createFieldWriter(

@@ -200,6 +200,22 @@ subsequent writes will automatically use blob encoding. No additional configurat
     df.writeTo("documents").append();
     ```
 
+
+### Copying blob v2 columns
+
+Blob v2 columns [read as descriptor structs](../../config.md#blob-v2-reads). Copy them with a direct select:
+
+```sql
+INSERT INTO documents_copy SELECT id, content FROM documents;
+```
+
+`writeTo().append()` and `.overwrite()` work the same way. Joins and filters are fine if the blob column stays a direct select or alias.
+
+**Limitations**
+
+- Do not transform the blob column (`CASE`, `content.size`, `GROUP BY`, `UNION`, `DISTINCT` fail the write).
+- `MERGE`, `UPDATE`, and dynamic partition overwrite are not supported.
+
 ## Writing Large String Data
 
 If you created a table with the `arrow.large_var_char` property (see [CREATE TABLE](../ddl/create-table.md#large-string-columns)), 

@@ -13,92 +13,147 @@
  */
 package org.apache.spark.sql.catalyst.optimizer
 
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.analysis.NamedRelation
+import org.apache.spark.sql.catalyst.optimizer.BlobPlanUtils.{LanceRelation, V2BlobWrite}
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.connector.catalog.Table
 import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2Relation, DataSourceV2ScanRelation}
-import org.apache.spark.sql.types.StructField
-import org.apache.spark.sql.util.LanceSerializeUtil
-import org.lance.spark.{LanceConstant, LanceDataset}
-import org.lance.spark.utils.{BlobSourceContext, BlobUtils}
+import org.apache.spark.sql.util.{CaseInsensitiveStringMap, LanceSerializeUtil}
+import org.lance.spark.{LanceConstant, LanceDataset, LanceSparkReadOptions}
+import org.lance.spark.read.LanceScan
+import org.lance.spark.utils.{BlobSourceContext, BlobUtils, Utils}
+
+import scala.util.control.NonFatal
 
 /**
- * Optimizer rule that propagates blob source credentials to the write side.
- *
- * When a Lance table with blob columns is read and its blob columns flow through a shuffle into a
- * write (e.g. `INSERT INTO target SELECT ... [JOIN ...]`), the blob bytes are not materialized: a
- * compact reference carrying the source dataset URI travels instead. To resolve those references the
- * write executors must reopen the source dataset — but Spark's DSv2 write is never handed the read
- * plan, so it has no way to learn the source's credentials.
- *
- * This rule bridges that gap on the driver, where both the write command and its source query are
- * visible: it collects each blob source's [[BlobSourceContext]] (read options + namespace config for
- * credential refresh), encodes them keyed by source URI, and stashes the result in the write
- * command's options under [[LanceConstant.BLOB_SOURCE_CONTEXTS_KEY]]. `LanceDataset.newWriteBuilder`
- * decodes it and threads it down to the per-task blob resolver. This keeps the credential context
- * query-scoped (no global state) and rides the write's own options channel rather than bloating
- * every shuffled row.
- *
- * No-op when the target is not a Lance table or the source query has no Lance blob tables.
+ * Encodes blob source credentials into Lance write options so write tasks can reopen source
+ * datasets for [[org.lance.spark.utils.BlobReference]] copy-through.
  */
 case class LanceBlobSourceContextRule() extends Rule[LogicalPlan] {
 
-  private val key = LanceConstant.BLOB_SOURCE_CONTEXTS_KEY
+  import LanceBlobSourceContextRule._
 
   override def apply(plan: LogicalPlan): LogicalPlan = plan.transformDown {
-    case a: AppendData if shouldAnnotate(a.table, a.writeOptions) =>
-      annotate(a.query) match {
-        case Some(v) => a.copy(writeOptions = a.writeOptions + (key -> v))
-        case None => a
-      }
-    case o: OverwriteByExpression if shouldAnnotate(o.table, o.writeOptions) =>
-      annotate(o.query) match {
-        case Some(v) => o.copy(writeOptions = o.writeOptions + (key -> v))
-        case None => o
-      }
-    case o: OverwritePartitionsDynamic if shouldAnnotate(o.table, o.writeOptions) =>
-      annotate(o.query) match {
-        case Some(v) => o.copy(writeOptions = o.writeOptions + (key -> v))
-        case None => o
-      }
+    case V2BlobWrite(write) if shouldAnnotate(write.table, write.writeOptions) =>
+      val (table, writeOptions) = annotate(write.query, write.table, write.writeOptions)
+      write.withTableAndOptions(table, writeOptions)
   }
 
-  private def shouldAnnotate(table: NamedRelation, writeOptions: Map[String, String]): Boolean =
-    !writeOptions.contains(key) && isLanceTarget(table)
+  // Spark 4.x V2Writes.mergeOptions requires command and relation options to match or one side empty.
+  private def annotate(
+      query: LogicalPlan,
+      table: NamedRelation,
+      writeOptions: Map[String, String]): (NamedRelation, Map[String, String]) =
+    encodeBlobSourceContexts(query) match {
+      case None => (table, writeOptions)
+      case Some(encoded) =>
+        val relationCarriesOptions = table match {
+          case relation: DataSourceV2Relation => !relation.options.isEmpty
+          case _ => false
+        }
+        val annotatedTable = table match {
+          case relation: DataSourceV2Relation if relationCarriesOptions =>
+            val merged = new java.util.HashMap[String, String](relation.options)
+            merged.put(key, encoded)
+            relation.copy(options = new CaseInsensitiveStringMap(merged))
+          case other => other
+        }
+        val annotatedWriteOptions =
+          if (writeOptions.nonEmpty || !relationCarriesOptions) writeOptions + (key -> encoded)
+          else writeOptions
+        (annotatedTable, annotatedWriteOptions)
+    }
 
-  private def isLanceTarget(table: NamedRelation): Boolean = table match {
-    case r: DataSourceV2Relation => r.table.isInstanceOf[LanceDataset]
+  private def shouldAnnotate(table: NamedRelation, writeOptions: Map[String, String]): Boolean =
+    !writeOptions.contains(key) && !annotatedOnRelation(table) && isLanceTarget(table)
+
+  private def annotatedOnRelation(table: NamedRelation): Boolean = table match {
+    case relation: DataSourceV2Relation => relation.options.containsKey(key)
     case _ => false
   }
 
-  /** Encodes {sourceUri -> context} for the query's blob sources, or None if there are none. */
-  private def annotate(query: LogicalPlan): Option[String] = {
-    val contexts = new java.util.HashMap[String, BlobSourceContext]()
-    query.foreach { node =>
-      lanceTableWithBlobs(node).foreach { ds =>
-        contexts.put(
-          ds.readOptions().getDatasetUri,
-          new BlobSourceContext(
-            ds.readOptions(),
-            ds.getInitialStorageOptions(),
-            ds.getNamespaceImpl(),
-            ds.getNamespaceProperties()))
+  private def isLanceTarget(table: NamedRelation): Boolean = table match {
+    case LanceRelation(_, _) => true
+    case _ => false
+  }
+}
+
+object LanceBlobSourceContextRule extends Logging {
+
+  val key: String = LanceConstant.BLOB_SOURCE_CONTEXTS_KEY
+
+  /** Adds the encoded blob source contexts for {@code query} to {@code writeOptions}, if any. */
+  def annotateWriteOptions(
+      query: LogicalPlan,
+      writeOptions: Map[String, String]): Map[String, String] =
+    encodeBlobSourceContexts(query) match {
+      case Some(encoded) => writeOptions + (key -> encoded)
+      case None => writeOptions
+    }
+
+  def encodeBlobSourceContexts(query: LogicalPlan): Option[String] = {
+    // Last relation per URI wins; pinning runs after dedup.
+    val sources =
+      new java.util.LinkedHashMap[String, (LanceDataset, Option[LanceSparkReadOptions])]()
+    (query +: query.subqueriesAll).foreach { plan =>
+      plan.foreach { node =>
+        blobSource(node).foreach { case source @ (ds, _) =>
+          sources.put(ds.readOptions().getDatasetUri, source)
+        }
       }
     }
-    if (contexts.isEmpty) None else Some(LanceSerializeUtil.encode(contexts))
+    if (sources.isEmpty) {
+      return None
+    }
+    val contexts = new java.util.HashMap[String, BlobSourceContext]()
+    sources.forEach { (uri, source) =>
+      val (ds, scanPinned) = source
+      contexts.put(
+        uri,
+        new BlobSourceContext(
+          scanPinned.getOrElse(pinToCurrentVersion(ds)),
+          ds.getInitialStorageOptions(),
+          ds.getNamespaceImpl(),
+          ds.getNamespaceProperties()))
+    }
+    Some(LanceSerializeUtil.encode(contexts))
   }
 
-  /** Returns the Lance table backing a relation iff it has blob columns (pre- or post-pushdown). */
-  private def lanceTableWithBlobs(node: LogicalPlan): Option[LanceDataset] = {
-    val table: Option[Table] = node match {
-      case r: DataSourceV2Relation => Some(r.table)
-      case sr: DataSourceV2ScanRelation => Some(sr.relation.table)
-      case _ => None
+  private def blobSource(
+      node: LogicalPlan): Option[(LanceDataset, Option[LanceSparkReadOptions])] = node match {
+    case LanceRelation(_, ds) if hasBlobColumns(ds) =>
+      Some((ds, None))
+    case sr: DataSourceV2ScanRelation =>
+      LanceRelation.unapply(sr.relation).collect {
+        case (_, ds) if hasBlobColumns(ds) =>
+          sr.scan match {
+            case scan: LanceScan => (ds, Some(scan.readOptions()))
+            case _ => (ds, None)
+          }
+      }
+    case _ => None
+  }
+
+  // Pin to the driver-visible version when time travel is not set; fall back on open failure.
+  private def pinToCurrentVersion(ds: LanceDataset): LanceSparkReadOptions = {
+    val opts = ds.readOptions()
+    if (opts.getVersion != null) {
+      return opts
     }
-    table.collect { case ds: LanceDataset if hasBlobColumns(ds) => ds }
+    try {
+      val dataset = Utils.openDatasetBuilder(opts).build()
+      try opts.withVersion(dataset.version())
+      finally dataset.close()
+    } catch {
+      case NonFatal(e) =>
+        logWarning(
+          s"Could not pin a dataset version for blob source '${opts.getDatasetUri}'; " +
+            s"blob references will resolve at the latest version: ${e.getMessage}")
+        opts
+    }
   }
 
   private def hasBlobColumns(ds: LanceDataset): Boolean =
-    ds.schema().fields.exists((f: StructField) => BlobUtils.isBlobSparkField(f))
+    ds.schema().fields.exists(f => BlobUtils.isBlobReadColumn(f))
 }

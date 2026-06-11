@@ -26,6 +26,12 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * The name+order contract pinned here is load-bearing for blob v2 copy-through:
+ * LanceBlobV2CopyThroughRule gates rewrites by output column NAME, which is only sound because this
+ * validator admits exclusively projections matching the target columns in name and order. Weakening
+ * these rejections requires changing that gating first.
+ */
 public class LanceWriteSchemaValidatorTest {
 
   @Test

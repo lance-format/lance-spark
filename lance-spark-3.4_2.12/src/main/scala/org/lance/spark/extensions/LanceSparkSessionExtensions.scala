@@ -16,7 +16,7 @@ package org.lance.spark.extensions
 import org.apache.spark.sql.SparkSessionExtensions
 import org.apache.spark.sql.catalyst.FunctionIdentifier
 import org.apache.spark.sql.catalyst.expressions.ExpressionInfo
-import org.apache.spark.sql.catalyst.optimizer.{LanceBlobSourceContextRule, LanceFragmentAwareJoinRule}
+import org.apache.spark.sql.catalyst.optimizer.{LanceBlobSourceContextRule, LanceBlobV2CopyThroughRule, LanceFragmentAwareJoinRule}
 import org.apache.spark.sql.catalyst.parser.extensions.LanceSparkSqlExtensionsParser
 import org.apache.spark.sql.execution.datasources.v2.LanceDataSourceV2Strategy
 import org.lance.spark.search.LanceSearchTableFunctions
@@ -26,6 +26,9 @@ class LanceSparkSessionExtensions extends (SparkSessionExtensions => Unit) {
   override def apply(extensions: SparkSessionExtensions): Unit = {
     // parser extensions
     extensions.injectParser { case (_, parser) => new LanceSparkSqlExtensionsParser(parser) }
+
+    // blob v2 copy-through for CTAS/INSERT (resolution rule)
+    extensions.injectResolutionRule(_ => LanceBlobV2CopyThroughRule())
 
     // optimizer rules for fragment-aware joins
     extensions.injectOptimizerRule(_ => LanceFragmentAwareJoinRule())
