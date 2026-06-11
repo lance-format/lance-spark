@@ -71,35 +71,11 @@ jobs:
           distribution: temurin
           java-version: 17
           cache: "maven"
-      - name: Resolve Docker build args
-        id: docker-args
-        run: |
-          make print-docker-build-args SPARK_VERSION=${SPARK_VERSION} SCALA_VERSION=${SCALA_VERSION} >> $GITHUB_OUTPUT
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-      - name: Build test-base image (cached)
-        uses: docker/build-push-action@v7
+      - name: Build Docker images
+        uses: ./.github/actions/docker-build
         with:
-          context: docker
-          file: docker/Dockerfile.test-base
-          load: true
-          tags: lance-spark-test-base:${{ env.SPARK_VERSION }}_${{ env.SCALA_VERSION }}
-          build-args: |
-            SPARK_DOWNLOAD_VERSION=${{ steps.docker-args.outputs.spark-download-version }}
-            SPARK_MAJOR_VERSION=${{ env.SPARK_VERSION }}
-            SCALA_VERSION=${{ env.SCALA_VERSION }}
-            PY4J_VERSION=${{ steps.docker-args.outputs.py4j-version }}
-            SPARK_SCALA_SUFFIX=${{ steps.docker-args.outputs.spark-scala-suffix }}
-          cache-from: type=gha,scope=test-base-${{ env.SPARK_VERSION }}_${{ env.SCALA_VERSION }}
-          cache-to: type=gha,mode=max,scope=test-base-${{ env.SPARK_VERSION }}_${{ env.SCALA_VERSION }}
-      - name: Build bundle
-        run: make bundle SPARK_VERSION=${SPARK_VERSION} SCALA_VERSION=${SCALA_VERSION}
-      - name: Build Glue/S3 test image
-        run: |
-          make docker-build-test \
-            SPARK_VERSION=${SPARK_VERSION} \
-            SCALA_VERSION=${SCALA_VERSION} \
-            LANCE_NAMESPACE_IMPL_VERSION=${{ steps.docker-args.outputs.lance-namespace-impl-version }}
+          spark-version: ${{ env.SPARK_VERSION }}
+          scala-version: ${{ env.SCALA_VERSION }}
       - name: Verify AWS Glue/S3 targets
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}

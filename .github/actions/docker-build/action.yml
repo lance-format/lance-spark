@@ -1,0 +1,72 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: "Docker Build"
+description: "Builds Docker test-base image, Spark bundle, and test image"
+
+inputs:
+  spark-version:
+    description: "Spark major version (e.g. 3.5)"
+    required: true
+  scala-version:
+    description: "Scala version (e.g. 2.13)"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Resolve Docker build args
+      id: docker-args
+      shell: bash
+      run: |
+        make print-docker-build-args \
+          SPARK_VERSION=${{ inputs.spark-version }} \
+          SCALA_VERSION=${{ inputs.scala-version }} \
+          >> $GITHUB_OUTPUT
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+
+    - name: Build test-base image (cached)
+      uses: docker/build-push-action@v7
+      with:
+        context: docker
+        file: docker/Dockerfile.test-base
+        load: true
+        tags: lance-spark-test-base:${{ inputs.spark-version }}_${{ inputs.scala-version }}
+        build-args: |
+          SPARK_DOWNLOAD_VERSION=${{ steps.docker-args.outputs.spark-download-version }}
+          SPARK_MAJOR_VERSION=${{ inputs.spark-version }}
+          SCALA_VERSION=${{ inputs.scala-version }}
+          PY4J_VERSION=${{ steps.docker-args.outputs.py4j-version }}
+          SPARK_SCALA_SUFFIX=${{ steps.docker-args.outputs.spark-scala-suffix }}
+        cache-from: type=gha,scope=test-base-${{ inputs.spark-version }}_${{ inputs.scala-version }}
+        cache-to: type=gha,mode=max,scope=test-base-${{ inputs.spark-version }}_${{ inputs.scala-version }}
+
+    - name: Build bundle
+      shell: bash
+      run: make bundle SPARK_VERSION=${{ inputs.spark-version }} SCALA_VERSION=${{ inputs.scala-version }}
+
+    - name: Build test image
+      shell: bash
+      run: |
+        NS_VERSION="${{ steps.docker-args.outputs.lance-namespace-impl-version }}"
+        if [ -n "${NS_VERSION}" ]; then
+          make docker-build-test \
+            SPARK_VERSION=${{ inputs.spark-version }} \
+            SCALA_VERSION=${{ inputs.scala-version }} \
+            LANCE_NAMESPACE_IMPL_VERSION="${NS_VERSION}"
+        else
+          make docker-build-test \
+            SPARK_VERSION=${{ inputs.spark-version }} \
+            SCALA_VERSION=${{ inputs.scala-version }}
+        fi
