@@ -192,7 +192,8 @@ public class LanceBatchWrite implements BatchWrite {
           operation = Append.builder().fragments(fragments).build();
         }
         CommitBuilder commitBuilder =
-            new CommitBuilder(ds).writeParams(writeOptions.getStorageOptions());
+            new CommitBuilder(ds)
+                .writeParams(WriteStorageOptions.merge(writeOptions, initialStorageOptions));
         // When enableStableRowIds is null (user didn't pass the option),
         // lance-core auto-inherits the flag from the existing manifest.
         // Appending to a table with stable row IDs works without

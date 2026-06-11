@@ -159,7 +159,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
               new Transaction.Builder().readVersion(version).operation(update).build();
           Dataset committed =
               new CommitBuilder(dataset)
-                  .writeParams(writeOptions.getStorageOptions())
+                  .writeParams(WriteStorageOptions.merge(writeOptions, initialStorageOptions))
                   .execute(txn)) {
         // auto-close txn and committed dataset
       }
