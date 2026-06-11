@@ -21,6 +21,8 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +33,13 @@ except ImportError:
     import xml.etree.ElementTree as etree
 
 LANCE_REPO = "lance-format/lance"
+
+# Lance's Java artifacts are published to Maven Central by a separate, slower
+# pipeline than the GitHub release/tag the timer watches. These point at the
+# lance-core jar so we can confirm a tagged version is actually resolvable
+# before opening a dependency-bump PR.
+MAVEN_CENTRAL_BASE = "https://repo1.maven.org/maven2"
+LANCE_CORE_PATH = "org/lance/lance-core"
 
 SEMVER_RE = re.compile(
     r"^\s*(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"
@@ -172,6 +181,38 @@ def determine_latest_tag(tags: Iterable[TagInfo]) -> TagInfo:
     return max(tags, key=lambda tag: tag.semver)
 
 
+def maven_artifact_published(version: str) -> bool:
+    """Return True if lance-core ``version`` is resolvable on Maven Central.
+
+    The release timer keys off Lance's GitHub tags, but the Java artifacts are
+    pushed to Maven Central by a separate, slower pipeline. Opening the bump PR
+    before the jar lands only produces a guaranteed-red build (the dependency
+    cannot be resolved), so we defer until the artifact actually exists. Any
+    ambiguity (404, network error, unexpected status) is treated as
+    "not yet published" so the next scheduled run simply retries.
+    """
+    jar_url = f"{MAVEN_CENTRAL_BASE}/{LANCE_CORE_PATH}/{version}/lance-core-{version}.jar"
+    request = urllib.request.Request(jar_url, method="HEAD")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return 200 <= response.status < 300
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            print(
+                f"Unexpected HTTP {exc.code} probing Maven Central for "
+                f"lance-core {version}; treating as not yet published.",
+                file=sys.stderr,
+            )
+        return False
+    except urllib.error.URLError as exc:
+        print(
+            f"Network error probing Maven Central for lance-core {version} "
+            f"({exc.reason}); treating as not yet published.",
+            file=sys.stderr,
+        )
+        return False
+
+
 def write_outputs(args: argparse.Namespace, payload: dict) -> None:
     target = getattr(args, "github_output", None)
     if not target:
@@ -202,13 +243,26 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     tags = fetch_remote_tags()
     latest = determine_latest_tag(tags)
-    needs_update = latest.semver > current_semver
+    newer_tag_available = latest.semver > current_semver
+
+    # A newer tag alone is not enough: only proceed once the artifact is on
+    # Maven Central, otherwise the bump PR's build cannot resolve the dependency.
+    artifact_published = newer_tag_available and maven_artifact_published(latest.version)
+    if newer_tag_available and not artifact_published:
+        print(
+            f"Lance {latest.version} is tagged but its artifact is not yet on "
+            "Maven Central; deferring the dependency update until it is published.",
+            file=sys.stderr,
+        )
+
+    needs_update = newer_tag_available and artifact_published
 
     payload = {
         "current_version": current_version,
         "current_tag": f"v{current_version}",
         "latest_version": latest.version,
         "latest_tag": latest.tag,
+        "artifact_published": "true" if artifact_published else "false",
         "needs_update": "true" if needs_update else "false",
     }
 
