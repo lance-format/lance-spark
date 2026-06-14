@@ -624,8 +624,9 @@ public class LanceArrowColumnVector extends ColumnVector {
 
   /**
    * Computes the Spark type this column reports. Blob v2 descriptor fields report the descriptor
-   * struct; a plain (non-blob) struct field reports its Spark schema so a pruned or reordered nested
-   * projection is described correctly (#499); everything else derives the type from the Arrow field.
+   * struct; a plain (non-blob) struct field reports its Spark schema so a pruned or reordered
+   * nested projection is described correctly (#499); everything else derives the type from the
+   * Arrow field.
    */
   private static DataType reportedSparkType(ValueVector vector, StructField sparkField) {
     if (BlobUtils.isBlobV2SparkField(sparkField)) {
