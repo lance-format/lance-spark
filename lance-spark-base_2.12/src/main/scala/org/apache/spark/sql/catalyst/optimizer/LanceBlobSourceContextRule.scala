@@ -34,13 +34,14 @@ case class LanceBlobSourceContextRule() extends Rule[LogicalPlan] {
 
   import LanceBlobSourceContextRule._
 
+  // Context key lives on command writeOptions only. V2Writes.mergeOptions requires matching options
+  // or one side empty; INSERT/OVERWRITE targets resolve with empty relation options.
   override def apply(plan: LogicalPlan): LogicalPlan = plan.transformDown {
     case V2BlobWrite(write) if shouldAnnotate(write.table, write.writeOptions) =>
       val (table, writeOptions) = annotate(write.query, write.table, write.writeOptions)
       write.withTableAndOptions(table, writeOptions)
   }
 
-  // Spark 4.x V2Writes.mergeOptions requires command and relation options to match or one side empty.
   private def annotate(
       query: LogicalPlan,
       table: NamedRelation,
@@ -103,21 +104,15 @@ object LanceBlobSourceContextRule extends Logging {
         }
       }
     }
-    if (sources.isEmpty) {
-      return None
-    }
-    val contexts = new java.util.HashMap[String, BlobSourceContext]()
-    sources.forEach { (uri, source) =>
-      val (ds, scanPinned) = source
-      contexts.put(
-        uri,
-        new BlobSourceContext(
-          scanPinned.getOrElse(pinToCurrentVersion(ds)),
-          ds.getInitialStorageOptions(),
-          ds.getNamespaceImpl(),
-          ds.getNamespaceProperties()))
-    }
-    Some(LanceSerializeUtil.encode(contexts))
+    encodeContexts(sources)
+  }
+
+  /** Pinned source contexts for row-level copy (WriteDelta cannot carry write options). */
+  def contextsForDatasets(datasets: Seq[LanceDataset]): java.util.Map[String, BlobSourceContext] = {
+    val sources =
+      new java.util.LinkedHashMap[String, (LanceDataset, Option[LanceSparkReadOptions])]()
+    datasets.foreach(ds => sources.put(ds.readOptions().getDatasetUri, (ds, None)))
+    buildContexts(sources)
   }
 
   private def blobSource(
@@ -156,4 +151,28 @@ object LanceBlobSourceContextRule extends Logging {
 
   private def hasBlobColumns(ds: LanceDataset): Boolean =
     ds.schema().fields.exists(f => BlobUtils.isBlobReadColumn(f))
+
+  private def encodeContexts(
+      sources: java.util.LinkedHashMap[String, (LanceDataset, Option[LanceSparkReadOptions])])
+      : Option[String] = {
+    val contexts = buildContexts(sources)
+    if (contexts.isEmpty) None else Some(LanceSerializeUtil.encode(contexts))
+  }
+
+  private def buildContexts(
+      sources: java.util.LinkedHashMap[String, (LanceDataset, Option[LanceSparkReadOptions])])
+      : java.util.Map[String, BlobSourceContext] = {
+    val contexts = new java.util.HashMap[String, BlobSourceContext]()
+    sources.forEach { (uri, source) =>
+      val (ds, scanPinned) = source
+      contexts.put(
+        uri,
+        new BlobSourceContext(
+          scanPinned.getOrElse(pinToCurrentVersion(ds)),
+          ds.getInitialStorageOptions(),
+          ds.getNamespaceImpl(),
+          ds.getNamespaceProperties()))
+    }
+    contexts
+  }
 }

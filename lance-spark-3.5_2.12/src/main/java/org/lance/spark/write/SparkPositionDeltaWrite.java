@@ -27,6 +27,8 @@ import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkCatalogConfig;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
+import org.lance.spark.utils.BlobReferenceResolver;
+import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.Utils;
 
 import com.google.common.collect.ImmutableList;
@@ -94,6 +96,9 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
   private final boolean managedVersioning;
   private final boolean hasStableRowIds;
 
+  /** Blob source contexts for resolving copy tokens, keyed by source dataset URI. */
+  private final Map<String, BlobSourceContext> blobSourceContexts;
+
   public SparkPositionDeltaWrite(
       StructType sparkSchema,
       LanceSparkWriteOptions writeOptions,
@@ -101,7 +106,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       String namespaceImpl,
       Map<String, String> namespaceProperties,
       boolean managedVersioning,
-      List<String> tableId) {
+      List<String> tableId,
+      Map<String, BlobSourceContext> blobSourceContexts) {
     this.sparkSchema = sparkSchema;
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
       this.writeOptions = writeOptions.withVersion(ds.version());
@@ -116,6 +122,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
     this.managedVersioning = managedVersioning;
+    this.blobSourceContexts = blobSourceContexts;
   }
 
   @Override
@@ -151,7 +158,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
           namespaceImpl,
           namespaceProperties,
           tableId,
-          hasStableRowIds);
+          hasStableRowIds,
+          blobSourceContexts);
     }
 
     @Override
@@ -251,6 +259,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     private final Map<String, String> namespaceProperties;
     private final List<String> tableId;
     private final boolean hasStableRowIds;
+    private final Map<String, BlobSourceContext> blobSourceContexts;
 
     PositionDeltaWriteFactory(
         StructType sparkSchema,
@@ -259,7 +268,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
         String namespaceImpl,
         Map<String, String> namespaceProperties,
         List<String> tableId,
-        boolean hasStableRowIds) {
+        boolean hasStableRowIds,
+        Map<String, BlobSourceContext> blobSourceContexts) {
       this.sparkSchema = sparkSchema;
       this.writeOptions = writeOptions;
       this.initialStorageOptions = initialStorageOptions;
@@ -267,6 +277,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       this.namespaceProperties = namespaceProperties;
       this.tableId = tableId;
       this.hasStableRowIds = hasStableRowIds;
+      this.blobSourceContexts = blobSourceContexts;
     }
 
     @Override
@@ -274,19 +285,27 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       int batchSize = writeOptions.getBatchSize();
       boolean useQueuedBuffer = writeOptions.isUseQueuedWriteBuffer();
       boolean useLargeVarTypes = writeOptions.isUseLargeVarTypes();
+      long maxBatchBytes = writeOptions.getMaxBatchBytes();
 
       LanceSparkWriteOptions fragmentWriteOptions =
           writeOptions.toBuilder().enableStableRowIds(false).build();
       WriteParams params = fragmentWriteOptions.toWriteParams(initialStorageOptions);
+
+      // One resolver per write task, closed via LanceDataWriter when the task finishes. Always
+      // created so copy tokens resolve even without captured contexts (falls back to open-by-URI).
+      BlobReferenceResolver blobResolver = new BlobReferenceResolver(blobSourceContexts);
 
       // Select buffer type based on configuration
       ArrowBatchWriteBuffer writeBuffer;
       if (useQueuedBuffer) {
         int queueDepth = writeOptions.getQueueDepth();
         writeBuffer =
-            new QueuedArrowBatchWriteBuffer(sparkSchema, batchSize, queueDepth, useLargeVarTypes);
+            new QueuedArrowBatchWriteBuffer(
+                sparkSchema, batchSize, queueDepth, useLargeVarTypes, maxBatchBytes, blobResolver);
       } else {
-        writeBuffer = new SemaphoreArrowBatchWriteBuffer(sparkSchema, batchSize, useLargeVarTypes);
+        writeBuffer =
+            new SemaphoreArrowBatchWriteBuffer(
+                sparkSchema, batchSize, useLargeVarTypes, maxBatchBytes, blobResolver);
       }
 
       // Create fragment in background thread
@@ -305,7 +324,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
       return new LanceDeltaWriter(
           writeOptions,
-          new LanceDataWriter(writeBuffer, fragmentCreationTask, fragmentCreationThread),
+          new LanceDataWriter(
+              writeBuffer, fragmentCreationTask, fragmentCreationThread, null, null, blobResolver),
           initialStorageOptions,
           hasStableRowIds);
     }

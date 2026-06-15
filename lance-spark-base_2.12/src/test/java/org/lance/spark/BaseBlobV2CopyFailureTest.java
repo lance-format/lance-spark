@@ -43,36 +43,7 @@ public abstract class BaseBlobV2CopyFailureTest extends AbstractBlobV2CopyTest {
   }
 
   @Test
-  public void mergeIntoBlobV2Table_failsLoudly() throws Exception {
-    String src = "v2_fail_merge_src_" + System.currentTimeMillis();
-    String tgt = "v2_fail_merge_tgt_" + System.currentTimeMillis();
-    String fqSrc = fq(src);
-    String fqTgt = fq(tgt);
-    createV2BlobSource(fqSrc, row(1, deterministicBlob(141, 16)));
-    createV2BlobSource(fqTgt, row(1, deterministicBlob(142, 16)));
-    try {
-      Exception ex =
-          assertThrows(
-              Exception.class,
-              () ->
-                  spark.sql(
-                      "MERGE INTO "
-                          + fqTgt
-                          + " t USING "
-                          + fqSrc
-                          + " s ON t.id = s.id"
-                          + " WHEN MATCHED THEN UPDATE SET t.data = s.data"));
-      assertTrue(
-          ex.getMessage() != null && !ex.getMessage().isEmpty(),
-          "MERGE must fail with a message, got: " + ex);
-    } finally {
-      spark.sql("DROP TABLE IF EXISTS " + fqSrc);
-      spark.sql("DROP TABLE IF EXISTS " + fqTgt);
-    }
-  }
-
-  @Test
-  public void updateBlobV2Table_failsLoudly() throws Exception {
+  public void testUpdateBlobWithBinaryLiteralFailsAtAnalysis() throws Exception {
     String tgt = "v2_fail_update_tgt_" + System.currentTimeMillis();
     String fqTgt = fq(tgt);
     createV2BlobSource(fqTgt, row(1, deterministicBlob(143, 16)));

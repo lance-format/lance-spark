@@ -14,6 +14,8 @@
 package org.lance.spark;
 
 import org.lance.spark.read.LanceScanBuilder;
+import org.lance.spark.utils.BlobSourceContext;
+import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.write.SparkPositionDeltaWriteBuilder;
 
 import org.apache.spark.sql.connector.expressions.Expressions;
@@ -23,9 +25,11 @@ import org.apache.spark.sql.connector.write.DeltaWriteBuilder;
 import org.apache.spark.sql.connector.write.LogicalWriteInfo;
 import org.apache.spark.sql.connector.write.RowLevelOperation;
 import org.apache.spark.sql.connector.write.SupportsDelta;
+import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
+import java.util.Collections;
 import java.util.Map;
 
 public class LancePositionDeltaOperation implements RowLevelOperation, SupportsDelta {
@@ -50,6 +54,8 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
 
   private final Map<String, String> tableProperties;
 
+  private final Map<String, BlobSourceContext> blobSourceContexts;
+
   public LancePositionDeltaOperation(
       Command command,
       StructType sparkSchema,
@@ -60,6 +66,30 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
       boolean managedVersioning,
       String fileFormatVersion,
       Map<String, String> tableProperties) {
+    this(
+        command,
+        sparkSchema,
+        readOptions,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        managedVersioning,
+        fileFormatVersion,
+        tableProperties,
+        Collections.emptyMap());
+  }
+
+  private LancePositionDeltaOperation(
+      Command command,
+      StructType sparkSchema,
+      LanceSparkReadOptions readOptions,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      boolean managedVersioning,
+      String fileFormatVersion,
+      Map<String, String> tableProperties,
+      Map<String, BlobSourceContext> blobSourceContexts) {
     this.command = command;
     this.sparkSchema = sparkSchema;
     this.readOptions = readOptions;
@@ -69,6 +99,22 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
     this.managedVersioning = managedVersioning;
     this.fileFormatVersion = fileFormatVersion;
     this.tableProperties = tableProperties;
+    this.blobSourceContexts = blobSourceContexts;
+  }
+
+  public LancePositionDeltaOperation withBlobSourceContexts(
+      Map<String, BlobSourceContext> contexts) {
+    return new LancePositionDeltaOperation(
+        command,
+        sparkSchema,
+        readOptions,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        managedVersioning,
+        fileFormatVersion,
+        tableProperties,
+        contexts);
   }
 
   @Override
@@ -84,7 +130,7 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
 
   @Override
   public DeltaWriteBuilder newWriteBuilder(LogicalWriteInfo logicalWriteInfo) {
-    // Create write options from read options for delta operations
+    rejectBlobV2Descriptors(logicalWriteInfo.schema());
     LanceSparkWriteOptions.Builder writeOptionsBuilder =
         LanceSparkWriteOptions.builder()
             .datasetUri(readOptions.getDatasetUri())
@@ -102,6 +148,10 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
       }
     }
     LanceSparkWriteOptions writeOptions = writeOptionsBuilder.build();
+    Map<String, BlobSourceContext> contexts =
+        blobSourceContexts.isEmpty()
+            ? BlobSourceContext.decodeFromWriteOptions(logicalWriteInfo.options())
+            : blobSourceContexts;
     return new SparkPositionDeltaWriteBuilder(
         sparkSchema,
         writeOptions,
@@ -109,7 +159,33 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
         namespaceImpl,
         namespaceProperties,
         managedVersioning,
-        readOptions.getTableId());
+        readOptions.getTableId(),
+        contexts);
+  }
+
+  /**
+   * A blob v2 column accepts only BINARY on write. If a descriptor struct reaches the delta writer
+   * it would serialize as opaque bytes and silently corrupt the column, so any row-level plan the
+   * copy-through rewrite could not convert to copy tokens must fail here.
+   */
+  private void rejectBlobV2Descriptors(StructType writeSchema) {
+    for (StructField tableField : sparkSchema.fields()) {
+      if (!BlobUtils.isBlobV2SparkField(tableField)) {
+        continue;
+      }
+      for (StructField writeField : writeSchema.fields()) {
+        if (writeField.name().equals(tableField.name())
+            && writeField.dataType() instanceof StructType) {
+          throw new IllegalArgumentException(
+              String.format(
+                  "Cannot run this MERGE/UPDATE on Lance table %s: blob v2 column '%s' would "
+                      + "receive descriptor structs instead of binary data. Assign the column "
+                      + "directly from a blob v2 source column (deep copy) or omit it from the "
+                      + "command",
+                  readOptions.getDatasetUri(), tableField.name()));
+        }
+      }
+    }
   }
 
   @Override
@@ -128,5 +204,9 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
   @Override
   public boolean representUpdateAsDeleteAndInsert() {
     return command != Command.UPDATE;
+  }
+
+  Map<String, BlobSourceContext> blobSourceContexts() {
+    return blobSourceContexts;
   }
 }

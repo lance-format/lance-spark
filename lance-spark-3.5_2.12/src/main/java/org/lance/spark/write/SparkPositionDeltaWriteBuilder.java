@@ -14,6 +14,7 @@
 package org.lance.spark.write;
 
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.utils.BlobSourceContext;
 
 import org.apache.spark.sql.connector.write.DeltaWrite;
 import org.apache.spark.sql.connector.write.DeltaWriteBuilder;
@@ -39,6 +40,9 @@ public class SparkPositionDeltaWriteBuilder implements DeltaWriteBuilder {
   private final List<String> tableId;
   private final boolean managedVersioning;
 
+  /** Blob source contexts for resolving copy tokens, keyed by source dataset URI. */
+  private final Map<String, BlobSourceContext> blobSourceContexts;
+
   public SparkPositionDeltaWriteBuilder(
       StructType sparkSchema,
       LanceSparkWriteOptions writeOptions,
@@ -46,7 +50,8 @@ public class SparkPositionDeltaWriteBuilder implements DeltaWriteBuilder {
       String namespaceImpl,
       Map<String, String> namespaceProperties,
       boolean managedVersioning,
-      List<String> tableId) {
+      List<String> tableId,
+      Map<String, BlobSourceContext> blobSourceContexts) {
     this.sparkSchema = sparkSchema;
     this.writeOptions = writeOptions;
     this.initialStorageOptions = initialStorageOptions;
@@ -54,6 +59,7 @@ public class SparkPositionDeltaWriteBuilder implements DeltaWriteBuilder {
     this.namespaceProperties = namespaceProperties;
     this.managedVersioning = managedVersioning;
     this.tableId = tableId;
+    this.blobSourceContexts = blobSourceContexts;
   }
 
   public DeltaWrite build() {
@@ -64,6 +70,7 @@ public class SparkPositionDeltaWriteBuilder implements DeltaWriteBuilder {
         namespaceImpl,
         namespaceProperties,
         managedVersioning,
-        tableId);
+        tableId,
+        blobSourceContexts);
   }
 }

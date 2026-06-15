@@ -209,12 +209,23 @@ Blob v2 columns [read as descriptor structs](../../config.md#blob-v2-reads). Cop
 INSERT INTO documents_copy SELECT id, content FROM documents;
 ```
 
-`writeTo().append()` and `.overwrite()` work the same way. Joins and filters are fine if the blob column stays a direct select or alias.
+Only direct column references (or simple aliases) from a single Lance source table are
+copied this way; `ORDER BY` and `LIMIT` on the SELECT are supported. `writeTo().append()`
+and `.overwrite()` work the same way. Transformed values (e.g. `content.size`),
+`DISTINCT`, `GROUP BY`, `UNION`, ordering by the blob column itself, and joins of multiple
+blob sources keep their descriptor semantics and cannot be inserted into a blob column. See
+[CREATE TABLE](../ddl/create-table.md#copying-blob-v2-columns-with-ctas) for creating a new
+table from a blob v2 query.
 
-**Limitations**
+On Spark 3.5+, `MERGE INTO` and `UPDATE` deep-copy blob v2 columns the same way: a blob
+assigned from a source column (`SET t.content = s.content`) is copied from the source table,
+and blobs the command does not touch are carried forward from the target. Additional
+limitations apply:
 
-- Do not transform the blob column (`CASE`, `content.size`, `GROUP BY`, `UNION`, `DISTINCT` fail the write).
-- `MERGE`, `UPDATE`, and dynamic partition overwrite are not supported.
+- Assigning a binary literal to a blob v2 column through `UPDATE` or `MERGE` is rejected at
+  analysis; use `INSERT` for direct binary writes.
+- Dynamic partition overwrite is not supported.
+- On Spark 3.4, `MERGE` and `UPDATE` are not supported for blob v2 tables.
 
 ## Writing Large String Data
 
