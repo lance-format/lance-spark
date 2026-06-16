@@ -15,8 +15,8 @@ package org.apache.spark.sql.catalyst.parser.extensions
 
 import org.antlr.v4.runtime.ParserRuleContext
 import org.apache.spark.sql.catalyst.analysis.{UnresolvedIdentifier, UnresolvedRelation}
-import org.apache.spark.sql.catalyst.parser.ParserInterface
-import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, LanceDropIndex, LanceNamedArgument, LogicalPlan, Optimize, SetUnenforcedPrimaryKey, ShowIndexes, UpdateColumnsBackfill, Vacuum}
+import org.apache.spark.sql.catalyst.parser.{ParseException, ParserInterface}
+import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, LanceCreateBranch, LanceDropBranch, LanceDropIndex, LanceNamedArgument, LanceShowBranches, LogicalPlan, Optimize, SetUnenforcedPrimaryKey, ShowIndexes, UpdateColumnsBackfill, Vacuum}
 import org.lance.spark.utils.{FieldPathUtils, ParserUtils}
 
 import scala.collection.JavaConverters._
