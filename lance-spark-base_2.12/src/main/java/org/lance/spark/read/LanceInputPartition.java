@@ -33,6 +33,7 @@ public class LanceInputPartition implements HasPartitionKey {
   private final LanceSplit lanceSplit;
   private final LanceSparkReadOptions readOptions;
   private final Optional<String> whereCondition;
+  private final Optional<FtsQuerySpec> ftsQuery;
   private final Optional<Integer> limit;
   private final Optional<Integer> offset;
   private final Optional<List<ColumnOrdering>> topNSortOrders;
@@ -63,6 +64,7 @@ public class LanceInputPartition implements HasPartitionKey {
       LanceSplit lanceSplit,
       LanceSparkReadOptions readOptions,
       Optional<String> whereCondition,
+      Optional<FtsQuerySpec> ftsQuery,
       Optional<Integer> limit,
       Optional<Integer> offset,
       Optional<List<ColumnOrdering>> topNSortOrders,
@@ -77,6 +79,7 @@ public class LanceInputPartition implements HasPartitionKey {
     this.lanceSplit = lanceSplit;
     this.readOptions = readOptions;
     this.whereCondition = whereCondition;
+    this.ftsQuery = ftsQuery;
     this.limit = limit;
     this.offset = offset;
     this.topNSortOrders = topNSortOrders;
@@ -106,6 +109,10 @@ public class LanceInputPartition implements HasPartitionKey {
 
   public Optional<String> getWhereCondition() {
     return whereCondition;
+  }
+
+  public Optional<FtsQuerySpec> getFtsQuery() {
+    return ftsQuery;
   }
 
   public Optional<Integer> getLimit() {

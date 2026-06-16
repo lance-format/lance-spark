@@ -149,13 +149,30 @@ public class LanceDataset
         }
       };
 
+  // Virtual BM25 relevance column surfaced by the native scanner when an FTS query is active.
+  // Exposed unconditionally to Spark's analyzer; referencing it without lance_match() is rejected
+  // at scan-build time in LanceFragmentScanner.
+  public static final MetadataColumn FTS_SCORE_COLUMN =
+      new MetadataColumn() {
+        @Override
+        public String name() {
+          return LanceConstant.FTS_SCORE;
+        }
+
+        @Override
+        public DataType dataType() {
+          return DataTypes.FloatType;
+        }
+      };
+
   public static final MetadataColumn[] METADATA_COLUMNS =
       new MetadataColumn[] {
         ROW_ID_COLUMN,
         ROW_ADDRESS_COLUMN,
         ROW_LAST_UPDATED_AT_VERSION_COLUMN,
         ROW_CREATED_AT_VERSION_COLUMN,
-        FRAGMENT_ID_COLUMN
+        FRAGMENT_ID_COLUMN,
+        FTS_SCORE_COLUMN
       };
 
   protected final LanceSparkReadOptions readOptions;
@@ -296,13 +313,22 @@ public class LanceDataset
               .fromOptions(mergedOptions)
               .build();
     }
-    return new LanceScanBuilder(
-        sparkSchema,
-        scanOptions,
-        initialStorageOptions,
-        namespaceImpl,
-        namespaceProperties,
-        shardingSpec);
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            sparkSchema,
+            scanOptions,
+            initialStorageOptions,
+            namespaceImpl,
+            namespaceProperties,
+            shardingSpec);
+
+    // Apply FTS spec injected by LanceFtsPushdownRule via scan options.
+    String ftsColumn = caseInsensitiveStringMap.get(LanceConstant.LANCE_FTS_COLUMN_OPT);
+    String ftsQuery = caseInsensitiveStringMap.get(LanceConstant.LANCE_FTS_QUERY_OPT);
+    if (ftsColumn != null && ftsQuery != null) {
+      builder.setFtsQuery(new org.lance.spark.read.FtsQuerySpec(ftsColumn, ftsQuery));
+    }
+    return builder;
   }
 
   @Override

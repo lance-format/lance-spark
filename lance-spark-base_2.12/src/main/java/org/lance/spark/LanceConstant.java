@@ -18,6 +18,22 @@ public class LanceConstant {
   public static final String ROW_ID = "_rowid";
   public static final String ROW_ADDRESS = "_rowaddr";
 
+  /**
+   * Virtual FTS relevance column. Populated by the Lance native scanner automatically when a
+   * full-text query is active (see {@code lance_index::scalar::inverted::SCORE_COL} in Rust).
+   * Referencing it outside an FTS query is rejected at scan-build time.
+   */
+  public static final String FTS_SCORE = "_score";
+
+  /**
+   * Internal scan options carrying FTS info from {@code LanceFtsPushdownRule} (logical plan) down
+   * to {@code LanceScanBuilder}. They are injected into the table options by the optimizer rule and
+   * read back by {@code LanceDataset.newScanBuilder}.
+   */
+  public static final String LANCE_FTS_COLUMN_OPT = "_lance_fts_column";
+
+  public static final String LANCE_FTS_QUERY_OPT = "_lance_fts_query";
+
   // CDF (Change Data Feed) version tracking columns
   public static final String ROW_CREATED_AT_VERSION = "_row_created_at_version";
   public static final String ROW_LAST_UPDATED_AT_VERSION = "_row_last_updated_at_version";
