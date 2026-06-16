@@ -145,7 +145,7 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
       ifNotExists)
   }
 
-  def _parseVersion(ctx: ParserRuleContext, value: String): Long = {
+  private def _parseVersion(ctx: ParserRuleContext, value: String): Long = {
     try {
       java.lang.Long.valueOf(value)
     } catch {
