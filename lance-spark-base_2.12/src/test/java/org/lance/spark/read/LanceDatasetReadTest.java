@@ -120,6 +120,7 @@ public class LanceDatasetReadTest {
                 new LanceSplit(Arrays.asList(fragment)),
                 TestUtils.TestTable1Config.readOptions,
                 Optional.empty() /* whereCondition */,
+                Optional.empty() /* ftsQuery */,
                 Optional.empty() /* limit */,
                 Optional.empty() /* offset */,
                 Optional.empty() /* topNSortOrders */,

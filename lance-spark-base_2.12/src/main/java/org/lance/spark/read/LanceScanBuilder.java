@@ -91,6 +91,7 @@ public class LanceScanBuilder
   private Optional<Integer> offset = Optional.empty();
   private Optional<List<ColumnOrdering>> topNSortOrders = Optional.empty();
   private Optional<Aggregation> pushedAggregation = Optional.empty();
+  private Optional<FtsQuerySpec> ftsQuery = Optional.empty();
   private LanceLocalScan localScan = null;
 
   // Lazily opened dataset for reuse during scan building
@@ -133,6 +134,11 @@ public class LanceScanBuilder
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.shardingSpec = shardingSpec;
+  }
+
+  /** Sets the FTS query extracted by {@code LanceFtsPushdownRule} — applied in {@link #build()}. */
+  public void setFtsQuery(FtsQuerySpec ftsQuery) {
+    this.ftsQuery = Optional.of(ftsQuery);
   }
 
   /**
@@ -261,6 +267,7 @@ public class LanceScanBuilder
           schema,
           resolvedReadOptions,
           whereCondition,
+          ftsQuery,
           limit,
           offset,
           topNSortOrders,
@@ -385,8 +392,8 @@ public class LanceScanBuilder
       return false;
     }
     if (funcs.length == 1 && funcs[0] instanceof CountStar) {
-      // Check if we can use metadata-based count (no filters pushed)
-      if (pushedPredicates.length == 0) {
+      // Check if we can use metadata-based count (no filters and no FTS query pushed)
+      if (pushedPredicates.length == 0 && !ftsQuery.isPresent()) {
         Optional<Long> metadataCount = getCountFromMetadata(getOrOpenDataset());
         if (metadataCount.isPresent()) {
           // Create LocalScan with pre-computed count result

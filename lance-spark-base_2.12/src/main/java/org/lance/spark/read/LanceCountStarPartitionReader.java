@@ -14,6 +14,7 @@
 package org.lance.spark.read;
 
 import org.lance.Dataset;
+import org.lance.ipc.FullTextQuery;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
 import org.lance.spark.LanceRuntime;
@@ -83,6 +84,10 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
       ScanOptions.Builder scanOptionsBuilder = new ScanOptions.Builder();
       if (inputPartition.getWhereCondition().isPresent()) {
         scanOptionsBuilder.filter(inputPartition.getWhereCondition().get());
+      }
+      if (inputPartition.getFtsQuery().isPresent()) {
+        FtsQuerySpec spec = inputPartition.getFtsQuery().get();
+        scanOptionsBuilder.fullTextQuery(FullTextQuery.match(spec.query(), spec.column()));
       }
       scanOptionsBuilder.withRowId(true);
       scanOptionsBuilder.columns(Lists.newArrayList());

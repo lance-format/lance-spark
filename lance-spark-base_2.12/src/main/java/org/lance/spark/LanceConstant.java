@@ -18,6 +18,15 @@ public class LanceConstant {
   public static final String ROW_ID = "_rowid";
   public static final String ROW_ADDRESS = "_rowaddr";
 
+  /**
+   * Internal scan options carrying FTS info from {@code LanceFtsPushdownRule} (logical plan) down
+   * to {@code LanceScanBuilder}. They are injected into the table options by the optimizer rule and
+   * read back by {@code LanceDataset.newScanBuilder}.
+   */
+  public static final String LANCE_FTS_COLUMN_OPT = "_lance_fts_column";
+
+  public static final String LANCE_FTS_QUERY_OPT = "_lance_fts_query";
+
   // CDF (Change Data Feed) version tracking columns
   public static final String ROW_CREATED_AT_VERSION = "_row_created_at_version";
   public static final String ROW_LAST_UPDATED_AT_VERSION = "_row_last_updated_at_version";

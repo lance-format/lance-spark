@@ -15,11 +15,13 @@ package org.lance.spark.internal;
 
 import org.lance.Dataset;
 import org.lance.Fragment;
+import org.lance.ipc.FullTextQuery;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.read.FtsQuerySpec;
 import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Utils;
@@ -125,6 +127,10 @@ public class LanceFragmentScanner implements AutoCloseable {
       scanOptions.columns(projectedColumns);
       if (inputPartition.getWhereCondition().isPresent()) {
         scanOptions.filter(inputPartition.getWhereCondition().get());
+      }
+      if (inputPartition.getFtsQuery().isPresent()) {
+        FtsQuerySpec spec = inputPartition.getFtsQuery().get();
+        scanOptions.fullTextQuery(FullTextQuery.match(spec.query(), spec.column()));
       }
       scanOptions.batchSize(readOptions.getBatchSize());
       if (inputPartition.getLimit().isPresent()) {

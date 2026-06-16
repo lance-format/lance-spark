@@ -44,6 +44,7 @@ public class LanceCountStarPartitionReaderTest {
             new LanceSplit(Arrays.asList(0, 1)),
             TestUtils.TestTable1Config.readOptions,
             Optional.of("x > 0"),
+            Optional.empty() /* ftsQuery */,
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
