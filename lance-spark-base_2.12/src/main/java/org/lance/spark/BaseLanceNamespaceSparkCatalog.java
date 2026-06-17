@@ -1569,37 +1569,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
   }
 
   /**
-   * Removes parent prefix from namespace array for Spark. For example, with
-   * parentPrefix=["catalog1"], ["catalog1", "ns1"] becomes ["ns1"]
-   */
-  private String[] removeParentPrefix(String[] namespace) {
-    if (parentPrefix.isEmpty()) {
-      return namespace;
-    }
-
-    List<String> prefix = parentPrefix.get();
-    if (namespace.length >= prefix.size()) {
-      // Check if namespace starts with the parent prefix
-      boolean hasPrefix = true;
-      for (int i = 0; i < prefix.size(); i++) {
-        if (!prefix.get(i).equals(namespace[i])) {
-          hasPrefix = false;
-          break;
-        }
-      }
-
-      if (hasPrefix) {
-        // Remove the prefix
-        String[] result = new String[namespace.length - prefix.size()];
-        System.arraycopy(namespace, prefix.size(), result, 0, result.length);
-        return result;
-      }
-    }
-
-    return namespace;
-  }
-
-  /**
    * Builds the table ID list from an identifier for use with namespace operations. The table ID
    * includes both the namespace parts and the table name.
    */
