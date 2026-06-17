@@ -99,14 +99,32 @@ public abstract class BaseLanceNamespaceSparkCatalog
                   TableCatalog.PROP_OWNER,
                   TableCatalog.PROP_PROVIDER)));
 
-  /**
-   * Used to specify the namespace implementation to use. Optional when using path-based access
-   * only.
-   */
   private static final String CONFIG_IMPL = "impl";
 
-  /** Indicates path-based only mode when impl is not configured. */
+  /**
+   * Virtual "default" namespace for flat backends; REST may auto-enable if ListNamespaces fails.
+   */
+  private static final String CONFIG_SINGLE_LEVEL_NS = "single_level_ns";
+
+  private static final String CREATE_TABLE_PROPERTY_LOCATION = "location";
+
+  /** Parent prefix for multi-level namespaces (e.g. Hive3). */
+  private static final String CONFIG_PARENT = "parent";
+
+  private static final String CONFIG_PARENT_DELIMITER = "parent_delimiter";
+  private static final String CONFIG_PARENT_DELIMITER_DEFAULT = ".";
+
   private boolean pathBasedOnly = false;
+
+  private LanceNamespace namespace;
+  private String name;
+  private boolean singleLevelNs;
+  private Optional<List<String>> parentPrefix;
+  private LanceSparkCatalogConfig catalogConfig;
+  private Map<String, String> storageOptions;
+
+  private String namespaceImpl;
+  private Map<String, String> namespaceProperties;
 
   /**
    * Checks if an identifier represents a path-based table location (e.g., /path/to/table or
@@ -180,49 +198,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
     sb.append(name);
     return sb.toString();
   }
-
-  /**
-   * Enable single-level namespace mode with a virtual "default" namespace.
-   *
-   * <p>When true: Tables are accessed as catalog.default.table, where "default" is a virtual
-   * namespace that maps to the root level. CREATE NAMESPACE is not allowed.
-   *
-   * <p>When false (default): Multi-level namespace mode. Namespaces must be created explicitly with
-   * CREATE NAMESPACE before creating tables. Tables use manifest-based storage with hash-prefixed
-   * paths for better scalability.
-   *
-   * <p>For REST implementations: if ListNamespaces fails, single_level_ns is automatically enabled
-   * for backward compatibility with flat namespace backends.
-   */
-  private static final String CONFIG_SINGLE_LEVEL_NS = "single_level_ns";
-
-  /** Supply in CREATE TABLE options to supply a different location to use for the table */
-  private static final String CREATE_TABLE_PROPERTY_LOCATION = "location";
-
-  /** Parent prefix configuration for multi-level namespaces like Hive3 */
-  private static final String CONFIG_PARENT = "parent";
-
-  private static final String CONFIG_PARENT_DELIMITER = "parent_delimiter";
-  private static final String CONFIG_PARENT_DELIMITER_DEFAULT = ".";
-
-  private LanceNamespace namespace;
-  private String name;
-  private boolean singleLevelNs;
-  private Optional<List<String>> parentPrefix;
-  private LanceSparkCatalogConfig catalogConfig;
-  private Map<String, String> storageOptions;
-
-  /**
-   * The namespace implementation type (e.g., "rest", "dir"). Saved for creating storage options
-   * providers on workers.
-   */
-  private String namespaceImpl;
-
-  /**
-   * The namespace properties for connection. Saved for creating storage options providers on
-   * workers.
-   */
-  private Map<String, String> namespaceProperties;
 
   @Override
   public void initialize(String name, CaseInsensitiveStringMap options) {
@@ -330,9 +305,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
   }
 
   @Override
-  public void alterNamespace(String[] namespace, NamespaceChange... changes)
-      throws NoSuchNamespaceException {
-    // Namespace alteration is not supported in the current API
+  public void alterNamespace(String[] namespace, NamespaceChange... changes) {
     throw new UnsupportedOperationException("Namespace alteration is not supported");
   }
 
