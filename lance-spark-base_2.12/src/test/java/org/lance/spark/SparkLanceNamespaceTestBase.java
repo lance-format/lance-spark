@@ -1028,6 +1028,77 @@ public abstract class SparkLanceNamespaceTestBase {
     assertEquals("TABLE_ALREADY_EXISTS", ex.getErrorClass());
   }
 
+  @Test
+  public void testCtasCreatesAndPopulatesTable() throws Exception {
+    String fullName = catalogName + ".default." + generateTableName("ctas");
+
+    spark.sql(
+        "CREATE TABLE "
+            + fullName
+            + " USING lance AS SELECT * FROM VALUES (1, 'a'), (2, 'b') AS t(id, name)");
+
+    assertTrue(checkDataset(2, fullName));
+  }
+
+  @Test
+  public void testReplaceTableRewritesData() throws Exception {
+    String fullName = catalogName + ".default." + generateTableName("replace");
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, 'old'), (2, 'old')");
+    assertTrue(checkDataset(2, fullName));
+
+    spark.sql(
+        "REPLACE TABLE "
+            + fullName
+            + " USING lance AS SELECT * FROM VALUES (9, 'new') AS t(id, name)");
+
+    List<Row> rows = spark.sql("SELECT id FROM " + fullName).collectAsList();
+    assertEquals(1, rows.size());
+    assertEquals(9, rows.get(0).getInt(0));
+  }
+
+  @Test
+  public void testCreateOrReplaceCreatesNewTable() throws Exception {
+    String fullName = catalogName + ".default." + generateTableName("cor_new");
+
+    spark.sql(
+        "CREATE OR REPLACE TABLE "
+            + fullName
+            + " USING lance AS SELECT * FROM VALUES (1, 'a'), (2, 'b'), (3, 'c') AS t(id, name)");
+
+    assertTrue(checkDataset(3, fullName));
+  }
+
+  @Test
+  public void testCreateOrReplaceOverwritesExistingTable() throws Exception {
+    String fullName = catalogName + ".default." + generateTableName("cor_existing");
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, 'old'), (2, 'old'), (3, 'old')");
+    assertTrue(checkDataset(3, fullName));
+
+    spark.sql(
+        "CREATE OR REPLACE TABLE "
+            + fullName
+            + " USING lance AS SELECT * FROM VALUES (7, 'new') AS t(id, name)");
+
+    assertTrue(checkDataset(1, fullName));
+  }
+
+  @Test
+  public void testCreateExistingTableThrows() throws Exception {
+    String fullName = catalogName + ".default." + generateTableName("dup");
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL)");
+
+    AnalysisException ex =
+        assertThrows(
+            AnalysisException.class,
+            () -> spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL)"));
+    assertEquals("TABLE_OR_VIEW_ALREADY_EXISTS", ex.getErrorClass());
+  }
+
   private boolean checkDataset(int expectedSize, String tableName) {
     Dataset<Row> actual = spark.sql("SELECT * FROM " + tableName);
     List<Row> res = actual.collectAsList();
