@@ -13,10 +13,14 @@
  */
 package org.apache.spark.sql.execution.datasources.v2
 
+import org.apache.arrow.vector.types.FloatingPointPrecision
+import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType}
 import org.apache.spark.sql.catalyst.plans.logical.LanceNamedArgument
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.Test
 import org.lance.index.IndexType
+
+import java.util.Collections
 
 /**
  * Pure unit tests for [[VectorIndexParamsResolver.parseAndValidate]] — no Spark, no Dataset.
@@ -26,6 +30,19 @@ import org.lance.index.IndexType
  * bridge, so any class extending AnyFunSuite silently runs zero tests.
  */
 class VectorIndexParamsResolverTest {
+
+  private def fixedSizeListField(
+      precision: FloatingPointPrecision,
+      dim: Int = 32): Field = {
+    val child = new Field(
+      "item",
+      FieldType.nullable(new ArrowType.FloatingPoint(precision)),
+      Collections.emptyList[Field]())
+    new Field(
+      "vec",
+      FieldType.nullable(new ArrowType.FixedSizeList(dim)),
+      Collections.singletonList(child))
+  }
 
   // ---------- IVF_FLAT defaults ----------
   @Test
@@ -112,7 +129,6 @@ class VectorIndexParamsResolverTest {
       "Cosine" -> "Cosine",
       "COSINE" -> "Cosine",
       "dot" -> "Dot",
-      "hamming" -> "Hamming",
       "euclidean" -> "L2",
       "EUCLIDEAN" -> "L2").foreach { case (input, expected) =>
       val plan = VectorIndexParamsResolver.parseAndValidate(
@@ -319,5 +335,130 @@ class VectorIndexParamsResolverTest {
           dim = 32,
           numRows = 400L))
     assertTrue(ex.getMessage.contains("prefetch_distance"), ex.getMessage)
+  }
+
+  @Test
+  def rejectsFloatingPointIntegerParametersInsteadOfTruncating(): Unit = {
+    val ex = assertThrows(
+      classOf[IllegalArgumentException],
+      () =>
+        VectorIndexParamsResolver.parseAndValidate(
+          IndexType.IVF_FLAT,
+          Seq(LanceNamedArgument("num_partitions", java.lang.Double.valueOf(4.9d))),
+          dim = 32,
+          numRows = 400L))
+    assertTrue(ex.getMessage.contains("num_partitions"), ex.getMessage)
+    assertTrue(ex.getMessage.contains("integer"), ex.getMessage)
+  }
+
+  @Test
+  def rejectsDecimalIntegerParametersInsteadOfTruncating(): Unit = {
+    val ex = assertThrows(
+      classOf[IllegalArgumentException],
+      () =>
+        VectorIndexParamsResolver.parseAndValidate(
+          IndexType.IVF_HNSW_SQ,
+          Seq(LanceNamedArgument("max_level", new java.math.BigDecimal("7.5"))),
+          dim = 32,
+          numRows = 400L))
+    assertTrue(ex.getMessage.contains("max_level"), ex.getMessage)
+    assertTrue(ex.getMessage.contains("integer"), ex.getMessage)
+  }
+
+  @Test
+  def pqNumBitsMustBeFourOrEight(): Unit = {
+    Seq(1, 2, 3, 5, 16).foreach { bits =>
+      val ex = assertThrows(
+        classOf[IllegalArgumentException],
+        () =>
+          VectorIndexParamsResolver.parseAndValidate(
+            IndexType.IVF_PQ,
+            Seq(
+              LanceNamedArgument("num_sub_vectors", java.lang.Long.valueOf(4L)),
+              LanceNamedArgument("num_bits", java.lang.Long.valueOf(bits.toLong))),
+            dim = 32,
+            numRows = 400L))
+      assertTrue(ex.getMessage.contains("num_bits"), s"bits=$bits message=${ex.getMessage}")
+      assertTrue(ex.getMessage.contains("4 or 8"), s"bits=$bits message=${ex.getMessage}")
+    }
+  }
+
+  @Test
+  def pqNumBitsFourRequiresEvenNumSubVectors(): Unit = {
+    val ex = assertThrows(
+      classOf[IllegalArgumentException],
+      () =>
+        VectorIndexParamsResolver.parseAndValidate(
+          IndexType.IVF_PQ,
+          Seq(
+            LanceNamedArgument("num_sub_vectors", java.lang.Long.valueOf(3L)),
+            LanceNamedArgument("num_bits", java.lang.Long.valueOf(4L))),
+          dim = 24,
+          numRows = 400L))
+    assertTrue(ex.getMessage.contains("num_sub_vectors"), ex.getMessage)
+    assertTrue(ex.getMessage.contains("even"), ex.getMessage)
+  }
+
+  @Test
+  def sqNumBitsMustBeEight(): Unit = {
+    val ex = assertThrows(
+      classOf[IllegalArgumentException],
+      () =>
+        VectorIndexParamsResolver.parseAndValidate(
+          IndexType.IVF_SQ,
+          Seq(LanceNamedArgument("num_bits", java.lang.Long.valueOf(4L))),
+          dim = 32,
+          numRows = 400L))
+    assertTrue(ex.getMessage.contains("SQ num_bits"), ex.getMessage)
+    assertTrue(ex.getMessage.contains("8"), ex.getMessage)
+  }
+
+  @Test
+  def hnswMaxLevelMustFitUnsignedShort(): Unit = {
+    val ex = assertThrows(
+      classOf[IllegalArgumentException],
+      () =>
+        VectorIndexParamsResolver.parseAndValidate(
+          IndexType.IVF_HNSW_SQ,
+          Seq(LanceNamedArgument("max_level", java.lang.Long.valueOf(65536L))),
+          dim = 32,
+          numRows = 400L))
+    assertTrue(ex.getMessage.contains("max_level"), ex.getMessage)
+    assertTrue(ex.getMessage.contains("65535"), ex.getMessage)
+  }
+
+  @Test
+  def hammingDistanceIsRejectedUntilUInt8VectorsAreSupported(): Unit = {
+    val ex = assertThrows(
+      classOf[IllegalArgumentException],
+      () =>
+        VectorIndexParamsResolver.parseAndValidate(
+          IndexType.IVF_FLAT,
+          Seq(LanceNamedArgument("distance_type", "hamming")),
+          dim = 32,
+          numRows = 400L))
+    assertTrue(ex.getMessage.contains("hamming"), ex.getMessage)
+    assertTrue(ex.getMessage.contains("UInt8"), ex.getMessage)
+  }
+
+  @Test
+  def float32FixedSizeListIsAcceptedForVectorIndex(): Unit = {
+    assertEquals(
+      32,
+      VectorIndexParamsResolver.validateVectorFieldForIndex(
+        "vec",
+        fixedSizeListField(FloatingPointPrecision.SINGLE)))
+  }
+
+  @Test
+  def doubleFixedSizeListIsRejectedForVectorIndex(): Unit = {
+    val ex = assertThrows(
+      classOf[IllegalArgumentException],
+      () =>
+        VectorIndexParamsResolver.validateVectorFieldForIndex(
+          "vec",
+          fixedSizeListField(FloatingPointPrecision.DOUBLE)))
+    assertTrue(ex.getMessage.contains("Float32"), ex.getMessage)
+    assertTrue(ex.getMessage.contains("Double"), ex.getMessage)
   }
 }

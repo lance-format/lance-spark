@@ -646,6 +646,71 @@ public abstract class BaseAddVectorIndexTest {
   }
 
   @Test
+  public void testEmptyTableRejectsUnsupportedVectorIndexMethod() {
+    spark.sql(
+        String.format(
+            "CREATE TABLE %s (id INT NOT NULL, vec ARRAY<FLOAT> NOT NULL) USING lance "
+                + "TBLPROPERTIES ('vec.arrow.fixed-size-list.size' = '%d')",
+            fullTable, VEC_DIM));
+
+    RuntimeException ex =
+        Assertions.assertThrows(
+            RuntimeException.class,
+            () ->
+                spark
+                    .sql(
+                        String.format(
+                            "ALTER TABLE %s CREATE INDEX vec_idx USING IVF_HNSW_FLAT (vec)",
+                            fullTable))
+                    .collect());
+    Assertions.assertTrue(
+        rootCauseMessage(ex).contains("Unsupported index method"), "got: " + rootCauseMessage(ex));
+  }
+
+  @Test
+  public void testEmptyTableRejectsInvalidVectorIndexParams() {
+    spark.sql(
+        String.format(
+            "CREATE TABLE %s (id INT NOT NULL, vec ARRAY<FLOAT> NOT NULL) USING lance "
+                + "TBLPROPERTIES ('vec.arrow.fixed-size-list.size' = '%d')",
+            fullTable, VEC_DIM));
+
+    RuntimeException ex =
+        Assertions.assertThrows(
+            RuntimeException.class,
+            () ->
+                spark
+                    .sql(
+                        String.format(
+                            "ALTER TABLE %s CREATE INDEX vec_idx USING IVF_PQ (vec) "
+                                + "WITH (num_partitions=1, num_sub_vectors=4, num_bits=3)",
+                            fullTable))
+                    .collect());
+    Assertions.assertTrue(rootCauseMessage(ex).contains("num_bits"), rootCauseMessage(ex));
+  }
+
+  @Test
+  public void testEmptyTableRejectsDoubleVectorIndex() {
+    spark.sql(
+        String.format(
+            "CREATE TABLE %s (id INT NOT NULL, vec ARRAY<DOUBLE> NOT NULL) USING lance "
+                + "TBLPROPERTIES ('vec.arrow.fixed-size-list.size' = '%d')",
+            fullTable, VEC_DIM));
+
+    RuntimeException ex =
+        Assertions.assertThrows(
+            RuntimeException.class,
+            () ->
+                spark
+                    .sql(
+                        String.format(
+                            "ALTER TABLE %s CREATE INDEX vec_idx USING IVF_FLAT (vec)", fullTable))
+                    .collect());
+    Assertions.assertTrue(rootCauseMessage(ex).contains("Float32"), rootCauseMessage(ex));
+    Assertions.assertTrue(rootCauseMessage(ex).contains("Double"), rootCauseMessage(ex));
+  }
+
+  @Test
   public void testVectorSearchUsesIndex() {
     // Spark 3.4 does not support TVF named-argument syntax (`table => ...`); SPARK-44059 added
     // it in 3.5. Skip on 3.4 to mirror BaseSparkSearchTableFunctionTest#supportsNamedArguments.

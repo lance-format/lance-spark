@@ -102,6 +102,8 @@ Spark SQL currently does not expose a per-index `fts_version` option. Use `USING
 
 Vector index methods (`IVF_FLAT`, `IVF_PQ`, `IVF_SQ`, `IVF_HNSW_PQ`, `IVF_HNSW_SQ`) share a set of common IVF training options. Methods that include PQ, SQ, or HNSW components accept additional method-specific options.
 
+Spark CREATE INDEX currently supports `FixedSizeList<Float32>` vector columns for distributed vector index creation. `FixedSizeList<Double>` and Hamming/UInt8 vector indexing are rejected early until the corresponding Lance Java training paths are wired through.
+
 #### Common Options
 
 Available for every `IVF_*` method:
@@ -109,7 +111,7 @@ Available for every `IVF_*` method:
 | Option          | Type    | Default                                       | Description |
 |-----------------|---------|-----------------------------------------------|-------------|
 | `num_partitions`| Integer | `max(1, round(sqrt(num_rows)))`               | Number of IVF cells (centroids) trained on the driver. Must be `<= num_rows`. |
-| `distance_type` | String  | `l2`                                          | Distance metric used for both training and search. Accepts `l2` (alias `euclidean`), `cosine`, `dot`, `hamming`. Case-insensitive. |
+| `distance_type` | String  | `l2`                                          | Distance metric used for both training and search. Accepts `l2` (alias `euclidean`), `cosine`, `dot`. Case-insensitive. |
 | `sample_rate`   | Integer | `256`                                         | Number of training samples per centroid (and per PQ sub-vector during codebook training). Must be `>= 2`. |
 | `max_iters`     | Integer | `50`                                          | Maximum k-means iterations during IVF centroid (and PQ codebook) training. Must be positive. |
 | `num_segments`  | Integer | `min(fragment_count, spark.default.parallelism)` | Target number of executor-parallel segments. Each segment covers a batch of fragments. Clamped to `[1, fragment_count]`; values larger than the fragment count are clamped down with a warning. |
@@ -121,7 +123,7 @@ Available only for the two PQ-quantized variants (in addition to common options)
 | Option            | Type    | Default                                      | Description |
 |-------------------|---------|----------------------------------------------|-------------|
 | `num_sub_vectors` | Integer | `dim / 16`, falling back to `dim / 8`        | Number of PQ sub-vectors. Must divide the vector dimension. If the vector dimension is divisible by neither 16 nor 8, this option is required. |
-| `num_bits`        | Integer | `8`                                          | Number of bits per PQ code. Must be positive. |
+| `num_bits`        | Integer | `8`                                          | Number of bits per PQ code. Lance currently supports `4` or `8`; when set to `4`, `num_sub_vectors` must be even. |
 
 #### IVF_SQ / IVF_HNSW_SQ Options
 
@@ -129,7 +131,7 @@ Available only for the two SQ-quantized variants (in addition to common options)
 
 | Option     | Type    | Default | Description |
 |------------|---------|---------|-------------|
-| `num_bits` | Integer | `8`     | Number of bits per scalar-quantized component. Must be positive. |
+| `num_bits` | Integer | `8`     | Number of bits per scalar-quantized component. Spark CREATE INDEX currently supports Lance's 8-bit SQ path only, so this must be `8`. |
 
 #### IVF_HNSW_PQ / IVF_HNSW_SQ Options
 
@@ -139,7 +141,7 @@ Available only for the two HNSW variants (in addition to common options and the 
 |---------------------|---------|---------|-------------|
 | `m`                 | Integer | `20`    | Maximum number of neighbours per HNSW graph node. Must be positive. |
 | `ef_construction`   | Integer | `150`   | Size of the dynamic candidate list during HNSW graph construction. Must be positive. |
-| `max_level`         | Integer | `7`     | Maximum HNSW level. Must be positive. |
+| `max_level`         | Integer | `7`     | Maximum HNSW level. Must be in `[1, 65535]`. |
 | `prefetch_distance` | Integer | `2`     | Prefetch distance hint for graph traversal. Must be `>= 0`. |
 
 ## Examples
@@ -220,7 +222,7 @@ Create a flat IVF index. All defaults are inferred from the dataset; in particul
 
 ### Vector Index — IVF_PQ
 
-Create an IVF + Product Quantization index. `num_sub_vectors` is inferred from the vector dimension, but you can override it; `num_partitions` is required when the dataset is small enough that the default `sqrt(num_rows)` would exceed the row count.
+Create an IVF + Product Quantization index. `num_sub_vectors` is inferred from the vector dimension, but you can override it; `num_partitions` defaults to `round(sqrt(num_rows))` and can be set explicitly when you want a specific number of IVF cells.
 
 === "SQL"
     ```sql

@@ -90,8 +90,6 @@ class VectorIndexJob(
           plan = plan,
           indexName = indexName,
           fragmentIds = batch,
-          centroidsBC = centroidsBC,
-          codebookBC = codebookBC,
           namespaceImpl = nsImpl,
           namespaceProperties = nsProps,
           tableId = tableId,
@@ -100,7 +98,11 @@ class VectorIndexJob(
 
       val encodedSegments =
         try {
-          sc.parallelize(tasks, tasks.size).map(_.execute()).collect()
+          val localCentroidsBC = centroidsBC
+          val localCodebookBC = codebookBC
+          sc.parallelize(tasks, tasks.size)
+            .map(task => task.execute(localCentroidsBC.value, localCodebookBC.value))
+            .collect()
         } catch {
           case e: Exception =>
             throw new RuntimeException(
@@ -112,10 +114,20 @@ class VectorIndexJob(
       encodedSegments.map(decode[Index]).toSeq
     } finally {
       // Always destroy broadcasts so SQL doesn't accumulate broadcast memory
-      try centroidsBC.destroy()
-      catch { case _: Throwable => /* ignore */ }
-      try codebookBC.destroy()
-      catch { case _: Throwable => /* ignore */ }
+      destroyBroadcast("centroids", centroidsBC)
+      destroyBroadcast("codebook", codebookBC)
+    }
+  }
+
+  private def destroyBroadcast(name: String, broadcast: Broadcast[_]): Unit = {
+    try {
+      broadcast.destroy()
+    } catch {
+      case e: InterruptedException =>
+        Thread.currentThread().interrupt()
+        logWarning(s"Interrupted while destroying $name broadcast for vector index '$indexName'", e)
+      case NonFatal(e) =>
+        logWarning(s"Failed to destroy $name broadcast for vector index '$indexName'", e)
     }
   }
 
@@ -172,8 +184,7 @@ class VectorIndexJob(
           }
         } catch {
           case t: Throwable =>
-            try centroidsBC.destroy()
-            catch { case NonFatal(_) => /* swallow cleanup errors only */ }
+            destroyBroadcast("centroids", centroidsBC)
             throw t
         }
 
@@ -188,8 +199,8 @@ class VectorIndexJob(
  * Executor-side build of one segment.
  *
  * Closure invariants:
- *   - All fields are Serializable (Strings, primitives, Option, IndexType enum,
- *     case classes from VectorIndexPlan.scala, Spark Broadcast).
+ *   - All fields are Serializable plain task metadata. Spark Broadcast handles
+ *     are captured by the RDD closure and passed to execute as values.
  *   - We do NOT capture lance-core *BuildParams; they are rebuilt inside execute().
  */
 case class VectorIndexTask(
@@ -199,15 +210,13 @@ case class VectorIndexTask(
     plan: VectorIndexPlan,
     indexName: String,
     fragmentIds: List[Integer],
-    centroidsBC: Broadcast[Array[Float]],
-    codebookBC: Broadcast[Array[Float]],
     namespaceImpl: Option[String],
     namespaceProperties: Option[Map[String, String]],
     tableId: Option[List[String]],
     initialStorageOptions: Option[Map[String, String]])
   extends Serializable {
 
-  def execute(): String = {
+  def execute(centroids: Array[Float], codebook: Array[Float]): String = {
     val readOptions = decode[LanceSparkReadOptions](encodedReadOptions)
     val distanceType = DistanceType.valueOf(plan.distanceTypeName)
 
@@ -216,7 +225,7 @@ case class VectorIndexTask(
       .setNumPartitions(plan.ivf.numPartitions)
       .setSampleRate(plan.ivf.sampleRate)
       .setMaxIters(plan.ivf.maxIters)
-      .setCentroids(centroidsBC.value)
+      .setCentroids(centroids)
       .build()
 
     val pqParams: Option[PQBuildParams] = plan.pq.map { p =>
@@ -225,7 +234,7 @@ case class VectorIndexTask(
         .setNumBits(p.numBits)
         .setSampleRate(p.sampleRate)
         .setMaxIters(p.maxIters)
-        .setCodebook(codebookBC.value)
+        .setCodebook(codebook)
         .build()
     }
 

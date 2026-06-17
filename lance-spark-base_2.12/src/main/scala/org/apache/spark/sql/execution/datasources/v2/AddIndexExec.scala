@@ -40,6 +40,12 @@ import java.util.{Collections, Optional, UUID}
 
 import scala.collection.JavaConverters._
 
+private case class AddIndexTableSnapshot(
+    readOptions: LanceSparkReadOptions,
+    fragmentIds: List[Integer],
+    canonicalColumns: Seq[String],
+    vectorPlan: Option[VectorIndexPlan])
+
 /**
  * Physical execution of distributed CREATE INDEX (ALTER TABLE ... CREATE INDEX ...) for Lance datasets.
  *
@@ -83,36 +89,12 @@ case class AddIndexExec(
       case _ => throw new UnsupportedOperationException("AddIndex only supports LanceDataset")
     }
 
-    val readOptions = lanceDataset.readOptions()
-
-    val (fragmentIds, canonicalColumns) = {
-      val ds = Utils.openDatasetBuilder(readOptions).build()
-      try {
-        val canonical = columns.map { column =>
-          val field = FieldPathUtils.resolveLeafField(ds.getLanceSchema, column)
-          FieldPathUtils.pathByFieldId(ds.getLanceSchema, field.getId)
-        }
-        (
-          ds.getFragments.asScala.map(_.getId).map(Integer.valueOf).toList,
-          canonical)
-      } finally {
-        ds.close()
-      }
-    }
-
-    if (fragmentIds.isEmpty) {
-      // No fragments to index
-      return Seq(new GenericInternalRow(Array[Any](0L, UTF8String.fromString(indexName))))
-    }
+    val baseReadOptions = lanceDataset.readOptions()
+    val (nsImpl, nsProps, tableId, initialStorageOpts) =
+      extractNamespaceInfo(lanceDataset, baseReadOptions)
 
     val train = IndexUtils.extractTrain(args)
     val indexType = IndexUtils.buildIndexType(method)
-
-    if (indexType == IndexType.ZONEMAP && canonicalColumns.size != 1) {
-      throw new UnsupportedOperationException(
-        "Zonemap index currently supports a single column only")
-    }
-
     val btreeBuildMode = IndexUtils.btreeBuildMode(indexType, args)
     val useLogicalSegmentCommit = IndexUtils.useLogicalSegmentCommit(indexType)
 
@@ -142,11 +124,74 @@ case class AddIndexExec(
       }
     }
 
+    val snapshot: AddIndexTableSnapshot = {
+      val ds = openDataset(baseReadOptions, initialStorageOpts, nsImpl, nsProps, tableId)
+      try {
+        val canonical = columns.map { column =>
+          val field = FieldPathUtils.resolveLeafField(ds.getLanceSchema, column)
+          FieldPathUtils.pathByFieldId(ds.getLanceSchema, field.getId)
+        }
+        val vectorPlan = indexType match {
+          case IndexType.IVF_FLAT
+              | IndexType.IVF_PQ
+              | IndexType.IVF_SQ
+              | IndexType.IVF_HNSW_PQ
+              | IndexType.IVF_HNSW_SQ =>
+            if (canonical.size != 1) {
+              throw new UnsupportedOperationException(
+                s"$indexType currently supports a single vector column only")
+            }
+            val arrowSchema = ds.getLanceSchema.asArrowSchema()
+            val arrowField =
+              try {
+                arrowSchema.findField(canonical.head)
+              } catch {
+                case _: IllegalArgumentException => null
+              }
+            if (arrowField == null) {
+              val available = arrowSchema.getFields.asScala.map(_.getName).mkString(", ")
+              throw new IllegalArgumentException(
+                s"Column '${canonical.head}' not found. Available: $available")
+            }
+            val dim = VectorIndexParamsResolver.validateVectorFieldForIndex(
+              canonical.head,
+              arrowField)
+            Some(VectorIndexParamsResolver.parseAndValidate(
+              indexType,
+              args,
+              dim,
+              ds.countRows()))
+          case _ => None
+        }
+        AddIndexTableSnapshot(
+          readOptions = baseReadOptions.withVersion(ds.version()),
+          fragmentIds = ds.getFragments.asScala.map(_.getId).map(Integer.valueOf).toList,
+          canonicalColumns = canonical,
+          vectorPlan = vectorPlan)
+      } finally {
+        ds.close()
+      }
+    }
+
+    val readOptions = snapshot.readOptions
+    val fragmentIds = snapshot.fragmentIds
+    val canonicalColumns = snapshot.canonicalColumns
+
+    if (indexType == IndexType.ZONEMAP && canonicalColumns.size != 1) {
+      throw new UnsupportedOperationException(
+        "Zonemap index currently supports a single column only")
+    }
+
+    if (fragmentIds.isEmpty) {
+      // No fragments to index
+      return Seq(new GenericInternalRow(Array[Any](0L, UTF8String.fromString(indexName))))
+    }
+
     // train=false: commit an empty index on the driver for any index type,
     // skipping all data processing. See the class doc for how it is populated.
     if (!train) {
       val uuid = UUID.randomUUID()
-      val dataset = Utils.openDatasetBuilder(readOptions).build()
+      val dataset = openDataset(readOptions, initialStorageOpts, nsImpl, nsProps, tableId)
       try {
         return commitEmptyIndex(
           dataset,
@@ -159,9 +204,6 @@ case class AddIndexExec(
         dataset.close()
       }
     }
-
-    val (nsImpl, nsProps, tableId, initialStorageOpts) =
-      extractNamespaceInfo(lanceDataset, readOptions)
 
     // Logical segment commit path: ZONEMAP and IVF_*
     if (useLogicalSegmentCommit) {
@@ -187,15 +229,9 @@ case class AddIndexExec(
             throw new UnsupportedOperationException(
               s"$indexType currently supports a single vector column only")
           }
-          val plan = VectorIndexParamsResolver.resolve(
-            indexType,
-            args,
-            readOptions,
-            initialStorageOpts,
-            nsImpl,
-            nsProps,
-            tableId,
-            canonicalColumns.head)
+          val plan = snapshot.vectorPlan.getOrElse {
+            throw new IllegalStateException(s"Vector plan was not resolved for $indexType")
+          }
           val vectorJob = new VectorIndexJob(
             this.copy(columns = canonicalColumns),
             readOptions,
@@ -408,6 +444,21 @@ case class AddIndexExec(
     } finally {
       dataset.close()
     }
+  }
+
+  private def openDataset(
+      readOptions: LanceSparkReadOptions,
+      initialStorageOpts: Option[Map[String, String]],
+      nsImpl: Option[String],
+      nsProps: Option[Map[String, String]],
+      tableId: Option[List[String]]): Dataset = {
+    Utils.openDatasetBuilder(readOptions)
+      .initialStorageOptions(initialStorageOpts.map(_.asJava).orNull)
+      .runtimeNamespace(
+        nsImpl.orNull,
+        nsProps.map(_.asJava).orNull,
+        tableId.map(_.asJava).orNull)
+      .build()
   }
 
   private def extractNamespaceInfo(

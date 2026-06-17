@@ -13,11 +13,15 @@
  */
 package org.apache.spark.sql.execution.datasources.v2
 
+import org.apache.arrow.vector.types.FloatingPointPrecision
+import org.apache.arrow.vector.types.pojo.ArrowType
 import org.apache.arrow.vector.types.pojo.Field
 import org.apache.spark.sql.catalyst.plans.logical.LanceNamedArgument
 import org.lance.index.IndexType
 import org.lance.spark.LanceSparkReadOptions
 import org.lance.spark.utils.{Utils, VectorUtils}
+
+import java.util.Locale
 
 import scala.collection.JavaConverters._
 
@@ -144,8 +148,14 @@ object VectorIndexParamsResolver {
               "please specify num_sub_vectors explicitly")
       }
       val numBits = parseInt(map.get("num_bits"), "num_bits", default = 8)
-      if (numBits <= 0) throw new IllegalArgumentException(
-        s"num_bits must be positive (got $numBits)")
+      if (numBits != 4 && numBits != 8) {
+        throw new IllegalArgumentException(
+          s"PQ num_bits must be 4 or 8 (got $numBits)")
+      }
+      if (numBits == 4 && nsv % 2 != 0) {
+        throw new IllegalArgumentException(
+          s"PQ num_bits=4 requires num_sub_vectors to be even (got $nsv)")
+      }
       Some(PqPlan(
         numSubVectors = nsv,
         numBits = numBits,
@@ -156,8 +166,11 @@ object VectorIndexParamsResolver {
     // 6. SQ
     val sq = if (SqIndexTypes.contains(indexType)) {
       val numBits = parseInt(map.get("num_bits"), "num_bits", default = 8)
-      if (numBits <= 0) throw new IllegalArgumentException(
-        s"num_bits must be positive (got $numBits)")
+      if (numBits != 8) {
+        throw new IllegalArgumentException(
+          s"SQ num_bits must be 8 because Lance SQ currently builds 8-bit quantizers " +
+            s"(got $numBits)")
+      }
       Some(SqPlan(numBits = numBits, sampleRate = sampleRate))
     } else None
 
@@ -169,8 +182,11 @@ object VectorIndexParamsResolver {
       if (ef <= 0) throw new IllegalArgumentException(
         s"ef_construction must be positive (got $ef)")
       val maxLevel = parseInt(map.get("max_level"), "max_level", default = 7)
-      if (maxLevel <= 0) throw new IllegalArgumentException(
-        s"max_level must be positive (got $maxLevel)")
+      if (maxLevel <= 0 || maxLevel > 65535) {
+        throw new IllegalArgumentException(
+          s"max_level must be in [1, 65535] because Lance stores it as u16 " +
+            s"(got $maxLevel)")
+      }
       val prefetch = parseIntOpt(map.get("prefetch_distance"), "prefetch_distance")
         .orElse(Some(2))
       prefetch.foreach { p =>
@@ -188,16 +204,19 @@ object VectorIndexParamsResolver {
   private def parseDistanceTypeName(raw: Option[Any]): String = raw match {
     case None => "L2"
     case Some(s: String) =>
-      s.trim.toLowerCase match {
+      s.trim.toLowerCase(Locale.ROOT) match {
         case "l2" => "L2"
         case "euclidean" => "L2"
         case "cosine" => "Cosine"
         case "dot" => "Dot"
-        case "hamming" => "Hamming"
+        case "hamming" =>
+          throw new IllegalArgumentException(
+            "distance_type 'hamming' requires UInt8 vector support, which Spark " +
+              "CREATE INDEX does not support yet")
         case other =>
           throw new IllegalArgumentException(
             s"distance_type '$other' not supported. " +
-              "Valid: l2, cosine, dot, hamming (alias: euclidean→l2)")
+              "Valid: l2, cosine, dot (alias: euclidean->l2)")
       }
     case Some(other) =>
       throw new IllegalArgumentException(
@@ -206,20 +225,74 @@ object VectorIndexParamsResolver {
 
   private def parseIntOpt(raw: Option[Any], key: String): Option[Int] = raw match {
     case None => None
-    case Some(n: java.lang.Number) =>
-      val asLong = n.longValue()
-      if (asLong < Int.MinValue || asLong > Int.MaxValue) {
-        throw new IllegalArgumentException(
-          s"$key must be a positive integer that fits in Int (got $asLong)")
+    case Some(null) =>
+      throw new IllegalArgumentException(s"$key must be an integer, got: null")
+    case Some(n: java.lang.Byte) => Some(validateIntRange(n.longValue(), key))
+    case Some(n: java.lang.Short) => Some(validateIntRange(n.longValue(), key))
+    case Some(n: java.lang.Integer) => Some(validateIntRange(n.longValue(), key))
+    case Some(n: java.lang.Long) => Some(validateIntRange(n.longValue(), key))
+    case Some(n: java.math.BigInteger) =>
+      if (n.compareTo(java.math.BigInteger.valueOf(Int.MinValue.toLong)) < 0 ||
+        n.compareTo(java.math.BigInteger.valueOf(Int.MaxValue.toLong)) > 0) {
+        throw new IllegalArgumentException(s"$key must fit in Int (got $n)")
       }
-      Some(asLong.toInt)
+      Some(n.intValue())
+    case Some(n: java.math.BigDecimal) =>
+      try {
+        val exact = n.toBigIntegerExact
+        if (exact.compareTo(java.math.BigInteger.valueOf(Int.MinValue.toLong)) < 0 ||
+          exact.compareTo(java.math.BigInteger.valueOf(Int.MaxValue.toLong)) > 0) {
+          throw new IllegalArgumentException(s"$key must fit in Int (got $n)")
+        }
+        Some(exact.intValue())
+      } catch {
+        case _: ArithmeticException =>
+          throw new IllegalArgumentException(s"$key must be an integer, got: $n")
+      }
+    case Some(_: java.lang.Float) | Some(_: java.lang.Double) =>
+      throw new IllegalArgumentException(s"$key must be an integer literal, got: ${raw.get}")
     case Some(other) =>
-      throw new IllegalArgumentException(
-        s"$key must be an integer, got: $other")
+      throw new IllegalArgumentException(s"$key must be an integer, got: $other")
+  }
+
+  private def validateIntRange(value: Long, key: String): Int = {
+    if (value < Int.MinValue || value > Int.MaxValue) {
+      throw new IllegalArgumentException(s"$key must fit in Int (got $value)")
+    }
+    value.toInt
   }
 
   private def parseInt(raw: Option[Any], key: String, default: Int): Int =
     parseIntOpt(raw, key).getOrElse(default)
+
+  def validateVectorFieldForIndex(column: String, field: Field): Int = {
+    val dim = VectorUtils.getVectorArrowDimension(field)
+    if (dim < 0) {
+      throw new IllegalArgumentException(
+        s"Column '$column' is not a fixed-size vector column " +
+          "(requires FixedSizeList<Float32>); cannot build vector index")
+    }
+
+    val child = field.getChildren.asScala.headOption.getOrElse {
+      throw new IllegalArgumentException(
+        s"Column '$column' is not a fixed-size vector column " +
+          "(requires FixedSizeList<Float32>); cannot build vector index")
+    }
+    child.getType match {
+      case fp: ArrowType.FloatingPoint
+          if fp.getPrecision == FloatingPointPrecision.SINGLE =>
+        dim
+      case fp: ArrowType.FloatingPoint =>
+        throw new IllegalArgumentException(
+          s"Column '$column' uses FixedSizeList<$fp>. Spark CREATE INDEX currently supports " +
+            "only FixedSizeList<Float32> vector columns; Double vector index training is not " +
+            "supported yet")
+      case other =>
+        throw new IllegalArgumentException(
+          s"Column '$column' uses FixedSizeList<$other>. Spark CREATE INDEX currently " +
+            "supports only FixedSizeList<Float32> vector columns")
+    }
+  }
 
   /**
    * Driver-only entry point. Opens the lance Dataset to read column dimension
@@ -244,19 +317,19 @@ object VectorIndexParamsResolver {
       .build()
     try {
       val arrowSchema = dataset.getLanceSchema.asArrowSchema()
-      val arrowField: Field = Option(arrowSchema.findField(column)).getOrElse {
+      val arrowField: Field =
+        try {
+          arrowSchema.findField(column)
+        } catch {
+          case _: IllegalArgumentException => null
+        }
+      if (arrowField == null) {
         val available = arrowSchema.getFields.asScala.map(_.getName).mkString(", ")
         throw new IllegalArgumentException(
           s"Column '$column' not found. Available: $available")
       }
 
-      val dim = VectorUtils.getVectorArrowDimension(arrowField)
-      if (dim < 0) {
-        throw new IllegalArgumentException(
-          s"Column '$column' is not a fixed-size vector column " +
-            "(FixedSizeList<Float|Double>); cannot build vector index")
-      }
-
+      val dim = validateVectorFieldForIndex(column, arrowField)
       val numRows = dataset.countRows()
       parseAndValidate(indexType, args, dim, numRows)
     } finally {
