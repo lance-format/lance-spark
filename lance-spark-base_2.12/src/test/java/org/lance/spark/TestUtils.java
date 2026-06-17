@@ -13,10 +13,12 @@
  */
 package org.lance.spark;
 
+import org.lance.namespace.LanceNamespace;
 import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.read.LanceSplit;
 import org.lance.spark.utils.Optional;
 
+import org.apache.arrow.memory.BufferAllocator;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
@@ -24,6 +26,7 @@ import org.apache.spark.sql.types.StructType;
 import java.net.URL;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 public class TestUtils {
   public static class TestTable1Config {
@@ -104,5 +107,22 @@ public class TestUtils {
       return sb.append(datasetUri).append(".lance").toString();
     }
     return sb.append(datasetUri).toString();
+  }
+
+  /**
+   * A non-functional {@link LanceNamespace} stub for toBuilder identity and serialization tests:
+   * assigned to the transient {@code LanceSparkWriteOptions#namespace} field before serialization,
+   * it must be {@code null} after deserialization.
+   */
+  public static LanceNamespace stubNamespace() {
+    return new LanceNamespace() {
+      @Override
+      public void initialize(Map<String, String> properties, BufferAllocator allocator) {}
+
+      @Override
+      public String namespaceId() {
+        return "stub";
+      }
+    };
   }
 }

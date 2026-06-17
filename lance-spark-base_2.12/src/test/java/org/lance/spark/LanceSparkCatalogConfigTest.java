@@ -44,6 +44,21 @@ public class LanceSparkCatalogConfigTest {
   }
 
   @Test
+  public void testFromKeepsTableOptionsOutOfStorageOptions() {
+    Map<String, String> catalogOptions = new HashMap<>();
+    catalogOptions.put("file_format_version", "2.0");
+    catalogOptions.put("enable_stable_row_ids", "true");
+    catalogOptions.put("storage.region", "us-west-2");
+
+    LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
+
+    assertFalse(config.getStorageOptions().containsKey("file_format_version"));
+    assertFalse(config.getStorageOptions().containsKey("enable_stable_row_ids"));
+    assertEquals("2.0", config.getFileFormatVersion());
+    assertTrue(config.isEnableStableRowIds());
+  }
+
+  @Test
   public void testFromIgnoresNullKeysOrValues() {
     Map<String, String> catalogOptions = new HashMap<>();
     catalogOptions.put("storage.region", "us-west-2");
@@ -158,29 +173,5 @@ public class LanceSparkCatalogConfigTest {
     LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
 
     assertEquals("LEGACY", config.getFileFormatVersion());
-  }
-
-  @Test
-  public void testFileFormatVersionTablePropertiesOverrideCatalogDefault() {
-    Map<String, String> catalogOptions = new HashMap<>();
-    catalogOptions.put("file_format_version", "LEGACY");
-    LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
-
-    Map<String, String> tableProperties = new HashMap<>();
-    tableProperties.put("file_format_version", "STABLE");
-
-    assertEquals("LEGACY", config.getFileFormatVersion());
-    assertEquals("STABLE", config.getFileFormatVersion(tableProperties));
-  }
-
-  @Test
-  public void testFileFormatVersionTablePropertiesFallsThroughToCatalogDefault() {
-    Map<String, String> catalogOptions = new HashMap<>();
-    catalogOptions.put("file_format_version", "LEGACY");
-    LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
-
-    Map<String, String> tableProperties = new HashMap<>();
-
-    assertEquals("LEGACY", config.getFileFormatVersion(tableProperties));
   }
 }

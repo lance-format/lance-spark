@@ -13,9 +13,14 @@
  */
 package org.lance.spark.utils;
 
+import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
 
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
+import org.apache.spark.sql.util.LanceSerializeUtil;
+
 import java.io.Serializable;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -69,5 +74,20 @@ public class BlobSourceContext implements Serializable {
 
   public List<String> getTableId() {
     return readOptions.getTableId();
+  }
+
+  /**
+   * Decodes the contexts that {@code LanceBlobSourceContextRule} injected into the write options,
+   * keyed by source dataset URI. Returns an empty map when absent (e.g. no blob sources, or the SQL
+   * extension is not enabled); {@link BlobReferenceResolver} then falls back to opening sources by
+   * URI alone.
+   */
+  public static Map<String, BlobSourceContext> decodeFromWriteOptions(
+      CaseInsensitiveStringMap writeOptions) {
+    String encoded = writeOptions.get(LanceConstant.BLOB_SOURCE_CONTEXTS_KEY);
+    if (encoded == null || encoded.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    return LanceSerializeUtil.decode(encoded);
   }
 }

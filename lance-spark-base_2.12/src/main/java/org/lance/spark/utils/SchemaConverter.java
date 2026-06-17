@@ -223,7 +223,7 @@ public class SchemaConverter {
         if ("blob".equalsIgnoreCase(encodingValue)) {
           if (field.dataType() instanceof BinaryType) {
             // Add metadata for blob encoding
-            boolean useV2 = enablesBlobV2(fileFormatVersion);
+            boolean useV2 = BlobUtils.fileFormatSupportsBlobV2(fileFormatVersion);
             String metaKey = useV2 ? ARROW_EXTENSION_NAME_KEY : LANCE_ENCODING_BLOB_KEY;
             String metaVal = useV2 ? ARROW_EXTENSION_BLOB_V2 : LANCE_ENCODING_BLOB_VALUE;
             Metadata newMetadata =
@@ -251,26 +251,6 @@ public class SchemaConverter {
     }
 
     return new StructType(newFields);
-  }
-
-  private static boolean enablesBlobV2(String fileFormatVersion) {
-    if (fileFormatVersion == null) {
-      return false;
-    }
-
-    String[] parts = fileFormatVersion.split("\\.");
-    try {
-      int major = Integer.parseInt(parts[0]);
-      int minor = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
-
-      return major > 2 || (major == 2 && minor >= 2);
-    } catch (NumberFormatException | ArrayIndexOutOfBoundsException e) {
-      throw new IllegalArgumentException(
-          String.format(
-              "Blob columns require a numeric file_format_version like '2.2'. Got: '%s'.",
-              fileFormatVersion),
-          e);
-    }
   }
 
   /**

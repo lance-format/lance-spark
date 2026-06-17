@@ -172,7 +172,7 @@ docker-build-test-base:
 docker-build-test:
 	@ls $(BUNDLE_MODULE)/target/$(BUNDLE_MODULE)-*.jar >/dev/null 2>&1 || \
 		(echo "Error: Bundle jar not found. Run 'make bundle' first." && exit 1)
-	docker build --no-cache \
+	docker build \
 		--build-arg SPARK_MAJOR_VERSION=$(SPARK_VERSION) \
 		--build-arg SCALA_VERSION=$(SCALA_VERSION) \
 		--build-arg LANCE_NAMESPACE_IMPL_VERSION=$(LANCE_NAMESPACE_IMPL_VERSION) \

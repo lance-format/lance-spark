@@ -607,7 +607,6 @@ public class SchemaConverterTest {
 
   @Test
   public void testBlobV1WithUnsupportedVersion() {
-    // v2 only supported on 2.2 or higher
     assertBlobV1Field(blobSchemaWithVersion("2.1").apply("data"));
   }
 
@@ -632,31 +631,13 @@ public class SchemaConverterTest {
   }
 
   @Test
-  public void testBlobEncodingRejectsUnknownFileFormatVersion() {
-    StructType schema =
-        new StructType(
-            new StructField[] {
-              DataTypes.createStructField("data", DataTypes.BinaryType, true),
-            });
-    Map<String, String> properties = ImmutableMap.of("data.lance.encoding", "blob");
-
-    assertValidationFailure(
-        "Blob columns require a numeric file_format_version like '2.2'. Got: 'stable'.",
-        () -> SchemaConverter.processSchemaWithProperties(schema, properties, "stable"));
+  public void testBlobEncodingAtNamedFileFormatVersionResolvesToBlobV1() {
+    assertBlobV1Field(blobSchemaWithVersion("stable").apply("data"));
   }
 
   @Test
-  public void testBlobEncodingRejectsMalformedFileFormatVersion() {
-    StructType schema =
-        new StructType(
-            new StructField[] {
-              DataTypes.createStructField("data", DataTypes.BinaryType, true),
-            });
-    Map<String, String> properties = ImmutableMap.of("data.lance.encoding", "blob");
-
-    assertValidationFailure(
-        "numeric file_format_version",
-        () -> SchemaConverter.processSchemaWithProperties(schema, properties, "2.x"));
+  public void testBlobEncodingAtMalformedFileFormatVersionResolvesToBlobV1() {
+    assertBlobV1Field(blobSchemaWithVersion("2.x").apply("data"));
   }
 
   private static StructType blobSchemaWithVersion(String fileFormatVersion) {

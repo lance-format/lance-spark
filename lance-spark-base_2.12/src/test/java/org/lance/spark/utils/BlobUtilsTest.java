@@ -13,11 +13,13 @@
  */
 package org.lance.spark.utils;
 
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.unsafe.types.UTF8String;
 import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
@@ -81,6 +83,27 @@ public class BlobUtilsTest {
   }
 
   @Test
+  public void testNullBlobV2DescriptorSentinel() {
+    // The sentinel is ALL five fields zero/empty; any single non-zero field means a real blob,
+    // so each field must participate in the detection (size == 0 alone is not enough).
+    Object[] sentinel = {(short) 0, 0L, 0L, 0L, UTF8String.fromString("")};
+    assertTrue(BlobUtils.isNullBlobV2Descriptor(new GenericInternalRow(sentinel)));
+    Object[][] realBlobs = {
+      {(short) 1, 0L, 0L, 0L, UTF8String.fromString("")},
+      {(short) 0, 8L, 0L, 0L, UTF8String.fromString("")},
+      {(short) 0, 0L, 16L, 0L, UTF8String.fromString("")},
+      {(short) 0, 0L, 0L, 7L, UTF8String.fromString("")},
+      {(short) 0, 0L, 0L, 0L, UTF8String.fromString("file:///b.blob")},
+    };
+    for (Object[] fields : realBlobs) {
+      assertFalse(
+          BlobUtils.isNullBlobV2Descriptor(new GenericInternalRow(fields)),
+          "must not classify a real descriptor as the null sentinel: "
+              + java.util.Arrays.toString(fields));
+    }
+  }
+
+  @Test
   public void testDescriptorStructShape() {
     StructType s = BlobUtils.BLOB_DESCRIPTOR_STRUCT;
     assertEquals(5, s.fields().length);
@@ -112,6 +135,31 @@ public class BlobUtilsTest {
             });
     StructType rewritten = BlobUtils.applyBlobV2DescriptorSchema(schema);
     assertEquals(DataTypes.BinaryType, rewritten.apply("payload").dataType());
+  }
+
+  @Test
+  public void fileFormatSupportsBlobV2AcceptsTwoTwoAndNewer() {
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2("2.2"));
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2("2.10"));
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2("3.0"));
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2(" 2.2 "));
+  }
+
+  @Test
+  public void fileFormatSupportsBlobV2RejectsOlderAndNull() {
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2(null));
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2("2.0"));
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2("2.1"));
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2("2"));
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2("2."));
+  }
+
+  @Test
+  public void fileFormatSupportsBlobV2RejectsNamedAndMalformedVersions() {
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2("stable"));
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2(""));
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2("."));
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2("2.x"));
   }
 
   private static StructField field(String name, org.apache.spark.sql.types.DataType dt) {

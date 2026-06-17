@@ -82,7 +82,9 @@ public class LanceSparkCatalogConfig {
       if (fullKey.startsWith(STORAGE_PREFIX)) {
         String nativeKey = fullKey.substring(STORAGE_PREFIX.length());
         nativeOptions.put(nativeKey, value);
-      } else {
+      } else if (!TABLE_OPT_ENABLE_STABLE_ROW_IDS.equals(fullKey)
+          && !TABLE_OPT_FILE_FORMAT_VERSION.equals(fullKey)) {
+        // Keep table options out of storageOptions, as writes merge those in.
         nativeOptions.put(fullKey, value);
       }
     }
@@ -150,21 +152,6 @@ public class LanceSparkCatalogConfig {
    */
   public String getFileFormatVersion() {
     return tableOptions.get(TABLE_OPT_FILE_FORMAT_VERSION);
-  }
-
-  /**
-   * Returns the file format version, allowing per-table TBLPROPERTIES to override the catalog-level
-   * default.
-   *
-   * @param tableProperties the TBLPROPERTIES from CREATE TABLE
-   * @return the file format version string, or null if not specified
-   */
-  public String getFileFormatVersion(Map<String, String> tableProperties) {
-    String override = tableProperties.get(TABLE_OPT_FILE_FORMAT_VERSION);
-    if (override != null) {
-      return override;
-    }
-    return getFileFormatVersion();
   }
 
   @Override

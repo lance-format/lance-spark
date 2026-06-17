@@ -2,6 +2,17 @@
 
 The Spark Lance connector codebase is at [lance-format/lance-spark](https://github.com/lance-format/lance-spark).
 
+## Contribution Workflow
+
+This section describes how contributors pick up and coordinate on work. It reflects the consensus from [discussion #583](https://github.com/lance-format/lance-spark/discussions/583). The goal is visibility: the clearer we are about what we are working on, the less effort we duplicate and the less we miss.
+
+- **Claim an issue first.** Before starting non-trivial work, comment on the issue (or self-assign if you have triage rights) so others see it is taken. A claim can go stale: with no linked PR or activity after about two weeks, anyone may pick the issue up.
+- **Link every PR to its issue.** Use `Closes #NNN` or `Part of #NNN` in the PR description so related work stays visible under one issue, which is the root construct we use to reconcile differences. Trivial fixes without an issue are exempt.
+- **Write a design proposal for large features.** For a new SQL extension, a new public API, or anything cross-cutting, open a [GitHub Discussion](https://github.com/lance-format/lance-spark/discussions) (the `Design Proposals` category) describing the approach before opening implementation issues or PRs: what you are solving, how it works today, the proposed change, who is affected, the risks, and an incremental/MVP plan. Authoring proposals as Discussions keeps them searchable and separates the design phase from implementation tracking, mirroring how the core [lance-format/lance](https://github.com/lance-format/lance/discussions) repo runs design proposals. A maintainer sponsors the proposal and the approach is agreed before code is written; expect initial feedback within about a week. Once the design is agreed, open the implementation issue(s) and link back to the discussion. Normal issues stay no-ceremony.
+- **Keep PRs small and reviewable.** Split large efforts into an umbrella issue with a checklist, each sub-task delivered as a small PR marked `Part of #NNN`. Small PRs surface direction problems early.
+- **Resolving duplicate PRs.** By default the earlier-submitted PR is reviewed first when it has no critical design flaws (first in, first served). The exception is a new contributor's PR competing with a maintainer's, where the newcomer's is prioritized absent a fundamental design problem. The maintainer records the reasoning on the issue so the decision is transparent to everyone.
+- **Maintainer responsibilities.** Maintainers groom issues and PRs to limit duplication, point duplicate PRs back to the shared issue so authors can consolidate, and keep the workflow visible so contributors always know where to jump in.
+
 ## Build Commands
 
 This connector is built using Maven. You can run the following make commands:

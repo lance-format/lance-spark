@@ -28,7 +28,10 @@ import java.util.Objects;
 /**
  * Write-specific options for Lance Spark connector.
  *
- * <p>These options override catalog-level settings for write operations.
+ * <p>Options supplied via {@link Builder#fromOptions(Map)} override catalog-level settings for
+ * write operations. Typed Builder setters applied before {@link
+ * Builder#withCatalogDefaults(LanceSparkCatalogConfig)} are superseded by catalog values for the
+ * same key (see that method's javadoc).
  *
  * <p>Usage:
  *
@@ -516,7 +519,17 @@ public class LanceSparkWriteOptions implements Serializable {
     }
 
     /**
-     * Merges catalog config options as defaults (write options override).
+     * Merges catalog config options as defaults; options supplied via {@link #fromOptions(Map)}
+     * override catalog values.
+     *
+     * <p>Re-parses the merged map through {@link #fromOptions(Map)} so that catalog-level write
+     * settings (e.g. {@code spark.sql.catalog.<name>.<key>}) are promoted into their typed Builder
+     * fields and take effect on write paths that do not supply per-write {@code .option(...)}
+     * overrides. Mirrors {@code LanceSparkReadOptions.Builder#withCatalogDefaults}. Typed values
+     * previously assigned via Builder setters are re-derived from the merged map, so a catalog
+     * default wins over an earlier setter call for the same key. Call this after {@link
+     * #fromOptions(Map)} / {@link #storageOptions(Map)}: a later {@code fromOptions} call replaces
+     * the storage options map and discards the merged catalog defaults.
      *
      * @param catalogConfig the catalog config
      * @return this builder
@@ -525,8 +538,7 @@ public class LanceSparkWriteOptions implements Serializable {
       // Merge storage options: catalog options are defaults, current options override
       Map<String, String> merged = new HashMap<>(catalogConfig.getStorageOptions());
       merged.putAll(this.storageOptions);
-      this.storageOptions = merged;
-      return this;
+      return fromOptions(merged);
     }
 
     public LanceSparkWriteOptions build() {

@@ -17,7 +17,10 @@ import org.lance.index.Index;
 import org.lance.index.IndexCriteria;
 import org.lance.index.IndexDescription;
 import org.lance.index.IndexType;
+import org.lance.index.OptimizeOptions;
+import org.lance.spark.utils.FieldPathUtils;
 
+import org.apache.spark.SparkException;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
@@ -99,6 +102,29 @@ public abstract class BaseAddIndexTest {
                 .boxed()
                 .map(i -> String.format("(%d, 'text_%d')", i, i))
                 .collect(Collectors.joining(","))));
+  }
+
+  private void prepareNestedDataset() {
+    spark.sql(
+        String.format(
+            "create table %s ("
+                + "id int, "
+                + "left_payload struct<value:int>, "
+                + "right_payload struct<value:int>, "
+                + "dot_payload struct<`literal.dot`:int>, "
+                + "special_payload struct<`user-id`:int, `display name`:int>"
+                + ") using lance;",
+            fullTable));
+    spark.sql(
+        String.format(
+            "insert into %s values "
+                + "(1, named_struct('value', 10), named_struct('value', 100), "
+                + "named_struct('literal.dot', 1000), "
+                + "named_struct('user-id', 10000, 'display name', 10001)), "
+                + "(2, named_struct('value', 20), named_struct('value', 200), "
+                + "named_struct('literal.dot', 2000), "
+                + "named_struct('user-id', 20000, 'display name', 20001))",
+            fullTable));
   }
 
   @Test
@@ -376,6 +402,141 @@ public abstract class BaseAddIndexTest {
                     "alter table %s create index idx_multi using zonemap (id, text)", fullTable)));
   }
 
+  /**
+   * Deferred (train=false) ZONEMAP commits a single empty driver-side index (not distributed
+   * segments); optimizeIndices then populates it.
+   */
+  @Test
+  public void testCreateZonemapIndexDeferred() {
+    prepareDataset();
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index test_index_zonemap_deferred using zonemap (id) "
+                    + "with (train=false, rows_per_zone=4)",
+                fullTable));
+
+    // Deferred create processes no fragments.
+    Row row = result.collectAsList().get(0);
+    Assertions.assertEquals(0L, row.getLong(0), "Deferred create should index zero fragments");
+    Assertions.assertEquals("test_index_zonemap_deferred", row.getString(1));
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int fragmentCount = lanceDataset.getFragments().size();
+      Assertions.assertTrue(fragmentCount >= 2, "Expected multiple fragments");
+
+      List<Index> deferred =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> "test_index_zonemap_deferred".equals(index.name()))
+              .collect(Collectors.toList());
+
+      // A single empty index is committed on the driver (not distributed segments).
+      Assertions.assertEquals(
+          1, deferred.size(), "Deferred zonemap should commit a single empty index");
+      Assertions.assertEquals(IndexType.ZONEMAP, deferred.get(0).indexType());
+      Assertions.assertEquals(
+          0,
+          deferred.get(0).fragments().orElse(Collections.emptyList()).size(),
+          "Deferred zonemap should cover no fragments before OPTIMIZE");
+
+      // Query still returns correct results: the predicate falls back to a full scan
+      // because the index covers nothing yet.
+      Dataset<Row> beforeOptimize =
+          spark.sql(String.format("select * from %s where id=15", fullTable));
+      Assertions.assertEquals(1L, beforeOptimize.count());
+      Assertions.assertEquals("text_15", beforeOptimize.collectAsList().get(0).getString(1));
+
+      // Populate the deferred index from the unindexed fragments.
+      lanceDataset.optimizeIndices(OptimizeOptions.builder().build());
+    } finally {
+      lanceDataset.close();
+    }
+
+    org.lance.Dataset optimized = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int fragmentCount = optimized.getFragments().size();
+      List<Index> populated =
+          optimized.getIndexes().stream()
+              .filter(index -> "test_index_zonemap_deferred".equals(index.name()))
+              .collect(Collectors.toList());
+      int coveredFragments =
+          populated.stream()
+              .map(index -> index.fragments().orElse(Collections.emptyList()).size())
+              .mapToInt(Integer::intValue)
+              .sum();
+      Assertions.assertEquals(
+          fragmentCount,
+          coveredFragments,
+          "Expected OPTIMIZE to populate the deferred zonemap over all fragments");
+    } finally {
+      optimized.close();
+    }
+
+    // Query remains correct after the index is populated.
+    Dataset<Row> afterOptimize =
+        spark.sql(String.format("select * from %s where id=15", fullTable));
+    Assertions.assertEquals(1L, afterOptimize.count());
+    Assertions.assertEquals("text_15", afterOptimize.collectAsList().get(0).getString(1));
+  }
+
+  /**
+   * A deferred ZONEMAP can be populated by re-running CREATE INDEX (eager): the distributed segment
+   * build replaces the empty index and covers all fragments.
+   */
+  @Test
+  public void testDeferredZonemapPopulatedByEagerRecreate() {
+    prepareDataset();
+
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_dz using zonemap (id) with (train=false)", fullTable));
+
+    // Re-run eagerly with the same name: distributed build over all fragments.
+    spark.sql(String.format("alter table %s create index idx_dz using zonemap (id)", fullTable));
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int fragmentCount = lanceDataset.getFragments().size();
+      List<Index> segments =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> "idx_dz".equals(index.name()))
+              .collect(Collectors.toList());
+
+      // Distributed build emits more than one segment, and the empty deferred index is gone.
+      Assertions.assertTrue(
+          segments.size() > 1,
+          "Expected eager recreate to build distributed segments, got " + segments.size());
+      Assertions.assertTrue(
+          segments.stream().allMatch(s -> !s.fragments().orElse(Collections.emptyList()).isEmpty()),
+          "Expected no empty (deferred) segment to survive the eager recreate");
+      int coveredFragments =
+          segments.stream()
+              .map(index -> index.fragments().orElse(Collections.emptyList()).size())
+              .mapToInt(Integer::intValue)
+              .sum();
+      Assertions.assertEquals(
+          fragmentCount, coveredFragments, "Expected recreated zonemap to cover all fragments");
+    } finally {
+      lanceDataset.close();
+    }
+  }
+
+  /** num_segments is meaningless for a deferred build (no segmented build happens). */
+  @Test
+  public void testZonemapDeferredRejectsNumSegments() {
+    prepareDataset();
+    Assertions.assertThrows(
+        Exception.class,
+        () ->
+            spark.sql(
+                String.format(
+                    "alter table %s create index idx_defer_seg using zonemap (id) "
+                        + "with (train=false, num_segments=3)",
+                    fullTable)));
+  }
+
   @Test
   public void testNumSegmentsRejectedForBtree() {
     prepareDataset();
@@ -439,6 +600,65 @@ public abstract class BaseAddIndexTest {
   }
 
   @Test
+  public void testRepeatedCreateBTreeRangeIndex() {
+    prepareDataset();
+
+    String sql =
+        String.format(
+            "alter table %s create index test_range_repeat using btree (id) with (build_mode='range')",
+            fullTable);
+
+    spark.sql(sql);
+    checkIndex("test_range_repeat");
+
+    int fragmentCount;
+    Set<UUID> firstRunUuids;
+    org.lance.Dataset ds1 = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      fragmentCount = ds1.getFragments().size();
+      firstRunUuids =
+          ds1.getIndexes().stream()
+              .filter(index -> "test_range_repeat".equals(index.name()))
+              .map(Index::uuid)
+              .collect(Collectors.toSet());
+    } finally {
+      ds1.close();
+    }
+    Assertions.assertEquals(
+        fragmentCount,
+        firstRunUuids.size(),
+        "Expected one disjoint range segment per fragment on first create");
+
+    // Re-create with the same name: exercises replace(false) on the segment builds plus
+    // atomic replacement at commit time. The old segments must be replaced, not duplicated.
+    spark.sql(sql);
+    checkIndex("test_range_repeat");
+
+    org.lance.Dataset ds2 = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      List<Index> segments =
+          ds2.getIndexes().stream()
+              .filter(index -> "test_range_repeat".equals(index.name()))
+              .collect(Collectors.toList());
+      Set<UUID> secondRunUuids = segments.stream().map(Index::uuid).collect(Collectors.toSet());
+      Assertions.assertEquals(
+          fragmentCount,
+          segments.size(),
+          "Expected recreated range index to replace existing segments instead of duplicating them");
+      Assertions.assertTrue(
+          Collections.disjoint(firstRunUuids, secondRunUuids),
+          "Expected the recreated range index to produce fresh segment UUIDs");
+    } finally {
+      ds2.close();
+    }
+
+    // Index must remain queryable after the replacement.
+    Dataset<Row> query = spark.sql(String.format("select * from %s where id=15", fullTable));
+    Assertions.assertEquals(1L, query.count());
+    Assertions.assertEquals("text_15", query.collectAsList().get(0).getString(1));
+  }
+
+  @Test
   public void testCreateBTreeIndexWithRowsPerRange() {
     prepareDataset();
     Dataset<Row> result =
@@ -485,6 +705,91 @@ public abstract class BaseAddIndexTest {
   }
 
   @Test
+  public void testCreateBTreeIndexOnNestedFieldsUsesLeafFieldIds() {
+    prepareNestedDataset();
+
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_left_value using btree (left_payload.value)",
+            fullTable));
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_right_value using btree (right_payload.value)",
+            fullTable));
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int leftFieldId = fieldId(lanceDataset, "left_payload.value");
+      int rightFieldId = fieldId(lanceDataset, "right_payload.value");
+
+      Assertions.assertEquals(
+          Collections.singletonList(leftFieldId), checkIndex("idx_left_value").fields());
+      Assertions.assertEquals(
+          Collections.singletonList(rightFieldId), checkIndex("idx_right_value").fields());
+      Assertions.assertNotEquals(
+          leftFieldId,
+          rightFieldId,
+          "Same leaf names under different parents must resolve to different field ids");
+    } finally {
+      lanceDataset.close();
+    }
+  }
+
+  @Test
+  public void testCreateBTreeIndexOnNestedLiteralDotFieldShowsCanonicalPath() {
+    prepareNestedDataset();
+
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_literal_dot using btree (dot_payload.`literal.dot`)",
+            fullTable));
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int literalDotFieldId = fieldId(lanceDataset, "dot_payload.`literal.dot`");
+      Assertions.assertEquals(
+          Collections.singletonList(literalDotFieldId), checkIndex("idx_literal_dot").fields());
+    } finally {
+      lanceDataset.close();
+    }
+
+    List<Row> rows = spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+    Row row =
+        rows.stream()
+            .filter(r -> "idx_literal_dot".equals(r.getString(0)))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("SHOW INDEXES did not return idx_literal_dot"));
+    Assertions.assertEquals(Collections.singletonList("dot_payload.`literal.dot`"), row.getList(1));
+  }
+
+  @Test
+  public void testCreateBTreeIndexOnNestedSpecialCharacterFieldShowsCanonicalPath() {
+    prepareNestedDataset();
+
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_user_id using btree (special_payload.`user-id`)",
+            fullTable));
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int userIdFieldId = fieldId(lanceDataset, "special_payload.`user-id`");
+      Assertions.assertEquals(
+          Collections.singletonList(userIdFieldId), checkIndex("idx_user_id").fields());
+    } finally {
+      lanceDataset.close();
+    }
+
+    List<Row> rows = spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+    Row row =
+        rows.stream()
+            .filter(r -> "idx_user_id".equals(r.getString(0)))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("SHOW INDEXES did not return idx_user_id"));
+    Assertions.assertEquals(Collections.singletonList("special_payload.`user-id`"), row.getList(1));
+  }
+
+  @Test
   public void testCreateBTreeIndexWithUnrecognizedBuildMode() {
     prepareDataset();
 
@@ -503,6 +808,59 @@ public abstract class BaseAddIndexTest {
         exception.getMessage().contains("Unrecognized build_mode"),
         "Expected error message to mention unrecognized build_mode, got: "
             + exception.getMessage());
+  }
+
+  @Test
+  public void testCreateIndexFailureLeavesTableUsable() {
+    prepareDataset();
+
+    // An FTS index on a non-text column (id is int) resolves the column fine but fails inside
+    // AddIndexExec.run()'s FTS path, after the driver-side dataset is opened — the path the
+    // close-on-failure fix guards. We assert the publicly observable contract: the failed index
+    // is not committed, the table stays queryable, and a later valid CREATE INDEX succeeds. (On
+    // POSIX a leaked read handle would not surface, so this guards reusability/cleanliness, not
+    // handle-closure directly.)
+    Exception failure =
+        Assertions.assertThrows(
+            Exception.class,
+            () ->
+                spark
+                    .sql(
+                        String.format(
+                            "alter table %s create index bad_idx using fts (id)", fullTable))
+                    .collect());
+
+    // The failure must come from the distributed index-build job, which runs only after the
+    // driver-side dataset is opened. A SparkException in the cause chain indicates a job failure;
+    // earlier failures (analysis, driver-side validation) surface unwrapped and would mean this
+    // test no longer exercises the close-on-failure path it exists to guard.
+    boolean fromBuildJob = false;
+    for (Throwable t = failure; t != null && !fromBuildJob; t = t.getCause()) {
+      fromBuildJob = t instanceof SparkException;
+    }
+    Assertions.assertTrue(
+        fromBuildJob, "Expected a build-job failure after dataset open, got: " + failure);
+
+    // The table is still fully queryable after the failed CREATE INDEX. collectAsList (not
+    // count, which is answered from manifest metadata) forces a real scan of the data pages.
+    Dataset<Row> all = spark.sql(String.format("select * from %s", fullTable));
+    Assertions.assertEquals(20, all.collectAsList().size());
+
+    // Nothing was committed to the manifest: the table should have no index at all. (A check
+    // for the failed name alone would miss unnamed segment entries.)
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      Assertions.assertTrue(
+          lanceDataset.getIndexes().isEmpty(),
+          "Failed CREATE INDEX should not commit any index to the manifest, found: "
+              + lanceDataset.getIndexes());
+    } finally {
+      lanceDataset.close();
+    }
+
+    // The dataset is reusable: a subsequent valid CREATE INDEX still succeeds.
+    spark.sql(String.format("alter table %s create index good_idx using btree (id)", fullTable));
+    checkIndex("good_idx");
   }
 
   @Test
@@ -809,5 +1167,9 @@ public abstract class BaseAddIndexTest {
     if ("2".equals(System.getenv("LANCE_FTS_FORMAT_VERSION"))) {
       Assertions.assertEquals(2, index.indexVersion());
     }
+  }
+
+  private int fieldId(org.lance.Dataset dataset, String path) {
+    return FieldPathUtils.resolveLeafField(dataset.getLanceSchema(), path).getId();
   }
 }

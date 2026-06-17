@@ -40,6 +40,14 @@ The following index methods are supported:
 
 The `CREATE INDEX` command supports options via the `WITH` clause to control index creation. These options are specific to the chosen index method.
 
+### Common Options
+
+These options apply to all index methods:
+
+| Option  | Type    | Description                                                                                                                                                                |
+|---------|---------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `train` | Boolean | When `false`, defer index training: register an empty index covering no rows without scanning any data, to be populated later. Default `true`. See [Deferred Index Creation](#deferred-index-creation). |
+
 ### ZoneMap Options
 
 For the `zonemap` method, the following options are supported:
@@ -279,6 +287,40 @@ Create an IVF + HNSW graph + SQ index when you want HNSW search latency without 
 
 Query the indexed vector column with the [VECTOR_SEARCH](../dql/vector-search.md) table function.
 
+### Deferred Index Creation
+
+Register an index without scanning any data by setting `train = false`. This commits an empty index
+(covering no rows) instantly on the driver — useful when you want the index to exist immediately and
+fill it in later, or when you intend to build it incrementally:
+
+=== "SQL"
+    ```sql
+    ALTER TABLE lance.db.users CREATE INDEX idx_id USING zonemap (id) WITH (train = false);
+    ```
+
+A deferred index returns `fragments_indexed = 0` and is treated as fully unindexed: queries fall back
+to scanning the data until it is populated. There are two ways to populate it:
+
+- **Full distributed build (recommended):** re-run `CREATE INDEX` with the same name. This uses the
+  normal distributed build across Spark tasks and atomically replaces the empty index:
+
+    ```sql
+    ALTER TABLE lance.db.users CREATE INDEX idx_id USING zonemap (id);
+    ```
+
+- **Incremental build through the SDK:** when only some fragments are unindexed (for example after
+  appending data to an already-built index), `Dataset.optimizeIndices` indexes just the unindexed
+  fragments. This currently runs on a single node:
+
+    ```java
+    dataset.optimizeIndices(OptimizeOptions.builder().build());
+    ```
+
+`train = false` is supported for all index methods (`btree`, `fts`, `zonemap`, and `IVF_*` vector
+methods). Because a deferred index performs no segmented build at creation time, `num_segments`
+cannot be combined with `train = false` — pass it on the eager build that populates the index
+instead.
+
 ## Output
 
 The `CREATE INDEX` command returns the following information about the operation:
@@ -321,3 +363,4 @@ The `CREATE INDEX` command operates as follows:
 - **PQ Sub-Vector Constraint**: For `IVF_PQ` and `IVF_HNSW_PQ`, `num_sub_vectors` must divide the vector dimension. If the dimension is divisible by neither 16 nor 8, you must specify `num_sub_vectors` explicitly.
 - **Index Replacement**: Re-running `CREATE INDEX` with the same name replaces the existing index. For vector indexes the replacement happens in the same atomic commit, so concurrent readers see either the old or the new segment set, never a mixture.
 - **Empty Tables**: Creating an index on a table with no fragments returns `fragments_indexed = 0` and commits no segments.
+- **Deferred Training**: With `train = false` the index is registered empty and is populated later, either by re-running `CREATE INDEX` (a full distributed build that replaces the empty index) or, for incremental coverage of newly appended fragments, by `Dataset.optimizeIndices` in the SDK. The SQL `OPTIMIZE` command compacts fragments and does not train deferred indexes.

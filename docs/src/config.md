@@ -506,30 +506,24 @@ For details on how caching works and tuning recommendations, see [Performance Tu
 
 ## Blob v2 Reads
 
-Lance datasets that contain a blob v2 column expose that column to Spark as the native 5-field descriptor struct: `struct<kind:short, position:long, size:long, blob_id:long, blob_uri:string>`. Querying the descriptor never fetches the blob bytes, so `SELECT payload.size` and `SELECT payload.blob_uri` are cheap.
+Lance exposes blob v2 columns as `struct<kind:short, position:long, size:long, blob_id:long, blob_uri:string>`. Descriptor queries do not fetch bytes.
 
 ```sql
--- Query metadata only (no byte fetch):
 SELECT id, payload.size, payload.kind FROM lance.ns.tbl;
 ```
 
-A column is treated as blob v2 when the Arrow field carries `ARROW:extension:name = lance.blob.v2`, matching lance-core's blob v2 extension type.
+A column is blob v2 when the Arrow field has `ARROW:extension:name = lance.blob.v2`.
 
-Filter pushdown for SQL `WHERE` is disabled on blob v2 tables; Spark evaluates predicates after the scan. Zonemap-based fragment pruning still runs.
-
-The connector does not materialize blob bytes on read; queries against descriptor fields fetch metadata only. See [Blob v2 Writes](#blob-v2-writes) below for the write path.
+SQL filter pushdown is disabled on blob v2 tables; zonemap fragment pruning still runs. See [Blob v2 Writes](#blob-v2-writes) for copying blobs between tables.
 
 ## Blob v2 Writes
 
-To write blob v2 columns, set `file_format_version` to `2.2` or higher and set
+To write blob v2 columns, set `file_format_version` to `2.2` or higher and
 `<column>.lance.encoding = blob` in `TBLPROPERTIES`.
 
-Spark still sees the column as `BINARY` when writing. The connector converts that binary
-value into the Arrow blob write struct during encoding.
+Spark accepts `BINARY` on write. The connector maps that to the Arrow blob write struct at encode time. On read the same columns come back as descriptor structs ([Blob v2 Reads](#blob-v2-reads)).
 
-On reads, blob v2 columns are exposed as descriptor structs. See
-[Blob v2 Reads](#blob-v2-reads). For writes, `INSERT` and DataFrame append still take
-`BINARY`.
+Copy blobs between Lance tables with a direct column select in `INSERT ... SELECT` or CTAS. See [INSERT INTO](operations/dml/insert-into.md#copying-blob-v2-columns) and [CREATE TABLE](operations/ddl/create-table.md#blob-v2-columns).
 
 ```sql
 CREATE TABLE lance.mydb.users (

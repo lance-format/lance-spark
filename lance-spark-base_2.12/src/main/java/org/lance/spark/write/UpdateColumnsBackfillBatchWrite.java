@@ -21,6 +21,7 @@ import org.lance.Transaction;
 import org.lance.fragment.FragmentUpdateResult;
 import org.lance.operation.Update;
 import org.lance.spark.LanceDataset;
+import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.utils.Utils;
 
@@ -159,7 +160,9 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
               new Transaction.Builder().readVersion(version).operation(update).build();
           Dataset committed =
               new CommitBuilder(dataset)
-                  .writeParams(writeOptions.getStorageOptions())
+                  .writeParams(
+                      LanceRuntime.mergeStorageOptions(
+                          writeOptions.getStorageOptions(), initialStorageOptions))
                   .execute(txn)) {
         // auto-close txn and committed dataset
       }

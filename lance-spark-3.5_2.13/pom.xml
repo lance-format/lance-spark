@@ -105,6 +105,7 @@
                                 <source>../lance-spark-base_2.12/src/main/java</source>
                                 <source>../lance-spark-3.5_2.12/src/main/java</source>
                                 <source>../lance-spark-3.5_2.12/src/main/scala</source>
+                                <source>../lance-spark-3.5_2.12/src/main/scala-rowlevel</source>
                                 <source>${project.build.directory}/generated-sources/antlr4</source>
                             </sources>
                         </configuration>

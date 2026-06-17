@@ -102,6 +102,15 @@ public class LanceSqlExtensionsAstBuilderTest {
     assertEquals(List.of("col-a", "col-b", "NORMAL_COL"), columns);
   }
 
+  @Test
+  public void testFieldPathListWithNestedAndLiteralDotFields() {
+    LanceSqlExtensionsParser parser =
+        createParser("PAYLOAD.VALUE, PAYLOAD.`literal.dot`, `top.level`");
+    List<String> columns =
+        JavaConverters.seqAsJavaList(astBuilder.visitFieldPathList(parser.fieldPathList()));
+    assertEquals(List.of("PAYLOAD.VALUE", "PAYLOAD.`literal.dot`", "`top.level`"), columns);
+  }
+
   // --- Full-statement parse tests ---
 
   @Test
@@ -139,7 +148,19 @@ public class LanceSqlExtensionsAstBuilderTest {
         List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
     assertEquals("my-idx", plan.indexName());
     assertEquals("BTREE", plan.method());
-    assertEquals(List.of("col-a"), JavaConverters.seqAsJavaList(plan.columns()));
+    assertEquals(List.of("`col-a`"), JavaConverters.seqAsJavaList(plan.columns()));
+  }
+
+  @Test
+  public void testCreateIndexWithNestedFieldPath() {
+    LanceSqlExtensionsParser parser =
+        createParser(
+            "ALTER TABLE `my-catalog`.`my-table` CREATE INDEX `my-idx` USING BTREE (PAYLOAD.VALUE, PAYLOAD.`literal.dot`)");
+    AddIndex plan = (AddIndex) astBuilder.visitSingleStatement(parser.singleStatement());
+
+    assertEquals(
+        List.of("PAYLOAD.VALUE", "PAYLOAD.`literal.dot`"),
+        JavaConverters.seqAsJavaList(plan.columns()));
   }
 
   @Test

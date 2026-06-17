@@ -890,6 +890,45 @@ class TestDDLIndex:
         assert len(query_result) == 1
         assert query_result[0].id == 50
 
+    def test_create_btree_index_on_nested_literal_dot_field(self, spark):
+        """Test CREATE INDEX on nested struct fields, including literal dots."""
+        spark.sql("""
+            CREATE TABLE default.nested_index_table (
+                id INT,
+                left_payload STRUCT<value: INT>,
+                right_payload STRUCT<value: INT>,
+                dot_payload STRUCT<`literal.dot`: INT>
+            )
+        """)
+
+        spark.sql("""
+            INSERT INTO default.nested_index_table VALUES
+            (1, named_struct('value', 10), named_struct('value', 100), named_struct('literal.dot', 1000)),
+            (2, named_struct('value', 20), named_struct('value', 200), named_struct('literal.dot', 2000))
+        """)
+
+        spark.sql("""
+            ALTER TABLE default.nested_index_table
+            CREATE INDEX idx_left_value USING btree (left_payload.value)
+        """).collect()
+        spark.sql("""
+            ALTER TABLE default.nested_index_table
+            CREATE INDEX idx_literal_dot USING btree (dot_payload.`literal.dot`)
+        """).collect()
+
+        indexes = spark.sql("""
+            SHOW INDEXES IN default.nested_index_table
+        """).collect()
+        fields_by_name = {row["name"]: list(row["fields"]) for row in indexes}
+        assert fields_by_name["idx_left_value"] == ["left_payload.value"]
+        assert fields_by_name["idx_literal_dot"] == ["dot_payload.`literal.dot`"]
+
+        rows = spark.sql("""
+            SELECT id FROM default.nested_index_table
+            WHERE left_payload.value = 20
+        """).collect()
+        assert [row.id for row in rows] == [2]
+
     def test_create_fts_index(self, spark):
         """Test CREATE INDEX with full-text search (FTS)."""
         spark.sql("""

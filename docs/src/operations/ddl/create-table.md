@@ -342,8 +342,7 @@ To create a table with blob columns, use the table property pattern `<column_nam
 
 To create blob v2 columns, set the blob encoding property and use `file_format_version = '2.2'` or higher.
 
-Spark writes blob v2 columns as `BINARY`. On reads, the same columns are exposed as
-descriptor structs. See [Blob v2 Reads](../../config.md#blob-v2-reads).
+Spark writes blob v2 columns as `BINARY` and reads expose descriptor structs ([Blob v2 Reads](../../config.md#blob-v2-reads)).
 
 === "SQL"
     ```sql
@@ -364,6 +363,18 @@ descriptor structs. See [Blob v2 Reads](../../config.md#blob-v2-reads).
         .tableProperty("file_format_version", "2.2") \
         .createOrReplace()
     ```
+
+
+#### CTAS from a blob v2 source
+
+```sql
+CREATE TABLE documents_copy USING lance
+AS SELECT id, content FROM documents;
+```
+
+The new table picks up `file_format_version = '2.2'` when the query includes blob v2 columns. A lower explicit version is rejected.
+
+Same rules as [INSERT INTO](../dml/insert-into.md#copying-blob-v2-columns).
 
 ## Large String Columns
 

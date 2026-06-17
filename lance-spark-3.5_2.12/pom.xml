@@ -97,6 +97,7 @@
                                 <source>src/main/java</source>
                                 <source>src/main/java11</source>
                                 <source>src/main/scala</source>
+                                <source>src/main/scala-rowlevel</source>
                                 <source>${project.build.directory}/generated-sources/antlr4</source>
                             </sources>
                         </configuration>

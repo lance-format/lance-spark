@@ -242,22 +242,7 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
       LanceSparkWriteOptions options =
           !overwrite
               ? writeOptions
-              : LanceSparkWriteOptions.builder()
-                  .storageOptions(writeOptions.getStorageOptions())
-                  .namespace(writeOptions.getNamespace())
-                  .tableId(writeOptions.getTableId())
-                  .batchSize(writeOptions.getBatchSize())
-                  .datasetUri(writeOptions.getDatasetUri())
-                  .fileFormatVersion(writeOptions.getFileFormatVersion())
-                  .maxBytesPerFile(writeOptions.getMaxBytesPerFile())
-                  .maxRowsPerFile(writeOptions.getMaxRowsPerFile())
-                  .maxRowsPerGroup(writeOptions.getMaxRowsPerGroup())
-                  .queueDepth(writeOptions.getQueueDepth())
-                  .useQueuedWriteBuffer(writeOptions.isUseQueuedWriteBuffer())
-                  .useLargeVarTypes(writeOptions.isUseLargeVarTypes())
-                  .enableStableRowIds(writeOptions.getEnableStableRowIds())
-                  .writeMode(WriteParams.WriteMode.OVERWRITE)
-                  .build();
+              : writeOptions.toBuilder().writeMode(WriteParams.WriteMode.OVERWRITE).build();
 
       return new SparkWrite(
           schema,

@@ -898,6 +898,26 @@ public abstract class BaseBlobCreateTableTest {
     spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
   }
 
+  @Test
+  public void testMalformedFileFormatVersionRejectedAtCreate() {
+    String tableName = "blob_badversion_" + System.currentTimeMillis();
+    Exception ex =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            Exception.class,
+            () ->
+                spark.sql(
+                    "CREATE TABLE "
+                        + catalogName
+                        + ".default."
+                        + tableName
+                        + " (id INT, data BINARY) USING lance TBLPROPERTIES ("
+                        + "'data.lance.encoding' = 'blob', 'file_format_version' = '2.x')"));
+    assertTrue(
+        ex.getMessage() != null && ex.getMessage().toLowerCase().contains("version"),
+        "creating with a malformed file_format_version must fail mentioning the version, but got "
+            + ex.getMessage());
+  }
+
   private static String bytesToHex(byte[] bytes) {
     StringBuilder hexString = new StringBuilder();
     for (byte b : bytes) {
