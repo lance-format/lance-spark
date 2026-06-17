@@ -19,8 +19,12 @@ import org.apache.spark.sql.AnalysisException;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
+import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
+import org.apache.spark.sql.connector.catalog.FunctionCatalog;
 import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.SupportsNamespaces;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.catalog.TableChange;
 import org.junit.jupiter.api.AfterEach;
@@ -31,6 +35,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.format.DateTimeFormatter;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -1097,6 +1102,49 @@ public abstract class SparkLanceNamespaceTestBase {
             AnalysisException.class,
             () -> spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL)"));
     assertEquals("TABLE_OR_VIEW_ALREADY_EXISTS", ex.getErrorClass());
+  }
+
+  @Test
+  public void testListFunctionsAtRootAreLoadable() throws Exception {
+    FunctionCatalog functions = (FunctionCatalog) catalog;
+    Identifier[] rootFunctions = functions.listFunctions(new String[0]);
+    assertEquals(2, rootFunctions.length);
+    for (Identifier function : rootFunctions) {
+      assertNotNull(functions.loadFunction(function));
+    }
+  }
+
+  @Test
+  public void testListFunctionsForNonRootNamespaceIsEmpty() throws Exception {
+    FunctionCatalog functions = (FunctionCatalog) catalog;
+    assertEquals(0, functions.listFunctions(new String[] {"default"}).length);
+  }
+
+  @Test
+  public void testCreateExistingNamespaceThrows() throws Exception {
+    SupportsNamespaces namespaces = (SupportsNamespaces) catalog;
+    String[] namespace = {"dup_ns_" + UUID.randomUUID().toString().replace("-", "")};
+    namespaces.createNamespace(namespace, Collections.emptyMap());
+
+    assertThrows(
+        NamespaceAlreadyExistsException.class,
+        () -> namespaces.createNamespace(namespace, Collections.emptyMap()));
+  }
+
+  @Test
+  public void testLoadMissingNamespaceMetadataThrows() {
+    SupportsNamespaces namespaces = (SupportsNamespaces) catalog;
+    String[] namespace = {"missing_" + UUID.randomUUID().toString().replace("-", "")};
+
+    assertThrows(NoSuchNamespaceException.class, () -> namespaces.loadNamespaceMetadata(namespace));
+  }
+
+  @Test
+  public void testMissingNamespaceDoesNotExist() {
+    SupportsNamespaces namespaces = (SupportsNamespaces) catalog;
+    String[] namespace = {"missing_" + UUID.randomUUID().toString().replace("-", "")};
+
+    assertFalse(namespaces.namespaceExists(namespace));
   }
 
   private boolean checkDataset(int expectedSize, String tableName) {

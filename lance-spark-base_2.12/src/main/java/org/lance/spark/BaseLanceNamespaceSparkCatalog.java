@@ -302,13 +302,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   @Override
   public Identifier[] listFunctions(String[] namespace) throws NoSuchNamespaceException {
-    if (namespace != null && namespace.length > 0 && !namespaceExists(namespace)) {
-      throw new NoSuchNamespaceException(namespace);
+    if (namespace != null && namespace.length > 0) {
+      if (!namespaceExists(namespace)) {
+        throw new NoSuchNamespaceException(namespace);
+      }
+      return new Identifier[0];
     }
-    String[] targetNamespace = namespace == null ? new String[0] : namespace;
     return new Identifier[] {
-      Identifier.of(targetNamespace, LanceFragmentIdWithDefaultFunction.NAME),
-      Identifier.of(targetNamespace, LanceBucketFunction.NAME)
+      Identifier.of(new String[0], LanceFragmentIdWithDefaultFunction.NAME),
+      Identifier.of(new String[0], LanceBucketFunction.NAME)
     };
   }
 
@@ -367,8 +369,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
       }
 
       return result.toArray(new String[0][]);
-    } catch (Exception e) {
-      throw new NoSuchNamespaceException(new String[0]);
+    } catch (LanceNamespaceException e) {
+      if (e.getErrorCode() == ErrorCode.NAMESPACE_NOT_FOUND) {
+        throw new NoSuchNamespaceException(new String[0]);
+      }
+      throw e;
     }
   }
 
@@ -396,8 +401,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
       }
 
       return result.toArray(new String[0][]);
-    } catch (Exception e) {
-      throw new NoSuchNamespaceException(parent);
+    } catch (LanceNamespaceException e) {
+      if (e.getErrorCode() == ErrorCode.NAMESPACE_NOT_FOUND) {
+        throw new NoSuchNamespaceException(parent);
+      }
+      throw e;
     }
   }
 
@@ -419,8 +427,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
     try {
       this.namespace.namespaceExists(request);
       return true;
-    } catch (Exception e) {
-      return false;
+    } catch (LanceNamespaceException e) {
+      if (e.getErrorCode() == ErrorCode.NAMESPACE_NOT_FOUND) {
+        return false;
+      }
+      throw e;
     }
   }
 
@@ -441,8 +452,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
       Map<String, String> properties = response.getProperties();
       return properties != null ? properties : Collections.emptyMap();
-    } catch (Exception e) {
-      throw new NoSuchNamespaceException(namespace);
+    } catch (LanceNamespaceException e) {
+      if (e.getErrorCode() == ErrorCode.NAMESPACE_NOT_FOUND) {
+        throw new NoSuchNamespaceException(namespace);
+      }
+      throw e;
     }
   }
 
@@ -463,11 +477,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     try {
       this.namespace.createNamespace(request);
-    } catch (Exception e) {
-      if (e.getMessage() != null && e.getMessage().contains("already exists")) {
+    } catch (LanceNamespaceException e) {
+      if (e.getErrorCode() == ErrorCode.NAMESPACE_ALREADY_EXISTS) {
         throw new NamespaceAlreadyExistsException(namespace);
       }
-      throw new RuntimeException("Failed to create namespace", e);
+      throw e;
     }
   }
 
