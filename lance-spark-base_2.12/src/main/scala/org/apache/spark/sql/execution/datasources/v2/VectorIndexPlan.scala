@@ -13,7 +13,7 @@
  */
 package org.apache.spark.sql.execution.datasources.v2
 
-import org.lance.index.IndexType
+import org.lance.index.{DistanceType, IndexType}
 
 /**
  * Fully resolved, validated vector index parameters.
@@ -23,13 +23,12 @@ import org.lance.index.IndexType
  * Serializable). Does NOT hold lance-core BuildParams classes, because those are
  * not guaranteed Serializable and we want clean task closures.
  *
- * `distanceTypeName` is the canonical Lance distance type name ("L2", "Cosine",
- * "Dot", "Hamming"); we ship the string and rebuild [[org.lance.index.DistanceType]]
- * on the executor with `DistanceType.valueOf(name)`.
+ * Stores the Java [[DistanceType]] enum directly so driver and executor code do
+ * not need to round-trip through hand-maintained canonical string names.
  */
 case class VectorIndexPlan(
     indexType: IndexType,
-    distanceTypeName: String,
+    distanceType: DistanceType,
     ivf: IvfPlan,
     pq: Option[PqPlan],
     sq: Option[SqPlan],

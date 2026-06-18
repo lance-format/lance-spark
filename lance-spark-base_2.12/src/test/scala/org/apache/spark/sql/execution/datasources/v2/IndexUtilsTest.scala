@@ -181,6 +181,16 @@ class IndexUtilsTest {
   }
 
   @Test
+  def buildIndexType_throwsClearErrorForIvfHnswFlat(): Unit = {
+    val ex = assertThrows(
+      classOf[UnsupportedOperationException],
+      () => IndexUtils.buildIndexType("ivf_hnsw_flat"))
+    assertTrue(ex.getMessage.contains("IVF_HNSW_FLAT"), ex.getMessage)
+    assertTrue(ex.getMessage.contains("ivf_hnsw_pq"), ex.getMessage)
+    assertTrue(ex.getMessage.contains("ivf_hnsw_sq"), ex.getMessage)
+  }
+
+  @Test
   def useLogicalSegmentCommitTrueForZonemapAndSupportedIvf(): Unit = {
     Seq(
       IndexType.ZONEMAP,

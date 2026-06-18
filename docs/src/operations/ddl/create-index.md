@@ -34,7 +34,7 @@ The following index methods are supported:
 | Vector   | `ivf_hnsw_sq`  | IVF + HNSW graph + SQ. HNSW search latency without a PQ codebook. |
 
 !!! note "Vector column type"
-    Vector index methods (`IVF_*`) require a `FixedSizeList<Float|Double>` column. The column dimension is read from the Arrow schema on the driver before any work is dispatched.
+    Vector index methods (`IVF_*`) require a `FixedSizeList<Float32>` column. The column dimension is read from the Arrow schema on the driver before any work is dispatched.
 
 ## Options
 
@@ -104,6 +104,8 @@ Vector index methods (`IVF_FLAT`, `IVF_PQ`, `IVF_SQ`, `IVF_HNSW_PQ`, `IVF_HNSW_S
 
 Spark CREATE INDEX currently supports `FixedSizeList<Float32>` vector columns for distributed vector index creation. `FixedSizeList<Double>` and Hamming/UInt8 vector indexing are rejected early until the corresponding Lance Java training paths are wired through.
 
+The numeric defaults below are Spark SQL defaults pinned for reproducible CREATE INDEX behavior rather than implicit lance-core builder defaults.
+
 #### Common Options
 
 Available for every `IVF_*` method:
@@ -114,7 +116,7 @@ Available for every `IVF_*` method:
 | `distance_type` | String  | `l2`                                          | Distance metric used for both training and search. Accepts `l2` (alias `euclidean`), `cosine`, `dot`. Case-insensitive. |
 | `sample_rate`   | Integer | `256`                                         | Number of training samples per centroid (and per PQ sub-vector during codebook training). Must be `>= 2`. |
 | `max_iters`     | Integer | `50`                                          | Maximum k-means iterations during IVF centroid (and PQ codebook) training. Must be positive. |
-| `num_segments`  | Integer | `min(fragment_count, spark.default.parallelism)` | Target number of executor-parallel segments. Each segment covers a batch of fragments. Clamped to `[1, fragment_count]`; values larger than the fragment count are clamped down with a warning. |
+| `num_segments`  | Integer | `min(fragment_count, spark.default.parallelism)` | Target number of executor-parallel segments. Each segment covers a batch of fragments. Must be positive; values larger than the fragment count are clamped down with a warning. |
 
 #### IVF_PQ / IVF_HNSW_PQ Options
 
@@ -360,8 +362,8 @@ The `CREATE INDEX` command operates as follows:
 
 - **Index Methods**: `zonemap`, `btree`, and `fts` are supported for scalar index creation. `IVF_FLAT`, `IVF_PQ`, `IVF_SQ`, `IVF_HNSW_PQ`, and `IVF_HNSW_SQ` are supported for vector index creation.
 - **Zonemap Column Count**: Zonemap indexes currently support a single column only. The generic `CREATE INDEX` grammar accepts a column list, but Lance rejects multi-column zonemap creation.
-- **Vector Column Count**: Vector index methods accept exactly one `FixedSizeList<Float|Double>` column per index.
-- **`IVF_HNSW_FLAT`**: The grammar reserves the token but creation is not currently supported because `lance-core` requires a PQ or SQ quantizer for HNSW. Use `IVF_HNSW_PQ` or `IVF_HNSW_SQ` instead.
+- **Vector Column Count**: Vector index methods accept exactly one `FixedSizeList<Float32>` column per index.
+- **`IVF_HNSW_FLAT`**: Spark SQL accepts generic method identifiers, but `IVF_HNSW_FLAT` creation is rejected explicitly because `lance-core` requires a PQ or SQ quantizer for HNSW. Use `IVF_HNSW_PQ` or `IVF_HNSW_SQ` instead.
 - **PQ Sub-Vector Constraint**: For `IVF_PQ` and `IVF_HNSW_PQ`, `num_sub_vectors` must divide the vector dimension. If the dimension is divisible by neither 16 nor 8, you must specify `num_sub_vectors` explicitly.
 - **Index Replacement**: Re-running `CREATE INDEX` with the same name replaces the existing index. For vector indexes the replacement happens in the same atomic commit, so concurrent readers see either the old or the new segment set, never a mixture.
 - **Empty Tables**: Creating an index on a table with no fragments returns `fragments_indexed = 0` and commits no segments.

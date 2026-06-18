@@ -18,7 +18,7 @@ import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType}
 import org.apache.spark.sql.catalyst.plans.logical.LanceNamedArgument
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.Test
-import org.lance.index.IndexType
+import org.lance.index.{DistanceType, IndexType}
 
 import java.util.Collections
 
@@ -53,7 +53,7 @@ class VectorIndexParamsResolverTest {
       dim = 32,
       numRows = 400L)
     assertEquals(IndexType.IVF_FLAT, plan.indexType)
-    assertEquals("L2", plan.distanceTypeName)
+    assertEquals(DistanceType.L2, plan.distanceType)
     assertEquals(20, plan.ivf.numPartitions) // sqrt(400) = 20
     assertEquals(256, plan.ivf.sampleRate)
     assertEquals(50, plan.ivf.maxIters)
@@ -124,19 +124,19 @@ class VectorIndexParamsResolverTest {
   @Test
   def distanceTypeParsingIsCaseInsensitiveAndMapsEuclideanToL2(): Unit = {
     Seq(
-      "l2" -> "L2",
-      "L2" -> "L2",
-      "Cosine" -> "Cosine",
-      "COSINE" -> "Cosine",
-      "dot" -> "Dot",
-      "euclidean" -> "L2",
-      "EUCLIDEAN" -> "L2").foreach { case (input, expected) =>
+      "l2" -> DistanceType.L2,
+      "L2" -> DistanceType.L2,
+      "Cosine" -> DistanceType.Cosine,
+      "COSINE" -> DistanceType.Cosine,
+      "dot" -> DistanceType.Dot,
+      "euclidean" -> DistanceType.L2,
+      "EUCLIDEAN" -> DistanceType.L2).foreach { case (input, expected) =>
       val plan = VectorIndexParamsResolver.parseAndValidate(
         IndexType.IVF_FLAT,
         Seq(LanceNamedArgument("distance_type", input)),
         dim = 32,
         numRows = 400L)
-      assertEquals(expected, plan.distanceTypeName, s"input=$input")
+      assertEquals(expected, plan.distanceType, s"input=$input")
     }
   }
 

@@ -664,7 +664,11 @@ public abstract class BaseAddVectorIndexTest {
                             fullTable))
                     .collect());
     Assertions.assertTrue(
-        rootCauseMessage(ex).contains("Unsupported index method"), "got: " + rootCauseMessage(ex));
+        rootCauseMessage(ex).contains("IVF_HNSW_FLAT"), "got: " + rootCauseMessage(ex));
+    Assertions.assertTrue(
+        rootCauseMessage(ex).contains("ivf_hnsw_pq"), "got: " + rootCauseMessage(ex));
+    Assertions.assertTrue(
+        rootCauseMessage(ex).contains("ivf_hnsw_sq"), "got: " + rootCauseMessage(ex));
   }
 
   @Test

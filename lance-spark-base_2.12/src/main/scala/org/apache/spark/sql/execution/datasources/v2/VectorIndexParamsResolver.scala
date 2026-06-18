@@ -17,7 +17,7 @@ import org.apache.arrow.vector.types.FloatingPointPrecision
 import org.apache.arrow.vector.types.pojo.ArrowType
 import org.apache.arrow.vector.types.pojo.Field
 import org.apache.spark.sql.catalyst.plans.logical.LanceNamedArgument
-import org.lance.index.IndexType
+import org.lance.index.{DistanceType, IndexType}
 import org.lance.spark.LanceSparkReadOptions
 import org.lance.spark.utils.{Utils, VectorUtils}
 
@@ -48,6 +48,18 @@ object VectorIndexParamsResolver {
     Set(IndexType.IVF_SQ, IndexType.IVF_HNSW_SQ)
   private val HnswIndexTypes =
     Set(IndexType.IVF_HNSW_SQ, IndexType.IVF_HNSW_PQ)
+
+  // Spark SQL intentionally pins vector-index defaults instead of deferring to
+  // lance-core builder defaults. This keeps SQL behavior reproducible across
+  // lance-core retunes; docs expose these as Spark defaults.
+  private val DefaultSampleRate = 256
+  private val DefaultMaxIters = 50
+  private val DefaultPqNumBits = 8
+  private val DefaultSqNumBits = 8
+  private val DefaultHnswM = 20
+  private val DefaultHnswEfConstruction = 150
+  private val DefaultHnswMaxLevel = 7
+  private val DefaultHnswPrefetchDistance = 2
 
   /** Pure validation — no Dataset, no Spark. Tested by VectorIndexParamsResolverTest. */
   def parseAndValidate(
@@ -100,14 +112,15 @@ object VectorIndexParamsResolver {
     }
 
     // 3. Common: distance_type
-    val distanceTypeName = parseDistanceTypeName(map.get("distance_type"))
+    val distanceType = parseDistanceType(map.get("distance_type"))
 
     // 4. Common: sampleRate, maxIters, numPartitions
-    val sampleRate = parseInt(map.get("sample_rate"), "sample_rate", default = 256)
+    val sampleRate =
+      parseInt(map.get("sample_rate"), "sample_rate", default = DefaultSampleRate)
     if (sampleRate < 2) {
       throw new IllegalArgumentException(s"sample_rate must be >= 2 (got $sampleRate)")
     }
-    val maxIters = parseInt(map.get("max_iters"), "max_iters", default = 50)
+    val maxIters = parseInt(map.get("max_iters"), "max_iters", default = DefaultMaxIters)
     if (maxIters <= 0) {
       throw new IllegalArgumentException(
         s"max_iters must be a positive integer (got $maxIters)")
@@ -147,7 +160,7 @@ object VectorIndexParamsResolver {
             s"vector dimension $dim is not divisible by 16 or 8; " +
               "please specify num_sub_vectors explicitly")
       }
-      val numBits = parseInt(map.get("num_bits"), "num_bits", default = 8)
+      val numBits = parseInt(map.get("num_bits"), "num_bits", default = DefaultPqNumBits)
       if (numBits != 4 && numBits != 8) {
         throw new IllegalArgumentException(
           s"PQ num_bits must be 4 or 8 (got $numBits)")
@@ -165,7 +178,7 @@ object VectorIndexParamsResolver {
 
     // 6. SQ
     val sq = if (SqIndexTypes.contains(indexType)) {
-      val numBits = parseInt(map.get("num_bits"), "num_bits", default = 8)
+      val numBits = parseInt(map.get("num_bits"), "num_bits", default = DefaultSqNumBits)
       if (numBits != 8) {
         throw new IllegalArgumentException(
           s"SQ num_bits must be 8 because Lance SQ currently builds 8-bit quantizers " +
@@ -176,19 +189,23 @@ object VectorIndexParamsResolver {
 
     // 7. HNSW
     val hnsw = if (HnswIndexTypes.contains(indexType)) {
-      val m = parseInt(map.get("m"), "m", default = 20)
+      val m = parseInt(map.get("m"), "m", default = DefaultHnswM)
       if (m <= 0) throw new IllegalArgumentException(s"m must be positive (got $m)")
-      val ef = parseInt(map.get("ef_construction"), "ef_construction", default = 150)
+      val ef = parseInt(
+        map.get("ef_construction"),
+        "ef_construction",
+        default = DefaultHnswEfConstruction)
       if (ef <= 0) throw new IllegalArgumentException(
         s"ef_construction must be positive (got $ef)")
-      val maxLevel = parseInt(map.get("max_level"), "max_level", default = 7)
+      val maxLevel =
+        parseInt(map.get("max_level"), "max_level", default = DefaultHnswMaxLevel)
       if (maxLevel <= 0 || maxLevel > 65535) {
         throw new IllegalArgumentException(
           s"max_level must be in [1, 65535] because Lance stores it as u16 " +
             s"(got $maxLevel)")
       }
       val prefetch = parseIntOpt(map.get("prefetch_distance"), "prefetch_distance")
-        .orElse(Some(2))
+        .orElse(Some(DefaultHnswPrefetchDistance))
       prefetch.foreach { p =>
         if (p < 0) throw new IllegalArgumentException(
           s"prefetch_distance must be non-negative (got $p)")
@@ -196,19 +213,19 @@ object VectorIndexParamsResolver {
       Some(HnswPlan(m, ef, maxLevel, prefetch))
     } else None
 
-    VectorIndexPlan(indexType, distanceTypeName, ivf, pq, sq, hnsw)
+    VectorIndexPlan(indexType, distanceType, ivf, pq, sq, hnsw)
   }
 
   // ---------- helpers ----------
 
-  private def parseDistanceTypeName(raw: Option[Any]): String = raw match {
-    case None => "L2"
+  private def parseDistanceType(raw: Option[Any]): DistanceType = raw match {
+    case None => DistanceType.L2
     case Some(s: String) =>
       s.trim.toLowerCase(Locale.ROOT) match {
-        case "l2" => "L2"
-        case "euclidean" => "L2"
-        case "cosine" => "Cosine"
-        case "dot" => "Dot"
+        case "l2" => DistanceType.L2
+        case "euclidean" => DistanceType.L2
+        case "cosine" => DistanceType.Cosine
+        case "dot" => DistanceType.Dot
         case "hamming" =>
           throw new IllegalArgumentException(
             "distance_type 'hamming' requires UInt8 vector support, which Spark " +

@@ -36,9 +36,10 @@ import org.lance.spark.utils.{CloseableUtil, FieldPathUtils, Utils}
 import org.lance.spark.write.SingleBatchArrowReader
 
 import java.time.Instant
-import java.util.{Collections, Optional, UUID}
+import java.util.{Collections, Locale, Optional, UUID}
 
 import scala.collection.JavaConverters._
+import scala.reflect.ClassTag
 
 private case class AddIndexTableSnapshot(
     readOptions: LanceSparkReadOptions,
@@ -131,38 +132,32 @@ case class AddIndexExec(
           val field = FieldPathUtils.resolveLeafField(ds.getLanceSchema, column)
           FieldPathUtils.pathByFieldId(ds.getLanceSchema, field.getId)
         }
-        val vectorPlan = indexType match {
-          case IndexType.IVF_FLAT
-              | IndexType.IVF_PQ
-              | IndexType.IVF_SQ
-              | IndexType.IVF_HNSW_PQ
-              | IndexType.IVF_HNSW_SQ =>
-            if (canonical.size != 1) {
-              throw new UnsupportedOperationException(
-                s"$indexType currently supports a single vector column only")
+        val vectorPlan = if (IndexUtils.isIvfIndexType(indexType)) {
+          if (canonical.size != 1) {
+            throw new UnsupportedOperationException(
+              s"$indexType currently supports a single vector column only")
+          }
+          val arrowSchema = ds.getLanceSchema.asArrowSchema()
+          val arrowField =
+            try {
+              arrowSchema.findField(canonical.head)
+            } catch {
+              case _: IllegalArgumentException => null
             }
-            val arrowSchema = ds.getLanceSchema.asArrowSchema()
-            val arrowField =
-              try {
-                arrowSchema.findField(canonical.head)
-              } catch {
-                case _: IllegalArgumentException => null
-              }
-            if (arrowField == null) {
-              val available = arrowSchema.getFields.asScala.map(_.getName).mkString(", ")
-              throw new IllegalArgumentException(
-                s"Column '${canonical.head}' not found. Available: $available")
-            }
-            val dim = VectorIndexParamsResolver.validateVectorFieldForIndex(
-              canonical.head,
-              arrowField)
-            Some(VectorIndexParamsResolver.parseAndValidate(
-              indexType,
-              args,
-              dim,
-              ds.countRows()))
-          case _ => None
-        }
+          if (arrowField == null) {
+            val available = arrowSchema.getFields.asScala.map(_.getName).mkString(", ")
+            throw new IllegalArgumentException(
+              s"Column '${canonical.head}' not found. Available: $available")
+          }
+          val dim = VectorIndexParamsResolver.validateVectorFieldForIndex(
+            canonical.head,
+            arrowField)
+          Some(VectorIndexParamsResolver.parseAndValidate(
+            indexType,
+            args,
+            dim,
+            ds.countRows()))
+        } else None
         AddIndexTableSnapshot(
           readOptions = baseReadOptions.withVersion(ds.version()),
           fragmentIds = ds.getFragments.asScala.map(_.getId).map(Integer.valueOf).toList,
@@ -220,17 +215,13 @@ case class AddIndexExec(
             initialStorageOpts)
           zonemapJob.run()
 
-        case IndexType.IVF_FLAT
-            | IndexType.IVF_PQ
-            | IndexType.IVF_SQ
-            | IndexType.IVF_HNSW_PQ
-            | IndexType.IVF_HNSW_SQ =>
+        case vectorType if IndexUtils.isIvfIndexType(vectorType) =>
           if (canonicalColumns.size != 1) {
             throw new UnsupportedOperationException(
-              s"$indexType currently supports a single vector column only")
+              s"$vectorType currently supports a single vector column only")
           }
           val plan = snapshot.vectorPlan.getOrElse {
-            throw new IllegalStateException(s"Vector plan was not resolved for $indexType")
+            throw new IllegalStateException(s"Vector plan was not resolved for $vectorType")
           }
           val vectorJob = new VectorIndexJob(
             this.copy(columns = canonicalColumns),
@@ -452,13 +443,7 @@ case class AddIndexExec(
       nsImpl: Option[String],
       nsProps: Option[Map[String, String]],
       tableId: Option[List[String]]): Dataset = {
-    Utils.openDatasetBuilder(readOptions)
-      .initialStorageOptions(initialStorageOpts.map(_.asJava).orNull)
-      .runtimeNamespace(
-        nsImpl.orNull,
-        nsProps.map(_.asJava).orNull,
-        tableId.map(_.asJava).orNull)
-      .build()
+    IndexUtils.openDataset(readOptions, initialStorageOpts, nsImpl, nsProps, tableId)
   }
 
   private def extractNamespaceInfo(
@@ -965,20 +950,11 @@ class ZonemapIndexJob(
         initialStorageOpts)
     }.toSeq
 
-    try {
-      addIndexExec.session.sparkContext
-        .parallelize(tasks, tasks.size)
-        .map(t => t.execute())
-        .collect()
-        .map(decode[Index])
-        .toSeq
-    } catch {
-      case e: Exception =>
-        throw new RuntimeException(
-          "Zonemap segment build failed. Uncommitted segments are not " +
-            "visible to readers and will not affect query correctness.",
-          e)
-    }
+    IndexUtils.runSegmentTasks(
+      addIndexExec.session.sparkContext,
+      tasks,
+      "Zonemap segment build failed. Uncommitted segments are not " +
+        "visible to readers and will not affect query correctness.")(_.execute())
   }
 }
 
@@ -1010,19 +986,13 @@ case class ZonemapIndexTask(
       .replace(false)
       .build()
 
-    val dataset = Utils.openDatasetBuilder(readOptions)
-      .initialStorageOptions(initialStorageOptions.map(_.asJava).orNull)
-      .runtimeNamespace(
-        namespaceImpl.orNull,
-        namespaceProperties.map(_.asJava).orNull,
-        tableId.map(_.asJava).orNull)
-      .build()
-
-    try {
-      encode(dataset.createIndex(indexOptions))
-    } finally {
-      dataset.close()
-    }
+    IndexUtils.createIndexSegment(
+      readOptions,
+      initialStorageOptions,
+      namespaceImpl,
+      namespaceProperties,
+      tableId,
+      indexOptions)
   }
 }
 
@@ -1032,6 +1002,28 @@ case class ZonemapIndexTask(
 object IndexUtils {
 
   private val jsonMapper = new ObjectMapper()
+
+  private[datasources] val IvfIndexTypes: Set[IndexType] = Set(
+    IndexType.IVF_FLAT,
+    IndexType.IVF_PQ,
+    IndexType.IVF_SQ,
+    IndexType.IVF_HNSW_PQ,
+    IndexType.IVF_HNSW_SQ)
+
+  private val LogicalSegmentIndexTypes: Set[IndexType] =
+    Set(IndexType.ZONEMAP) ++ IvfIndexTypes
+
+  private val MethodToIndexType: Map[String, IndexType] = Map(
+    "btree" -> IndexType.BTREE,
+    "zonemap" -> IndexType.ZONEMAP,
+    "fts" -> IndexType.INVERTED,
+    "ivf_flat" -> IndexType.IVF_FLAT,
+    "ivf_pq" -> IndexType.IVF_PQ,
+    "ivf_sq" -> IndexType.IVF_SQ,
+    "ivf_hnsw_pq" -> IndexType.IVF_HNSW_PQ,
+    "ivf_hnsw_sq" -> IndexType.IVF_HNSW_SQ)
+
+  def isIvfIndexType(indexType: IndexType): Boolean = IvfIndexTypes.contains(indexType)
 
   /**
    * Extracts the `train` option from named arguments, defaulting to `true`.
@@ -1056,16 +1048,16 @@ object IndexUtils {
    * @throws UnsupportedOperationException if the method is not supported
    */
   def buildIndexType(method: String): IndexType = {
-    method.toLowerCase match {
-      case "btree" => IndexType.BTREE
-      case "zonemap" => IndexType.ZONEMAP
-      case "fts" => IndexType.INVERTED
-      case "ivf_flat" => IndexType.IVF_FLAT
-      case "ivf_pq" => IndexType.IVF_PQ
-      case "ivf_sq" => IndexType.IVF_SQ
-      case "ivf_hnsw_pq" => IndexType.IVF_HNSW_PQ
-      case "ivf_hnsw_sq" => IndexType.IVF_HNSW_SQ
-      case other => throw new UnsupportedOperationException(s"Unsupported index method: $other")
+    val normalized = method.toLowerCase(Locale.ROOT)
+    normalized match {
+      case "ivf_hnsw_flat" =>
+        throw new UnsupportedOperationException(
+          "IVF_HNSW_FLAT is not currently supported because Lance requires a PQ or SQ " +
+            "quantizer for HNSW vector indexes. Use ivf_hnsw_pq or ivf_hnsw_sq instead.")
+      case other =>
+        MethodToIndexType.getOrElse(
+          other,
+          throw new UnsupportedOperationException(s"Unsupported index method: $other"))
     }
   }
 
@@ -1093,14 +1085,58 @@ object IndexUtils {
     }
   }
 
-  def useLogicalSegmentCommit(indexType: IndexType): Boolean = indexType match {
-    case IndexType.ZONEMAP => true
-    case IndexType.IVF_FLAT => true
-    case IndexType.IVF_PQ => true
-    case IndexType.IVF_SQ => true
-    case IndexType.IVF_HNSW_PQ => true
-    case IndexType.IVF_HNSW_SQ => true
-    case _ => false
+  def useLogicalSegmentCommit(indexType: IndexType): Boolean =
+    LogicalSegmentIndexTypes.contains(indexType)
+
+  def openDataset(
+      readOptions: LanceSparkReadOptions,
+      initialStorageOptions: Option[Map[String, String]],
+      namespaceImpl: Option[String],
+      namespaceProperties: Option[Map[String, String]],
+      tableId: Option[List[String]]): Dataset = {
+    Utils.openDatasetBuilder(readOptions)
+      .initialStorageOptions(initialStorageOptions.map(_.asJava).orNull)
+      .runtimeNamespace(
+        namespaceImpl.orNull,
+        namespaceProperties.map(_.asJava).orNull,
+        tableId.map(_.asJava).orNull)
+      .build()
+  }
+
+  def createIndexSegment(
+      readOptions: LanceSparkReadOptions,
+      initialStorageOptions: Option[Map[String, String]],
+      namespaceImpl: Option[String],
+      namespaceProperties: Option[Map[String, String]],
+      tableId: Option[List[String]],
+      indexOptions: IndexOptions): String = {
+    val dataset =
+      openDataset(readOptions, initialStorageOptions, namespaceImpl, namespaceProperties, tableId)
+    try {
+      encode(dataset.createIndex(indexOptions))
+    } finally {
+      dataset.close()
+    }
+  }
+
+  def runSegmentTasks[T <: Serializable: ClassTag](
+      sc: org.apache.spark.SparkContext,
+      tasks: Seq[T],
+      failureMessage: String)(execute: T => String): Seq[Index] = {
+    if (tasks.isEmpty) {
+      Seq.empty
+    } else {
+      try {
+        sc.parallelize(tasks, tasks.size)
+          .map(execute)
+          .collect()
+          .map(encoded => decode[Index](encoded))
+          .toSeq
+      } catch {
+        case e: Exception =>
+          throw new RuntimeException(failureMessage, e)
+      }
+    }
   }
 
   /** Extracts the commit metadata from a newly created Index. */

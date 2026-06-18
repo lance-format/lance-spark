@@ -19,7 +19,6 @@ import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
 import org.lance.index.{DistanceType, Index, IndexOptions, IndexParams, IndexType}
 import org.lance.index.vector.{HnswBuildParams, IvfBuildParams, PQBuildParams, SQBuildParams, VectorIndexParams, VectorTrainer}
 import org.lance.spark.LanceSparkReadOptions
-import org.lance.spark.utils.Utils
 
 import scala.collection.JavaConverters._
 import scala.util.control.NonFatal
@@ -65,10 +64,9 @@ class VectorIndexJob(
   def runSegments(): Seq[Index] = {
     val sc = addIndexExec.session.sparkContext
     val column = columns.head
-    val distanceType = DistanceType.valueOf(plan.distanceTypeName)
 
     // ---- Phase 1: train + broadcast ----
-    val (centroidsBC, codebookBC) = trainAndBroadcast(column, distanceType)
+    val (centroidsBC, codebookBC) = trainAndBroadcast(column, plan.distanceType)
 
     try {
       // ---- Phase 2: split fragments, parallelize tasks ----
@@ -96,22 +94,15 @@ class VectorIndexJob(
           initialStorageOptions = initialStorageOpts)
       }
 
-      val encodedSegments =
-        try {
-          val localCentroidsBC = centroidsBC
-          val localCodebookBC = codebookBC
-          sc.parallelize(tasks, tasks.size)
-            .map(task => task.execute(localCentroidsBC.value, localCodebookBC.value))
-            .collect()
-        } catch {
-          case e: Exception =>
-            throw new RuntimeException(
-              "VectorIndexJob failed during distributed build " +
-                "(uncommitted segments will be cleaned by vacuum)",
-              e)
-        }
-
-      encodedSegments.map(decode[Index]).toSeq
+      val localCentroidsBC = centroidsBC
+      val localCodebookBC = codebookBC
+      IndexUtils.runSegmentTasks(
+        sc,
+        tasks,
+        "VectorIndexJob failed during distributed build " +
+          "(uncommitted segments will be cleaned by vacuum)") { task =>
+        task.execute(localCentroidsBC.value, localCodebookBC.value)
+      }
     } finally {
       // Always destroy broadcasts so SQL doesn't accumulate broadcast memory
       destroyBroadcast("centroids", centroidsBC)
@@ -139,13 +130,8 @@ class VectorIndexJob(
       distanceType: DistanceType): (Broadcast[Array[Float]], Broadcast[Array[Float]]) = {
     val sc = addIndexExec.session.sparkContext
 
-    val dataset = Utils.openDatasetBuilder(readOptions)
-      .initialStorageOptions(initialStorageOpts.map(_.asJava).orNull)
-      .runtimeNamespace(
-        nsImpl.orNull,
-        nsProps.map(_.asJava).orNull,
-        tableId.map(_.asJava).orNull)
-      .build()
+    val dataset =
+      IndexUtils.openDataset(readOptions, initialStorageOpts, nsImpl, nsProps, tableId)
     try {
       logInfo(
         s"VectorIndexJob phase 1: training IVF centroids for '$indexName' " +
@@ -218,7 +204,7 @@ case class VectorIndexTask(
 
   def execute(centroids: Array[Float], codebook: Array[Float]): String = {
     val readOptions = decode[LanceSparkReadOptions](encodedReadOptions)
-    val distanceType = DistanceType.valueOf(plan.distanceTypeName)
+    val distanceType = plan.distanceType
 
     // ---- rebuild BuildParams using broadcast artifacts ----
     val ivfParams = new IvfBuildParams.Builder()
@@ -274,18 +260,12 @@ case class VectorIndexTask(
       .withFragmentIds(fragmentIds.asJava)
       .build()
 
-    val dataset = Utils.openDatasetBuilder(readOptions)
-      .initialStorageOptions(initialStorageOptions.map(_.asJava).orNull)
-      .runtimeNamespace(
-        namespaceImpl.orNull,
-        namespaceProperties.map(_.asJava).orNull,
-        tableId.map(_.asJava).orNull)
-      .build()
-    try {
-      val segment: Index = dataset.createIndex(indexOptions)
-      encode(segment)
-    } finally {
-      dataset.close()
-    }
+    IndexUtils.createIndexSegment(
+      readOptions,
+      initialStorageOptions,
+      namespaceImpl,
+      namespaceProperties,
+      tableId,
+      indexOptions)
   }
 }
