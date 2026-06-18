@@ -105,6 +105,7 @@ Available for every `IVF_*` method:
 | `sample_rate`   | Integer | `256`                                         | Number of training samples per centroid (and per PQ sub-vector during codebook training). Must be `>= 2`. |
 | `max_iters`     | Integer | `50`                                          | Maximum k-means iterations during IVF centroid (and PQ codebook) training. Must be positive. |
 | `num_segments`  | Integer | `min(fragment_count, spark.default.parallelism)` | Target number of executor-parallel segments. Each segment covers a batch of fragments. Clamped to `[1, fragment_count]`; values larger than the fragment count are clamped down with a warning. |
+| `mode`          | String  | `replace`                                     | `replace` (default) — full rebuild over every fragment, atomically replacing the previous index. `incremental` — extend the existing index onto fragments not yet covered, **without retraining** centroids or codebook. See [Incremental Mode](#incremental-mode) below. |
 
 #### IVF_PQ / IVF_HNSW_PQ Options
 
@@ -133,6 +134,34 @@ Available only for the two HNSW variants (in addition to common options and the 
 | `ef_construction`   | Integer | `150`   | Size of the dynamic candidate list during HNSW graph construction. Must be positive. |
 | `max_level`         | Integer | `7`     | Maximum HNSW level. Must be positive. |
 | `prefetch_distance` | Integer | `2`     | Prefetch distance hint for graph traversal. Must be `>= 0`. |
+
+### Incremental Mode
+
+After data is appended to a table that already has a committed vector index, the new fragments are not covered until you re-run `CREATE INDEX`. By default this is a full rebuild: centroids and PQ codebook are re-trained, every fragment is re-indexed, and the previous index is atomically replaced. For tables that change frequently this is wasteful — both the training cost and the per-fragment build cost are paid again for fragments that haven't changed.
+
+`mode='incremental'` extends the existing index onto fragments not yet covered, **without retraining**. The same centroids and codebook are reused, so query results remain consistent across old and new segments.
+
+Pass `mode='incremental'` in the `WITH` clause:
+
+=== "SQL"
+    ```sql
+    ALTER TABLE lance.db.items CREATE INDEX vec_idx USING ivf_pq (embedding) WITH (
+        mode = 'incremental'
+    );
+    ```
+
+Contract:
+
+- The index named `vec_idx` must already exist. If it doesn't, the command fails with `Index '<name>' does not exist; cannot run in incremental mode`. This avoids a silent fallback that would accidentally retrain.
+- All other `WITH(...)` arguments are **ignored** — centroids, codebook, partition count and so on are inherited from the existing index. A warning is logged listing ignored arguments.
+- `mode='replace'` (or omitting `mode`) preserves the existing full-rebuild semantics; backwards compatible.
+
+The `fragments_indexed` output column has a different meaning in incremental mode: it is the number of fragments **newly** covered by this run (previously unindexed). When the index already covers every fragment the command returns `(0, indexName)` and commits no new transaction.
+
+!!! note "Driver-only execution"
+    Incremental mode currently runs on the Spark driver only and does not parallelize the per-fragment build across executors. For very large numbers of new fragments, falling back to `mode='replace'` may be faster despite the retraining cost. Distributed incremental build is on the roadmap and unblocked by upstream `lance-core` reader API work.
+
+Structural parameter changes (e.g. a different `num_partitions`) cannot be applied incrementally; use `mode='replace'` for those.
 
 ## Examples
 

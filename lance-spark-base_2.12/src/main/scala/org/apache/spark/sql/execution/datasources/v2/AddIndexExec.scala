@@ -27,7 +27,7 @@ import org.apache.spark.sql.util.LanceArrowUtils
 import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
 import org.apache.spark.unsafe.types.UTF8String
 import org.lance.{CommitBuilder, Dataset, Transaction}
-import org.lance.index.{Index, IndexOptions, IndexParams, IndexType}
+import org.lance.index.{Index, IndexOptions, IndexParams, IndexType, OptimizeOptions}
 import org.lance.index.scalar.{BTreeIndexParams, ScalarIndexParams}
 import org.lance.operation.{CreateIndex => AddIndexOperation}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceRuntime, LanceSparkReadOptions}
@@ -36,7 +36,7 @@ import org.lance.spark.utils.{CloseableUtil, Utils}
 import org.lance.spark.write.SingleBatchArrowReader
 
 import java.time.Instant
-import java.util.{Collections, Optional, UUID}
+import java.util.{Collections, Locale, Optional, UUID}
 
 import scala.collection.JavaConverters._
 
@@ -67,6 +67,12 @@ case class AddIndexExec(
 
     val readOptions = lanceDataset.readOptions()
 
+    // Detect mode='incremental' / mode='replace' (default). Incremental takes a
+    // separate code path that delegates to lance-core's optimizeIndices(retrain=false)
+    // and only covers fragments not yet indexed; replace falls through to the
+    // existing full-rebuild path below.
+    val mode = AddIndexExec.extractMode(args)
+
     // Get all fragment id list from dataset
     val fragmentIds = {
       val ds = Utils.openDatasetBuilder(readOptions).build()
@@ -80,6 +86,10 @@ case class AddIndexExec(
     if (fragmentIds.isEmpty) {
       // No fragments to index
       return Seq(new GenericInternalRow(Array[Any](0L, UTF8String.fromString(indexName))))
+    }
+
+    if (mode == AddIndexExec.MODE_INCREMENTAL) {
+      return runIncremental(readOptions, fragmentIds)
     }
 
     val indexType = IndexUtils.buildIndexType(method)
@@ -263,6 +273,75 @@ case class AddIndexExec(
     }
   }
 
+  /**
+   * Incremental ('mode=incremental') path. Delegates to lance-core's
+   * Dataset.optimizeIndices(retrain=false) to extend an already-trained index
+   * onto fragments not yet covered, without retraining centroids / codebook.
+   *
+   * R1 semantics (driver-only):
+   *  - The build itself runs in lance-core on the driver. Spark workers are
+   *    not used in this phase.
+   *  - All WITH(...) arguments other than 'mode' are ignored (centroids,
+   *    codebook, num_segments etc. are inherited from the existing index).
+   *  - Returns (newly_covered_fragments, indexName).
+   *
+   * Errors:
+   *  - IllegalArgumentException when no index named indexName exists.
+   *  - The lance-core call propagates as-is otherwise.
+   */
+  private def runIncremental(
+      readOptions: LanceSparkReadOptions,
+      fragmentIds: List[Integer]): Seq[InternalRow] = {
+    val ignored = args.filter(a => a.name != "mode")
+    if (ignored.nonEmpty) {
+      logWarning(
+        s"Incremental mode ignores WITH(...) arguments other than 'mode'; " +
+          s"ignored: ${ignored.map(_.name).mkString(", ")}")
+    }
+
+    val dataset = Utils.openDatasetBuilder(readOptions).build()
+    try {
+      val existing = dataset.getIndexes.asScala.filter(_.name() == indexName).toList
+      if (existing.isEmpty) {
+        throw new IllegalArgumentException(
+          s"Index '$indexName' does not exist; cannot run in incremental mode. " +
+            s"Use mode='replace' or omit the option to create a new index.")
+      }
+
+      val stats = dataset.getIndexStatistics(indexName)
+      val numUnindexedFragments = stats.get("num_unindexed_fragments") match {
+        case n: java.lang.Number => n.longValue()
+        case _ => 0L
+      }
+
+      if (numUnindexedFragments == 0L) {
+        logInfo(
+          s"Index '$indexName' already covers all ${fragmentIds.size} fragment(s); " +
+            s"incremental no-op")
+        return Seq(new GenericInternalRow(Array[Any](
+          0L,
+          UTF8String.fromString(indexName))))
+      }
+
+      logInfo(
+        s"Incremental build: extending index '$indexName' onto $numUnindexedFragments " +
+          s"new fragment(s) without retraining")
+
+      val opts = OptimizeOptions
+        .builder()
+        .indexNames(java.util.Arrays.asList(indexName))
+        .retrain(false)
+        .build()
+      dataset.optimizeIndices(opts)
+
+      Seq(new GenericInternalRow(Array[Any](
+        numUnindexedFragments,
+        UTF8String.fromString(indexName))))
+    } finally {
+      dataset.close()
+    }
+  }
+
   private def extractNamespaceInfo(
       lanceDataset: LanceDataset,
       readOptions: LanceSparkReadOptions): (
@@ -327,6 +406,41 @@ case class AddIndexExec(
           nsProps,
           tableId,
           initialStorageOpts)
+    }
+  }
+}
+
+object AddIndexExec {
+
+  /** Default behavior: full rebuild + atomic replace (preserves existing semantics). */
+  val MODE_REPLACE: String = "replace"
+
+  /** Extend an existing index onto unindexed fragments without retraining. */
+  val MODE_INCREMENTAL: String = "incremental"
+
+  private val ALLOWED_MODES = Set(MODE_REPLACE, MODE_INCREMENTAL)
+
+  /**
+   * Extract the value of the `mode` named argument from the WITH clause.
+   * Defaults to [[MODE_REPLACE]] when absent. Case-insensitive. Rejects
+   * unrecognized values with [[IllegalArgumentException]].
+   */
+  def extractMode(args: Seq[LanceNamedArgument]): String = {
+    args.find(_.name == "mode") match {
+      case None => MODE_REPLACE
+      case Some(arg) =>
+        arg.value match {
+          case s: String =>
+            val normalized = s.toLowerCase(Locale.ROOT)
+            if (!ALLOWED_MODES.contains(normalized)) {
+              throw new IllegalArgumentException(
+                s"Unrecognized mode '$s'. Valid: ${ALLOWED_MODES.toSeq.sorted.mkString(", ")}.")
+            }
+            normalized
+          case other =>
+            throw new IllegalArgumentException(
+              s"mode must be a string ('replace' or 'incremental'), got: $other")
+        }
     }
   }
 }

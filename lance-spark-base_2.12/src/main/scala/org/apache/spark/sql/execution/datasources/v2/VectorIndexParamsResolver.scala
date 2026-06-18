@@ -32,8 +32,12 @@ import scala.collection.JavaConverters._
 object VectorIndexParamsResolver {
 
   // ---- key whitelists ----
+  // "mode" is consumed earlier in AddIndexExec.run (incremental dispatch).
+  // Listing it here lets users pass mode='replace' / mode='incremental'
+  // explicitly without the resolver rejecting it as an unknown parameter;
+  // the resolver itself ignores the value.
   private val CommonKeys =
-    Set("num_partitions", "distance_type", "sample_rate", "max_iters", "num_segments")
+    Set("num_partitions", "distance_type", "sample_rate", "max_iters", "num_segments", "mode")
   private val PqKeys = Set("num_sub_vectors", "num_bits")
   private val SqKeys = Set("num_bits")
   private val HnswKeys = Set("m", "ef_construction", "max_level", "prefetch_distance")
