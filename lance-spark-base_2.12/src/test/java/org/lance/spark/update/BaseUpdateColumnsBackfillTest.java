@@ -181,6 +181,64 @@ public abstract class BaseUpdateColumnsBackfillTest {
   }
 
   @Test
+  public void testUpdateLargeVarCharColumnFromSqlTempView() {
+    spark.sql(
+        String.format(
+            "create table %s (id int, score int, payload string, note string) using lance "
+                + "tblproperties ('payload.arrow.large_var_char' = 'true')",
+            fullTable));
+    spark.sql(
+        String.format(
+            "insert into %s values "
+                + "(1, 10, 'one', 'note_one'), "
+                + "(2, 20, 'two', 'note_two')",
+            fullTable));
+
+    spark.sql(
+        String.format(
+            "create temporary view update_source as "
+                + "select concat(payload, '_updated') as payload, "
+                + "_fragid, "
+                + "score + 100 as score, "
+                + "_rowaddr "
+                + "from %s where id = 2",
+            fullTable));
+
+    spark.sql(
+        String.format(
+            "alter table %s update columns score, payload from update_source", fullTable));
+
+    List<Row> results =
+        spark
+            .sql(String.format("select id, score, payload, note from %s order by id", fullTable))
+            .collectAsList();
+    assertEquals(1, results.get(0).getInt(0));
+    assertEquals(10, results.get(0).getInt(1));
+    assertEquals("one", results.get(0).getString(2));
+    assertEquals("note_one", results.get(0).getString(3));
+    assertEquals(2, results.get(1).getInt(0));
+    assertEquals(120, results.get(1).getInt(1));
+    assertEquals("two_updated", results.get(1).getString(2));
+    assertEquals("note_two", results.get(1).getString(3));
+    Assertions.assertTrue(
+        spark
+            .table(fullTable)
+            .schema()
+            .apply("payload")
+            .metadata()
+            .contains("arrow:large-var-char"),
+        "updated large varchar column should keep LargeUtf8 metadata");
+    assertEquals(
+        "true",
+        spark
+            .table(fullTable)
+            .schema()
+            .apply("payload")
+            .metadata()
+            .getString("arrow:large-var-char"));
+  }
+
+  @Test
   public void testUpdateNonExistentColumn() {
     prepareDataset();
 
