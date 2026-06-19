@@ -13,21 +13,49 @@
  */
 package org.lance.spark.search;
 
+import org.lance.spark.LanceSparkReadOptions;
+
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.read.ScanBuilder;
 import org.apache.spark.sql.types.StructType;
 
+import java.util.Map;
+
 public class LanceSearchScanBuilder implements ScanBuilder {
   private final StructType schema;
   private final LanceSearchQuery query;
+  private final boolean distributed;
+  private final LanceSparkReadOptions readOptions;
+  private final String namespaceImpl;
+  private final Map<String, String> namespaceProperties;
+  private final Map<String, String> initialStorageOptions;
 
-  public LanceSearchScanBuilder(StructType schema, LanceSearchQuery query) {
+  public LanceSearchScanBuilder(
+      StructType schema,
+      LanceSearchQuery query,
+      boolean distributed,
+      LanceSparkReadOptions readOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      Map<String, String> initialStorageOptions) {
     this.schema = schema;
     this.query = query;
+    this.distributed = distributed;
+    this.readOptions = readOptions;
+    this.namespaceImpl = namespaceImpl;
+    this.namespaceProperties = namespaceProperties;
+    this.initialStorageOptions = initialStorageOptions;
   }
 
   @Override
   public Scan build() {
-    return new LanceSearchScan(schema, query);
+    return new LanceSearchScan(
+        schema,
+        query,
+        distributed,
+        readOptions,
+        namespaceImpl,
+        namespaceProperties,
+        initialStorageOptions);
   }
 }

@@ -24,13 +24,15 @@ public class LanceSearchPartitionReaderFactory implements PartitionReaderFactory
 
   @Override
   public PartitionReader<InternalRow> createReader(InputPartition partition) {
-    return new LanceSearchRowPartitionReader(
-        new LanceSearchColumnarPartitionReader(asSearchPartition(partition)));
+    return new LanceSearchRowPartitionReader(createColumnarReader(partition));
   }
 
   @Override
   public PartitionReader<ColumnarBatch> createColumnarReader(InputPartition partition) {
-    return new LanceSearchColumnarPartitionReader(asSearchPartition(partition));
+    LanceSearchInputPartition p = asSearchPartition(partition);
+    return p.isDistributed()
+        ? new LanceMergedSearchColumnarPartitionReader(p)
+        : new LanceSearchColumnarPartitionReader(p);
   }
 
   @Override

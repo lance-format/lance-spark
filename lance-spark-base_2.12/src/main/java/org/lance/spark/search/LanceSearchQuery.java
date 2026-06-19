@@ -104,6 +104,82 @@ public class LanceSearchQuery implements Serializable {
     return namespaceProperties;
   }
 
+  public List<String> getOutputColumns() {
+    return outputColumns;
+  }
+
+  public Integer getK() {
+    return k;
+  }
+
+  public Integer getOffset() {
+    return offset;
+  }
+
+  public Long getVersion() {
+    return version;
+  }
+
+  public String getFilter() {
+    return filter;
+  }
+
+  public Boolean getWithRowId() {
+    return withRowId;
+  }
+
+  public List<Float> getVector() {
+    return vector;
+  }
+
+  public String getVectorColumn() {
+    return vectorColumn;
+  }
+
+  public String getDistanceType() {
+    return distanceType;
+  }
+
+  public Integer getNprobes() {
+    return nprobes;
+  }
+
+  public Integer getEf() {
+    return ef;
+  }
+
+  public Integer getRefineFactor() {
+    return refineFactor;
+  }
+
+  public Float getLowerBound() {
+    return lowerBound;
+  }
+
+  public Float getUpperBound() {
+    return upperBound;
+  }
+
+  public Boolean getBypassVectorIndex() {
+    return bypassVectorIndex;
+  }
+
+  public Boolean getFastSearch() {
+    return fastSearch;
+  }
+
+  public Boolean getPrefilter() {
+    return prefilter;
+  }
+
+  public String getTextQuery() {
+    return textQuery;
+  }
+
+  public List<String> getSearchColumns() {
+    return searchColumns;
+  }
+
   public QueryTableRequest toQueryTableRequest() {
     QueryTableRequest request = new QueryTableRequest().id(tableId).k(k);
     request.vector(new QueryTableRequestVector());
