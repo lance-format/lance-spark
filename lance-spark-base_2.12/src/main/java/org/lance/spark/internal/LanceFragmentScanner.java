@@ -138,6 +138,10 @@ public class LanceFragmentScanner implements AutoCloseable {
       if (inputPartition.getTopNSortOrders().isPresent()) {
         scanOptions.setColumnOrderings(inputPartition.getTopNSortOrders().get());
       }
+
+      // Collect scan stats
+      scanOptions.collectStats(true);
+
       boolean withFragmentId = scanSchema.getFieldIndex(LanceConstant.FRAGMENT_ID).nonEmpty();
       long scanCreateStart = System.nanoTime();
       lanceScanner = fragment.newScan(scanOptions.build());
