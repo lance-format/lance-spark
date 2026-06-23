@@ -204,9 +204,7 @@ public class LanceReadMetricsTracker {
   }
 
   public void addScanStats(Optional<ScanStats> scanStats) {
-    if (scanStats.isEmpty()) {
-      return;
-    }
+    if (scanStats.isEmpty()) return;
 
     ScanStats stats = scanStats.get();
     numIops += stats.getIops();

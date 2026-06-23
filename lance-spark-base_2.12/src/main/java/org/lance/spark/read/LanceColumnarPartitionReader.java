@@ -28,6 +28,7 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
   private LanceFragmentColumnarBatchScanner fragmentReader;
   private ColumnarBatch currentBatch;
   private final LanceReadMetricsTracker metricsTracker = new LanceReadMetricsTracker();
+  private boolean currentScanStatsAdded = false;
 
   public LanceColumnarPartitionReader(LanceInputPartition inputPartition) {
     this.inputPartition = inputPartition;
@@ -41,22 +42,21 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
     }
     while (fragmentIndex < inputPartition.getLanceSplit().getFragments().size()) {
       if (fragmentReader != null) {
-        metricsTracker.addScanStats(fragmentReader.getScanStats());
         fragmentReader.close();
       }
       fragmentReader =
           LanceFragmentColumnarBatchScanner.create(
               inputPartition.getLanceSplit().getFragments().get(fragmentIndex), inputPartition);
       fragmentIndex++;
+
+      currentScanStatsAdded = false;
       metricsTracker.addNumFragmentsScanned(1);
       metricsTracker.addDatasetOpenTimeNs(fragmentReader.getDatasetOpenTimeNs());
       metricsTracker.addScannerCreateTimeNs(fragmentReader.getScannerCreateTimeNs());
+
       if (loadNextBatchFromCurrentReader()) {
         return true;
       }
-    }
-    if (fragmentReader != null) {
-      metricsTracker.addScanStats(fragmentReader.getScanStats());
     }
     return false;
   }
@@ -71,6 +71,12 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
       metricsTracker.addNumRowsScanned(currentBatch.numRows());
       metricsTracker.addBatchLoadTimeNs(fragmentReader.getLastBatchLoadTimeNs());
       return true;
+    }
+
+    // Lance scan stats are populated when the scan stream is fully consumed
+    if (!currentScanStatsAdded) {
+      metricsTracker.addScanStats(fragmentReader.getScanStats());
+      currentScanStatsAdded = true;
     }
     return false;
   }
@@ -88,6 +94,11 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
   @Override
   public void close() throws IOException {
     if (fragmentReader != null) {
+      if (!currentScanStatsAdded) {
+        metricsTracker.addScanStats(fragmentReader.getScanStats());
+        currentScanStatsAdded = true;
+      }
+
       try {
         fragmentReader.close();
       } catch (Exception e) {

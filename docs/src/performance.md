@@ -174,9 +174,9 @@ Naming conventions:
 | `numFragmentsScanned` | counter | Lance fragments actually opened by this task. Compare against the table fragment count to verify pruning is working. |
 | `numBatchesLoaded` | counter | Arrow batches returned from the JNI scanner. |
 | `numRowsScanned` | counter | Rows read from storage before filter evaluation. Pair with Spark's built-in `numOutputRows` to compute filter selectivity (`numOutputRows / numRowsScanned`). |
-| `numIops` | counter | Number of I/O operations performed during scanning. |
+| `numIops` | counter | Number of I/O operations performed by the scanner. |
 | `numRequests` | counter | Number of requests made to the storage layer. |
-| `numBytesRead` | counter | Total bytes read from storage. |
+| `numBytesRead` | counter | Total bytes read from storage by the scanner. |
 | `numIndicesLoaded` | counter | Number of top-level indices loaded. |
 | `numPartsLoaded` | counter | Number of index partitions loaded. |
 | `numIndexComparisons` | counter | Number of index comparisons performed during vector search. |

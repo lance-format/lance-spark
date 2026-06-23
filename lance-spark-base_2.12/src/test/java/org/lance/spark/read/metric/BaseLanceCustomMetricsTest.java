@@ -33,7 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public abstract class BaseLanceCustomMetricsTest {
 
   @Test
-  void testAllMetricsReturnsSixMetrics() {
+  void testAllMetricsReturnsTwelveMetrics() {
     CustomMetric[] metrics = LanceCustomMetrics.allMetrics();
     assertEquals(12, metrics.length);
   }
