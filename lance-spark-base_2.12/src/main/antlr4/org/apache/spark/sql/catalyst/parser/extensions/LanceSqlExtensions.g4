@@ -29,8 +29,16 @@ statement
         AS OF BRANCH refBranchName=identifier (VERSION refBranchVersion=versionNumber)?         #createBranchRefBranch
     | ALTER TABLE multipartIdentifier CREATE BRANCH (IF NOT EXISTS)? branchName=identifier
         AS OF TAG refTagName=identifier                                                         #createBranchRefTag
+    | ALTER TABLE multipartIdentifier CREATE TAG (IF NOT EXISTS)? tagName=identifier
+        (AS OF VERSION refMainVersion=versionNumber)?                                           #createTagRefMain
+    | ALTER TABLE multipartIdentifier CREATE TAG (IF NOT EXISTS)? tagName=identifier
+        AS OF BRANCH refBranchName=identifier (VERSION refBranchVersion=versionNumber)?         #createTagRefBranch
+    | ALTER TABLE multipartIdentifier CREATE TAG (IF NOT EXISTS)? tagName=identifier
+        AS OF TAG refTagName=identifier                                                         #createTagRefTag
     | ALTER TABLE multipartIdentifier DROP BRANCH (IF EXISTS)? branchName=identifier            #dropBranch
+    | ALTER TABLE multipartIdentifier DROP TAG (IF EXISTS)? tagName=identifier                  #dropTag
     | SHOW (BRANCHES | BRANCH) (FROM | IN) multipartIdentifier                                  #showBranches
+    | SHOW (TAGS | TAG) (FROM | IN) multipartIdentifier                                         #showTags
     | SHOW (INDEXES | INDEX) (FROM | IN) multipartIdentifier                                    #showIndexes
     | OPTIMIZE multipartIdentifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')?        #optimize
     | VACUUM multipartIdentifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')?          #vacuum
@@ -108,6 +116,7 @@ PRIMARY: 'PRIMARY';
 SET: 'SET';
 SHOW: 'SHOW';
 TABLE: 'TABLE';
+TAGS: 'TAGS';
 TAG: 'TAG';
 UNENFORCED: 'UNENFORCED';
 UPDATE: 'UPDATE';

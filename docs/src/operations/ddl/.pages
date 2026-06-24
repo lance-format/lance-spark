@@ -15,5 +15,8 @@ nav:
   - create-branch.md
   - drop-branch.md
   - show-branches.md
+  - create-tag.md
+  - drop-tag.md
+  - show-tags.md
   - optimize.md
   - vacuum.md
