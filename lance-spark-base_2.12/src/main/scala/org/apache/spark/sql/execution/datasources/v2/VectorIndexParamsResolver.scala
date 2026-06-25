@@ -18,8 +18,7 @@ import org.apache.arrow.vector.types.pojo.ArrowType
 import org.apache.arrow.vector.types.pojo.Field
 import org.apache.spark.sql.catalyst.plans.logical.LanceNamedArgument
 import org.lance.index.{DistanceType, IndexType}
-import org.lance.spark.LanceSparkReadOptions
-import org.lance.spark.utils.{Utils, VectorUtils}
+import org.lance.spark.utils.VectorUtils
 
 import java.util.Locale
 
@@ -36,8 +35,13 @@ import scala.collection.JavaConverters._
 object VectorIndexParamsResolver {
 
   // ---- key whitelists ----
+  // `train` is consumed at the Spark execution layer (handled in AddIndexExec) and stripped
+  // before being forwarded to lance-core via SparkOnlyOptions. It is whitelisted here so that
+  // explicitly writing `train=true` on an IVF_* CREATE INDEX is accepted instead of being
+  // rejected as an unknown parameter; `train=false` for IVF_* is rejected up front in
+  // AddIndexExec.run before reaching this resolver.
   private val CommonKeys =
-    Set("num_partitions", "distance_type", "sample_rate", "max_iters", "num_segments")
+    Set("num_partitions", "distance_type", "sample_rate", "max_iters", "num_segments", "train")
   private val PqKeys = Set("num_sub_vectors", "num_bits")
   private val SqKeys = Set("num_bits")
   private val HnswKeys = Set("m", "ef_construction", "max_level", "prefetch_distance")
@@ -311,46 +315,4 @@ object VectorIndexParamsResolver {
     }
   }
 
-  /**
-   * Driver-only entry point. Opens the lance Dataset to read column dimension
-   * and total row count, then delegates to [[parseAndValidate]].
-   */
-  def resolve(
-      indexType: IndexType,
-      args: Seq[LanceNamedArgument],
-      readOptions: LanceSparkReadOptions,
-      initialStorageOptions: Option[Map[String, String]],
-      namespaceImpl: Option[String],
-      namespaceProperties: Option[Map[String, String]],
-      tableId: Option[List[String]],
-      column: String): VectorIndexPlan = {
-
-    val dataset = Utils.openDatasetBuilder(readOptions)
-      .initialStorageOptions(initialStorageOptions.map(_.asJava).orNull)
-      .runtimeNamespace(
-        namespaceImpl.orNull,
-        namespaceProperties.map(_.asJava).orNull,
-        tableId.map(_.asJava).orNull)
-      .build()
-    try {
-      val arrowSchema = dataset.getLanceSchema.asArrowSchema()
-      val arrowField: Field =
-        try {
-          arrowSchema.findField(column)
-        } catch {
-          case _: IllegalArgumentException => null
-        }
-      if (arrowField == null) {
-        val available = arrowSchema.getFields.asScala.map(_.getName).mkString(", ")
-        throw new IllegalArgumentException(
-          s"Column '$column' not found. Available: $available")
-      }
-
-      val dim = validateVectorFieldForIndex(column, arrowField)
-      val numRows = dataset.countRows()
-      parseAndValidate(indexType, args, dim, numRows)
-    } finally {
-      dataset.close()
-    }
-  }
 }

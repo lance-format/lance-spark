@@ -64,11 +64,13 @@ private case class AddIndexTableSnapshot(
  *
  * <p><b>Deferred training ({@code WITH (train=false)})</b>: commits an empty index on the driver
  * with an empty fragment bitmap (all rows appear unindexed), skipping data processing. Supported
- * for all index types; ignored for empty tables. Populate it later by re-running {@code CREATE
- * INDEX} with the same name (a full distributed build that replaces the empty index) or, for
- * incremental coverage of appended fragments, by {@code Dataset.optimizeIndices} (the SQL
- * {@code OPTIMIZE} only compacts fragments). {@code num_segments} is rejected with this option,
- * since no segmented build occurs.
+ * for the scalar index types ({@code btree}, {@code fts}, {@code zonemap}); rejected for
+ * {@code IVF_*} vector index types because Lance does not currently expose a vector-aware
+ * empty-index commit path. Ignored for empty tables. Populate it later by re-running
+ * {@code CREATE INDEX} with the same name (a full distributed build that replaces the empty
+ * index) or, for incremental coverage of appended fragments, by {@code Dataset.optimizeIndices}
+ * (the SQL {@code OPTIMIZE} only compacts fragments). {@code num_segments} is rejected with this
+ * option, since no segmented build occurs.
  *
  * <p>The following options are consumed at the Spark execution layer and are never forwarded
  * to the Lance index backend: {@code train}, {@code build_mode}, {@code rows_per_range},
@@ -80,7 +82,8 @@ case class AddIndexExec(
     indexName: String,
     method: String,
     columns: Seq[String],
-    args: Seq[LanceNamedArgument]) extends LeafV2CommandExec {
+    args: Seq[LanceNamedArgument]) extends LeafV2CommandExec
+  with org.apache.spark.internal.Logging {
 
   override def output: Seq[Attribute] = AddIndexOutputType.SCHEMA
 
@@ -99,6 +102,18 @@ case class AddIndexExec(
     val btreeBuildMode = IndexUtils.btreeBuildMode(indexType, args)
     val useLogicalSegmentCommit = IndexUtils.useLogicalSegmentCommit(indexType)
 
+    // Deferred training (train=false) is only supported for scalar index methods today.
+    // commitEmptyIndex(...) below builds ScalarIndexParams via buildScalarIndexParamType,
+    // which has no IVF_* path. Until lance-core exposes an empty IndexOptions builder for
+    // vector indices, reject the combination up front so the user sees a clear message instead
+    // of "Unsupported index method: ivf_pq" coming out of the commit-empty path.
+    if (!train && IndexUtils.isIvfIndexType(indexType)) {
+      throw new IllegalArgumentException(
+        s"train=false is not supported for $indexType. Run CREATE INDEX without train=false " +
+          "(full distributed build) or use Dataset.optimizeIndices for incremental coverage of " +
+          "appended fragments.")
+    }
+
     val numSegmentsOpt = args.find(_.name == "num_segments")
     if (numSegmentsOpt.isDefined && !useLogicalSegmentCommit) {
       throw new IllegalArgumentException(
@@ -108,7 +123,7 @@ case class AddIndexExec(
       throw new IllegalArgumentException(
         "num_segments is not supported with train=false: a deferred index performs no segmented build")
     }
-    val validatedNumSegments: Option[Int] = numSegmentsOpt.map { arg =>
+    val parsedNumSegments: Option[Int] = numSegmentsOpt.map { arg =>
       arg.value match {
         case null =>
           throw new IllegalArgumentException(
@@ -124,6 +139,33 @@ case class AddIndexExec(
             s"num_segments must be a positive integer, got: $other")
       }
     }
+
+    // SQ-quantized IVF variants (IVF_SQ, IVF_HNSW_SQ) must be built as a single segment.
+    // lance-core trains the ScalarQuantizer per createIndex call, and
+    // commit_existing_index_segments does NOT reconcile per-shard SQ bounds — it keeps the
+    // first shard's ScalarQuantizationMetadata and concatenates u8 codes byte-for-byte
+    // (rust/lance-index/src/vector/distributed/index_merger.rs IVF_SQ branch). Different
+    // bounds across segments => silently corrupt distance computation. Force-clamp to 1
+    // until lance-core exposes a driver-side SQ trainer (tracked in the SQ-shared-artifact
+    // follow-up issue against lance-format/lance).
+    val validatedNumSegments: Option[Int] =
+      if (IndexUtils.isSqIvfIndexType(indexType)) {
+        parsedNumSegments match {
+          case Some(req) if req > 1 =>
+            logWarning(
+              s"$indexType: num_segments=$req requested, but SQ-quantized IVF builds are " +
+                "currently forced to a single segment because lance-core does not reconcile " +
+                "per-segment ScalarQuantizer bounds across shards (see follow-up issue). " +
+                "Downgrading to num_segments=1.")
+          case _ =>
+            logInfo(
+              s"$indexType: forcing single-segment build (lance-core does not yet support " +
+                "shared SQ bounds across segments).")
+        }
+        Some(1)
+      } else {
+        parsedNumSegments
+      }
 
     val snapshot: AddIndexTableSnapshot = {
       val ds = openDataset(baseReadOptions, initialStorageOpts, nsImpl, nsProps, tableId)
@@ -1010,6 +1052,19 @@ object IndexUtils {
     IndexType.IVF_HNSW_PQ,
     IndexType.IVF_HNSW_SQ)
 
+  // SQ-quantized IVF variants. These are forced to a single segment build because lance-core
+  // does not currently expose a driver-side ScalarQuantizer trainer; per-segment workers
+  // would each train their own per-dimension SQ bounds against only that worker's fragments,
+  // and `commit_existing_index_segments` does NOT reconcile bounds across segments — it
+  // keeps the first shard's `ScalarQuantizationMetadata` (see lance Rust
+  // `rust/lance-index/src/vector/distributed/index_merger.rs` IVF_SQ branch). Mixing
+  // segments built with different bounds silently corrupts query distance computation.
+  // Tracked as the SQ-shared-artifact follow-up; will be lifted once lance-core exposes
+  // shared-bounds training similar to IVF centroids / PQ codebook.
+  private[datasources] val SqIvfIndexTypes: Set[IndexType] = Set(
+    IndexType.IVF_SQ,
+    IndexType.IVF_HNSW_SQ)
+
   private val LogicalSegmentIndexTypes: Set[IndexType] =
     Set(IndexType.ZONEMAP) ++ IvfIndexTypes
 
@@ -1024,6 +1079,15 @@ object IndexUtils {
     "ivf_hnsw_sq" -> IndexType.IVF_HNSW_SQ)
 
   def isIvfIndexType(indexType: IndexType): Boolean = IvfIndexTypes.contains(indexType)
+
+  /**
+   * True when `indexType` is an IVF variant whose quantizer (Scalar Quantizer) is currently
+   * trained per-segment by lance-core. AddIndexExec downgrades these to a single-segment
+   * build because lance-core's `commit_existing_index_segments` does not reconcile per-segment
+   * SQ bounds across shards, which would otherwise silently corrupt query results. Tracked as
+   * the SQ-shared-artifact follow-up against lance-format/lance.
+   */
+  def isSqIvfIndexType(indexType: IndexType): Boolean = SqIvfIndexTypes.contains(indexType)
 
   /**
    * Extracts the `train` option from named arguments, defaulting to `true`.
@@ -1062,7 +1126,7 @@ object IndexUtils {
   }
 
   def buildScalarIndexParamType(method: String): String = {
-    method.toLowerCase match {
+    method.toLowerCase(Locale.ROOT) match {
       case "btree" => "btree"
       case "zonemap" => "zonemap"
       case "fts" => "inverted"

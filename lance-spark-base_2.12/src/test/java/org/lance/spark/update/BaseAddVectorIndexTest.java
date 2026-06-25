@@ -741,4 +741,101 @@ public abstract class BaseAddVectorIndexTest {
                 fullTable, qVec));
     Assertions.assertEquals(5, result.count(), "VECTOR_SEARCH topK should return exactly k rows");
   }
+
+  /**
+   * Deferred training (`train=false`) is not yet supported for IVF_* vector indexes because Lance
+   * does not expose a vector-aware empty-index commit path. AddIndexExec rejects it up front with a
+   * clear message rather than falling through to "Unsupported index method".
+   */
+  @Test
+  public void testIvfTrainFalseIsRejectedExplicitly() {
+    prepareVectorDataset();
+    RuntimeException ex =
+        Assertions.assertThrows(
+            RuntimeException.class,
+            () ->
+                spark
+                    .sql(
+                        String.format(
+                            "ALTER TABLE %s CREATE INDEX vec_idx USING IVF_PQ (vec) "
+                                + "WITH (num_partitions=4, num_sub_vectors=4, train=false)",
+                            fullTable))
+                    .collect());
+    Assertions.assertTrue(
+        rootCauseMessage(ex).contains("train=false is not supported"), rootCauseMessage(ex));
+    Assertions.assertTrue(rootCauseMessage(ex).contains("IVF_PQ"), rootCauseMessage(ex));
+  }
+
+  /**
+   * Explicit `train=true` is a no-op for IVF builds; it must be accepted (whitelisted in
+   * VectorIndexParamsResolver.CommonKeys and stripped via SparkOnlyOptions before being forwarded
+   * to lance-core), and the resulting index must cover all fragments just like the default eager
+   * build.
+   */
+  @Test
+  public void testIvfTrainTrueIsAcceptedAndBuildsIndex() {
+    prepareVectorDataset();
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "ALTER TABLE %s CREATE INDEX vec_idx USING IVF_PQ (vec) "
+                    + "WITH (num_partitions=4, num_sub_vectors=4, train=true)",
+                fullTable));
+    long fragmentsIndexed = result.first().getLong(0);
+    Assertions.assertTrue(
+        fragmentsIndexed > 0L,
+        "explicit train=true should run a full distributed build and cover at least one fragment");
+  }
+
+  /**
+   * SQ-quantized IVF variants must be downgraded to a single segment. lance-core trains the
+   * ScalarQuantizer per createIndex and `commit_existing_index_segments` does not reconcile
+   * per-segment SQ bounds, so multiple segments would silently corrupt distance computation.
+   * AddIndexExec clamps `num_segments` to 1 with a WARN log even when the user explicitly requests
+   * a larger value.
+   */
+  @Test
+  public void testIvfSqIsClampedToSingleSegmentEvenWhenLargerRequested() {
+    prepareVectorDataset();
+    spark.sql(
+        String.format(
+            "ALTER TABLE %s CREATE INDEX vec_sq_idx USING IVF_SQ (vec) "
+                + "WITH (num_partitions=4, num_segments=8)",
+            fullTable));
+    checkVectorIndex("vec_sq_idx", IndexType.IVF_SQ);
+
+    org.lance.Dataset ds = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      long segCount = ds.getIndexes().stream().filter(i -> "vec_sq_idx".equals(i.name())).count();
+      Assertions.assertEquals(
+          1L,
+          segCount,
+          "IVF_SQ should be forced to a single segment regardless of requested num_segments");
+    } finally {
+      ds.close();
+    }
+  }
+
+  @Test
+  public void testIvfHnswSqIsClampedToSingleSegmentByDefault() {
+    prepareVectorDataset();
+    spark.sql(
+        String.format(
+            "ALTER TABLE %s CREATE INDEX vec_hnsw_sq_idx USING IVF_HNSW_SQ (vec) "
+                + "WITH (num_partitions=4)",
+            fullTable));
+    checkVectorIndex("vec_hnsw_sq_idx", IndexType.IVF_HNSW_SQ);
+
+    org.lance.Dataset ds = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      long segCount =
+          ds.getIndexes().stream().filter(i -> "vec_hnsw_sq_idx".equals(i.name())).count();
+      Assertions.assertEquals(
+          1L,
+          segCount,
+          "IVF_HNSW_SQ should be forced to a single segment by default (no num_segments specified)");
+    } finally {
+      ds.close();
+    }
+  }
 }

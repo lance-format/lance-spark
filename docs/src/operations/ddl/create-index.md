@@ -42,11 +42,11 @@ The `CREATE INDEX` command supports options via the `WITH` clause to control ind
 
 ### Common Options
 
-These options apply to all index methods:
+These options apply to scalar index methods (`btree`, `zonemap`, `fts`):
 
 | Option  | Type    | Description                                                                                                                                                                |
 |---------|---------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `train` | Boolean | When `false`, defer index training: register an empty index covering no rows without scanning any data, to be populated later. Default `true`. See [Deferred Index Creation](#deferred-index-creation). |
+| `train` | Boolean | When `false`, defer index training: register an empty index covering no rows without scanning any data, to be populated later. Default `true`. Not supported for `IVF_*` vector methods. See [Deferred Index Creation](#deferred-index-creation). |
 
 ### ZoneMap Options
 
@@ -289,6 +289,12 @@ Create an IVF + HNSW graph + SQ index when you want HNSW search latency without 
     );
     ```
 
+`IVF_SQ` and `IVF_HNSW_SQ` are an exception: they are forced to a single segment regardless of the
+requested `num_segments`. lance-core does not currently expose a driver-side Scalar Quantizer trainer,
+and `commit_existing_index_segments` does not reconcile per-segment SQ bounds across shards, so a
+multi-segment SQ build would silently corrupt query distance computation. A larger `num_segments`
+on `IVF_SQ` / `IVF_HNSW_SQ` is accepted but logged as a `WARN` and downgraded to `1`.
+
 Query the indexed vector column with the [VECTOR_SEARCH](../dql/vector-search.md) table function.
 
 ### Deferred Index Creation
@@ -320,10 +326,11 @@ to scanning the data until it is populated. There are two ways to populate it:
     dataset.optimizeIndices(OptimizeOptions.builder().build());
     ```
 
-`train = false` is supported for all index methods (`btree`, `fts`, `zonemap`, and `IVF_*` vector
-methods). Because a deferred index performs no segmented build at creation time, `num_segments`
-cannot be combined with `train = false` — pass it on the eager build that populates the index
-instead.
+`train = false` is supported for the scalar index methods `btree`, `fts`, and `zonemap`. It is not
+yet supported for `IVF_*` vector methods — those reject `train = false` up front because Lance does
+not currently expose a vector-aware empty-index commit path. Because a deferred index performs no
+segmented build at creation time, `num_segments` cannot be combined with `train = false` — pass it
+on the eager build that populates the index instead.
 
 ## Output
 
@@ -367,4 +374,4 @@ The `CREATE INDEX` command operates as follows:
 - **PQ Sub-Vector Constraint**: For `IVF_PQ` and `IVF_HNSW_PQ`, `num_sub_vectors` must divide the vector dimension. If the dimension is divisible by neither 16 nor 8, you must specify `num_sub_vectors` explicitly.
 - **Index Replacement**: Re-running `CREATE INDEX` with the same name replaces the existing index. For vector indexes the replacement happens in the same atomic commit, so concurrent readers see either the old or the new segment set, never a mixture.
 - **Empty Tables**: Creating an index on a table with no fragments returns `fragments_indexed = 0` and commits no segments.
-- **Deferred Training**: With `train = false` the index is registered empty and is populated later, either by re-running `CREATE INDEX` (a full distributed build that replaces the empty index) or, for incremental coverage of newly appended fragments, by `Dataset.optimizeIndices` in the SDK. The SQL `OPTIMIZE` command compacts fragments and does not train deferred indexes.
+- **Deferred Training**: With `train = false` the index is registered empty and is populated later, either by re-running `CREATE INDEX` (a full distributed build that replaces the empty index) or, for incremental coverage of newly appended fragments, by `Dataset.optimizeIndices` in the SDK. The SQL `OPTIMIZE` command compacts fragments and does not train deferred indexes. `train = false` is supported only for scalar index methods (`btree`, `fts`, `zonemap`); `IVF_*` vector methods reject it because Lance does not currently expose a vector-aware empty-index commit path.

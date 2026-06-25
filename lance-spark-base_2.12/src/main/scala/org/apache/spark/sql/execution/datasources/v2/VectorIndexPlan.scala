@@ -32,14 +32,7 @@ case class VectorIndexPlan(
     ivf: IvfPlan,
     pq: Option[PqPlan],
     sq: Option[SqPlan],
-    hnsw: Option[HnswPlan]) {
-
-  /** True when this plan needs PQ codebook training. */
-  def requiresPq: Boolean = pq.isDefined
-
-  /** True when this plan involves HNSW graph build. */
-  def requiresHnsw: Boolean = hnsw.isDefined
-}
+    hnsw: Option[HnswPlan])
 
 case class IvfPlan(numPartitions: Int, sampleRate: Int, maxIters: Int)
 

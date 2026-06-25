@@ -461,4 +461,24 @@ class VectorIndexParamsResolverTest {
     assertTrue(ex.getMessage.contains("Float32"), ex.getMessage)
     assertTrue(ex.getMessage.contains("Double"), ex.getMessage)
   }
+
+  /**
+   * `train` is consumed at the Spark execution layer (stripped via SparkOnlyOptions), but is
+   * accepted by parseAndValidate so that an explicit `train=true` on an IVF_* CREATE INDEX is
+   * not rejected as an unknown parameter. `train=false` for IVF_* is rejected earlier in
+   * AddIndexExec.run; the resolver itself does not know about that policy.
+   */
+  @Test
+  def trainOptionIsAcceptedForIvfIndexes(): Unit = {
+    val plan = VectorIndexParamsResolver.parseAndValidate(
+      IndexType.IVF_PQ,
+      Seq(
+        LanceNamedArgument("num_partitions", java.lang.Long.valueOf(4L)),
+        LanceNamedArgument("num_sub_vectors", java.lang.Long.valueOf(4L)),
+        LanceNamedArgument("train", java.lang.Boolean.TRUE)),
+      dim = 32,
+      numRows = 400L)
+    assertEquals(IndexType.IVF_PQ, plan.indexType)
+    assertEquals(4, plan.ivf.numPartitions)
+  }
 }
