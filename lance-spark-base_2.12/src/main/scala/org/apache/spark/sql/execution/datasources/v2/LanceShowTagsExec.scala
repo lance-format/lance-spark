@@ -47,12 +47,12 @@ case class LanceShowTagsExec(
           null
         }
         val createdAt = if (tag.getCreatedAt.isPresent) {
-          UTF8String.fromString(tag.getCreatedAt.get().toString)
+          tag.getCreatedAt.get().getEpochSecond
         } else {
           null
         }
         val updatedAt = if (tag.getUpdatedAt.isPresent) {
-          UTF8String.fromString(tag.getUpdatedAt.get().toString)
+          tag.getUpdatedAt.get().getEpochSecond
         } else {
           null
         }

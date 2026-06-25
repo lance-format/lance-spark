@@ -38,8 +38,8 @@ object LanceShowTagsOutputType {
       StructField("name", DataTypes.StringType, nullable = false),
       StructField("branch", DataTypes.StringType, nullable = true),
       StructField("version", DataTypes.LongType, nullable = false),
-      StructField("created_at", DataTypes.StringType, nullable = true),
-      StructField("updated_at", DataTypes.StringType, nullable = true),
+      StructField("created_at", DataTypes.LongType, nullable = true),
+      StructField("updated_at", DataTypes.LongType, nullable = true),
       StructField("manifest_size", DataTypes.IntegerType, nullable = false)))
     .map(field => AttributeReference(field.name, field.dataType, field.nullable, field.metadata)())
 }

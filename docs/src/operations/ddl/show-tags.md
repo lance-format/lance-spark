@@ -46,8 +46,8 @@ The `SHOW TAGS` command returns the following columns:
 | `name` | String | Tag name |
 | `branch` | String | Source branch name if the tag points to a branch version; otherwise NULL |
 | `version` | Long | Version used as the tag target |
-| `created_at` | String | Tag creation timestamp as returned by Lance metadata |
-| `updated_at` | String | Tag update timestamp as returned by Lance metadata |
+| `created_at` | Long | Tag creation timestamp as Unix epoch seconds |
+| `updated_at` | Long | Tag update timestamp as Unix epoch seconds |
 | `manifest_size` | Integer | Manifest size recorded for the tag |
 
 ## Notes
@@ -55,6 +55,7 @@ The `SHOW TAGS` command returns the following columns:
 - `SHOW TAGS` is implemented as a Spark SQL extension command.
 - The target table must be a Lance table.
 - The result includes one row per tag currently registered in the table metadata.
+- `created_at` and `updated_at` are returned as Unix epoch seconds.
 - Use [CREATE TAG](./create-tag.md) to add a tag and [DROP TAG](./drop-tag.md) to remove one.
 
 ## See Also

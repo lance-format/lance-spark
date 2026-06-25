@@ -91,7 +91,6 @@ The `CREATE TAG` command returns:
 - `CREATE TAG` is implemented as a Spark SQL extension command.
 - The referenced table must be a Lance table.
 - Creating a tag from a non-existent branch, tag, or version returns an error.
-- The tag name is returned even when the command result contains only a single row.
 
 ## See Also
 

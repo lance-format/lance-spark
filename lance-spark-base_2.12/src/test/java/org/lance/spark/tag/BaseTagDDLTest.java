@@ -395,8 +395,8 @@ public abstract class BaseTagDDLTest {
         "StructType(StructField(name,StringType,false),"
             + "StructField(branch,StringType,true),"
             + "StructField(version,LongType,false),"
-            + "StructField(created_at,StringType,true),"
-            + "StructField(updated_at,StringType,true),"
+            + "StructField(created_at,LongType,true),"
+            + "StructField(updated_at,LongType,true),"
             + "StructField(manifest_size,IntegerType,false))",
         result.schema().toString());
 
@@ -407,8 +407,8 @@ public abstract class BaseTagDDLTest {
           new TagInfo(
               row.isNullAt(1) ? null : row.getString(1),
               row.getLong(2),
-              row.isNullAt(3) ? null : row.getString(3),
-              row.isNullAt(4) ? null : row.getString(4),
+              row.isNullAt(3) ? null : row.getLong(3),
+              row.isNullAt(4) ? null : row.getLong(4),
               row.getInt(5)));
     }
     return tags;
@@ -440,12 +440,11 @@ public abstract class BaseTagDDLTest {
   private static final class TagInfo {
     private final String branch;
     private final long version;
-    private final String createdAt;
-    private final String updatedAt;
+    private final Long createdAt;
+    private final Long updatedAt;
     private final int manifestSize;
 
-    private TagInfo(
-        String branch, long version, String createdAt, String updatedAt, int manifestSize) {
+    private TagInfo(String branch, long version, Long createdAt, Long updatedAt, int manifestSize) {
       this.branch = branch;
       this.version = version;
       this.createdAt = createdAt;

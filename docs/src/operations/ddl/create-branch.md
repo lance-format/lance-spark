@@ -93,7 +93,6 @@ The `CREATE BRANCH` command returns:
 - `CREATE BRANCH` is implemented as a Spark SQL extension command.
 - The referenced table must be a Lance table.
 - Creating a branch from a non-existent branch, tag, or version returns an error.
-- The branch name is returned even when the command result contains only a single row.
 
 ## See Also
 
