@@ -61,4 +61,5 @@ The `SHOW INDEXES` command returns the following columns:
 
 ## See Also
 
-- [CREATE INDEX](./create-index.md)
+- [CREATE SCALAR INDEX](./create-scalar-index.md)
+- [CREATE VECTOR INDEX](./create-vector-index.md)

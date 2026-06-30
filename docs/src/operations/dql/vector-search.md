@@ -16,7 +16,7 @@ Run vector similarity search from Spark SQL using Lance namespace execution.
 
 ## Basic Usage
 
-`VECTOR_SEARCH` returns the selected table columns plus `_distance`.
+`VECTOR_SEARCH` returns the selected table columns plus `_distance`. Create a vector index when you need indexed approximate nearest-neighbour search; see [CREATE VECTOR INDEX](../ddl/create-vector-index.md).
 
 === "SQL"
     ```sql

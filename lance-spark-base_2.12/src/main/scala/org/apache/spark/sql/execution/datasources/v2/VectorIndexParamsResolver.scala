@@ -27,10 +27,6 @@ import scala.collection.JavaConverters._
 /**
  * Parses and validates the WITH(...) named arguments attached to
  * `ALTER TABLE … CREATE INDEX … USING <IVF_*> ( col )` and infers defaults.
- *
- * The dataset-touching wrapper [[resolve]] (added in a later task) opens the
- * lance Dataset on the driver to read the column dimension and total row count,
- * then delegates to [[parseAndValidate]] which is pure and unit-tested.
  */
 object VectorIndexParamsResolver {
 

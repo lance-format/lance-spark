@@ -13,7 +13,7 @@ Run vector search and full-text search together from Spark SQL, then rerank the 
 
 ## Basic Usage
 
-`HYBRID_SEARCH` returns the selected table columns plus `_distance`, `_score`, and `_relevance_score`. Rows that only match one side have null for the other side's metric.
+`HYBRID_SEARCH` returns the selected table columns plus `_distance`, `_score`, and `_relevance_score`. Rows that only match one side have null for the other side's metric. For index setup, see [CREATE VECTOR INDEX](../ddl/create-vector-index.md) and [CREATE SCALAR INDEX](../ddl/create-scalar-index.md#full-text-search-index).
 
 === "SQL"
     ```sql

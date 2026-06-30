@@ -10,7 +10,8 @@ nav:
   - alter-table.md
   - show-tblproperties.md
   - drop-table.md
-  - create-index.md
+  - create-scalar-index.md
+  - create-vector-index.md
   - show-indexes.md
   - optimize.md
   - vacuum.md
