@@ -30,6 +30,7 @@ import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.Utils;
 
+import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.connector.expressions.Expression;
@@ -49,6 +50,7 @@ import org.apache.spark.sql.connector.read.SupportsPushDownOffset;
 import org.apache.spark.sql.connector.read.SupportsPushDownRequiredColumns;
 import org.apache.spark.sql.connector.read.SupportsPushDownTopN;
 import org.apache.spark.sql.connector.read.SupportsPushDownV2Filters;
+import org.apache.spark.sql.connector.read.colstats.ColumnStatistics;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
 import org.slf4j.Logger;
@@ -58,6 +60,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -166,7 +169,8 @@ public class LanceScanBuilder
       }
 
       // Get statistics from manifest summary before closing dataset
-      ManifestSummary summary = getOrOpenDataset().getVersion().getManifestSummary();
+      org.lance.Version datasetVersion = getOrOpenDataset().getVersion();
+      ManifestSummary summary = datasetVersion.getManifestSummary();
 
       // Collect all columns that need zonemap stats: filter columns + sharding columns.
       Set<String> columnsToLoad = extractReferencedColumns(pushedPredicates);
@@ -232,8 +236,37 @@ public class LanceScanBuilder
         projectedRows = (long) (projectedRows * ratio);
         projectedFullSize = (long) (projectedFullSize * ratio);
       }
+      // CBO column statistics: when ANALYZE TABLE has persisted lance.stats.* into the manifest
+      // config and the manifest version + schema fingerprint still match, surface them to Spark's
+      // optimizer via Statistics.columnStats(). There is intentionally NO zonemap-derived fallback
+      // here — when persisted stats are absent or stale we report none and let Spark fall back to
+      // its own row-count heuristics, exactly as native ANALYZE TABLE behaves.
+      //
+      // Skip the persisted stats entirely when zonemap fragment pruning has shrunk the reported row
+      // count below the live total: the persisted stats describe the FULL table, so pairing their
+      // full-table distinctCount / nullCount / min / max with a pruned (smaller) numRows would be
+      // internally inconsistent — e.g. distinctCount could exceed numRows — and mislead Spark's
+      // join/filter estimation worse than having no column stats. The full-table stats simply do
+      // not describe the pruned subset, so we drop them and let the (accurate) pruned row count
+      // drive estimation.
+      SparkSession session = activeSparkSessionOrNull();
+      Map<NamedReference, ColumnStatistics> columnStats = Collections.emptyMap();
+      boolean fragmentPruningReducedRows = projectedRows < summary.getTotalRows();
+      if (!fragmentPruningReducedRows && resolveCboColumnStatsEnabled(session, readOptions)) {
+        Map<String, String> tableProperties = getOrOpenDataset().getConfig();
+        Map<NamedReference, ColumnStatistics> persisted =
+            loadPersistedColumnStats(
+                session, tableProperties, fullSchema, schema, datasetVersion.getId());
+        if (persisted != null) {
+          columnStats = persisted;
+          LOG.info(
+              "Using persisted column stats (ANALYZE TABLE fast path) for {} columns",
+              persisted.size());
+        }
+      }
       LanceStatistics statistics =
-          LanceStatistics.estimateProjected(projectedRows, projectedFullSize, fullSchema, schema);
+          LanceStatistics.estimateProjected(
+              projectedRows, projectedFullSize, fullSchema, schema, columnStats);
       if (survivingFragmentIds != null) {
         LOG.debug(
             "Scan statistics after pruning: {} of {} fragments survive,"
@@ -485,5 +518,181 @@ public class LanceScanBuilder
       }
     }
     return columns;
+  }
+
+  private static SparkSession activeSparkSessionOrNull() {
+    try {
+      return SparkSession.active();
+    } catch (Exception ignored) {
+      return null;
+    }
+  }
+
+  /**
+   * Resolve the column-stats kill-switch using two-level lookup. The SparkConf key {@link
+   * LanceStatsKeys#SPARK_CONF_CBO_COLUMN_STATS_ENABLED} acts as a global kill-switch: when set, it
+   * overrides the per-scan {@link LanceSparkReadOptions#isCboColumnStatsEnabled()} value. When
+   * unset, the per-scan option (default {@code true}) wins. This makes a single session-level
+   * config able to disable the feature everywhere for safe rollback.
+   */
+  private static boolean resolveCboColumnStatsEnabled(
+      SparkSession session, LanceSparkReadOptions readOptions) {
+    if (session != null) {
+      try {
+        String key = LanceStatsKeys.SPARK_CONF_CBO_COLUMN_STATS_ENABLED;
+        if (session.conf().contains(key)) {
+          return Boolean.parseBoolean(session.conf().get(key));
+        }
+      } catch (Exception ignored) {
+        // Conf access can throw if the session was closed mid-scan — fall through.
+      }
+    }
+    return readOptions.isCboColumnStatsEnabled();
+  }
+
+  /**
+   * Read ANALYZE-TABLE-persisted column statistics from the Lance manifest config ({@code
+   * lance.stats.*} keys), or {@code null} when none are usable. The returned map feeds Spark's CBO
+   * via {@link LanceStatistics#columnStats()}. This path is fully decoupled from zonemap indexes —
+   * it reads only persisted properties. When it returns {@code null}, the caller reports no column
+   * stats (it does NOT fall back to zonemap aggregation), matching native ANALYZE TABLE semantics.
+   */
+  static Map<NamedReference, ColumnStatistics> loadPersistedColumnStats(
+      SparkSession session,
+      java.util.Map<String, String> tableProperties,
+      StructType fullSchema,
+      StructType projectedSchema,
+      long currentManifestVersion) {
+    if (tableProperties == null || tableProperties.isEmpty()) {
+      return null;
+    }
+    // No completeness sentinel is consulted: ANALYZE commits the entire stats payload in one atomic
+    // alterTable (BaseLanceNamespaceSparkCatalog issues a single Dataset.updateConfig), so a reader
+    // never observes a half-written set. Validity is gated below by the format version,
+    // computedAtVersion, and schemaHash tags instead.
+    // Format-version gate: only consume payloads we know how to decode. Missing version is
+    // fail-safe (skip); unrecognized version warns and skips so a future v2 writer can ship
+    // before the readers catch up.
+    String formatVersion = tableProperties.get(LanceStatsKeys.VERSION);
+    if (formatVersion == null) {
+      LOG.debug(
+          "lance.stats.version key absent — reporting no column stats (no ANALYZE-written "
+              + "stats payload present, or a hand-edited / partially-written payload)");
+      return null;
+    }
+    if (!LanceStatsKeys.SUPPORTED_VERSION.equals(formatVersion.trim())) {
+      // Sanitize: TBLPROPERTIES values are user-controllable; SLF4J's {} passes CR/LF verbatim.
+      LOG.warn(
+          "Unrecognized lance.stats.version='{}' — reporting no column stats. "
+              + "This usually means the table was analyzed with a newer connector; upgrade the "
+              + "connector or re-run ANALYZE TABLE with the current connector to restore the fast "
+              + "path.",
+          sanitizeForLog(formatVersion));
+      return null;
+    }
+    String versionStr = tableProperties.get(LanceStatsKeys.COMPUTED_AT_VERSION);
+    if (versionStr == null) {
+      return null;
+    }
+    long computedAtVersion;
+    try {
+      computedAtVersion = Long.parseLong(versionStr.trim());
+    } catch (NumberFormatException e) {
+      LOG.warn(
+          "Malformed lance.stats.computedAtVersion='{}' — ignoring persisted stats",
+          sanitizeForLog(versionStr));
+      return null;
+    }
+    if (computedAtVersion < 0) {
+      LOG.warn(
+          "Negative lance.stats.computedAtVersion={} — ignoring persisted stats",
+          computedAtVersion);
+      return null;
+    }
+    boolean allowStale = false;
+    if (session != null) {
+      try {
+        String key = LanceStatsKeys.SPARK_CONF_CBO_COLUMN_STATS_ALLOW_STALE;
+        if (session.conf().contains(key)) {
+          allowStale = Boolean.parseBoolean(session.conf().get(key));
+        }
+      } catch (Exception ignored) {
+        // Conf access can throw if the session was closed mid-scan — keep allowStale=false.
+      }
+    }
+    // Schema fingerprint guard: a hash mismatch means columns were renamed/retyped/dropped/
+    // reordered, and persisted stats may attribute values to the wrong column. Missing hash is
+    // also fail-safe — a hand-edited or pre-hash payload can't be verified.
+    String recordedSchemaHash = tableProperties.get(LanceStatsKeys.SCHEMA_HASH);
+    if (recordedSchemaHash == null) {
+      LOG.debug(
+          "lance.stats.schemaHash key absent — reporting no column stats. Persisted stats "
+              + "predate the schema-drift guard; re-run ANALYZE TABLE to populate the hash.");
+      return null;
+    }
+    String currentSchemaHash = LanceStatsKeys.computeSchemaHash(fullSchema);
+    if (!recordedSchemaHash.equals(currentSchemaHash)) {
+      // Sanitize the recorded hash — a poisoned property could violate the SHA-256-hex shape.
+      LOG.info(
+          "lance.stats.schemaHash mismatch (recorded={}, current={}); schema has changed since "
+              + "ANALYZE — reporting no column stats. Re-run ANALYZE TABLE to refresh.",
+          sanitizeForLog(recordedSchemaHash.substring(0, Math.min(8, recordedSchemaHash.length()))),
+          currentSchemaHash.substring(0, Math.min(8, currentSchemaHash.length())));
+      return null;
+    }
+    if (computedAtVersion != currentManifestVersion && !allowStale) {
+      LOG.debug(
+          "Persisted column stats are stale (computedAtVersion={}, currentVersion={}); "
+              + "reporting no column stats. Re-run ANALYZE TABLE to refresh, or set {}=true.",
+          computedAtVersion,
+          currentManifestVersion,
+          LanceStatsKeys.SPARK_CONF_CBO_COLUMN_STATS_ALLOW_STALE);
+      return null;
+    }
+
+    Map<NamedReference, ColumnStatistics> result = new LinkedHashMap<>();
+    for (org.apache.spark.sql.types.StructField f : projectedSchema.fields()) {
+      // Spark matches V2 column stats via AttributeReference.name().equals(ref.describe()).
+      // FieldReference.describe() backtick-quotes any name needing SQL quoting, so a stat for such
+      // a column would be reported but never matched/used by the optimizer. Skip it so
+      // columnStats() advertises only stats Spark can actually consume.
+      if (!FieldReference.column(f.name()).describe().equals(f.name())) {
+        LOG.debug(
+            "Skipping persisted stats for column {} — its name requires SQL quoting, so Spark's "
+                + "optimizer cannot match it to a plan attribute.",
+            sanitizeForLog(f.name()));
+        continue;
+      }
+      // TimestampNTZ min/max crash Spark's CBO FilterEstimation (no toDouble case → MatchError).
+      // ANALYZE never writes them, but defend against a hand-edited/poisoned payload too.
+      if (org.apache.spark.sql.types.DataTypes.TimestampNTZType.equals(f.dataType())) {
+        continue;
+      }
+      // Decode this column's persisted keys via Spark's own CatalogColumnStat codec (see
+      // LanceColumnStatCodec): fromMap + toPlanStat yields min/max in the internal catalyst
+      // representation that DataSourceV2Relation.transformV2Stats copies verbatim into a catalyst
+      // ColumnStat (no CatalystTypeConverters round-trip on the V2 min/max path). Every decode
+      // failure — absent keys, Spark codec rejection, or a poisoned min/max that fromExternalString
+      // can't parse — is fail-safe (empty), so the column is simply omitted from the stats map.
+      java.util.Optional<ColumnStatistics> decoded =
+          org.apache.spark.sql.execution.datasources.v2.LanceColumnStatCodec.decode(
+              STATS_DECODE_TABLE_LABEL, f.name(), f.dataType(), tableProperties);
+      if (decoded.isPresent()) {
+        result.put(FieldReference.column(f.name()), decoded.get());
+      }
+    }
+    return result.isEmpty() ? null : result;
+  }
+
+  /**
+   * Placeholder table label passed to {@link
+   * org.apache.spark.sql.execution.datasources.v2.LanceColumnStatCodec#decode}. Spark's {@code
+   * CatalogColumnStat.fromMap} uses it only in an internal warn message on malformed input; no real
+   * table identifier is in scope here, so a constant suffices.
+   */
+  private static final String STATS_DECODE_TABLE_LABEL = "lance";
+
+  private static String sanitizeForLog(String value) {
+    return LanceStatsKeys.sanitizeForLog(value);
   }
 }

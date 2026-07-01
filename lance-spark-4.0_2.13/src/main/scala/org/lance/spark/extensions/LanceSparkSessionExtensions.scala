@@ -18,7 +18,7 @@ import org.apache.spark.sql.catalyst.FunctionIdentifier
 import org.apache.spark.sql.catalyst.expressions.ExpressionInfo
 import org.apache.spark.sql.catalyst.optimizer.{LanceBlobSourceContextRule, LanceBlobV2CopyThroughRule, LanceBlobV2RowLevelCopyRule, LanceBlobV2RowLevelResolutionRule, LanceFragmentAwareJoinRule}
 import org.apache.spark.sql.catalyst.parser.extensions.LanceSparkSqlExtensionsParser
-import org.apache.spark.sql.execution.datasources.v2.LanceDataSourceV2Strategy
+import org.apache.spark.sql.execution.datasources.v2.{LanceAnalyzeTableResolution, LanceDataSourceV2Strategy}
 import org.lance.spark.search.LanceSearchTableFunctions
 
 class LanceSparkSessionExtensions extends (SparkSessionExtensions => Unit) {
@@ -33,6 +33,11 @@ class LanceSparkSessionExtensions extends (SparkSessionExtensions => Unit) {
     extensions.injectResolutionRule(_ => LanceBlobV2RowLevelResolutionRule())
 
     extensions.injectOptimizerRule(_ => LanceBlobV2RowLevelCopyRule())
+
+    // Rewrite Spark's native ANALYZE TABLE plans (AnalyzeColumn / AnalyzeTable) into
+    // LanceAnalyzeTable for Lance tables. There is no custom ANALYZE grammar; non-Lance ANALYZE is
+    // left untouched for Spark to handle.
+    extensions.injectResolutionRule(_ => LanceAnalyzeTableResolution)
 
     // optimizer rules for fragment-aware joins
     extensions.injectOptimizerRule(_ => LanceFragmentAwareJoinRule())

@@ -75,13 +75,26 @@ class LanceSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserInt
   }
 
   /**
-   * Parse a string to a LogicalPlan.
+   * Parse a string to a LogicalPlan. Delegate to Spark's built-in parser first; only fall through
+   * to the Lance extension grammar (index / optimize / vacuum / column-backfill / primary-key
+   * commands) when Spark rejects the statement. ANALYZE TABLE is intentionally NOT handled here —
+   * Spark parses it natively, and `LanceAnalyzeTableResolution` rewrites it for Lance tables during
+   * analysis, so non-Lance ANALYZE is left to Spark untouched (no hijack).
    */
   override def parsePlan(sqlText: String): LogicalPlan = {
     try {
       delegate.parsePlan(sqlText)
     } catch {
-      case _: ParseException => parse(sqlText)
+      case e: ParseException =>
+        // Spark rejected it; try the Lance extension grammar. If Lance can't parse it either (the
+        // input is neither valid Spark SQL nor a Lance command), surface Spark's original
+        // positioned ParseException rather than the raw ANTLR ParseCancellationException that the
+        // fail-fast parse() throws.
+        try {
+          parse(sqlText)
+        } catch {
+          case _: Exception => throw e
+        }
     }
   }
 
@@ -97,6 +110,11 @@ class LanceSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserInt
     val tokenStream = new CommonTokenStream(lexer)
     val parser = new LanceSqlExtensionsParser(tokenStream)
     parser.removeErrorListeners()
+    // Fail fast on any token mismatch instead of silently recovering to a partial plan. parse() is
+    // only reached after Spark's delegate already rejected the statement, so a failure here means
+    // it is neither valid Spark SQL nor a Lance extension command; throwing lets parsePlan surface
+    // Spark's original positioned ParseException rather than the raw ANTLR ParseCancellationException.
+    parser.setErrorHandler(new BailErrorStrategy())
 
     try {
       // first, try parsing with potentially faster SLL mode
@@ -107,6 +125,7 @@ class LanceSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserInt
         // if we fail, parse with LL mode
         tokenStream.seek(0) // rewind input stream
         parser.reset()
+        parser.setErrorHandler(new BailErrorStrategy())
 
         // Try Again.
         parser.getInterpreter.setPredictionMode(PredictionMode.LL)

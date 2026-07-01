@@ -54,6 +54,9 @@ public class LanceSparkReadOptions implements Serializable {
   public static final String CONFIG_TOP_N_PUSH_DOWN = "topN_push_down";
   private static final String DEPRECATED_CONFIG_NEAREST = "nearest";
 
+  /** Per-scan kill-switch for CBO column-stats reporting (persisted ANALYZE TABLE stats). */
+  public static final String CONFIG_CBO_COLUMN_STATS_ENABLED = "cbo.column.stats.enabled";
+
   /**
    * Whether executors should rebuild the namespace client and re-fetch storage options via {@code
    * namespace.describeTable()} when opening a dataset for fragment scans.
@@ -94,6 +97,7 @@ public class LanceSparkReadOptions implements Serializable {
   // Changed from 512 to 8192 for better OLAP scan performance (33x improvement)
   private static final int DEFAULT_BATCH_SIZE = 8192;
   private static final boolean DEFAULT_TOP_N_PUSH_DOWN = true;
+  private static final boolean DEFAULT_CBO_COLUMN_STATS_ENABLED = true;
   private static final boolean DEFAULT_EXECUTOR_CREDENTIAL_REFRESH = true;
 
   private final String datasetUri;
@@ -106,6 +110,7 @@ public class LanceSparkReadOptions implements Serializable {
   private final Integer metadataCacheSize;
   private final int batchSize;
   private final boolean topNPushDown;
+  private final boolean cboColumnStatsEnabled;
   private final Map<String, String> storageOptions;
 
   /** The namespace for credential vending. Transient as LanceNamespace is not serializable. */
@@ -135,6 +140,7 @@ public class LanceSparkReadOptions implements Serializable {
     this.metadataCacheSize = builder.metadataCacheSize;
     this.batchSize = builder.batchSize;
     this.topNPushDown = builder.topNPushDown;
+    this.cboColumnStatsEnabled = builder.cboColumnStatsEnabled;
     this.storageOptions = new HashMap<>(builder.storageOptions);
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
@@ -250,6 +256,10 @@ public class LanceSparkReadOptions implements Serializable {
     return topNPushDown;
   }
 
+  public boolean isCboColumnStatsEnabled() {
+    return cboColumnStatsEnabled;
+  }
+
   public Map<String, String> getStorageOptions() {
     return storageOptions;
   }
@@ -306,6 +316,7 @@ public class LanceSparkReadOptions implements Serializable {
         .metadataCacheSize(this.metadataCacheSize)
         .batchSize(this.batchSize)
         .topNPushDown(this.topNPushDown)
+        .cboColumnStatsEnabled(this.cboColumnStatsEnabled)
         .storageOptions(this.storageOptions)
         .namespace(this.namespace)
         .tableId(this.tableId)
@@ -349,6 +360,7 @@ public class LanceSparkReadOptions implements Serializable {
     return pushDownFilters == that.pushDownFilters
         && batchSize == that.batchSize
         && topNPushDown == that.topNPushDown
+        && cboColumnStatsEnabled == that.cboColumnStatsEnabled
         && executorCredentialRefresh == that.executorCredentialRefresh
         && Objects.equals(datasetUri, that.datasetUri)
         && Objects.equals(blockSize, that.blockSize)
@@ -370,6 +382,7 @@ public class LanceSparkReadOptions implements Serializable {
         metadataCacheSize,
         batchSize,
         topNPushDown,
+        cboColumnStatsEnabled,
         storageOptions,
         tableId,
         executorCredentialRefresh);
@@ -385,6 +398,7 @@ public class LanceSparkReadOptions implements Serializable {
     private Integer metadataCacheSize;
     private int batchSize = DEFAULT_BATCH_SIZE;
     private boolean topNPushDown = DEFAULT_TOP_N_PUSH_DOWN;
+    private boolean cboColumnStatsEnabled = DEFAULT_CBO_COLUMN_STATS_ENABLED;
     private Map<String, String> storageOptions = new HashMap<>();
     private LanceNamespace namespace;
     private List<String> tableId;
@@ -430,6 +444,11 @@ public class LanceSparkReadOptions implements Serializable {
 
     public Builder topNPushDown(boolean topNPushDown) {
       this.topNPushDown = topNPushDown;
+      return this;
+    }
+
+    public Builder cboColumnStatsEnabled(boolean cboColumnStatsEnabled) {
+      this.cboColumnStatsEnabled = cboColumnStatsEnabled;
       return this;
     }
 
@@ -519,6 +538,10 @@ public class LanceSparkReadOptions implements Serializable {
       }
       if (opts.containsKey(CONFIG_TOP_N_PUSH_DOWN)) {
         this.topNPushDown = Boolean.parseBoolean(opts.get(CONFIG_TOP_N_PUSH_DOWN));
+      }
+      if (opts.containsKey(CONFIG_CBO_COLUMN_STATS_ENABLED)) {
+        this.cboColumnStatsEnabled =
+            Boolean.parseBoolean(opts.get(CONFIG_CBO_COLUMN_STATS_ENABLED));
       }
       if (opts.containsKey(CONFIG_EXECUTOR_CREDENTIAL_REFRESH)) {
         this.executorCredentialRefresh =
