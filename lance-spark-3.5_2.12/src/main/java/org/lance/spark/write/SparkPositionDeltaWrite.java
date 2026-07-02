@@ -163,6 +163,11 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     }
 
     @Override
+    public boolean useCommitCoordinator() {
+      return false;
+    }
+
+    @Override
     public void commit(WriterCommitMessage[] messages) {
       List<FragmentMetadata> newFragments = new ArrayList<>();
       Map<Integer, RoaringBitmap> aggregatedDeletions = new HashMap<>();
