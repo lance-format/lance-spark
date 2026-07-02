@@ -100,11 +100,40 @@ history.
 - **Blob v2 source-context / copy-through** is not applied on the streaming path. Streaming writes
   store blob data directly (which works), but the batch-only optimization that copies blob
   references from a source Lance table does not fire for streaming writes.
+- **High-frequency writes (`< 30s` trigger) and Spark 4.1 Real-Time Mode** are out of scope for
+  this sink — the trigger→fragments/day math below shows why. A MemWAL-backed sink is the intended
+  path for those workloads (follow-up).
 - The Lance table must exist before the streaming query starts; the sink does not auto-create.
 
-## OPTIMIZE cadence
+## Trigger cadence, fragment count & compaction
 
-Each non-empty micro-batch advances the Lance manifest by one version. Manifest size grows linearly
-with fragment count, and read-path performance degrades for very large manifests. For continuous
-streams, schedule an `OPTIMIZE` on the target table at a cadence appropriate to your micro-batch
-volume — for example, every 1000 epochs at a 5-second trigger.
+Each non-empty micro-batch advances the Lance manifest by one version and writes at least one
+fragment. Manifest size grows linearly with fragment count, and read-path performance degrades
+for very large manifests. Choose a trigger cadence with the following fragment-per-day cost in
+mind (Spark actually schedules the next batch at `max(triggerInterval, batchCompletionTime)`, so
+busy pipelines produce fewer than the nominal count):
+
+| Trigger | Fragments/run | Fragments/day (typical) | Notes |
+|---|---|---|---|
+| `RealTime(...)` (Spark 4.1+) | — | — | ❌ Rejected by Spark's `RealTimeModeAllowlist` — only Kafka / ForeachWriter / Console / Memory sinks are allowlisted. Use one of those, or wait for the MemWAL sink. |
+| `Continuous(...)`, source is Lance | — | — | ❌ Rejected at planning: Lance does not declare `TableCapability.CONTINUOUS_READ`. |
+| `Continuous(...)`, non-Lance source (e.g. Kafka) | — | — | ⚠️ Passes source-side validation and reaches `Write.toStreaming()`, but per-epoch commit cadence is far too high for a Lance sink — expect catastrophic manifest growth. **Not recommended.** |
+| `ProcessingTime("10s")` | 1 per epoch | ~8,640 | ❌ Not recommended for this sink; wait for the MemWAL sink. |
+| `ProcessingTime("30s")` | 1 per epoch | ~2,880 | ⚠️ Borderline; requires frequent `OPTIMIZE`. |
+| `ProcessingTime("1min")` | 1 per epoch | ~1,440 | ✅ Comparable to a daily batch job. |
+| `ProcessingTime("5min")` | 1 per epoch | ~288 | ✅ Comfortable. |
+| `AvailableNow` | 1 per run | Depends on run cadence | ✅ Ideal (batch-style backfill). |
+
+### `foreachBatch` is not an escape hatch
+
+`foreachBatch` invokes a batch write per epoch and produces the same manifest growth this sink
+does. A user willing to buffer records across epochs and hand-roll `(queryId, epochId)`
+idempotency in `foreachBatch` could reduce the per-epoch fragment cost, but the logic is
+error-prone. The MemWAL follow-up is the intended path for high-frequency writes.
+
+### OPTIMIZE cadence
+
+For any long-running streaming query, schedule `OPTIMIZE` on the target table at a cadence
+appropriate to your commit volume — for example, every 1000 epochs at a 5-minute trigger, or
+daily at a 1-minute trigger.
+
