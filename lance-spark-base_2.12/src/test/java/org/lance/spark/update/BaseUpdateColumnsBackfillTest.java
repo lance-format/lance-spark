@@ -388,6 +388,52 @@ public abstract class BaseUpdateColumnsBackfillTest {
     }
   }
 
+  /** Verifies update-columns backfill preserves existing Arrow timestamp timezones. */
+  @Test
+  public void testUpdateTimestampColumnPreservesExistingTimezone(TestInfo testInfo)
+      throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    TestUtils.writeNonUtcTimestampDataset(datasetUri, "Asia/Shanghai");
+
+    LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
+    StructType existingSchema =
+        LanceArrowUtils.fromArrowSchema(TestUtils.nonUtcTimestampSchema("Asia/Shanghai"));
+    StructType updateSchema =
+        new StructType()
+            .add(LanceConstant.ROW_ADDRESS, DataTypes.LongType, false)
+            .add(LanceConstant.FRAGMENT_ID, DataTypes.IntegerType, false)
+            .add(existingSchema.apply("created_time"));
+
+    UpdateColumnsBackfillBatchWrite updateWrite =
+        new UpdateColumnsBackfillBatchWrite(
+            updateSchema,
+            writeOptions,
+            Collections.singletonList("created_time"),
+            null,
+            null,
+            null,
+            null);
+
+    DataWriterFactory factory = updateWrite.createBatchWriterFactory(() -> 1);
+    WriterCommitMessage updateMsg;
+    try (DataWriter<InternalRow> writer = factory.createWriter(0, 0)) {
+      for (int i = 0; i < 5; i++) {
+        writer.write(
+            new GenericInternalRow(new Object[] {(long) i, 0, 1_800_000_000_000_000L + i}));
+      }
+      updateMsg = writer.commit();
+    }
+    updateWrite.commit(new WriterCommitMessage[] {updateMsg});
+
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
+        org.lance.Dataset dataset = org.lance.Dataset.open(datasetUri, allocator)) {
+      ArrowType.Timestamp timestampType =
+          (ArrowType.Timestamp) dataset.getSchema().findField("created_time").getType();
+      Assertions.assertEquals("Asia/Shanghai", timestampType.getTimezone());
+    }
+  }
+
   /**
    * Pins a read version in UpdateColumnsBackfillBatchWrite's constructor, then advances the table
    * with an overwrite before the update driver commit. The stale commit must fail (OCC).

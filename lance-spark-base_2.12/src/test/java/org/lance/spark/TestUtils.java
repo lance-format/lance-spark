@@ -18,11 +18,25 @@ import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.read.LanceSplit;
 import org.lance.spark.utils.Optional;
 
+import org.apache.arrow.c.ArrowArrayStream;
+import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.TimeStampMicroTZVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.ipc.ArrowStreamReader;
+import org.apache.arrow.vector.ipc.ArrowStreamWriter;
+import org.apache.arrow.vector.types.TimeUnit;
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.net.URL;
 import java.util.Arrays;
 import java.util.List;
@@ -107,6 +121,46 @@ public class TestUtils {
       return sb.append(datasetUri).append(".lance").toString();
     }
     return sb.append(datasetUri).toString();
+  }
+
+  public static Schema nonUtcTimestampSchema(String timezone) {
+    return new Schema(
+        Arrays.asList(
+            new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
+            new Field(
+                "created_time",
+                FieldType.nullable(new ArrowType.Timestamp(TimeUnit.MICROSECOND, timezone)),
+                null)));
+  }
+
+  public static void writeNonUtcTimestampDataset(String datasetUri, String timezone)
+      throws Exception {
+    Schema arrowSchema = nonUtcTimestampSchema(timezone);
+    BufferAllocator allocator = LanceRuntime.allocator();
+    try (VectorSchemaRoot root = VectorSchemaRoot.create(arrowSchema, allocator)) {
+      root.allocateNew();
+      IntVector idVec = (IntVector) root.getVector("id");
+      TimeStampMicroTZVector timestampVec = (TimeStampMicroTZVector) root.getVector("created_time");
+      for (int i = 0; i < 5; i++) {
+        idVec.setSafe(i, i);
+        timestampVec.setSafe(i, 1_700_000_000_000_000L + i);
+      }
+      root.setRowCount(5);
+
+      ByteArrayOutputStream baos = new ByteArrayOutputStream();
+      try (ArrowStreamWriter writer = new ArrowStreamWriter(root, null, baos)) {
+        writer.start();
+        writer.writeBatch();
+        writer.end();
+      }
+
+      try (ArrowStreamReader reader =
+              new ArrowStreamReader(new ByteArrayInputStream(baos.toByteArray()), allocator);
+          ArrowArrayStream arrowStream = ArrowArrayStream.allocateNew(allocator)) {
+        Data.exportArrayStream(allocator, reader, arrowStream);
+        org.lance.Dataset.write().stream(arrowStream).uri(datasetUri).execute().close();
+      }
+    }
   }
 
   /**

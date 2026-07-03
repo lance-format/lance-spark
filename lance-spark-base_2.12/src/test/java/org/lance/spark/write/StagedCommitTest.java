@@ -24,6 +24,8 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.io.TempDir;
@@ -75,6 +77,29 @@ public class StagedCommitTest {
     commit.commit();
     try (Dataset reopened = Dataset.open(datasetUri, LanceRuntime.allocator())) {
       assertEquals(0, reopened.countRows());
+    }
+  }
+
+  @Test
+  public void testCommitExistingTablePreservesTimestampTimezone(TestInfo testInfo)
+      throws Exception {
+    String datasetUri =
+        TestUtils.getDatasetUri(tempDir.toString(), testInfo.getTestMethod().get().getName());
+    TestUtils.writeNonUtcTimestampDataset(datasetUri, "Asia/Shanghai");
+    StructType sparkSchema =
+        LanceArrowUtils.fromArrowSchema(TestUtils.nonUtcTimestampSchema("Asia/Shanghai"));
+    Schema stagedSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", true);
+
+    Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator());
+    StagedCommit commit =
+        StagedCommit.forExistingTable(
+            dataset, stagedSchema, StagedCommitOptions.pathBased(Collections.emptyMap(), false));
+    commit.commit();
+
+    try (Dataset reopened = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+      ArrowType.Timestamp timestampType =
+          (ArrowType.Timestamp) reopened.getSchema().findField("created_time").getType();
+      assertEquals("Asia/Shanghai", timestampType.getTimezone());
     }
   }
 

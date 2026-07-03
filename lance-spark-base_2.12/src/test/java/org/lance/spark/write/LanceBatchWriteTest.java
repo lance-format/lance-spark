@@ -134,6 +134,36 @@ public class LanceBatchWriteTest {
     }
   }
 
+  @Test
+  public void testOverwritePreservesExistingTimestampTimezone(TestInfo testInfo) throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    TestUtils.writeNonUtcTimestampDataset(datasetUri, "Asia/Shanghai");
+
+    LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
+    Schema schema = TestUtils.nonUtcTimestampSchema("Asia/Shanghai");
+    StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
+    LanceBatchWrite overwriteWrite =
+        new LanceBatchWrite(sparkSchema, writeOptions, true, null, null, null, null, false, null);
+
+    DataWriterFactory factory = overwriteWrite.createBatchWriterFactory(() -> 1);
+    WriterCommitMessage message;
+    try (DataWriter<InternalRow> writer = factory.createWriter(0, 0)) {
+      for (int i = 0; i < 5; i++) {
+        writer.write(new GenericInternalRow(new Object[] {i, 1_900_000_000_000_000L + i}));
+      }
+      message = writer.commit();
+    }
+    overwriteWrite.commit(new WriterCommitMessage[] {message});
+
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
+        Dataset dataset = Dataset.open(datasetUri, allocator)) {
+      ArrowType.Timestamp timestampType =
+          (ArrowType.Timestamp) dataset.getSchema().findField("created_time").getType();
+      assertEquals("Asia/Shanghai", timestampType.getTimezone());
+    }
+  }
+
   private static WriterCommitMessage writeRows(
       LanceBatchWrite batchWrite, StructType sparkSchema, int numRows, int startValue)
       throws Exception {
