@@ -31,10 +31,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.lang.reflect.Method;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
 public class SparkPositionDeltaWriteTest {
@@ -47,7 +49,7 @@ public class SparkPositionDeltaWriteTest {
               new Field("value", FieldType.nullable(new ArrowType.Int(32, true)), null)));
 
   @Test
-  public void positionDeltaWriteDoesNotUseCommitCoordinator(TestInfo testInfo) {
+  public void positionDeltaWriteDoesNotUseCommitCoordinator(TestInfo testInfo) throws Exception {
     String datasetName = testInfo.getTestMethod().get().getName();
     String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
 
@@ -68,6 +70,11 @@ public class SparkPositionDeltaWriteTest {
               Collections.emptyMap());
 
       DeltaBatchWrite batchWrite = write.toBatch();
+      Method useCommitCoordinator = batchWrite.getClass().getMethod("useCommitCoordinator");
+      assertEquals(
+          batchWrite.getClass(),
+          useCommitCoordinator.getDeclaringClass(),
+          "Position delta writes must explicitly override Spark's commit coordinator default");
       assertFalse(batchWrite.useCommitCoordinator());
     }
   }

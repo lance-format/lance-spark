@@ -164,6 +164,9 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
     @Override
     public boolean useCommitCoordinator() {
+      // Lance commits are atomic at the dataset level via CommitBuilder/Transaction on the
+      // driver; Spark's OutputCommitCoordinator is unnecessary and can break under speculation or
+      // retries.
       return false;
     }
 
