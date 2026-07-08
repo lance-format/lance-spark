@@ -29,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Tests for {@link LanceSparkWriteOptions}. */
@@ -350,5 +351,54 @@ public class LanceSparkWriteOptionsTest {
     assertNull(
         copy.getNamespace(),
         "namespace is transient: the non-null stub set above must not survive serialization");
+  }
+
+  @Test
+  public void streamingDedupeLookbackDefaultsTo100() {
+    LanceSparkWriteOptions opts = LanceSparkWriteOptions.from(TEMP_URL);
+    assertEquals(
+        LanceSparkWriteOptions.DEFAULT_STREAMING_DEDUPE_LOOKBACK_VERSIONS,
+        opts.getStreamingDedupeLookbackVersions());
+  }
+
+  @Test
+  public void streamingOptionsRoundTripThroughOptionMap() {
+    Map<String, String> options = new HashMap<>();
+    options.put(LanceSparkWriteOptions.CONFIG_STREAMING_QUERY_ID, "q-42");
+    options.put(LanceSparkWriteOptions.CONFIG_STREAMING_DEDUPE_LOOKBACK_VERSIONS, "250");
+    LanceSparkWriteOptions opts =
+        LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(options).build();
+    assertEquals("q-42", opts.getStreamingQueryId());
+    assertEquals(250, opts.getStreamingDedupeLookbackVersions());
+  }
+
+  @Test
+  public void streamingDedupeLookbackRejectsOutOfRangeValues() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> LanceSparkWriteOptions.builder().streamingDedupeLookbackVersions(0));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> LanceSparkWriteOptions.builder().streamingDedupeLookbackVersions(-1));
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            LanceSparkWriteOptions.builder()
+                .streamingDedupeLookbackVersions(
+                    LanceSparkWriteOptions.MAX_STREAMING_DEDUPE_LOOKBACK_VERSIONS + 1));
+  }
+
+  @Test
+  public void streamingDedupeLookbackNonNumericGivesActionableError() {
+    Map<String, String> options = new HashMap<>();
+    options.put(LanceSparkWriteOptions.CONFIG_STREAMING_DEDUPE_LOOKBACK_VERSIONS, "not-a-number");
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(options).build());
+    assertTrue(
+        ex.getMessage().contains(LanceSparkWriteOptions.CONFIG_STREAMING_DEDUPE_LOOKBACK_VERSIONS),
+        "error should name the option key, got: " + ex.getMessage());
   }
 }

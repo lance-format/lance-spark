@@ -3,5 +3,6 @@ nav:
   - Install: install.md
   - Config: config.md
   - Performance: performance.md
+  - Streaming: streaming.md
   - Operations: operations
   - Vendors: vendors

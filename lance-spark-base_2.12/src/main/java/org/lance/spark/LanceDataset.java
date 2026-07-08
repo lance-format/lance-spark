@@ -58,13 +58,17 @@ public class LanceDataset
 
   private static final Set<TableCapability> CAPABILITIES =
       ImmutableSet.of(
-          TableCapability.BATCH_READ, TableCapability.BATCH_WRITE, TableCapability.TRUNCATE);
+          TableCapability.BATCH_READ,
+          TableCapability.BATCH_WRITE,
+          TableCapability.STREAMING_WRITE,
+          TableCapability.TRUNCATE);
 
   // Blob v2 is read as descriptor structs, but written as BINARY from sparkSchema.
   private static final Set<TableCapability> CAPABILITIES_WITH_BLOB_V2 =
       ImmutableSet.of(
           TableCapability.BATCH_READ,
           TableCapability.BATCH_WRITE,
+          TableCapability.STREAMING_WRITE,
           TableCapability.TRUNCATE,
           TableCapability.ACCEPT_ANY_SCHEMA);
 

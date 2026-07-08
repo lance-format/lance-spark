@@ -13,7 +13,10 @@ Test organization follows the Lance documentation structure:
 """
 
 import os
+import shutil
+import tempfile
 import time
+import uuid
 import pytest
 from packaging.version import Version
 from pyspark.sql.types import StructType, StructField, IntegerType, StringType, DoubleType, BinaryType
@@ -3110,6 +3113,95 @@ class TestStableRowIds:
         # Verify data correctness
         values = {row.id: row.value for row in after}
         assert values == {1: 100, 2: 201, 3: 301, 4: 401, 5: 501}
+
+
+class TestStreamingWrite:
+    """Structured Streaming write sink, end-to-end through the bundled jar and
+    each storage backend.
+
+    The streaming-specific logic (dedupe, empty epochs, overwrite, version
+    strip, lookback window) is unit-covered by ``BaseStreamingWriteTest``, which
+    runs against a local ``dir`` catalog. These two cases pin the real
+    ``writeStream`` -> object-store path that the JUnit suite cannot exercise:
+    the bundled jar in a live Spark cluster, the PySpark ``writeStream`` API,
+    and writes against a credential-bearing backend (MinIO / Azurite / Glue).
+    """
+
+    _SCHEMA = StructType([
+        StructField("id", IntegerType(), False),
+        StructField("name", StringType(), True),
+    ])
+
+    def _write_source_batch(self, spark, batch_dir, ids):
+        """Write one source micro-batch as a single Parquet file."""
+        rows = [(i, f"row-{i}") for i in ids]
+        (
+            spark.createDataFrame(rows, self._SCHEMA)
+            .coalesce(1)
+            .write.parquet(batch_dir)
+        )
+
+    def _run_stream(self, spark, src_dir, checkpoint, table, query_id):
+        """Drain all currently-available source files into ``table`` once."""
+        query = (
+            spark.readStream
+            .schema(self._SCHEMA)
+            # Spark's Parquet writer creates per-batch sub-directories — let the
+            # streaming file source descend into them.
+            .option("recursiveFileLookup", "true")
+            .parquet(src_dir)
+            .writeStream
+            .format("lance")
+            .option("streamingQueryId", query_id)
+            .option("checkpointLocation", checkpoint)
+            .trigger(availableNow=True)
+            .toTable(table)
+        )
+        query.processAllAvailable()
+        query.stop()
+
+    def test_streaming_write_append_roundtrip(self, spark, test_table):
+        """Two micro-batches on one checkpoint accumulate in the target table."""
+        spark.sql(f"CREATE TABLE {test_table} (id INT NOT NULL, name STRING)")
+        tmp = tempfile.mkdtemp(prefix="lance-stream-")
+        try:
+            src = os.path.join(tmp, "src")
+            ckpt = os.path.join(tmp, "ckpt")
+            query_id = f"qid-{uuid.uuid4().hex}"
+
+            self._write_source_batch(spark, os.path.join(src, "b1"), [1, 2, 3])
+            self._run_stream(spark, src, ckpt, test_table, query_id)
+            assert spark.table(test_table).count() == 3
+
+            # A second batch on the SAME checkpoint is a new epoch and appends.
+            self._write_source_batch(spark, os.path.join(src, "b2"), [4, 5])
+            self._run_stream(spark, src, ckpt, test_table, query_id)
+            assert spark.table(test_table).count() == 5
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_streaming_write_dedupe_on_replay(self, spark, test_table):
+        """Re-running with the same streamingQueryId but a fresh checkpoint
+        re-delivers epoch 0; the dedupe scan finds the prior (queryId, epochId)
+        commit and skips it, so rows are not double-inserted."""
+        spark.sql(f"CREATE TABLE {test_table} (id INT NOT NULL, name STRING)")
+        tmp = tempfile.mkdtemp(prefix="lance-stream-")
+        try:
+            src = os.path.join(tmp, "src")
+            query_id = f"qid-{uuid.uuid4().hex}"
+
+            # A single source file => exactly one micro-batch (epoch 0) per run.
+            self._write_source_batch(spark, os.path.join(src, "b1"), [10, 20, 30])
+
+            self._run_stream(spark, src, os.path.join(tmp, "ckptA"), test_table, query_id)
+            assert spark.table(test_table).count() == 3
+
+            # Simulate a restart that lost its checkpoint but kept the queryId:
+            # epoch 0 is re-delivered against the same data and must dedupe.
+            self._run_stream(spark, src, os.path.join(tmp, "ckptB"), test_table, query_id)
+            assert spark.table(test_table).count() == 3
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

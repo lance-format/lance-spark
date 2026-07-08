@@ -62,6 +62,19 @@ public class LanceSparkWriteOptions implements Serializable {
   public static final String CONFIG_MAX_BATCH_BYTES = "max_batch_bytes";
   public static final String CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD = "blob_pack_file_size_threshold";
 
+  // Structured Streaming options (see docs/src/streaming.md).
+  public static final String CONFIG_STREAMING_QUERY_ID = "streamingQueryId";
+  public static final String CONFIG_STREAMING_DEDUPE_LOOKBACK_VERSIONS =
+      "lance.streaming.dedupe.lookback.versions";
+
+  // Transaction-property keys stamped into the Lance commit. The streaming dedupe scan looks for
+  // these keys to detect a replay of an already-committed epoch.
+  public static final String STREAMING_QUERY_ID_PROP = "lance.streaming.queryId";
+  public static final String STREAMING_EPOCH_ID_PROP = "lance.streaming.epochId";
+
+  public static final int DEFAULT_STREAMING_DEDUPE_LOOKBACK_VERSIONS = 100;
+  public static final int MAX_STREAMING_DEDUPE_LOOKBACK_VERSIONS = 10_000;
+
   private static final WriteMode DEFAULT_WRITE_MODE = WriteMode.APPEND;
   private static final boolean DEFAULT_USE_QUEUED_WRITE_BUFFER = false;
   private static final int DEFAULT_QUEUE_DEPTH = 8;
@@ -99,6 +112,18 @@ public class LanceSparkWriteOptions implements Serializable {
   /** Use this version to open the dataset and apply write if set. */
   private final Long version;
 
+  /**
+   * Idempotency key for Structured Streaming. Required for the streaming write path; null on the
+   * batch path. Persisted as {@link #STREAMING_QUERY_ID_PROP} in each epoch's Lance transaction.
+   */
+  private final String streamingQueryId;
+
+  /**
+   * Number of versions to scan backwards when looking for a previously-committed (queryId, epochId)
+   * pair during replay. Bounded above by {@link #MAX_STREAMING_DEDUPE_LOOKBACK_VERSIONS}.
+   */
+  private final int streamingDedupeLookbackVersions;
+
   private LanceSparkWriteOptions(Builder builder) {
     this.datasetUri = builder.datasetUri;
     this.writeMode = builder.writeMode;
@@ -117,6 +142,8 @@ public class LanceSparkWriteOptions implements Serializable {
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
     this.version = builder.version;
+    this.streamingQueryId = builder.streamingQueryId;
+    this.streamingDedupeLookbackVersions = builder.streamingDedupeLookbackVersions;
   }
 
   /** Creates a new builder for LanceSparkWriteOptions. */
@@ -217,6 +244,15 @@ public class LanceSparkWriteOptions implements Serializable {
     return version;
   }
 
+  /** Nullable: non-null only on the streaming write path. */
+  public String getStreamingQueryId() {
+    return streamingQueryId;
+  }
+
+  public int getStreamingDedupeLookbackVersions() {
+    return streamingDedupeLookbackVersions;
+  }
+
   /** Returns a builder pre-populated with all fields from this instance. */
   public Builder toBuilder() {
     return builder()
@@ -236,7 +272,9 @@ public class LanceSparkWriteOptions implements Serializable {
         .storageOptions(storageOptions)
         .namespace(namespace)
         .tableId(tableId)
-        .version(version);
+        .version(version)
+        .streamingQueryId(streamingQueryId)
+        .streamingDedupeLookbackVersions(streamingDedupeLookbackVersions);
   }
 
   /** Returns a copy of these options with version set to the given version. */
@@ -328,7 +366,9 @@ public class LanceSparkWriteOptions implements Serializable {
         && Objects.equals(blobPackFileSizeThreshold, that.blobPackFileSizeThreshold)
         && Objects.equals(storageOptions, that.storageOptions)
         && Objects.equals(tableId, that.tableId)
-        && Objects.equals(version, that.version);
+        && Objects.equals(version, that.version)
+        && Objects.equals(streamingQueryId, that.streamingQueryId)
+        && streamingDedupeLookbackVersions == that.streamingDedupeLookbackVersions;
   }
 
   @Override
@@ -349,7 +389,9 @@ public class LanceSparkWriteOptions implements Serializable {
         blobPackFileSizeThreshold,
         storageOptions,
         tableId,
-        version);
+        version,
+        streamingQueryId,
+        streamingDedupeLookbackVersions);
   }
 
   /** Builder for creating LanceSparkWriteOptions instances. */
@@ -371,6 +413,8 @@ public class LanceSparkWriteOptions implements Serializable {
     private LanceNamespace namespace;
     private List<String> tableId;
     private Long version;
+    private String streamingQueryId;
+    private int streamingDedupeLookbackVersions = DEFAULT_STREAMING_DEDUPE_LOOKBACK_VERSIONS;
 
     private Builder() {}
 
@@ -464,6 +508,27 @@ public class LanceSparkWriteOptions implements Serializable {
       return this;
     }
 
+    public Builder streamingQueryId(String streamingQueryId) {
+      this.streamingQueryId = streamingQueryId;
+      return this;
+    }
+
+    public Builder streamingDedupeLookbackVersions(int versions) {
+      // Note: avoid Preconditions.checkArgument with the (boolean, String, int, int) overload —
+      // that one was added in Guava 20.0 and Spark 3.x runtimes still ship Guava 14.0.1, which
+      // causes NoSuchMethodError at runtime even though compile + unit tests resolve a newer
+      // Guava from the Maven classpath.
+      if (versions <= 0 || versions > MAX_STREAMING_DEDUPE_LOOKBACK_VERSIONS) {
+        throw new IllegalArgumentException(
+            "streamingDedupeLookbackVersions must be in (0, "
+                + MAX_STREAMING_DEDUPE_LOOKBACK_VERSIONS
+                + "], got "
+                + versions);
+      }
+      this.streamingDedupeLookbackVersions = versions;
+      return this;
+    }
+
     /**
      * Parses options from a map, extracting write-specific settings.
      *
@@ -514,6 +579,25 @@ public class LanceSparkWriteOptions implements Serializable {
         long parsed = Long.parseLong(options.get(CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD));
         Preconditions.checkArgument(parsed > 0, "blob_pack_file_size_threshold must be positive");
         this.blobPackFileSizeThreshold = parsed;
+      }
+      if (options.containsKey(CONFIG_STREAMING_QUERY_ID)) {
+        this.streamingQueryId = options.get(CONFIG_STREAMING_QUERY_ID);
+      }
+      if (options.containsKey(CONFIG_STREAMING_DEDUPE_LOOKBACK_VERSIONS)) {
+        String raw = options.get(CONFIG_STREAMING_DEDUPE_LOOKBACK_VERSIONS);
+        int parsed;
+        try {
+          parsed = Integer.parseInt(raw);
+        } catch (NumberFormatException e) {
+          throw new IllegalArgumentException(
+              CONFIG_STREAMING_DEDUPE_LOOKBACK_VERSIONS
+                  + " must be an integer in (0, "
+                  + MAX_STREAMING_DEDUPE_LOOKBACK_VERSIONS
+                  + "], got: "
+                  + raw,
+              e);
+        }
+        streamingDedupeLookbackVersions(parsed);
       }
       return this;
     }

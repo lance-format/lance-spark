@@ -104,10 +104,71 @@ public class SparkWriteTest {
   }
 
   @Test
-  public void testToStreamingThrowsUnsupportedOperationException(TestInfo testInfo) {
+  public void testToStreamingRequiresStreamingQueryId(TestInfo testInfo) {
     String datasetUri = createDataset(testInfo.getTestMethod().get().getName());
     Write write = createBuilder(datasetUri).build();
-    assertThrows(UnsupportedOperationException.class, write::toStreaming);
+    // Without the streamingQueryId option the constructor fails fast — exercises the option
+    // validation in LanceStreamingWrite#requireStreamingQueryId.
+    IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, write::toStreaming);
+    assertTrue(
+        ex.getMessage().contains(LanceSparkWriteOptions.CONFIG_STREAMING_QUERY_ID),
+        "Expected error message to mention streamingQueryId, got: " + ex.getMessage());
+  }
+
+  @Test
+  public void testToStreamingReturnsLanceStreamingWrite(TestInfo testInfo) {
+    String datasetUri = createDataset(testInfo.getTestMethod().get().getName());
+    LanceSparkWriteOptions writeOptions =
+        LanceSparkWriteOptions.builder()
+            .datasetUri(datasetUri)
+            .streamingQueryId("test-query-id")
+            .build();
+    SparkWrite.SparkWriteBuilder builder =
+        new SparkWrite.SparkWriteBuilder(
+            SPARK_SCHEMA,
+            writeOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            Arrays.asList("default", "test_table"),
+            false,
+            null,
+            Collections.emptyMap());
+    Write write = builder.build();
+    assertInstanceOf(LanceStreamingWrite.class, write.toStreaming());
+  }
+
+  @Test
+  public void testToStreamingRejectsStagedCommit(TestInfo testInfo) {
+    String datasetUri = createDataset(testInfo.getTestMethod().get().getName());
+    LanceSparkWriteOptions writeOptions =
+        LanceSparkWriteOptions.builder()
+            .datasetUri(datasetUri)
+            .streamingQueryId("test-query-id")
+            .build();
+    SparkWrite.SparkWriteBuilder builder =
+        new SparkWrite.SparkWriteBuilder(
+            SPARK_SCHEMA,
+            writeOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            Arrays.asList("default", "test_table"),
+            false,
+            null,
+            Collections.emptyMap());
+    // Simulate a CTAS / REPLACE TABLE flow that staged the commit before toStreaming.
+    builder.setStagedCommit(
+        StagedCommit.forNewTable(
+            ARROW_SCHEMA,
+            datasetUri,
+            StagedCommitOptions.pathBased(Collections.emptyMap(), false)));
+    Write write = builder.build();
+    UnsupportedOperationException ex =
+        assertThrows(UnsupportedOperationException.class, write::toStreaming);
+    assertTrue(
+        ex.getMessage().contains("staged"),
+        "expected error to mention staged commits, got: " + ex.getMessage());
   }
 
   @Test

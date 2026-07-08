@@ -32,6 +32,7 @@ import org.apache.spark.sql.connector.write.SupportsTruncate;
 import org.apache.spark.sql.connector.write.Write;
 import org.apache.spark.sql.connector.write.WriteBuilder;
 import org.apache.spark.sql.connector.write.streaming.StreamingWrite;
+import org.apache.spark.sql.internal.connector.SupportsStreamingUpdateAsAppend;
 import org.apache.spark.sql.types.StructType;
 
 import java.util.Collections;
@@ -166,11 +167,35 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
 
   @Override
   public StreamingWrite toStreaming() {
-    throw new UnsupportedOperationException();
+    if (stagedCommit != null) {
+      throw new UnsupportedOperationException(
+          "Structured Streaming writes are incompatible with staged commits (CTAS / REPLACE "
+              + "TABLE). Create the target Lance table first, then start the streaming query.");
+    }
+    // Streaming always opens the dataset at the current latest version on every epoch (see
+    // LanceStreamingWrite's constructor note). Strip any pinned `version` so a stale snapshot
+    // carried in via a per-write option or a catalog default cannot break the dedupe scan window
+    // or the per-epoch readVersion.
+    LanceSparkWriteOptions streamingOptions =
+        writeOptions.getVersion() == null
+            ? writeOptions
+            : writeOptions.toBuilder().version(null).build();
+    return new LanceStreamingWrite(
+        schema,
+        streamingOptions,
+        overwrite,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        tableId,
+        managedVersioning,
+        shardingSpec(),
+        blobSourceContexts);
   }
 
   /** Spark write builder. */
-  public static class SparkWriteBuilder implements SupportsTruncate, WriteBuilder {
+  public static class SparkWriteBuilder
+      implements SupportsTruncate, SupportsStreamingUpdateAsAppend, WriteBuilder {
     private final LanceSparkWriteOptions writeOptions;
     private final StructType schema;
     private boolean overwrite = false;
