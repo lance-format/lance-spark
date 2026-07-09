@@ -624,7 +624,12 @@ public abstract class BaseLanceNamespaceSparkCatalog
     String fileFormatVersion = spec.fileFormatVersion();
 
     // Create dataset using namespace - WriteDatasetBuilder handles declareTable internally
-    // and properly leverages namespace client for credential vending
+    // and properly leverages namespace client for credential vending.
+    // TODO: WriteDatasetBuilder (lance-core) builds the internal DeclareTableRequest without table
+    // properties, so user properties (e.g. governance hints like access.group) are dropped on this
+    // no-location create path. The LOCATION/register/stage paths forward them via
+    // setDeclareTableProperties(...); this path needs WriteDatasetBuilder to accept and forward
+    // table properties to its declareTable call before it can do the same.
     String location;
     WriteDatasetBuilder writeBuilder =
         Dataset.write()
@@ -711,6 +716,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     DeclareTableRequest declareRequest = new DeclareTableRequest();
     tableIdList.forEach(declareRequest::addIdItem);
     declareRequest.setLocation(userLocation);
+    setDeclareTableProperties(declareRequest, properties);
     DeclareTableResponse declareResponse = namespace.declareTable(declareRequest);
     String location = declareResponse.getLocation();
     Map<String, String> initialStorageOptions = declareResponse.getStorageOptions();
@@ -1089,6 +1095,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     if (userLocation != null && !userLocation.trim().isEmpty()) {
       declareRequest.setLocation(userLocation);
     }
+    setDeclareTableProperties(declareRequest, properties);
     DeclareTableResponse declareResponse = namespace.declareTable(declareRequest);
     String location = declareResponse.getLocation();
     Map<String, String> initialStorageOptions = declareResponse.getStorageOptions();
@@ -1295,6 +1302,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       if (userLocation != null && !userLocation.trim().isEmpty()) {
         declareRequest.setLocation(userLocation);
       }
+      setDeclareTableProperties(declareRequest, properties);
       DeclareTableResponse declareResponse = namespace.declareTable(declareRequest);
       location = declareResponse.getLocation();
       initialStorageOptions = declareResponse.getStorageOptions();
@@ -1562,6 +1570,20 @@ public abstract class BaseLanceNamespaceSparkCatalog
       }
     }
     return userProperties.isEmpty() ? Collections.emptyMap() : userProperties;
+  }
+
+  /**
+   * Forwards the user-supplied table properties (minus Spark-reserved keys) onto a {@link
+   * DeclareTableRequest} so the namespace server sees them at declare time. Without this, table
+   * properties such as governance hints are dropped and never reach the catalog's declareTable
+   * handler.
+   */
+  private static void setDeclareTableProperties(
+      DeclareTableRequest declareRequest, Map<String, String> properties) {
+    Map<String, String> userProperties = copyUserTableProperties(properties);
+    if (!userProperties.isEmpty()) {
+      declareRequest.setProperties(userProperties);
+    }
   }
 
   private static Map<String, String> tablePropertiesToPersistOnCreate(
