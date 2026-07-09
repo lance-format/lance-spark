@@ -624,12 +624,13 @@ public abstract class BaseLanceNamespaceSparkCatalog
     String fileFormatVersion = spec.fileFormatVersion();
 
     // Create dataset using namespace - WriteDatasetBuilder handles declareTable internally
-    // and properly leverages namespace client for credential vending.
-    // TODO: WriteDatasetBuilder (lance-core) builds the internal DeclareTableRequest without table
-    // properties, so user properties (e.g. governance hints like access.group) are dropped on this
-    // no-location create path. The LOCATION/register/stage paths forward them via
-    // setDeclareTableProperties(...); this path needs WriteDatasetBuilder to accept and forward
-    // table properties to its declareTable call before it can do the same.
+    // and properly leverages namespace client for credential vending. Forward the user table
+    // properties so governance hints (e.g. access.group) reach the namespace declareTable call on
+    // this no-location create path, mirroring the LOCATION/register/stage paths.
+    //
+    // TODO: WriteDatasetBuilder.tableProperties(...) is added by lance-core
+    //   (https://github.com/lance-format/lance/pull/7711). This call does not compile until the
+    //   lance dependency (lance.version in pom.xml) is bumped to a release that includes it.
     String location;
     WriteDatasetBuilder writeBuilder =
         Dataset.write()
@@ -639,6 +640,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
             .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true))
             .mode(WriteParams.WriteMode.CREATE)
             .enableStableRowIds(catalogConfig.isEnableStableRowIds(properties))
+            .tableProperties(copyUserTableProperties(properties))
             .storageOptions(catalogConfig.getStorageOptions());
     if (fileFormatVersion != null) {
       writeBuilder.dataStorageVersion(fileFormatVersion);
