@@ -628,9 +628,10 @@ public abstract class BaseLanceNamespaceSparkCatalog
     // properties so governance hints (e.g. access.group) reach the namespace declareTable call on
     // this no-location create path, mirroring the LOCATION/register/stage paths.
     //
-    // TODO: WriteDatasetBuilder.tableProperties(...) is added by lance-core
-    //   (https://github.com/lance-format/lance/pull/7711). This call does not compile until the
-    //   lance dependency (lance.version in pom.xml) is bumped to a release that includes it.
+    // TODO: WriteDatasetBuilder.properties(...) is added by lance-core
+    //   (https://github.com/lance-format/lance/pull/7711, renamed in #7715). This call does not
+    //   compile until the lance dependency (lance.version in pom.xml) is bumped to a release that
+    //   includes it.
     String location;
     WriteDatasetBuilder writeBuilder =
         Dataset.write()
@@ -640,7 +641,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
             .schema(LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true))
             .mode(WriteParams.WriteMode.CREATE)
             .enableStableRowIds(catalogConfig.isEnableStableRowIds(properties))
-            .tableProperties(copyUserTableProperties(properties))
+            .properties(copyUserTableProperties(properties))
             .storageOptions(catalogConfig.getStorageOptions());
     if (fileFormatVersion != null) {
       writeBuilder.dataStorageVersion(fileFormatVersion);
