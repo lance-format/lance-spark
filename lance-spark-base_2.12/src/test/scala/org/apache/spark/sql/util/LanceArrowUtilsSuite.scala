@@ -29,7 +29,7 @@ import org.apache.arrow.vector.types.pojo.ArrowType
 import org.apache.spark.SparkUnsupportedOperationException
 import org.apache.spark.sql.types._
 import org.lance.spark.LanceConstant
-import org.lance.spark.utils.{FixedSizeBinaryUtils, Float16Utils, LargeVarCharUtils, VectorUtils}
+import org.lance.spark.utils.{FixedSizeBinaryUtils, Float16Utils, LargeVarCharUtils, ListChildUtils, VectorUtils}
 import org.scalatest.funsuite.AnyFunSuite
 
 import java.time.ZoneId
@@ -495,6 +495,35 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
     assert(
       innermost.getType === new ArrowType.Date(DateUnit.MILLISECOND),
       s"Innermost element should remain Date(MILLISECOND), got ${innermost.getType}")
+  }
+
+  test("list child name is preserved in Spark metadata on read") {
+    val arrow = new Schema(java.util.Arrays.asList(listField(
+      "tags",
+      primitiveField("legacy_element", ArrowType.Utf8.INSTANCE))))
+    val sparkSchema = LanceArrowUtils.fromArrowSchema(arrow)
+    assert(sparkSchema("tags").metadata.contains(ListChildUtils.LANCE_LIST_CHILD_NAME_METADATA_KEY))
+    assert(
+      sparkSchema("tags").metadata.getString(ListChildUtils.LANCE_LIST_CHILD_NAME_METADATA_KEY) ===
+        "legacy_element")
+  }
+
+  test("Spark ArrayType writes list child name as item by default") {
+    val sparkSchema = new StructType().add("tags", ArrayType(StringType, containsNull = true))
+    val arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false)
+    assert(
+      arrowSchema.findField("tags").getChildren.get(0).getName ===
+        ListChildUtils.LIST_CHILD_NAME_DEFAULT)
+  }
+
+  test("list child name stored in metadata is used on writeback") {
+    val metadata = new MetadataBuilder()
+      .putString(ListChildUtils.LANCE_LIST_CHILD_NAME_METADATA_KEY, "legacy_element")
+      .build()
+    val sparkSchema = new StructType()
+      .add("tags", ArrayType(StringType, containsNull = true), nullable = true, metadata)
+    val arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false)
+    assert(arrowSchema.findField("tags").getChildren.get(0).getName === "legacy_element")
   }
 
   test("FixedSizeList(Float16) nested inside an Array preserves size + float16 markers") {

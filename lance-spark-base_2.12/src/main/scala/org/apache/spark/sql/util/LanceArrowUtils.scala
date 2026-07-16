@@ -30,7 +30,7 @@ import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.apache.spark.{SparkException, SparkUnsupportedOperationException}
 import org.apache.spark.sql.types._
 import org.lance.spark.LanceConstant
-import org.lance.spark.utils.{BlobUtils, DateMilliUtils, FixedSizeBinaryUtils, Float16Utils, LargeVarCharUtils, VectorUtils}
+import org.lance.spark.utils.{BlobUtils, DateMilliUtils, FixedSizeBinaryUtils, Float16Utils, LargeVarCharUtils, ListChildUtils, VectorUtils}
 
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
@@ -70,7 +70,8 @@ object LanceArrowUtils {
   private val LANCE_INTERNAL_METADATA_KEYS = Set(
     LANCE_ELEMENT_METADATA_KEY,
     LANCE_MAP_KEY_METADATA_KEY,
-    LANCE_MAP_VALUE_METADATA_KEY)
+    LANCE_MAP_VALUE_METADATA_KEY,
+    ListChildUtils.LANCE_LIST_CHILD_NAME_METADATA_KEY)
 
   def fromArrowField(field: Field): DataType = {
     val baseType = convertArrowFieldType(field)
@@ -257,12 +258,16 @@ object LanceArrowUtils {
     field.getType match {
       case _: ArrowType.FixedSizeList | _: ArrowType.List =>
         val children = field.getChildren
-        if (!children.isEmpty && !Float16Utils.isFloat16ArrowField(field)) {
-          // For Float16 vectors, the child's HALF type is encoded in `arrow.float16` on the
-          // parent, so there is no extra child-side metadata worth embedding.
-          val childMeta = buildFieldMetadata(children.get(0))
-          if (hasContent(childMeta)) {
-            builder.putString(LANCE_ELEMENT_METADATA_KEY, childMeta.json)
+        if (!children.isEmpty) {
+          val childField = children.get(0)
+          builder.putString(ListChildUtils.LANCE_LIST_CHILD_NAME_METADATA_KEY, childField.getName)
+          if (!Float16Utils.isFloat16ArrowField(field)) {
+            // For Float16 vectors, the child's HALF type is encoded in `arrow.float16` on the
+            // parent, so there is no extra child-side metadata worth embedding.
+            val childMeta = buildFieldMetadata(childField)
+            if (hasContent(childMeta)) {
+              builder.putString(LANCE_ELEMENT_METADATA_KEY, childMeta.json)
+            }
           }
         }
       case _: ArrowType.Map =>
@@ -351,6 +356,7 @@ object LanceArrowUtils {
     dt match {
       case ArrayType(elementType, containsNull) =>
         val elementMetadata = parseEmbeddedMetadata(metadata, LANCE_ELEMENT_METADATA_KEY)
+        val elementName = ListChildUtils.listChildName(metadata)
         if (shouldBeFixedSizeList(metadata, elementType)) {
           val listSize = metadata.getLong(ARROW_FIXED_SIZE_LIST_SIZE_KEY).toInt
           val fieldType =
@@ -364,7 +370,7 @@ object LanceArrowUtils {
                   "Current Arrow version does not support Float2Vector.")
             }
             new Field(
-              "element",
+              elementName,
               new FieldType(
                 containsNull,
                 new ArrowType.FloatingPoint(FloatingPointPrecision.HALF),
@@ -372,7 +378,7 @@ object LanceArrowUtils {
               Seq.empty[Field].asJava)
           } else {
             toArrowField(
-              "element",
+              elementName,
               elementType,
               containsNull,
               timeZoneId,
@@ -390,7 +396,7 @@ object LanceArrowUtils {
             fieldType,
             Seq(
               toArrowField(
-                "element",
+                elementName,
                 elementType,
                 containsNull,
                 timeZoneId,
