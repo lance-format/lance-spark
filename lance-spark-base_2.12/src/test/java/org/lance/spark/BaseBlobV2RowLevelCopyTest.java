@@ -185,11 +185,11 @@ public abstract class BaseBlobV2RowLevelCopyTest extends AbstractBlobV2CopyTest 
                       + fqTgt
                       + " WHERE id = 1")
               .first();
-      assertEquals((short) 0, desc.getShort(0));
-      assertEquals(0L, desc.getLong(1));
-      assertEquals(0L, desc.getLong(2));
-      assertEquals(0L, desc.getLong(3));
-      assertEquals("", desc.getString(4));
+      // A null blob yields a null descriptor struct; before lance 9 a redundant rep/def validity
+      // layer made it decode as a non-null zero-filled struct, silently dropping the null.
+      for (int i = 0; i < 5; i++) {
+        assertTrue(desc.isNullAt(i), "expected null blob descriptor field " + i + " to be null");
+      }
     } finally {
       spark.sql("DROP TABLE IF EXISTS " + fqSrc);
       spark.sql("DROP TABLE IF EXISTS " + fqTgt);
