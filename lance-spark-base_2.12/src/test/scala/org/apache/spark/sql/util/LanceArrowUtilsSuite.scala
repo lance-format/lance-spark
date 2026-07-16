@@ -526,6 +526,55 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
     assert(arrowSchema.findField("tags").getChildren.get(0).getName === "legacy_element")
   }
 
+  test("nested Array<Array<String>> preserves inner list child name from metadata") {
+    val innerMetadata = new MetadataBuilder()
+      .putString(ListChildUtils.LANCE_LIST_CHILD_NAME_METADATA_KEY, "legacy_inner")
+      .build()
+    val outerMetadata = new MetadataBuilder()
+      .putString(
+        LanceArrowUtils.LANCE_ELEMENT_METADATA_KEY,
+        innerMetadata.json)
+      .build()
+    val sparkSchema = new StructType()
+      .add(
+        "nested_tags",
+        ArrayType(ArrayType(StringType, containsNull = true), containsNull = true),
+        nullable = true,
+        outerMetadata)
+
+    val arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false)
+    val outerChild = arrowSchema.findField("nested_tags").getChildren.get(0)
+    val innerChild = outerChild.getChildren.get(0)
+
+    assert(outerChild.getName === ListChildUtils.LIST_CHILD_NAME_DEFAULT)
+    assert(innerChild.getName === "legacy_inner")
+    assert(innerChild.getType === ArrowType.Utf8.INSTANCE)
+  }
+
+  test("nested Array<Array<String>> roundtrips from Arrow schema preserving child names") {
+    val arrow = new Schema(java.util.Arrays.asList(listField(
+      "nested_tags",
+      listField("legacy_inner_list", primitiveField("legacy_inner_element", ArrowType.Utf8.INSTANCE)))))
+
+    val sparkSchema = LanceArrowUtils.fromArrowSchema(arrow)
+    val outerMetadata = sparkSchema("nested_tags").metadata
+    val innerMetadata = org.apache.spark.sql.types.Metadata.fromJson(
+      outerMetadata.getString(LanceArrowUtils.LANCE_ELEMENT_METADATA_KEY))
+    assert(
+      outerMetadata.getString(ListChildUtils.LANCE_LIST_CHILD_NAME_METADATA_KEY) ===
+        "legacy_inner_list")
+    assert(
+      innerMetadata.getString(ListChildUtils.LANCE_LIST_CHILD_NAME_METADATA_KEY) ===
+        "legacy_inner_element")
+
+    val arrowBack = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false)
+    val outerChild = arrowBack.findField("nested_tags").getChildren.get(0)
+    val innerChild = outerChild.getChildren.get(0)
+    assert(outerChild.getName === "legacy_inner_list")
+    assert(innerChild.getName === "legacy_inner_element")
+    assert(innerChild.getType === ArrowType.Utf8.INSTANCE)
+  }
+
   test("FixedSizeList(Float16) nested inside an Array preserves size + float16 markers") {
     val float16Element = primitiveField(
       "element",
