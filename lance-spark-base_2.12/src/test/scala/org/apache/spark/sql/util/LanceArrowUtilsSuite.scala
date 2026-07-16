@@ -508,6 +508,53 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
         "legacy_element")
   }
 
+  test("default list child name is not recorded in Spark metadata") {
+    val arrow = new Schema(java.util.Arrays.asList(listField(
+      "tags",
+      primitiveField(ListChildUtils.LIST_CHILD_NAME_DEFAULT, ArrowType.Utf8.INSTANCE))))
+    val sparkSchema = LanceArrowUtils.fromArrowSchema(arrow)
+    // A default-named child must leave no internal key behind, so the result stays equal to the
+    // equivalent plain Spark schema rather than only equal in dataType.
+    assert(sparkSchema("tags").metadata.json === "{}")
+    assert(sparkSchema === new StructType().add("tags", ArrayType(StringType, containsNull = true)))
+  }
+
+  test("unnamed Arrow list child falls back to the default name") {
+    val arrow = new Schema(java.util.Arrays.asList(listField(
+      "tags",
+      primitiveField(null, ArrowType.Utf8.INSTANCE))))
+    val sparkSchema = LanceArrowUtils.fromArrowSchema(arrow)
+    // Reading `json` is what would surface a null smuggled into the Metadata map.
+    assert(sparkSchema("tags").metadata.json === "{}")
+
+    val arrowBack = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false)
+    assert(
+      arrowBack.findField("tags").getChildren.get(0).getName ===
+        ListChildUtils.LIST_CHILD_NAME_DEFAULT)
+  }
+
+  test("unnamed Arrow list child inside a nested list falls back to the default name") {
+    val arrow = new Schema(java.util.Arrays.asList(listField(
+      "nested_tags",
+      listField("legacy_inner_list", primitiveField(null, ArrowType.Utf8.INSTANCE)))))
+
+    val sparkSchema = LanceArrowUtils.fromArrowSchema(arrow)
+    val outerMetadata = sparkSchema("nested_tags").metadata
+    // The outer list keeps its non-default child name. The unnamed innermost child defaults to
+    // `item`, so the inner list contributes nothing and `_lance.element` is omitted entirely.
+    assert(
+      outerMetadata.getString(ListChildUtils.LANCE_LIST_CHILD_NAME_METADATA_KEY) ===
+        "legacy_inner_list")
+    assert(!outerMetadata.contains(LanceArrowUtils.LANCE_ELEMENT_METADATA_KEY))
+
+    val arrowBack = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false)
+    val outerChild = arrowBack.findField("nested_tags").getChildren.get(0)
+    val innerChild = outerChild.getChildren.get(0)
+    assert(outerChild.getName === "legacy_inner_list")
+    assert(innerChild.getName === ListChildUtils.LIST_CHILD_NAME_DEFAULT)
+    assert(innerChild.getType === ArrowType.Utf8.INSTANCE)
+  }
+
   test("Spark ArrayType writes list child name as item by default") {
     val sparkSchema = new StructType().add("tags", ArrayType(StringType, containsNull = true))
     val arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false)

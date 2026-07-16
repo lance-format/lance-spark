@@ -260,7 +260,16 @@ object LanceArrowUtils {
         val children = field.getChildren
         if (!children.isEmpty) {
           val childField = children.get(0)
-          builder.putString(ListChildUtils.LANCE_LIST_CHILD_NAME_METADATA_KEY, childField.getName)
+          // Arrow permits unnamed List children; a null here would survive into the Metadata map
+          // and only blow up later when it is serialized to JSON.
+          val childName =
+            Option(childField.getName).getOrElse(ListChildUtils.LIST_CHILD_NAME_DEFAULT)
+          // Only record a non-default name. Writeback resolves an absent key to the same default,
+          // so stamping it would add nothing while putting an internal key on the Spark schema of
+          // every array column, breaking equality against an equivalent plain Spark schema.
+          if (childName != ListChildUtils.LIST_CHILD_NAME_DEFAULT) {
+            builder.putString(ListChildUtils.LANCE_LIST_CHILD_NAME_METADATA_KEY, childName)
+          }
           if (!Float16Utils.isFloat16ArrowField(field)) {
             // For Float16 vectors, the child's HALF type is encoded in `arrow.float16` on the
             // parent, so there is no extra child-side metadata worth embedding.
