@@ -42,9 +42,13 @@ case class LanceDropBranchExec(
       .build()
 
     try {
+      // The missing-branch error is enforced here rather than delegated to
+      // branches().delete(), which only reports it on local filesystems.
       val exists = dataset.branches().list().asScala.exists(_.getName == branchName)
-      if (!ifExists || exists) {
+      if (exists) {
         dataset.branches().delete(branchName)
+      } else if (!ifExists) {
+        throw new IllegalArgumentException(s"Can't drop missing branch: $branchName")
       }
     } finally {
       dataset.close()
