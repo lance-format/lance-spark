@@ -554,7 +554,9 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
   test("nested Array<Array<String>> roundtrips from Arrow schema preserving child names") {
     val arrow = new Schema(java.util.Arrays.asList(listField(
       "nested_tags",
-      listField("legacy_inner_list", primitiveField("legacy_inner_element", ArrowType.Utf8.INSTANCE)))))
+      listField(
+        "legacy_inner_list",
+        primitiveField("legacy_inner_element", ArrowType.Utf8.INSTANCE)))))
 
     val sparkSchema = LanceArrowUtils.fromArrowSchema(arrow)
     val outerMetadata = sparkSchema("nested_tags").metadata
