@@ -59,6 +59,7 @@
         <arrow15.version>15.0.2</arrow15.version>
         <arrow18.version>18.1.0</arrow18.version>
         <arrow183.version>18.3.0</arrow183.version>
+        <arrow19.version>19.0.0</arrow19.version>
         <!-- Default Arrow version (Spark 3.5); modules override as needed -->
         <arrow.version>${arrow15.version}</arrow.version>
 
@@ -68,12 +69,14 @@
         <spark35.version>3.5.5</spark35.version>
         <spark40.version>4.0.0</spark40.version>
         <spark41.version>4.1.1</spark41.version>
+        <spark42.version>4.2.0</spark42.version>
         <spark.version>${spark35.version}</spark.version>
 
         <spark34.compat.version>3.4</spark34.compat.version>
         <spark35.compat.version>3.5</spark35.compat.version>
         <spark40.compat.version>4.0</spark40.compat.version>
         <spark41.compat.version>4.1</spark41.compat.version>
+        <spark42.compat.version>4.2</spark42.compat.version>
         <spark.compat.version>${spark35.compat.version}</spark.compat.version>
 
         <scala212.version>2.12.20</scala212.version>
@@ -143,6 +146,8 @@
         <module>lance-spark-bundle-4.0_2.13</module>
         <module>lance-spark-4.1_2.13</module>
         <module>lance-spark-bundle-4.1_2.13</module>
+        <module>lance-spark-4.2_2.13</module>
+        <module>lance-spark-bundle-4.2_2.13</module>
     </modules>
 
     <dependencyManagement>

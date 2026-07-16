@@ -98,6 +98,8 @@ jobs:
             scala-version: "2.13"
           - spark-version: "4.1"
             scala-version: "2.13"
+          - spark-version: "4.2"
+            scala-version: "2.13"
     steps:
       - uses: actions/checkout@v6
       - name: Set up Java
@@ -130,6 +132,8 @@ jobs:
           - spark-version: "4.0"
             scala-version: "2.13"
           - spark-version: "4.1"
+            scala-version: "2.13"
+          - spark-version: "4.2"
             scala-version: "2.13"
     steps:
       - uses: actions/checkout@v6

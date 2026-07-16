@@ -80,6 +80,11 @@ filename = "lance-spark-4.1_2.13/pom.xml"
 search = "<version>{current_version}</version>"
 replace = "<version>{new_version}</version>"
 
+[[tool.bumpversion.files]]
+filename = "lance-spark-4.2_2.13/pom.xml"
+search = "<version>{current_version}</version>"
+replace = "<version>{new_version}</version>"
+
 # Bundle module pom.xml files - parent version
 [[tool.bumpversion.files]]
 filename = "lance-spark-bundle-3.4_2.12/pom.xml"
@@ -108,5 +113,10 @@ replace = "<version>{new_version}</version>"
 
 [[tool.bumpversion.files]]
 filename = "lance-spark-bundle-4.1_2.13/pom.xml"
+search = "<version>{current_version}</version>"
+replace = "<version>{new_version}</version>"
+
+[[tool.bumpversion.files]]
+filename = "lance-spark-bundle-4.2_2.13/pom.xml"
 search = "<version>{current_version}</version>"
 replace = "<version>{new_version}</version>"
