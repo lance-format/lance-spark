@@ -53,7 +53,7 @@ Available for every `IVF_*` method:
 | `distance_type`  | String  | `l2`                                          | Distance metric used for both training and search. Accepts `l2` (alias `euclidean`), `cosine`, `dot`. Case-insensitive. |
 | `sample_rate`    | Integer | `256`                                         | Number of training samples per centroid (and per PQ sub-vector during codebook training). Must be `>= 2`. |
 | `max_iters`      | Integer | `50`                                          | Maximum k-means iterations during IVF centroid (and PQ codebook) training. Must be positive. |
-| `num_segments`   | Integer | `min(fragment_count, spark.default.parallelism)` | Target number of executor-parallel segments. Each segment covers a batch of fragments. Must be positive; values larger than the fragment count are clamped down with a warning. |
+| `num_segments`   | Integer | `min(fragment_count, spark.default.parallelism)` | Target number of executor-parallel segments. Each segment covers a batch of fragments. Must be positive; values larger than the fragment count are clamped down with a warning. **`IVF_SQ` and `IVF_HNSW_SQ` always force `num_segments = 1` — see [Controlling Executor Parallelism](#controlling-executor-parallelism) below.** |
 
 ### IVF_PQ / IVF_HNSW_PQ Options
 

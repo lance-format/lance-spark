@@ -162,8 +162,11 @@ public abstract class BaseAddVectorIndexTest {
 
   /**
    * Verify that an index with the given name exists on the {@code vec} column and covers all
-   * fragments. {@code expectedTypes} are accepted alternatives because lance-core may surface IVF_*
-   * either as the specific subtype or as the umbrella {@link IndexType#VECTOR}.
+   * fragments. {@code expectedTypes} are accepted alternatives because lance-core 7.0.0 empirically
+   * surfaces some IVF families (IVF_FLAT, IVF_SQ) as the umbrella {@link IndexType#VECTOR} rather
+   * than the concrete subtype, while others (IVF_PQ, IVF_HNSW_PQ, IVF_HNSW_SQ) come back as the
+   * concrete enum. Tighter subtype discrimination is deferred to a follow-up that inspects {@code
+   * indexDetails()} bytes once lance-core stabilizes the enum surface for the FLAT and SQ paths.
    */
   protected void checkVectorIndex(String name, IndexType... expectedTypes) {
     org.lance.Dataset ds = org.lance.Dataset.open().uri(tableDir).build();
@@ -837,5 +840,113 @@ public abstract class BaseAddVectorIndexTest {
     } finally {
       ds.close();
     }
+  }
+
+  // ---------------------------------------------------------------------
+  // Semantic correctness: recall against brute-force + degenerate input
+  // ---------------------------------------------------------------------
+
+  /** Brute-force L2² for ARRAY&lt;FLOAT&gt; rows; small fixture so exact math is fine. */
+  private static double l2sq(float[] a, float[] b) {
+    double s = 0.0;
+    for (int i = 0; i < a.length; i++) {
+      double d = a[i] - b[i];
+      s += d * d;
+    }
+    return s;
+  }
+
+  /**
+   * Recall smoke test: IVF_FLAT (no quantization) top-10 should overlap heavily with a brute-force
+   * scan on the fixture. A build that ships wrong centroids or mis-sharded segments produces near-
+   * zero overlap. This pins semantic correctness of the multi-segment batch path — the default
+   * {@code num_segments = min(fragment_count, parallelism)} exercises it here.
+   */
+  @Test
+  public void testIvfFlatMatchesBruteForceTopK() {
+    Assumptions.assumeFalse(
+        spark.version().startsWith("3.4."),
+        "VECTOR_SEARCH named-argument syntax requires Spark 3.5+");
+    prepareVectorDataset();
+    spark.sql(
+        String.format(
+            "ALTER TABLE %s CREATE INDEX vec_idx USING IVF_FLAT (vec) " + "WITH (num_partitions=4)",
+            fullTable));
+
+    float[] q = new float[VEC_DIM];
+    for (int i = 0; i < VEC_DIM; i++) q[i] = 0.5f;
+
+    java.util.List<Row> all = spark.sql("SELECT id, vec FROM " + fullTable).collectAsList();
+    java.util.List<Integer> bruteTopK =
+        all.stream()
+            .sorted(
+                java.util.Comparator.comparingDouble(
+                    r -> {
+                      java.util.List<Float> v = r.getList(1);
+                      float[] arr = new float[v.size()];
+                      for (int i = 0; i < v.size(); i++) arr[i] = v.get(i);
+                      return l2sq(arr, q);
+                    }))
+            .limit(10)
+            .map(r -> r.getInt(0))
+            .collect(Collectors.toList());
+
+    String qVec = buildVecLiteral(VEC_DIM, 0.5f);
+    java.util.List<Integer> indexTopK =
+        spark
+            .sql(
+                String.format(
+                    "SELECT id, _distance FROM VECTOR_SEARCH("
+                        + "table => '%s', "
+                        + "query_vector => %s, "
+                        + "vector_column => 'vec', "
+                        + "num_results => 10)",
+                    fullTable, qVec))
+            .collectAsList()
+            .stream()
+            .map(r -> r.getInt(0))
+            .collect(Collectors.toList());
+
+    long overlap = indexTopK.stream().filter(bruteTopK::contains).count();
+    Assertions.assertTrue(
+        overlap >= 6,
+        "IVF_FLAT top-10 should agree with brute-force in >=6 IDs, got "
+            + overlap
+            + " (index="
+            + indexTopK
+            + ", brute="
+            + bruteTopK
+            + ")");
+  }
+
+  /**
+   * Degenerate input: every vector is identical. K-means centroids collapse (any partition
+   * assignment is optimal) and cosine normalization would produce NaN. The pipeline must still
+   * commit a valid index and not blow up on the driver side.
+   */
+  @Test
+  public void testCreateIvfFlatOnAllEqualVectors() {
+    spark.sql(
+        String.format(
+            "CREATE TABLE %s (id INT NOT NULL, vec ARRAY<FLOAT> NOT NULL) USING lance "
+                + "TBLPROPERTIES ('vec.arrow.fixed-size-list.size' = '%d')",
+            fullTable, VEC_DIM));
+
+    int rowId = 0;
+    for (int b = 0; b < INSERT_COUNT; b++) {
+      java.util.List<String> values = new java.util.ArrayList<>();
+      for (int r = 0; r < ROWS_PER_INSERT; r++) {
+        values.add(String.format("(%d, %s)", rowId++, buildVecLiteral(VEC_DIM, 0.5f)));
+      }
+      spark.sql(
+          String.format("INSERT INTO %s (id, vec) VALUES %s", fullTable, String.join(",", values)));
+    }
+
+    spark.sql(
+        String.format(
+            "ALTER TABLE %s CREATE INDEX vec_idx USING IVF_FLAT (vec) "
+                + "WITH (num_partitions=2, distance_type='l2')",
+            fullTable));
+    checkVectorIndex("vec_idx", IndexType.IVF_FLAT);
   }
 }

@@ -36,8 +36,14 @@ import scala.util.control.NonFatal
  *   3. Driver: collects segments. The caller (AddIndexExec.run) is responsible
  *      for invoking commitExistingIndexSegments.
  *
- * Broadcasts are destroyed in a finally block whether the build succeeds or
- * fails so resources aren't leaked across SQL statements.
+ * Broadcasts are unpersisted (not destroyed) in a finally block whether the
+ * build succeeds or fails. `destroy()` would permanently invalidate the
+ * broadcast, which is unsafe for speculative losers that may still dereference
+ * it after `collect()` returns and for any future retry / stage-recompute
+ * wrapper around `runSegments`. `unpersist(blocking = false)` releases the
+ * executor caches; the driver-side handle then becomes eligible for
+ * `ContextCleaner` once this method returns, so SQL doesn't accumulate
+ * broadcast memory across statements either.
  */
 class VectorIndexJob(
     addIndexExec: AddIndexExec,
@@ -104,21 +110,25 @@ class VectorIndexJob(
         task.execute(localCentroidsBC.value, localCodebookBC.value)
       }
     } finally {
-      // Always destroy broadcasts so SQL doesn't accumulate broadcast memory
-      destroyBroadcast("centroids", centroidsBC)
-      destroyBroadcast("codebook", codebookBC)
+      // Release executor caches; leave the driver handle eligible for
+      // ContextCleaner. destroy() would poison speculative losers or any
+      // future retry — see class doc for why unpersist is preferred.
+      releaseBroadcast("centroids", centroidsBC)
+      releaseBroadcast("codebook", codebookBC)
     }
   }
 
-  private def destroyBroadcast(name: String, broadcast: Broadcast[_]): Unit = {
+  private def releaseBroadcast(name: String, broadcast: Broadcast[_]): Unit = {
     try {
-      broadcast.destroy()
+      broadcast.unpersist(blocking = false)
     } catch {
       case e: InterruptedException =>
         Thread.currentThread().interrupt()
-        logWarning(s"Interrupted while destroying $name broadcast for vector index '$indexName'", e)
+        logWarning(
+          s"Interrupted while unpersisting $name broadcast for vector index '$indexName'",
+          e)
       case NonFatal(e) =>
-        logWarning(s"Failed to destroy $name broadcast for vector index '$indexName'", e)
+        logWarning(s"Failed to unpersist $name broadcast for vector index '$indexName'", e)
     }
   }
 
@@ -145,7 +155,7 @@ class VectorIndexJob(
         VectorTrainer.trainIvfCentroids(dataset, column, ivfTrainParams, distanceType)
       val centroidsBC = sc.broadcast(centroids)
 
-      // If codebook training (or its broadcast) throws, destroy centroidsBC here
+      // If codebook training (or its broadcast) throws, release centroidsBC here
       // since the caller never receives it and so cannot clean it up. Without
       // this guard, long-running SQL sessions accumulate orphan broadcasts.
       val codebookBC: Broadcast[Array[Float]] =
@@ -170,7 +180,7 @@ class VectorIndexJob(
           }
         } catch {
           case t: Throwable =>
-            destroyBroadcast("centroids", centroidsBC)
+            releaseBroadcast("centroids", centroidsBC)
             throw t
         }
 
