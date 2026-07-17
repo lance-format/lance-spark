@@ -41,9 +41,12 @@ import scala.collection.JavaConverters;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 /** Spark-facing helpers for Lance MemWAL sharding specs. */
 public final class SparkLanceShardingUtils {
@@ -130,14 +133,31 @@ public final class SparkLanceShardingUtils {
   }
 
   public static Optional<Map<Integer, Object>> detectFragmentKeys(
-      ShardingField field, LanceSchema schema, List<ZoneStats> zones) {
+      ShardingField field,
+      LanceSchema schema,
+      List<ZoneStats> zones,
+      Set<Integer> liveFragmentIds) {
     columnName(field, schema);
-    Map<Integer, Object> result = new HashMap<>();
-    for (ZoneStats zone : zones) {
-      result.putIfAbsent(zone.getFragmentId(), null);
+    Objects.requireNonNull(liveFragmentIds, "liveFragmentIds");
+    if (liveFragmentIds.isEmpty()) {
+      return Optional.empty();
     }
-    for (int fragmentId : new ArrayList<>(result.keySet())) {
-      Optional<Object> key = fragmentKeyFromZones(field, schema, zones, fragmentId);
+
+    List<ZoneStats> liveZones = new ArrayList<>();
+    Set<Integer> coveredFragmentIds = new HashSet<>();
+    for (ZoneStats zone : zones) {
+      if (liveFragmentIds.contains(zone.getFragmentId())) {
+        liveZones.add(zone);
+        coveredFragmentIds.add(zone.getFragmentId());
+      }
+    }
+    if (!coveredFragmentIds.equals(liveFragmentIds)) {
+      return Optional.empty();
+    }
+
+    Map<Integer, Object> result = new HashMap<>();
+    for (int fragmentId : liveFragmentIds) {
+      Optional<Object> key = fragmentKeyFromZones(field, schema, liveZones, fragmentId);
       if (!key.isPresent()) {
         return Optional.empty();
       }
