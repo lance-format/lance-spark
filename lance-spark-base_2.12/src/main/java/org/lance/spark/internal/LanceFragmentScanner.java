@@ -129,6 +129,9 @@ public class LanceFragmentScanner implements AutoCloseable {
         scanOptions.filter(inputPartition.getWhereCondition().get());
       }
       scanOptions.batchSize(readOptions.getBatchSize());
+      if (readOptions.getFullTextQuery() != null) {
+        scanOptions.fullTextQuery(readOptions.getFullTextQuery());
+      }
       scanOptions.useScalarIndex(readOptions.isUseScalarIndex());
       if (inputPartition.getLimit().isPresent()) {
         scanOptions.limit(inputPartition.getLimit().get());
@@ -279,6 +282,7 @@ public class LanceFragmentScanner implements AutoCloseable {
                         && !name.equals(LanceConstant.ROW_ADDRESS)
                         && !name.equals(LanceConstant.ROW_CREATED_AT_VERSION)
                         && !name.equals(LanceConstant.ROW_LAST_UPDATED_AT_VERSION)
+                        && !name.equals(LanceConstant.SCORE)
                         && !name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)
                         && !name.endsWith(LanceConstant.BLOB_SIZE_SUFFIX))
             .collect(Collectors.toList());

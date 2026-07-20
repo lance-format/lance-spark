@@ -24,9 +24,13 @@ import org.lance.memwal.ShardingField;
 import org.lance.memwal.ShardingSpec;
 import org.lance.schema.LanceField;
 import org.lance.schema.LanceSchema;
+import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.search.LanceSearchQuery;
+import org.lance.spark.search.LanceSearchScan;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
 import org.lance.spark.utils.BlobUtils;
+import org.lance.spark.utils.FullTextQueryUtils;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.Utils;
 
@@ -50,6 +54,7 @@ import org.apache.spark.sql.connector.read.SupportsPushDownRequiredColumns;
 import org.apache.spark.sql.connector.read.SupportsPushDownTopN;
 import org.apache.spark.sql.connector.read.SupportsPushDownV2Filters;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -163,6 +168,15 @@ public class LanceScanBuilder
       // Return LocalScan if we have a metadata-only aggregation result
       if (localScan != null) {
         return localScan;
+      }
+
+      // Namespace-configured full-text search executes server-side via queryTable (single
+      // partition). A full-text query without a namespace falls through to the local per-fragment
+      // scan below. COUNT(*) is excluded because countTableRows has no full-text field.
+      if (readOptions.getFullTextQuery() != null
+          && namespaceImpl != null
+          && !pushedAggregation.isPresent()) {
+        return buildNamespaceFtsScan();
       }
 
       // Get statistics from manifest summary before closing dataset
@@ -279,6 +293,51 @@ public class LanceScanBuilder
     } finally {
       closeLazyDataset();
     }
+  }
+
+  /**
+   * Builds a single-partition scan that runs the full-text query server-side through the namespace
+   * {@code queryTable} endpoint. Reuses the search-package namespace scan/reader, driven from the
+   * shared scan spec rather than a bespoke table function.
+   */
+  private Scan buildNamespaceFtsScan() {
+    // Request every projected field except the row-id metadata column (fetched via withRowId).
+    // _score stays in the request columns because queryTable returns it as a named column.
+    List<String> requestColumns = new ArrayList<>();
+    boolean withRowId = false;
+    for (StructField field : schema.fields()) {
+      if (field.name().equals(LanceConstant.ROW_ID)) {
+        withRowId = true;
+      } else {
+        requestColumns.add(field.name());
+      }
+    }
+
+    // Push the real k/offset only when no residual predicate sits above the scan. Otherwise request
+    // all matches and let Spark apply the residual filter and limit globally. queryTable requires a
+    // non-null k, so "all" is Integer.MAX_VALUE rather than an omitted k.
+    boolean pushLimit = limit.isPresent() && !hasResidualPredicates;
+    Integer k = pushLimit ? limit.get() : Integer.MAX_VALUE;
+    Integer pushedOffset = (offset.isPresent() && !hasResidualPredicates) ? offset.get() : null;
+
+    Optional<String> whereCondition =
+        FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);
+
+    LanceSearchQuery query =
+        LanceSearchQuery.builder(LanceSearchQuery.SearchType.FULL_TEXT)
+            .tableId(readOptions.getTableId())
+            .namespaceImpl(namespaceImpl)
+            .namespaceProperties(namespaceProperties)
+            .outputColumns(requestColumns)
+            .fullTextQueryJson(
+                FullTextQueryUtils.fullTextQueryToString(readOptions.getFullTextQuery()))
+            .topK(k)
+            .offset(pushedOffset)
+            .filter(whereCondition.isPresent() ? whereCondition.get() : null)
+            .version(readOptions.getVersion())
+            .withRowId(withRowId ? Boolean.TRUE : null)
+            .build();
+    return new LanceSearchScan(schema, query);
   }
 
   @Override

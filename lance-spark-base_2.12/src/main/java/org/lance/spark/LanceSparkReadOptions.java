@@ -14,10 +14,15 @@
 package org.lance.spark;
 
 import org.lance.ReadOptions;
+import org.lance.ipc.FullTextQuery;
 import org.lance.namespace.LanceNamespace;
+import org.lance.spark.utils.FullTextQueryUtils;
 
 import com.google.common.base.Preconditions;
 
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.io.Serializable;
 import java.util.HashMap;
 import java.util.List;
@@ -42,7 +47,7 @@ import java.util.Objects;
  * }</pre>
  */
 public class LanceSparkReadOptions implements Serializable {
-  private static final long serialVersionUID = 1L;
+  private static final long serialVersionUID = 3L;
 
   public static final String CONFIG_DATASET_URI = "path";
   public static final String CONFIG_PUSH_DOWN_FILTERS = "pushDownFilters";
@@ -53,7 +58,8 @@ public class LanceSparkReadOptions implements Serializable {
   public static final String CONFIG_BATCH_SIZE = "batch_size";
   public static final String CONFIG_USE_SCALAR_INDEX = "use_scalar_index";
   public static final String CONFIG_TOP_N_PUSH_DOWN = "topN_push_down";
-  private static final String DEPRECATED_CONFIG_NEAREST = "nearest";
+  public static final String CONFIG_NEAREST = "nearest";
+  public static final String CONFIG_FULL_TEXT_QUERY = "fullTextQuery";
 
   /**
    * Whether executors should rebuild the namespace client and re-fetch storage options via {@code
@@ -107,6 +113,7 @@ public class LanceSparkReadOptions implements Serializable {
   private final Integer indexCacheSize;
   private final Integer metadataCacheSize;
   private final int batchSize;
+  private transient FullTextQuery fullTextQuery;
   private final boolean useScalarIndex;
   private final boolean topNPushDown;
   private final Map<String, String> storageOptions;
@@ -137,6 +144,7 @@ public class LanceSparkReadOptions implements Serializable {
     this.indexCacheSize = builder.indexCacheSize;
     this.metadataCacheSize = builder.metadataCacheSize;
     this.batchSize = builder.batchSize;
+    this.fullTextQuery = builder.fullTextQuery;
     this.useScalarIndex = builder.useScalarIndex;
     this.topNPushDown = builder.topNPushDown;
     this.storageOptions = new HashMap<>(builder.storageOptions);
@@ -250,6 +258,10 @@ public class LanceSparkReadOptions implements Serializable {
     return batchSize;
   }
 
+  public FullTextQuery getFullTextQuery() {
+    return fullTextQuery;
+  }
+
   public boolean isUseScalarIndex() {
     return useScalarIndex;
   }
@@ -313,6 +325,7 @@ public class LanceSparkReadOptions implements Serializable {
         .indexCacheSize(this.indexCacheSize)
         .metadataCacheSize(this.metadataCacheSize)
         .batchSize(this.batchSize)
+        .fullTextQuery(this.fullTextQuery)
         .useScalarIndex(this.useScalarIndex)
         .topNPushDown(this.topNPushDown)
         .storageOptions(this.storageOptions)
@@ -349,6 +362,17 @@ public class LanceSparkReadOptions implements Serializable {
     return builder.build();
   }
 
+  private void writeObject(ObjectOutputStream out) throws IOException {
+    out.defaultWriteObject();
+    out.writeObject(FullTextQueryUtils.fullTextQueryToString(fullTextQuery));
+  }
+
+  private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
+    in.defaultReadObject();
+    String ftsJson = (String) in.readObject();
+    this.fullTextQuery = FullTextQueryUtils.stringToFullTextQuery(ftsJson);
+  }
+
   @Override
   public boolean equals(Object o) {
     if (o == null || getClass() != o.getClass()) {
@@ -360,13 +384,15 @@ public class LanceSparkReadOptions implements Serializable {
         && useScalarIndex == that.useScalarIndex
         && topNPushDown == that.topNPushDown
         && executorCredentialRefresh == that.executorCredentialRefresh
+        && FullTextQueryUtils.equals(fullTextQuery, that.fullTextQuery)
         && Objects.equals(datasetUri, that.datasetUri)
         && Objects.equals(blockSize, that.blockSize)
         && Objects.equals(version, that.version)
         && Objects.equals(indexCacheSize, that.indexCacheSize)
         && Objects.equals(metadataCacheSize, that.metadataCacheSize)
         && Objects.equals(storageOptions, that.storageOptions)
-        && Objects.equals(tableId, that.tableId);
+        && Objects.equals(tableId, that.tableId)
+        && Objects.equals(catalogName, that.catalogName);
   }
 
   @Override
@@ -379,10 +405,12 @@ public class LanceSparkReadOptions implements Serializable {
         indexCacheSize,
         metadataCacheSize,
         batchSize,
+        FullTextQueryUtils.fullTextQueryToString(fullTextQuery),
         useScalarIndex,
         topNPushDown,
         storageOptions,
         tableId,
+        catalogName,
         executorCredentialRefresh);
   }
 
@@ -391,6 +419,7 @@ public class LanceSparkReadOptions implements Serializable {
     private String datasetUri;
     private boolean pushDownFilters = DEFAULT_PUSH_DOWN_FILTERS;
     private Integer blockSize;
+    private FullTextQuery fullTextQuery;
     private Long version;
     private Integer indexCacheSize;
     private Integer metadataCacheSize;
@@ -417,6 +446,11 @@ public class LanceSparkReadOptions implements Serializable {
 
     public Builder blockSize(Integer blockSize) {
       this.blockSize = blockSize;
+      return this;
+    }
+
+    public Builder fullTextQuery(FullTextQuery fullTextQuery) {
+      this.fullTextQuery = fullTextQuery;
       return this;
     }
 
@@ -512,7 +546,7 @@ public class LanceSparkReadOptions implements Serializable {
      */
     private void parseTypedFlags(Map<String, String> opts) {
       Preconditions.checkArgument(
-          !opts.containsKey(DEPRECATED_CONFIG_NEAREST),
+          !opts.containsKey(CONFIG_NEAREST),
           "The nearest read option is no longer supported; use VECTOR_SEARCH table function");
       if (opts.containsKey(CONFIG_PUSH_DOWN_FILTERS)) {
         this.pushDownFilters = Boolean.parseBoolean(opts.get(CONFIG_PUSH_DOWN_FILTERS));
@@ -536,6 +570,10 @@ public class LanceSparkReadOptions implements Serializable {
       }
       if (opts.containsKey(CONFIG_TOP_N_PUSH_DOWN)) {
         this.topNPushDown = Boolean.parseBoolean(opts.get(CONFIG_TOP_N_PUSH_DOWN));
+      }
+      if (opts.containsKey(CONFIG_FULL_TEXT_QUERY)) {
+        String json = opts.get(CONFIG_FULL_TEXT_QUERY);
+        this.fullTextQuery = FullTextQueryUtils.stringToFullTextQuery(json);
       }
       if (opts.containsKey(CONFIG_USE_SCALAR_INDEX)) {
         this.useScalarIndex = Boolean.parseBoolean(opts.get(CONFIG_USE_SCALAR_INDEX));

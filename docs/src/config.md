@@ -52,6 +52,7 @@ The following features require the Lance Spark SQL extension to be enabled:
 - [VECTOR_SEARCH](operations/dql/vector-search.md) - Run vector similarity search through Lance namespace execution
 - [SEARCH](operations/dql/search.md) - Run full-text search through Lance namespace execution
 - [HYBRID_SEARCH](operations/dql/hybrid-search.md) - Combine vector and full-text search with reciprocal rank fusion
+- [Full-Text Search](operations/dql/fts.md) - `lance_match`, `lance_match_phrase`, and `lance_multi_match` SQL functions for querying FTS indexes
 - [ADD COLUMNS with backfill](operations/dml/add-columns.md) - Add new columns and backfill existing rows with data
 - [UPDATE COLUMNS with backfill](operations/dml/update-columns.md) - Update existing columns using data from a source
 - [OPTIMIZE](operations/ddl/optimize.md) - Compact table fragments for improved query performance

@@ -16,7 +16,7 @@ package org.lance.spark.extensions
 import org.apache.spark.sql.SparkSessionExtensions
 import org.apache.spark.sql.catalyst.FunctionIdentifier
 import org.apache.spark.sql.catalyst.expressions.ExpressionInfo
-import org.apache.spark.sql.catalyst.optimizer.{LanceBlobSourceContextRule, LanceBlobV2CopyThroughRule, LanceFragmentAwareJoinRule}
+import org.apache.spark.sql.catalyst.optimizer.{LanceBlobSourceContextRule, LanceBlobV2CopyThroughRule, LanceFragmentAwareJoinRule, LanceFtsPredicateRule}
 import org.apache.spark.sql.catalyst.parser.extensions.LanceSparkSqlExtensionsParser
 import org.apache.spark.sql.execution.datasources.v2.LanceDataSourceV2Strategy
 import org.lance.spark.search.LanceSearchTableFunctions
@@ -32,6 +32,9 @@ class LanceSparkSessionExtensions extends (SparkSessionExtensions => Unit) {
 
     // optimizer rules for fragment-aware joins
     extensions.injectOptimizerRule(_ => LanceFragmentAwareJoinRule())
+
+    // optimizer rule for FTS predicate pushdown
+    extensions.injectOptimizerRule(_ => new LanceFtsPredicateRule())
 
     // propagate blob source credentials from read scans to the write side
     extensions.injectOptimizerRule(_ => LanceBlobSourceContextRule())

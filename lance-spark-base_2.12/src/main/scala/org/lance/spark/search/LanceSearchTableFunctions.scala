@@ -15,15 +15,17 @@ package org.lance.spark.search
 
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
-import org.apache.spark.sql.catalyst.expressions.{CreateArray, Expression, Literal}
-import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.catalyst.analysis.{UnresolvedAttribute, UnresolvedStar}
+import org.apache.spark.sql.catalyst.expressions.{CreateArray, Descending, Expression, Literal, NamedExpression, SortOrder}
+import org.apache.spark.sql.catalyst.plans.logical.{Filter, Limit, LogicalPlan, Project, Sort}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.types.{DataTypes, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
-import org.lance.spark.LanceDataset
+import org.lance.ipc.FullTextQuery
+import org.lance.spark.{LanceDataset, LanceSparkReadOptions}
 import org.lance.spark.search.LanceSearchQuery.SearchType
+import org.lance.spark.utils.FullTextQueryUtils
 
 import java.util.Locale
 
@@ -100,34 +102,75 @@ object LanceSearchTableFunctions {
     val queryText = optionalString(parsed, QueryArg)
       .orElse(optionalString(parsed, SearchQueryArg))
       .getOrElse(throw new IllegalArgumentException("SEARCH requires query"))
+    val searchColumns = optionalStringArray(parsed, SearchColumnsArg).getOrElse(Seq.empty)
+    if (searchColumns.isEmpty) {
+      throw new IllegalArgumentException(
+        "SEARCH requires search_columns for full-text search, " +
+          "e.g. search_columns => array('body')")
+    }
     val k = optionalInt(parsed, "num_results")
       .orElse(optionalInt(parsed, "limit"))
       .orElse(optionalInt(parsed, "k"))
       .getOrElse(DefaultK)
     val outputColumns = optionalStringArray(parsed, ColumnsArg).getOrElse(Seq.empty)
-    val filter = optionalString(parsed, "filter").orNull
     val withRowId = effectiveWithRowId(parsed, outputColumns)
     val version = optionalLong(parsed, "version")
     val resolved = resolveLanceTable(tableName, version)
-    val schemaColumns = requestOutputColumns(resolved.table.schema(), outputColumns, FtsScoreColumn)
-    val requestColumns = namespaceOutputColumns(schemaColumns)
-    val schema = outputSchema(resolved.table.schema(), schemaColumns, FtsScoreColumn, withRowId)
 
-    val builder = LanceSearchQuery
-      .builder(SearchType.FULL_TEXT)
-      .tableId(resolved.table.readOptions().getTableId)
-      .namespaceImpl(resolved.table.getNamespaceImpl)
-      .namespaceProperties(resolved.table.getNamespaceProperties)
-      .outputColumns(requestColumns.asJava)
-      .textQuery(queryText)
-      .searchColumns(optionalStringArray(parsed, SearchColumnsArg).getOrElse(Seq.empty).asJava)
-      .topK(k)
-      .filter(filter)
-      .offset(optionalInt(parsed, "offset").orNull)
-      .version(version.orNull)
-      .withRowId(withRowId.orNull)
+    // Build the canonical FullTextQuery and carry it through the shared scan path via options,
+    // instead of the bespoke LanceSearchTable. One column -> match, several -> multi_match.
+    val fullTextQuery =
+      if (searchColumns.size == 1) {
+        FullTextQuery.`match`(queryText, searchColumns.head)
+      } else {
+        FullTextQuery.multiMatch(queryText, searchColumns.asJava)
+      }
+    val options = new java.util.HashMap[String, String]()
+    options.put(
+      LanceSparkReadOptions.CONFIG_FULL_TEXT_QUERY,
+      FullTextQueryUtils.fullTextQueryToString(fullTextQuery))
+    version.foreach(v => options.put(LanceSparkReadOptions.CONFIG_VERSION, v.toString))
 
-    relation("SEARCH", schema, builder.build(), resolved)
+    val relation = DataSourceV2Relation.create(
+      resolved.table,
+      Some(resolved.catalog),
+      Some(resolved.identifier),
+      new CaseInsensitiveStringMap(options))
+
+    // SEARCH is ranked top-k: optional filter, project requested columns + _score, order by
+    // _score descending, limit k. k flows to the scan through Spark's limit pushdown; _score is
+    // resolved as a metadata column on LanceDataset.
+    val filtered = optionalString(parsed, "filter")
+      .map(f =>
+        Filter(SparkSession.active.sessionState.sqlParser.parseExpression(f), relation))
+      .getOrElse(relation)
+    val projected = Project(searchProjectList(outputColumns, withRowId), filtered)
+    val ordered =
+      Sort(
+        Seq(SortOrder(UnresolvedAttribute(FtsScoreColumn), Descending)),
+        global = true,
+        projected)
+    Limit(Literal(k.intValue()), ordered)
+  }
+
+  private def searchProjectList(
+      outputColumns: Seq[String],
+      withRowId: Option[java.lang.Boolean]): Seq[NamedExpression] = {
+    val normalized = normalizeOutputColumns(outputColumns)
+    val buf = ArrayBuffer.empty[NamedExpression]
+    if (normalized.isEmpty) {
+      buf += UnresolvedStar(None)
+    } else {
+      normalized.foreach(column => buf += UnresolvedAttribute.quoted(column))
+    }
+    if (!normalized.exists(_.equalsIgnoreCase(FtsScoreColumn))) {
+      buf += UnresolvedAttribute.quoted(FtsScoreColumn)
+    }
+    if (withRowId.contains(java.lang.Boolean.TRUE) &&
+      !normalized.exists(_.equalsIgnoreCase(RowIdColumn))) {
+      buf += UnresolvedAttribute.quoted(RowIdColumn)
+    }
+    buf.toSeq
   }
 
   def hybridSearch(args: Seq[Expression]): LogicalPlan = {

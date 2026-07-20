@@ -77,6 +77,9 @@ For the `fts` method, the following options are required:
 
 For advanced tokenizer configuration, refer to the [Lance FTS documentation](https://lance.org/format/table/index/scalar/fts/#tokenizers).
 
+!!! tip "Querying FTS Indexes"
+    Once an FTS index is created, query it using the `lance_match`, `lance_match_phrase`, and `lance_multi_match` SQL functions. See [Full-Text Search](../dql/fts.md) for function signatures, options, and examples.
+
 ### FTS Format Version
 
 Lance FTS index format v2 is selected by the Lance runtime environment variable `LANCE_FTS_FORMAT_VERSION=2`. Configure it on both the Spark driver and executors before creating the index.
