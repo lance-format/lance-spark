@@ -210,6 +210,7 @@ public class LanceScanTest {
             org.lance.spark.utils.Optional.empty(),
             new Predicate[0],
             null,
+            ReadSchemaNestedColumnProjection.buildProjectedColumns(TEST_SCHEMA, TEST_SCHEMA),
             Collections.emptyMap(),
             null,
             plan.getSplits(),
@@ -295,6 +296,7 @@ public class LanceScanTest {
             org.lance.spark.utils.Optional.empty(),
             new Predicate[0],
             null,
+            ReadSchemaNestedColumnProjection.buildProjectedColumns(TEST_SCHEMA, TEST_SCHEMA),
             Collections.emptyMap(),
             null,
             bucketPlan.getSplits(),
@@ -360,5 +362,61 @@ public class LanceScanTest {
                 .build();
 
     assertNotEquals(scan1, scan2, "Scans with different schemas should not be equal");
+  }
+
+  @Test
+  public void testNotEqualWithDifferentProjectedColumns() {
+    StructType schema =
+        new StructType()
+            .add(
+                "usage_metrics",
+                new StructType()
+                    .add("token_total", DataTypes.LongType)
+                    .add("token_prompt", DataTypes.LongType));
+    LanceScan scan1 =
+        new LanceScan(
+            schema,
+            TestUtils.TestTable1Config.readOptions,
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            new Predicate[0],
+            null,
+            Collections.singletonList("usage_metrics.token_total"),
+            Collections.emptyMap(),
+            null,
+            null,
+            Collections.emptyMap(),
+            null,
+            null,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+    LanceScan scan2 =
+        new LanceScan(
+            schema,
+            TestUtils.TestTable1Config.readOptions,
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            new Predicate[0],
+            null,
+            Collections.singletonList("usage_metrics.token_prompt"),
+            Collections.emptyMap(),
+            null,
+            null,
+            Collections.emptyMap(),
+            null,
+            null,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+
+    assertNotEquals(
+        scan1, scan2, "Scans with different nested projected columns should not be equal");
   }
 }

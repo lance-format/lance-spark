@@ -16,6 +16,7 @@ package org.lance.spark;
 import org.lance.namespace.LanceNamespace;
 import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.read.LanceSplit;
+import org.lance.spark.read.ReadSchemaNestedColumnProjection;
 import org.lance.spark.utils.Optional;
 
 import org.apache.arrow.memory.BufferAllocator;
@@ -82,6 +83,7 @@ public class TestUtils {
       inputPartition =
           new LanceInputPartition(
               schema,
+              ReadSchemaNestedColumnProjection.buildProjectedColumns(schema, schema),
               0 /* partitionId */,
               new LanceSplit(Arrays.asList(0, 1)),
               readOptions,

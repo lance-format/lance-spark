@@ -86,6 +86,7 @@ public class LanceScanBuilder
   private final Set<String> blobV2Columns;
 
   private StructType schema;
+  private List<String> projectedColumns;
 
   private Predicate[] pushedPredicates = new Predicate[0];
 
@@ -133,6 +134,8 @@ public class LanceScanBuilder
     this.fullSchema = BlobUtils.applyBlobV2DescriptorSchema(schema);
     this.blobV2Columns = BlobUtils.blobV2ColumnNames(this.fullSchema);
     this.schema = this.fullSchema;
+    this.projectedColumns =
+        ReadSchemaNestedColumnProjection.buildProjectedColumns(this.fullSchema, this.fullSchema);
     this.readOptions = readOptions;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
@@ -281,6 +284,7 @@ public class LanceScanBuilder
           pushedAggregation,
           pushedPredicates,
           statistics,
+          projectedColumns,
           zonemapStats,
           survivingFragmentIds,
           scanPlan.getSplits(),
@@ -343,6 +347,8 @@ public class LanceScanBuilder
   @Override
   public void pruneColumns(StructType requiredSchema) {
     this.schema = ReadSchemaNestedStructWidening.widenRequiredSchema(requiredSchema, fullSchema);
+    this.projectedColumns =
+        ReadSchemaNestedColumnProjection.buildProjectedColumns(requiredSchema, fullSchema);
   }
 
   @Override

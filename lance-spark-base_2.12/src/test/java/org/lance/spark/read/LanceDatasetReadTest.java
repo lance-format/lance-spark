@@ -116,6 +116,7 @@ public class LanceDatasetReadTest {
             fragment,
             new LanceInputPartition(
                 schema,
+                ReadSchemaNestedColumnProjection.buildProjectedColumns(schema, schema),
                 0 /* partitionId */,
                 new LanceSplit(Arrays.asList(fragment)),
                 TestUtils.TestTable1Config.readOptions,
