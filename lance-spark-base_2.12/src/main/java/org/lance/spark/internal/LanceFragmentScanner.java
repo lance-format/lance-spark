@@ -93,7 +93,6 @@ public class LanceFragmentScanner implements AutoCloseable {
                   inputPartition.getNamespaceProperties(),
                   inputPartition.getScanId());
           readOptions.setNamespace(namespaceLease.namespace());
-          namespaceLease.pinDataset(readOptions, inputPartition.getInitialStorageOptions());
         } else {
           readOptions.setNamespace(null);
         }

@@ -13,7 +13,6 @@
  */
 package org.lance.spark.internal;
 
-import org.lance.Dataset;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.DescribeTableRequest;
 import org.lance.namespace.model.DescribeTableResponse;
@@ -42,12 +41,8 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class LanceFragmentScannerTest {
 
@@ -299,33 +294,18 @@ public class LanceFragmentScannerTest {
 
     LanceInputPartition partition = createNamespacePartition("namespace-cache-test");
 
-    Dataset firstAnchor;
-    try (LanceFragmentScanner ignored = LanceFragmentScanner.create(0, partition);
-        ExecutorNamespaceCache.Lease lease =
-            ExecutorNamespaceCache.acquire(
-                RecordingNamespace.class.getName(),
-                Collections.emptyMap(),
-                "namespace-cache-test")) {
+    try (LanceFragmentScanner ignored = LanceFragmentScanner.create(0, partition)) {
       // Opening the first fragment initializes the namespace and describes the table.
-      firstAnchor = lease.datasetAnchor();
-      assertFalse(firstAnchor.closed());
     }
-    try (LanceFragmentScanner ignored = LanceFragmentScanner.create(1, partition);
-        ExecutorNamespaceCache.Lease lease =
-            ExecutorNamespaceCache.acquire(
-                RecordingNamespace.class.getName(),
-                Collections.emptyMap(),
-                "namespace-cache-test")) {
-      // Opening another fragment must reuse both within the same executor JVM.
-      assertSame(firstAnchor, lease.datasetAnchor());
+    assertEquals(1, RecordingNamespace.INITIALIZE_CALLS.get());
+    assertEquals(1, RecordingNamespace.DESCRIBE_CALLS.get());
+
+    try (LanceFragmentScanner ignored = LanceFragmentScanner.create(1, partition)) {
+      // Opening another fragment must reuse the namespace metadata within the executor JVM.
     }
 
     assertEquals(1, RecordingNamespace.INITIALIZE_CALLS.get());
     assertEquals(1, RecordingNamespace.DESCRIBE_CALLS.get());
-    assertFalse(firstAnchor.closed(), "the anchor must outlive individual fragment scanners");
-
-    ExecutorNamespaceCache.clear();
-    assertTrue(firstAnchor.closed(), "cache eviction must close the dataset anchor");
   }
 
   @Test
@@ -334,22 +314,16 @@ public class LanceFragmentScannerTest {
     RecordingNamespace.DESCRIBE_CALLS.set(0);
     RecordingNamespace.location = TestUtils.TestTable1Config.datasetUri;
 
-    Dataset firstAnchor;
     try (LanceFragmentScanner ignored =
-            LanceFragmentScanner.create(0, createNamespacePartition("scan-a"));
-        ExecutorNamespaceCache.Lease lease =
-            ExecutorNamespaceCache.acquire(
-                RecordingNamespace.class.getName(), Collections.emptyMap(), "scan-a")) {
+        LanceFragmentScanner.create(0, createNamespacePartition("scan-a"))) {
       // First scan resolves its own table description.
-      firstAnchor = lease.datasetAnchor();
     }
+    assertEquals(1, RecordingNamespace.INITIALIZE_CALLS.get());
+    assertEquals(1, RecordingNamespace.DESCRIBE_CALLS.get());
+
     try (LanceFragmentScanner ignored =
-            LanceFragmentScanner.create(1, createNamespacePartition("scan-b"));
-        ExecutorNamespaceCache.Lease lease =
-            ExecutorNamespaceCache.acquire(
-                RecordingNamespace.class.getName(), Collections.emptyMap(), "scan-b")) {
+        LanceFragmentScanner.create(1, createNamespacePartition("scan-b"))) {
       // A later scan must not reuse the first scan's location or credentials.
-      assertNotSame(firstAnchor, lease.datasetAnchor());
     }
 
     assertEquals(2, RecordingNamespace.INITIALIZE_CALLS.get());

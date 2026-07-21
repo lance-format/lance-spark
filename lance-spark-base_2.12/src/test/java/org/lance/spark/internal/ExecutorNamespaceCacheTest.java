@@ -16,6 +16,10 @@ package org.lance.spark.internal;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.DescribeTableRequest;
 import org.lance.namespace.model.DescribeTableResponse;
+import org.lance.namespace.model.DescribeTableVersionRequest;
+import org.lance.namespace.model.DescribeTableVersionResponse;
+import org.lance.namespace.model.ListTableVersionsRequest;
+import org.lance.namespace.model.ListTableVersionsResponse;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.junit.jupiter.api.AfterEach;
@@ -155,6 +159,41 @@ public class ExecutorNamespaceCacheTest {
     assertEquals("expired-1", namespace.describeTable(request).getStorageOptions().get("token"));
     assertEquals("expired-2", namespace.describeTable(request).getStorageOptions().get("token"));
     assertEquals(2, calls.get());
+  }
+
+  @Test
+  public void delegatesManagedVersioningReads() {
+    ListTableVersionsResponse listResponse = new ListTableVersionsResponse();
+    DescribeTableVersionResponse describeResponse = new DescribeTableVersionResponse();
+    AtomicInteger listCalls = new AtomicInteger();
+    AtomicInteger describeVersionCalls = new AtomicInteger();
+    LanceNamespace delegate =
+        new RecordingNamespace(new AtomicLong()) {
+          @Override
+          public ListTableVersionsResponse listTableVersions(ListTableVersionsRequest request) {
+            listCalls.incrementAndGet();
+            return listResponse;
+          }
+
+          @Override
+          public DescribeTableVersionResponse describeTableVersion(
+              DescribeTableVersionRequest request) {
+            describeVersionCalls.incrementAndGet();
+            return describeResponse;
+          }
+        };
+    ExecutorNamespaceCache.CredentialCachingNamespace namespace =
+        new ExecutorNamespaceCache.CredentialCachingNamespace(delegate, () -> 0L);
+
+    assertSame(
+        listResponse,
+        namespace.listTableVersions(new ListTableVersionsRequest().addIdItem("table")));
+    assertSame(
+        describeResponse,
+        namespace.describeTableVersion(
+            new DescribeTableVersionRequest().addIdItem("table").version(1L)));
+    assertEquals(1, listCalls.get());
+    assertEquals(1, describeVersionCalls.get());
   }
 
   private static class RecordingNamespace implements LanceNamespace {

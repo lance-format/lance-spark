@@ -13,13 +13,14 @@
  */
 package org.lance.spark.internal;
 
-import org.lance.Dataset;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.DescribeTableRequest;
 import org.lance.namespace.model.DescribeTableResponse;
+import org.lance.namespace.model.DescribeTableVersionRequest;
+import org.lance.namespace.model.DescribeTableVersionResponse;
+import org.lance.namespace.model.ListTableVersionsRequest;
+import org.lance.namespace.model.ListTableVersionsResponse;
 import org.lance.spark.LanceRuntime;
-import org.lance.spark.LanceSparkReadOptions;
-import org.lance.spark.utils.Utils;
 
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
@@ -41,20 +42,15 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 
 /**
- * Executor-local cache for namespace clients, table descriptions, and dataset anchors.
+ * Executor-local cache for namespace clients and credential-vending table descriptions.
  *
  * <p>A Spark executor opens one Lance dataset per fragment. Opening through a namespace calls
  * {@link LanceNamespace#describeTable(DescribeTableRequest)}, so reconstructing the namespace for
- * every fragment turns a table with many fragments into a burst of catalog and identity-provider
- * requests. Closing every fragment dataset can also drop the last strong reference to Lance's
- * session-cached object store, forcing the next fragment to rebuild the cloud client and acquire a
- * new identity-provider token. This cache keeps one namespace client and one lightweight dataset
- * anchor per Spark scan in each executor. The anchor is not used for fragment reads; it only keeps
- * the shared object store and credential provider alive while fragment datasets continue to open
- * and close independently. Identical table descriptions are coalesced within the scan while
- * preserving refresh before temporary credentials expire. Scan scoping prevents table locations,
- * credentials, and dataset metadata from leaking into a later query that happens to reuse the same
- * executor JVM.
+ * every fragment turns a table with many fragments into a burst of catalog requests. This cache
+ * keeps one namespace client per Spark scan in each executor and coalesces identical table
+ * descriptions within that scan while preserving refresh before temporary credentials expire. Scan
+ * scoping prevents table locations and credentials from leaking into a later query that happens to
+ * reuse the same executor JVM.
  */
 public final class ExecutorNamespaceCache {
   private static final Logger LOG = LoggerFactory.getLogger(ExecutorNamespaceCache.class);
@@ -161,7 +157,7 @@ public final class ExecutorNamespaceCache {
     }
   }
 
-  /** A reference-counted scan-resource lease held for the lifetime of one fragment scanner. */
+  /** A reference-counted namespace lease held for the lifetime of one fragment scanner. */
   public static final class Lease implements AutoCloseable {
     private CachedNamespace owner;
 
@@ -175,32 +171,6 @@ public final class ExecutorNamespaceCache {
           throw new IllegalStateException("Namespace lease is already closed");
         }
         return owner.namespace;
-      }
-    }
-
-    /**
-     * Opens the scan's dataset anchor once and keeps it alive until this cache entry is evicted.
-     *
-     * <p>Every fragment still opens its own Dataset and scanner. The anchor deliberately never
-     * calls {@code getFragments()}, so its memory cost is independent of the fragment count.
-     */
-    void pinDataset(LanceSparkReadOptions readOptions, Map<String, String> initialStorageOptions) {
-      CachedNamespace current;
-      synchronized (this) {
-        if (owner == null) {
-          throw new IllegalStateException("Namespace lease is already closed");
-        }
-        current = owner;
-      }
-      current.pinDataset(readOptions, initialStorageOptions);
-    }
-
-    Dataset datasetAnchor() {
-      synchronized (this) {
-        if (owner == null) {
-          throw new IllegalStateException("Namespace lease is already closed");
-        }
-        return owner.datasetAnchor();
       }
     }
 
@@ -220,7 +190,6 @@ public final class ExecutorNamespaceCache {
   private static final class CachedNamespace {
     private final LanceNamespace delegate;
     private final CredentialCachingNamespace namespace;
-    private FutureTask<Dataset> datasetAnchor;
     private int leases;
     private boolean evicted;
     private boolean closed;
@@ -255,73 +224,11 @@ public final class ExecutorNamespaceCache {
       }
     }
 
-    private void pinDataset(
-        LanceSparkReadOptions readOptions, Map<String, String> initialStorageOptions) {
-      FutureTask<Dataset> task;
-      boolean loaded = false;
-      synchronized (this) {
-        if (evicted) {
-          throw new IllegalStateException("Cannot pin a dataset on an evicted namespace");
-        }
-        task = datasetAnchor;
-        if (task == null) {
-          task =
-              new FutureTask<>(
-                  () ->
-                      Utils.openDatasetBuilder(readOptions)
-                          .initialStorageOptions(initialStorageOptions)
-                          .build());
-          datasetAnchor = task;
-          loaded = true;
-        }
-      }
-
-      if (loaded) {
-        task.run();
-      }
-      try {
-        getDataset(task);
-      } catch (RuntimeException | Error e) {
-        synchronized (this) {
-          if (datasetAnchor == task) {
-            datasetAnchor = null;
-          }
-        }
-        throw e;
-      }
-    }
-
-    private synchronized Dataset datasetAnchor() {
-      if (datasetAnchor == null) {
-        throw new IllegalStateException("Dataset anchor has not been initialized");
-      }
-      return getDataset(datasetAnchor);
-    }
-
-    private static Dataset getDataset(FutureTask<Dataset> task) {
-      try {
-        return task.get();
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        throw new RuntimeException("Interrupted while opening executor dataset anchor", e);
-      } catch (ExecutionException e) {
-        throw propagate(e.getCause(), "Failed to open executor dataset anchor");
-      }
-    }
-
     private void closeDelegate() {
       if (closed) {
         return;
       }
       closed = true;
-      if (datasetAnchor != null) {
-        try {
-          getDataset(datasetAnchor).close();
-        } catch (Exception e) {
-          // Cache eviction is best effort and must not fail an unrelated Spark task.
-          LOG.warn("Failed to close an evicted executor dataset anchor", e);
-        }
-      }
       if (delegate instanceof AutoCloseable) {
         try {
           ((AutoCloseable) delegate).close();
@@ -394,6 +301,16 @@ public final class ExecutorNamespaceCache {
           return cached.response;
         }
       }
+    }
+
+    @Override
+    public ListTableVersionsResponse listTableVersions(ListTableVersionsRequest request) {
+      return delegate.listTableVersions(request);
+    }
+
+    @Override
+    public DescribeTableVersionResponse describeTableVersion(DescribeTableVersionRequest request) {
+      return delegate.describeTableVersion(request);
     }
 
     private static CachedDescription get(FutureTask<CachedDescription> task) {
