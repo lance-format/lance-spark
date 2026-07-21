@@ -240,6 +240,14 @@ public final class ExecutorNamespaceCache {
     }
   }
 
+  /**
+   * Read-only namespace wrapper used by executor-side Dataset opens.
+   *
+   * <p>Lance 9.0 executor reads use {@code namespaceId}, {@code describeTable}, and, for managed
+   * versioning, {@code listTableVersions} and {@code describeTableVersion}. Other namespace
+   * operations intentionally retain {@link LanceNamespace}'s unsupported default implementations;
+   * worker-side reads must not expose catalog mutation APIs through this cache.
+   */
   static final class CredentialCachingNamespace implements LanceNamespace {
     private final LanceNamespace delegate;
     private final LongSupplier clock;

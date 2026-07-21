@@ -20,6 +20,7 @@ import org.lance.namespace.model.DescribeTableVersionRequest;
 import org.lance.namespace.model.DescribeTableVersionResponse;
 import org.lance.namespace.model.ListTableVersionsRequest;
 import org.lance.namespace.model.ListTableVersionsResponse;
+import org.lance.namespace.model.TableExistsRequest;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.junit.jupiter.api.AfterEach;
@@ -35,8 +36,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class ExecutorNamespaceCacheTest {
 
@@ -95,6 +98,33 @@ public class ExecutorNamespaceCacheTest {
     } finally {
       executor.shutdownNow();
     }
+  }
+
+  @Test
+  public void cachesValueEquivalentDescribeTableRequests() {
+    AtomicLong clock = new AtomicLong(100_000L);
+    RecordingNamespace delegate = new RecordingNamespace(clock);
+    ExecutorNamespaceCache.CredentialCachingNamespace namespace =
+        new ExecutorNamespaceCache.CredentialCachingNamespace(delegate, clock::get);
+    DescribeTableRequest firstRequest =
+        new DescribeTableRequest()
+            .addIdItem("catalog")
+            .addIdItem("table")
+            .version(1L)
+            .branch("main")
+            .vendCredentials(true);
+    DescribeTableRequest equivalentRequest =
+        new DescribeTableRequest()
+            .addIdItem("catalog")
+            .addIdItem("table")
+            .version(1L)
+            .branch("main")
+            .vendCredentials(true);
+
+    assertNotSame(firstRequest, equivalentRequest);
+    assertEquals(firstRequest, equivalentRequest);
+    assertSame(namespace.describeTable(firstRequest), namespace.describeTable(equivalentRequest));
+    assertEquals(1, delegate.describeCalls.get());
   }
 
   @Test
@@ -194,6 +224,26 @@ public class ExecutorNamespaceCacheTest {
             new DescribeTableVersionRequest().addIdItem("table").version(1L)));
     assertEquals(1, listCalls.get());
     assertEquals(1, describeVersionCalls.get());
+  }
+
+  @Test
+  public void keepsUnexpectedNamespaceOperationsReadOnly() {
+    LanceNamespace delegate =
+        new RecordingNamespace(new AtomicLong()) {
+          @Override
+          public void tableExists(TableExistsRequest request) {
+            throw new AssertionError("unexpected delegation of a non-read-path operation");
+          }
+        };
+    ExecutorNamespaceCache.CredentialCachingNamespace namespace =
+        new ExecutorNamespaceCache.CredentialCachingNamespace(delegate, () -> 0L);
+
+    org.lance.namespace.errors.UnsupportedOperationException error =
+        assertThrows(
+            org.lance.namespace.errors.UnsupportedOperationException.class,
+            () -> namespace.tableExists(new TableExistsRequest().addIdItem("table")));
+
+    assertTrue(error.getMessage().contains("tableExists"));
   }
 
   private static class RecordingNamespace implements LanceNamespace {
