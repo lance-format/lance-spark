@@ -43,6 +43,7 @@ public class LanceFragmentScanner implements AutoCloseable {
   private final int fragmentId;
   private final boolean withFragmentId;
   private final LanceInputPartition inputPartition;
+  private final ExecutorNamespaceCache.Lease namespaceLease;
   private final long datasetOpenTimeNs;
   private final long scannerCreateTimeNs;
 
@@ -61,6 +62,7 @@ public class LanceFragmentScanner implements AutoCloseable {
       int fragmentId,
       boolean withFragmentId,
       LanceInputPartition inputPartition,
+      ExecutorNamespaceCache.Lease namespaceLease,
       long datasetOpenTimeNs,
       long scannerCreateTimeNs,
       boolean withRowAddrForBlobs,
@@ -70,6 +72,7 @@ public class LanceFragmentScanner implements AutoCloseable {
     this.fragmentId = fragmentId;
     this.withFragmentId = withFragmentId;
     this.inputPartition = inputPartition;
+    this.namespaceLease = namespaceLease;
     this.datasetOpenTimeNs = datasetOpenTimeNs;
     this.scannerCreateTimeNs = scannerCreateTimeNs;
     this.withRowAddrForBlobs = withRowAddrForBlobs;
@@ -79,13 +82,17 @@ public class LanceFragmentScanner implements AutoCloseable {
   public static LanceFragmentScanner create(int fragmentId, LanceInputPartition inputPartition) {
     Dataset dataset = null;
     LanceScanner lanceScanner = null;
+    ExecutorNamespaceCache.Lease namespaceLease = null;
     try {
       LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
       if (inputPartition.getNamespaceImpl() != null && readOptions.isExecutorCredentialRefresh()) {
         if (LanceRuntime.useNamespaceOnWorkers(inputPartition.getNamespaceImpl())) {
-          readOptions.setNamespace(
-              LanceRuntime.getOrCreateNamespace(
-                  inputPartition.getNamespaceImpl(), inputPartition.getNamespaceProperties()));
+          namespaceLease =
+              ExecutorNamespaceCache.acquire(
+                  inputPartition.getNamespaceImpl(),
+                  inputPartition.getNamespaceProperties(),
+                  inputPartition.getScanId());
+          readOptions.setNamespace(namespaceLease.namespace());
         } else {
           readOptions.setNamespace(null);
         }
@@ -156,6 +163,7 @@ public class LanceFragmentScanner implements AutoCloseable {
           fragmentId,
           withFragmentId,
           inputPartition,
+          namespaceLease,
           dsOpenTimeNs,
           scanCreateTimeNs,
           withRowAddrForBlobs,
@@ -171,6 +179,13 @@ public class LanceFragmentScanner implements AutoCloseable {
       if (dataset != null) {
         try {
           dataset.close();
+        } catch (Throwable closeError) {
+          throwable.addSuppressed(closeError);
+        }
+      }
+      if (namespaceLease != null) {
+        try {
+          namespaceLease.close();
         } catch (Throwable closeError) {
           throwable.addSuppressed(closeError);
         }
@@ -199,6 +214,17 @@ public class LanceFragmentScanner implements AutoCloseable {
     if (dataset != null) {
       try {
         dataset.close();
+      } catch (Throwable t) {
+        if (primary != null) {
+          primary.addSuppressed(t);
+        } else {
+          primary = t;
+        }
+      }
+    }
+    if (namespaceLease != null) {
+      try {
+        namespaceLease.close();
       } catch (Throwable t) {
         if (primary != null) {
           primary.addSuppressed(t);
