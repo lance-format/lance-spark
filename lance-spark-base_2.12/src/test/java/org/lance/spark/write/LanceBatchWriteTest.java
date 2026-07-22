@@ -15,6 +15,7 @@ package org.lance.spark.write;
 
 import org.lance.Dataset;
 import org.lance.WriteParams;
+import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
 
@@ -40,6 +41,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -132,6 +135,107 @@ public class LanceBatchWriteTest {
       writerA.commit(new WriterCommitMessage[] {messageA});
       assertThrows(Exception.class, () -> writerB.commit(new WriterCommitMessage[] {messageB}));
     }
+  }
+
+  /**
+   * Reproduces the bug fixed by {@link StagedCommit#mergeStorageOptions}: for a staged create (e.g.
+   * {@code stageCreateAtPath}), {@code StagedCommit} is constructed with only the catalog's static
+   * storage options, before {@code initialStorageOptions} (namespace-vended credentials, e.g. from
+   * {@code declareTable()}) or write-time options are known. Without the merge, {@link
+   * LanceBatchWrite#commit} would leave those credentials out of the final commit and the manifest
+   * write would authenticate with the empty/static set instead.
+   */
+  @Test
+  public void testCommitMergesInitialStorageOptionsIntoStagedCommit(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+
+    Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
+    Schema schema = new Schema(Collections.singletonList(field));
+    StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
+    LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
+
+    // Simulates stageCreateAtPath: StagedCommit built with empty storage options, since no
+    // namespace round trip has happened yet at stage-create time.
+    StagedCommit stagedCommit =
+        StagedCommit.forNewTable(
+            schema, datasetUri, StagedCommitOptions.pathBased(Collections.emptyMap(), false));
+
+    // Simulates namespace-vended credentials obtained afterward (describeTable()/declareTable()),
+    // passed into LanceBatchWrite the same way BaseLanceNamespaceSparkCatalog does.
+    Map<String, String> initialStorageOptions = new HashMap<>();
+    initialStorageOptions.put("access_key_id", "AKIA-from-namespace");
+
+    LanceBatchWrite batchWrite =
+        new LanceBatchWrite(
+            sparkSchema,
+            writeOptions,
+            false,
+            initialStorageOptions,
+            null, // namespaceImpl
+            null, // namespaceProperties
+            null, // tableId
+            false, // managedVersioning
+            stagedCommit);
+
+    batchWrite.commit(new WriterCommitMessage[0]);
+
+    assertEquals("AKIA-from-namespace", stagedCommit.getStorageOptions().get("access_key_id"));
+
+    // The merge must also survive an actual commit, not just land in the field.
+    stagedCommit.commit();
+    try (Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+      assertEquals(0, dataset.countRows());
+    }
+  }
+
+  /**
+   * {@link LanceRuntime#mergeStorageOptions} is documented as: initialStorageOptions overrides
+   * write-time options on key conflict, but write-time-only options are still included. Confirms
+   * both halves: (1) the staged-commit merge preserves conflict precedence, and (2) a write-time
+   * option with no namespace-vended counterpart still survives into the final merged map. Without
+   * (2), an implementation that merged only {@code initialStorageOptions} into {@code stagedCommit}
+   * — silently dropping {@code writeOptions.getStorageOptions()} from the merge entirely — would
+   * satisfy (1) alone.
+   */
+  @Test
+  public void testCommitStagedMergePrefersInitialStorageOptionsOnConflict(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+
+    Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
+    Schema schema = new Schema(Collections.singletonList(field));
+    StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
+    Map<String, String> writeTimeOptions = new HashMap<>();
+    writeTimeOptions.put("access_key_id", "stale-write-time-key");
+    writeTimeOptions.put("region", "us-west-2");
+    LanceSparkWriteOptions writeOptions =
+        LanceSparkWriteOptions.from(datasetUri).toBuilder()
+            .storageOptions(writeTimeOptions)
+            .build();
+
+    StagedCommit stagedCommit =
+        StagedCommit.forNewTable(
+            schema, datasetUri, StagedCommitOptions.pathBased(Collections.emptyMap(), false));
+
+    LanceBatchWrite batchWrite =
+        new LanceBatchWrite(
+            sparkSchema,
+            writeOptions,
+            false,
+            Collections.singletonMap("access_key_id", "fresh-namespace-key"),
+            null,
+            null,
+            null,
+            false,
+            stagedCommit);
+
+    batchWrite.commit(new WriterCommitMessage[0]);
+
+    // initialStorageOptions wins on the conflicting key...
+    assertEquals("fresh-namespace-key", stagedCommit.getStorageOptions().get("access_key_id"));
+    // ...but a write-time-only key (absent from initialStorageOptions) must still come through.
+    assertEquals("us-west-2", stagedCommit.getStorageOptions().get("region"));
   }
 
   private static WriterCommitMessage writeRows(

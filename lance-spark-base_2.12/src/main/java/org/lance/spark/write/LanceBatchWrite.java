@@ -178,6 +178,14 @@ public class LanceBatchWrite implements BatchWrite {
       if (enableStableRowIds != null) {
         stagedCommit.setEnableStableRowIds(enableStableRowIds);
       }
+      // StagedCommit.storageOptions was captured at stage-create time from the catalog's static
+      // config only; it does not include write-time options or namespace-vended credentials
+      // obtained afterward (e.g. describeTable()/declareTable() results in initialStorageOptions).
+      // Merge both in now so the manifest commit below authenticates with them instead of falling
+      // back to ambient credential discovery. Same merge semantics as the non-staged branch below.
+      stagedCommit.mergeStorageOptions(
+          LanceRuntime.mergeStorageOptions(
+              writeOptions.getStorageOptions(), initialStorageOptions));
     } else {
       // For non-staged tables, commit immediately
       long version =
