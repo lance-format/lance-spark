@@ -36,6 +36,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -72,11 +73,28 @@ public class ExecutorNamespaceCacheTest {
   }
 
   @Test
+  public void separatesObjectStoreIdentityAcrossScans() {
+    ExecutorNamespaceCache.Lease first =
+        ExecutorNamespaceCache.acquire(
+            CloseableNamespace.class.getName(), Map.of("catalog", "test"), "scan-a");
+    ExecutorNamespaceCache.Lease second =
+        ExecutorNamespaceCache.acquire(
+            CloseableNamespace.class.getName(), Map.of("catalog", "test"), "scan-b");
+
+    assertNotEquals(first.namespace().namespaceId(), second.namespace().namespaceId());
+    assertTrue(first.namespace().namespaceId().endsWith("sparkScan[scan-a]"));
+    assertTrue(second.namespace().namespaceId().endsWith("sparkScan[scan-b]"));
+
+    first.close();
+    second.close();
+  }
+
+  @Test
   public void coalescesConcurrentDescribeTableCalls() throws Exception {
     AtomicLong clock = new AtomicLong(100_000L);
     BlockingNamespace delegate = new BlockingNamespace(clock);
     ExecutorNamespaceCache.CredentialCachingNamespace namespace =
-        new ExecutorNamespaceCache.CredentialCachingNamespace(delegate, clock::get);
+        new ExecutorNamespaceCache.CredentialCachingNamespace(delegate, clock::get, "test-scan");
     DescribeTableRequest request = new DescribeTableRequest().addIdItem("table").version(1L);
 
     ExecutorService executor = Executors.newFixedThreadPool(8);
@@ -105,7 +123,7 @@ public class ExecutorNamespaceCacheTest {
     AtomicLong clock = new AtomicLong(100_000L);
     RecordingNamespace delegate = new RecordingNamespace(clock);
     ExecutorNamespaceCache.CredentialCachingNamespace namespace =
-        new ExecutorNamespaceCache.CredentialCachingNamespace(delegate, clock::get);
+        new ExecutorNamespaceCache.CredentialCachingNamespace(delegate, clock::get, "test-scan");
     DescribeTableRequest firstRequest =
         new DescribeTableRequest()
             .addIdItem("catalog")
@@ -132,7 +150,7 @@ public class ExecutorNamespaceCacheTest {
     AtomicLong clock = new AtomicLong(100_000L);
     RecordingNamespace delegate = new RecordingNamespace(clock);
     ExecutorNamespaceCache.CredentialCachingNamespace namespace =
-        new ExecutorNamespaceCache.CredentialCachingNamespace(delegate, clock::get);
+        new ExecutorNamespaceCache.CredentialCachingNamespace(delegate, clock::get, "test-scan");
     DescribeTableRequest request = new DescribeTableRequest().addIdItem("table").version(1L);
 
     DescribeTableResponse first = namespace.describeTable(request);
@@ -153,7 +171,7 @@ public class ExecutorNamespaceCacheTest {
     RecordingNamespace delegate = new RecordingNamespace(clock);
     delegate.failNext = true;
     ExecutorNamespaceCache.CredentialCachingNamespace namespace =
-        new ExecutorNamespaceCache.CredentialCachingNamespace(delegate, clock::get);
+        new ExecutorNamespaceCache.CredentialCachingNamespace(delegate, clock::get, "test-scan");
     DescribeTableRequest request = new DescribeTableRequest().addIdItem("table").version(1L);
 
     assertThrows(IllegalStateException.class, () -> namespace.describeTable(request));
@@ -183,7 +201,7 @@ public class ExecutorNamespaceCacheTest {
           }
         };
     ExecutorNamespaceCache.CredentialCachingNamespace namespace =
-        new ExecutorNamespaceCache.CredentialCachingNamespace(delegate, clock::get);
+        new ExecutorNamespaceCache.CredentialCachingNamespace(delegate, clock::get, "test-scan");
     DescribeTableRequest request = new DescribeTableRequest().addIdItem("table").version(1L);
 
     assertEquals("expired-1", namespace.describeTable(request).getStorageOptions().get("token"));
@@ -213,7 +231,7 @@ public class ExecutorNamespaceCacheTest {
           }
         };
     ExecutorNamespaceCache.CredentialCachingNamespace namespace =
-        new ExecutorNamespaceCache.CredentialCachingNamespace(delegate, () -> 0L);
+        new ExecutorNamespaceCache.CredentialCachingNamespace(delegate, () -> 0L, "test-scan");
 
     assertSame(
         listResponse,
@@ -236,7 +254,7 @@ public class ExecutorNamespaceCacheTest {
           }
         };
     ExecutorNamespaceCache.CredentialCachingNamespace namespace =
-        new ExecutorNamespaceCache.CredentialCachingNamespace(delegate, () -> 0L);
+        new ExecutorNamespaceCache.CredentialCachingNamespace(delegate, () -> 0L, "test-scan");
 
     org.lance.namespace.errors.UnsupportedOperationException error =
         assertThrows(

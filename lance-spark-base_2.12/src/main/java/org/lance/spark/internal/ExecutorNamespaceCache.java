@@ -91,7 +91,8 @@ public final class ExecutorNamespaceCache {
                 key,
                 () ->
                     new CachedNamespace(
-                        LanceRuntime.getOrCreateNamespace(namespaceImpl, key.properties)));
+                        LanceRuntime.getOrCreateNamespace(namespaceImpl, key.properties),
+                        key.scanId));
       } catch (ExecutionException e) {
         throw propagate(e.getCause(), "Failed to initialize executor namespace");
       } catch (UncheckedExecutionException e) {
@@ -194,9 +195,10 @@ public final class ExecutorNamespaceCache {
     private boolean evicted;
     private boolean closed;
 
-    private CachedNamespace(LanceNamespace delegate) {
+    private CachedNamespace(LanceNamespace delegate, String scanId) {
       this.delegate = Objects.requireNonNull(delegate, "delegate");
-      this.namespace = new CredentialCachingNamespace(delegate, System::currentTimeMillis);
+      this.namespace =
+          new CredentialCachingNamespace(delegate, System::currentTimeMillis, scanId);
     }
 
     private synchronized Lease acquire() {
@@ -251,6 +253,7 @@ public final class ExecutorNamespaceCache {
   static final class CredentialCachingNamespace implements LanceNamespace {
     private final LanceNamespace delegate;
     private final LongSupplier clock;
+    private final String namespaceId;
     private final Cache<DescribeTableRequest, FutureTask<CachedDescription>> descriptionCache =
         CacheBuilder.newBuilder()
             .maximumSize(MAX_DESCRIBED_TABLES_PER_NAMESPACE)
@@ -259,9 +262,17 @@ public final class ExecutorNamespaceCache {
     private final ConcurrentMap<DescribeTableRequest, FutureTask<CachedDescription>> descriptions =
         descriptionCache.asMap();
 
-    CredentialCachingNamespace(LanceNamespace delegate, LongSupplier clock) {
+    CredentialCachingNamespace(LanceNamespace delegate, LongSupplier clock, String scanId) {
       this.delegate = Objects.requireNonNull(delegate, "delegate");
       this.clock = Objects.requireNonNull(clock, "clock");
+      // Lance uses namespaceId as part of its object-store/provider cache key. Keep the ID stable
+      // within one Spark scan, but isolate scans so a later scan cannot reuse a provider whose
+      // namespace lease belongs to an earlier scan and may be closed on cache eviction.
+      this.namespaceId =
+          delegate.namespaceId()
+              + ",sparkScan["
+              + Objects.requireNonNull(scanId, "scanId")
+              + "]";
     }
 
     @Override
@@ -271,7 +282,7 @@ public final class ExecutorNamespaceCache {
 
     @Override
     public String namespaceId() {
-      return delegate.namespaceId();
+      return namespaceId;
     }
 
     @Override
