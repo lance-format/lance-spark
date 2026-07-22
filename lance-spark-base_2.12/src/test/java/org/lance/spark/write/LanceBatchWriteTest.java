@@ -138,12 +138,9 @@ public class LanceBatchWriteTest {
   }
 
   /**
-   * Reproduces the bug fixed by {@link StagedCommit#mergeStorageOptions}: for a staged create (e.g.
-   * {@code stageCreateAtPath}), {@code StagedCommit} is constructed with only the catalog's static
-   * storage options, before {@code initialStorageOptions} (namespace-vended credentials, e.g. from
-   * {@code declareTable()}) or write-time options are known. Without the merge, {@link
-   * LanceBatchWrite#commit} would leave those credentials out of the final commit and the manifest
-   * write would authenticate with the empty/static set instead.
+   * A staged create (e.g. {@code stageCreateAtPath}) builds {@code StagedCommit} with only the
+   * catalog's static storage options. Confirms {@link LanceBatchWrite#commit} merges {@code
+   * initialStorageOptions} in before the eventual {@link StagedCommit#commit()}.
    */
   @Test
   public void testCommitMergesInitialStorageOptionsIntoStagedCommit(TestInfo testInfo) {
@@ -155,14 +152,13 @@ public class LanceBatchWriteTest {
     StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
     LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
 
-    // Simulates stageCreateAtPath: StagedCommit built with empty storage options, since no
-    // namespace round trip has happened yet at stage-create time.
+    // StagedCommit starts with no storage options, as for a path-based staged create.
     StagedCommit stagedCommit =
         StagedCommit.forNewTable(
             schema, datasetUri, StagedCommitOptions.pathBased(Collections.emptyMap(), false));
 
-    // Simulates namespace-vended credentials obtained afterward (describeTable()/declareTable()),
-    // passed into LanceBatchWrite the same way BaseLanceNamespaceSparkCatalog does.
+    // initialStorageOptions represents namespace-vended credentials, passed to LanceBatchWrite
+    // independently of how stagedCommit was constructed.
     Map<String, String> initialStorageOptions = new HashMap<>();
     initialStorageOptions.put("access_key_id", "AKIA-from-namespace");
 
@@ -182,7 +178,7 @@ public class LanceBatchWriteTest {
 
     assertEquals("AKIA-from-namespace", stagedCommit.getStorageOptions().get("access_key_id"));
 
-    // The merge must also survive an actual commit, not just land in the field.
+    // The merged options must not break the subsequent commit.
     stagedCommit.commit();
     try (Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator())) {
       assertEquals(0, dataset.countRows());
@@ -190,13 +186,8 @@ public class LanceBatchWriteTest {
   }
 
   /**
-   * {@link LanceRuntime#mergeStorageOptions} is documented as: initialStorageOptions overrides
-   * write-time options on key conflict, but write-time-only options are still included. Confirms
-   * both halves: (1) the staged-commit merge preserves conflict precedence, and (2) a write-time
-   * option with no namespace-vended counterpart still survives into the final merged map. Without
-   * (2), an implementation that merged only {@code initialStorageOptions} into {@code stagedCommit}
-   * — silently dropping {@code writeOptions.getStorageOptions()} from the merge entirely — would
-   * satisfy (1) alone.
+   * On key conflict, {@code initialStorageOptions} wins over write-time options; a write-time-only
+   * key (no namespace-vended counterpart) must still be included in the merge.
    */
   @Test
   public void testCommitStagedMergePrefersInitialStorageOptionsOnConflict(TestInfo testInfo) {

@@ -162,11 +162,9 @@ public class StagedCommitTest {
 
   @Test
   public void testMergeStorageOptionsAcceptsUnmodifiableBaseMap() {
-    // BaseLanceNamespaceSparkCatalog.stageCreateAtPath/stageReplaceAtPath pass
-    // catalogConfig.getStorageOptions() directly, which LanceSparkCatalogConfig wraps in
-    // Collections.unmodifiableMap(...) and shares across every staged operation on the catalog.
-    // Without a defensive copy in the constructor, merging into that map throws
-    // UnsupportedOperationException on every real path-based staged create.
+    // Path-based staged creates pass catalogConfig.getStorageOptions() directly, which
+    // LanceSparkCatalogConfig wraps in Collections.unmodifiableMap(...). Without a defensive
+    // copy in the constructor, merging into that map throws UnsupportedOperationException.
     Map<String, String> unmodifiableCatalogOptions =
         Collections.unmodifiableMap(Collections.singletonMap("region", "us-west-2"));
     StagedCommit commit =

@@ -117,13 +117,8 @@ public class StagedCommit {
   }
 
   /**
-   * Merges additional storage options into this staged commit's storage options.
-   *
-   * <p>{@code storageOptions} is captured once at {@code StagedCommit} construction time (from
-   * {@link StagedCommitOptions#getStorageOptions()}), before write-time options or namespace-vended
-   * credentials (e.g. from {@code declareTable()}) are necessarily known. This allows the caller to
-   * layer those in afterward, once available, so the final {@link #commit()} call authenticates
-   * with them instead of falling back to ambient credential discovery.
+   * Merges additional storage options into this staged commit's storage options, for options that
+   * were not yet known when this {@code StagedCommit} was constructed.
    *
    * @param extra additional storage options to merge in; a no-op when null or empty. Keys in {@code
    *     extra} take precedence over any existing entry with the same key.
