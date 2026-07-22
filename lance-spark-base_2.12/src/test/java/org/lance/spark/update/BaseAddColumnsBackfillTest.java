@@ -266,6 +266,50 @@ public abstract class BaseAddColumnsBackfillTest {
     }
   }
 
+  /** Verifies add-columns backfill preserves existing Arrow timestamp timezones. */
+  @Test
+  public void testAddColumnsBackfillPreservesExistingTimestampTimezone(TestInfo testInfo)
+      throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    TestUtils.writeNonUtcTimestampDataset(datasetUri, "Asia/Shanghai");
+
+    LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
+    StructType backfillSchema =
+        new StructType()
+            .add(LanceConstant.ROW_ADDRESS, DataTypes.LongType, false)
+            .add(LanceConstant.FRAGMENT_ID, DataTypes.IntegerType, false)
+            .add("new_col", DataTypes.IntegerType, true);
+
+    AddColumnsBackfillBatchWrite backfillWrite =
+        new AddColumnsBackfillBatchWrite(
+            backfillSchema,
+            writeOptions,
+            Collections.singletonList("new_col"),
+            null,
+            null,
+            null,
+            null);
+
+    DataWriterFactory factory = backfillWrite.createBatchWriterFactory(() -> 1);
+    WriterCommitMessage backfillMsg;
+    try (DataWriter<InternalRow> writer = factory.createWriter(0, 0)) {
+      for (int i = 0; i < 5; i++) {
+        writer.write(new GenericInternalRow(new Object[] {(long) i, 0, i * 10}));
+      }
+      backfillMsg = writer.commit();
+    }
+    backfillWrite.commit(new WriterCommitMessage[] {backfillMsg});
+
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
+        org.lance.Dataset dataset = org.lance.Dataset.open(datasetUri, allocator)) {
+      ArrowType.Timestamp timestampType =
+          (ArrowType.Timestamp) dataset.getSchema().findField("created_time").getType();
+      Assertions.assertEquals("Asia/Shanghai", timestampType.getTimezone());
+      Assertions.assertNotNull(dataset.getSchema().findField("new_col"));
+    }
+  }
+
   /**
    * Pins a read version in AddColumnsBackfillBatchWrite's constructor, then advances the table with
    * an overwrite before the backfill driver commit. The stale commit must fail (OCC).

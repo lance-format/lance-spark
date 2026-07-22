@@ -50,6 +50,7 @@ object LanceArrowUtils {
   val ARROW_DATE_MILLISECOND_KEY = DateMilliUtils.ARROW_DATE_MILLISECOND_KEY
   val ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY =
     FixedSizeBinaryUtils.ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY
+  val ARROW_TIMESTAMP_TIMEZONE_KEY = "lance.arrow.timestamp.timezone"
 
   // Namespaced keys used to embed child Spark Metadata on a parent StructField when the
   // child sits inside an ArrayType/MapType — Spark has no per-element metadata slot of its
@@ -250,6 +251,8 @@ object LanceArrowUtils {
         // Preserve FixedSizeBinary byte width so a subsequent write reproduces
         // FixedSizeBinary(n) instead of falling back to variable-length Binary.
         builder.putLong(ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY, fsb.getByteWidth.toLong)
+      case timestamp: ArrowType.Timestamp if timestamp.getTimezone != null =>
+        builder.putString(ARROW_TIMESTAMP_TIMEZONE_KEY, timestamp.getTimezone)
       case _ =>
     }
   }
@@ -356,7 +359,9 @@ object LanceArrowUtils {
         .readValue(metadata.json, classOf[java.util.LinkedHashMap[_, _]])
         .asScala
         .collect {
-          case (k, v) if !LANCE_INTERNAL_METADATA_KEYS.contains(k.toString) =>
+          case (k, v)
+              if !LANCE_INTERNAL_METADATA_KEYS.contains(k.toString) &&
+                k.toString != ARROW_TIMESTAMP_TIMEZONE_KEY =>
             (k.toString, String.valueOf(v))
         }
         .toMap
@@ -496,8 +501,19 @@ object LanceArrowUtils {
             arrowUInt64Field("position"),
             arrowUInt64Field("size")).asJava)
       case dataType =>
+        val effectiveTimeZoneId =
+          if (dataType == TimestampType && metadata != null
+            && metadata.contains(ARROW_TIMESTAMP_TIMEZONE_KEY)) {
+            metadata.getString(ARROW_TIMESTAMP_TIMEZONE_KEY)
+          } else {
+            timeZoneId
+          }
         val fieldType =
-          new FieldType(nullable, toArrowType(dataType, timeZoneId, large, name), null, meta.asJava)
+          new FieldType(
+            nullable,
+            toArrowType(dataType, effectiveTimeZoneId, large, name),
+            null,
+            meta.asJava)
         new Field(name, fieldType, Seq.empty[Field].asJava)
     }
   }
