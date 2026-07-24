@@ -28,6 +28,7 @@ import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.spark.annotation.Evolving;
 import org.apache.spark.sql.connector.write.BatchWrite;
 import org.apache.spark.sql.connector.write.DataWriterFactory;
 import org.apache.spark.sql.connector.write.PhysicalWriteInfo;
@@ -37,6 +38,7 @@ import org.apache.spark.sql.util.LanceArrowUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -229,6 +231,22 @@ public class LanceBatchWrite implements BatchWrite {
   @Override
   public String toString() {
     return String.format("LanceBatchWrite(datasetUri=%s)", writeOptions.getDatasetUri());
+  }
+
+  /**
+   * Creates an opaque commit message for uncommitted fragments written for a target dataset.
+   *
+   * <p>The returned message must be passed to {@link #commit(WriterCommitMessage[])} on a {@code
+   * LanceBatchWrite} for the same target dataset.
+   *
+   * @param fragments uncommitted fragments produced by a task
+   * @return a message accepted by {@link #commit(WriterCommitMessage[])}
+   * @throws NullPointerException if {@code fragments} is null
+   */
+  @Evolving
+  public static WriterCommitMessage taskCommit(List<FragmentMetadata> fragments) {
+    return new TaskCommit(
+        new ArrayList<>(Objects.requireNonNull(fragments, "fragments must not be null")));
   }
 
   public static class TaskCommit implements WriterCommitMessage {

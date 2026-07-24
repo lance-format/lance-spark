@@ -14,6 +14,7 @@
 package org.lance.spark.write;
 
 import org.lance.Dataset;
+import org.lance.FragmentMetadata;
 import org.lance.WriteParams;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
@@ -39,13 +40,49 @@ import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class LanceBatchWriteTest {
   @TempDir static Path tempDir;
+
+  @Test
+  public void testTaskCommitRejectsNullFragments() {
+    NullPointerException error =
+        assertThrows(NullPointerException.class, () -> LanceBatchWrite.taskCommit(null));
+
+    assertEquals("fragments must not be null", error.getMessage());
+  }
+
+  @Test
+  public void testTaskCommitDefensivelyCopiesFragments() {
+    FragmentMetadata first = new FragmentMetadata(1, Collections.emptyList(), 0L, null, null);
+    FragmentMetadata second = new FragmentMetadata(2, Collections.emptyList(), 0L, null, null);
+    List<FragmentMetadata> fragments = new ArrayList<>(Arrays.asList(first, second, first));
+
+    WriterCommitMessage message = LanceBatchWrite.taskCommit(fragments);
+    LanceBatchWrite.TaskCommit taskCommit =
+        assertInstanceOf(LanceBatchWrite.TaskCommit.class, message);
+    fragments.clear();
+
+    assertEquals(Arrays.asList(first, second, first), taskCommit.getFragments());
+  }
+
+  @Test
+  public void testTaskCommitAcceptsEmptyFragments() {
+    LanceBatchWrite.TaskCommit taskCommit =
+        assertInstanceOf(
+            LanceBatchWrite.TaskCommit.class, LanceBatchWrite.taskCommit(Collections.emptyList()));
+
+    assertTrue(taskCommit.getFragments().isEmpty());
+  }
 
   @Test
   public void testLanceDataWriter(TestInfo testInfo) throws Exception {
@@ -101,6 +138,55 @@ public class LanceBatchWriteTest {
             assertEquals(rows, totalRowsRead);
           }
         }
+      }
+    }
+  }
+
+  @Test
+  public void testTaskCommitCommitsMultipleFragments(TestInfo testInfo) throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
+      Schema schema = new Schema(Collections.singletonList(field));
+      Dataset.create(allocator, datasetUri, schema, new WriteParams.Builder().build()).close();
+
+      LanceSparkWriteOptions writeOptions =
+          LanceSparkWriteOptions.builder().datasetUri(datasetUri).maxRowsPerFile(32).build();
+      StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
+      LanceBatchWrite lanceBatchWrite =
+          new LanceBatchWrite(
+              sparkSchema,
+              writeOptions,
+              false,
+              null, // initialStorageOptions
+              null, // namespaceImpl
+              null, // namespaceProperties
+              null, // tableId
+              false, // managedVersioning
+              null); // stagedCommit
+      DataWriterFactory factory = lanceBatchWrite.createBatchWriterFactory(() -> 1);
+
+      int rows = 132;
+      WriterCommitMessage writerMessage;
+      try (DataWriter<InternalRow> writer = factory.createWriter(0, 0)) {
+        for (int i = 0; i < rows; i++) {
+          writer.write(new GenericInternalRow(new Object[] {i}));
+        }
+        writerMessage = writer.commit();
+      }
+
+      LanceBatchWrite.TaskCommit writerTaskCommit =
+          assertInstanceOf(LanceBatchWrite.TaskCommit.class, writerMessage);
+      List<FragmentMetadata> fragments = writerTaskCommit.getFragments();
+      assertTrue(fragments.size() > 1);
+
+      WriterCommitMessage externalMessage = LanceBatchWrite.taskCommit(fragments);
+      lanceBatchWrite.commit(new WriterCommitMessage[] {externalMessage});
+
+      try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
+        assertEquals(rows, dataset.countRows());
+        assertEquals(fragments.size(), dataset.getFragments().size());
       }
     }
   }
