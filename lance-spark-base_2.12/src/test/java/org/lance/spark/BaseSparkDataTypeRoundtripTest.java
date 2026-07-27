@@ -624,4 +624,38 @@ public abstract class BaseSparkDataTypeRoundtripTest {
     assertEquals(v1, got.get(0));
     assertEquals(v2, got.get(1));
   }
+
+  // ---------------- fixed-size-list with null ----------------
+
+  @Test
+  public void testFixedSizeListNullMixed() {
+    org.apache.spark.sql.types.Metadata meta =
+        new org.apache.spark.sql.types.MetadataBuilder()
+            .putLong("arrow.fixed-size-list.size", 4L)
+            .build();
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add(
+                org.apache.spark.sql.types.DataTypes.createStructField(
+                    "vec", DataTypes.createArrayType(DataTypes.FloatType, false), true, meta));
+    List<Row> data =
+        Arrays.asList(
+            RowFactory.create(0, Arrays.asList(1.0f, 2.0f, 3.0f, 4.0f)),
+            RowFactory.create(1, null),
+            RowFactory.create(2, null),
+            RowFactory.create(3, Arrays.asList(5.0f, 6.0f, 7.0f, 8.0f)));
+    List<Row> out = writeAndRead(schema, data, "fsl_null").orderBy("id").collectAsList();
+    assertEquals(4, out.size());
+    // Row 0: non-null
+    assertFalse(out.get(0).isNullAt(1));
+    assertEquals(Arrays.asList(1.0f, 2.0f, 3.0f, 4.0f), out.get(0).getList(1));
+    // Row 1: null
+    assertTrue(out.get(1).isNullAt(1));
+    // Row 2: null
+    assertTrue(out.get(2).isNullAt(1));
+    // Row 3: non-null AFTER nulls - this is the critical assertion
+    assertFalse(out.get(3).isNullAt(1), "Row after null should not be null");
+    assertEquals(Arrays.asList(5.0f, 6.0f, 7.0f, 8.0f), out.get(3).getList(1));
+  }
 }

@@ -208,6 +208,9 @@ private[arrow] class FixedSizeListWriter(
     val elementWriter: LanceArrowFieldWriter) extends LanceArrowFieldWriter {
 
   override def setNull(): Unit = {
+    // Child vector must reserve listSize slots even for null rows,
+    // otherwise subsequent rows write to wrong offsets.
+    elementWriter.count += valueVector.getListSize()
     valueVector.setNull(count)
   }
 
