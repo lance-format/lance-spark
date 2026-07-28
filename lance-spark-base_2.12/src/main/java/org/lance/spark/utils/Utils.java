@@ -173,13 +173,16 @@ public class Utils {
   }
 
   /**
-   * Creates LanceSparkReadOptions for this catalog.
+   * Creates LanceSparkReadOptions for a namespace-backed table.
    *
    * @param location the dataset URI
    * @param catalogConfig catalog configuration
    * @param versionId optional dataset version id
    * @param namespace optional namespace for credential vending
    * @param tableId optional table identifier
+   * @param storageOptions optional per-table storage options returned by the namespace service
+   *     (e.g. vended credentials from {@code describeTable} / {@code declareTable}); wins over
+   *     {@code catalogConfig} storage options on key collisions
    * @param catalogName catalog name for cache isolation
    * @return a new LanceSparkReadOptions with catalog settings
    */
@@ -189,12 +192,10 @@ public class Utils {
       Optional<Long> versionId,
       Optional<LanceNamespace> namespace,
       Optional<List<String>> tableId,
+      Optional<Map<String, String>> storageOptions,
       String catalogName) {
     LanceSparkReadOptions.Builder builder =
-        LanceSparkReadOptions.builder()
-            .datasetUri(location)
-            .withCatalogDefaults(catalogConfig)
-            .catalogName(catalogName);
+        LanceSparkReadOptions.builder().datasetUri(location).catalogName(catalogName);
 
     if (versionId.isPresent()) {
       builder.version(versionId.get());
@@ -205,8 +206,30 @@ public class Utils {
     if (namespace.isPresent()) {
       builder.namespace(namespace.get());
     }
-
+    if (storageOptions.isPresent() && !storageOptions.get().isEmpty()) {
+      builder.storageOptions(storageOptions.get());
+    }
+    // Order matters: storage options above are set first so withCatalogDefaults
+    // treats catalog values as fallbacks under them, not overrides.
+    builder.withCatalogDefaults(catalogConfig);
     return builder.build();
+  }
+
+  /**
+   * Convenience overload for path-based callers that have no namespace-vended storage options.
+   * Namespace-based call sites must use {@link #createReadOptions} with an explicit {@code
+   * storageOptions} argument so that credentials vended by the namespace service reach the read
+   * path.
+   */
+  public static LanceSparkReadOptions createPathBasedReadOptions(
+      String location,
+      LanceSparkCatalogConfig catalogConfig,
+      Optional<Long> versionId,
+      Optional<LanceNamespace> namespace,
+      Optional<List<String>> tableId,
+      String catalogName) {
+    return createReadOptions(
+        location, catalogConfig, versionId, namespace, tableId, Optional.empty(), catalogName);
   }
 
   // Determine if the timestamp is in microseconds or nanoseconds and convert to Instant
