@@ -13,6 +13,7 @@
  */
 package org.lance.spark.read;
 
+import org.lance.ipc.FullTextQuery;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 import org.lance.spark.utils.BlobUtils;
@@ -363,6 +364,31 @@ public class LanceScanBuilderTest {
     // Metadata-based COUNT(*) without filters returns LanceLocalScan
     assertNotNull(scan);
     assertInstanceOf(LanceLocalScan.class, scan);
+  }
+
+  /**
+   * A full-text query restricts rows but is carried in the read options rather than as a pushed
+   * predicate, so the metadata-based COUNT(*) shortcut must not fire: answering from {@code
+   * ManifestSummary.getTotalRows()} would ignore the FTS query and return the whole table's count.
+   */
+  @Test
+  public void testBuildWithCountStarAndFullTextQueryReturnsLanceScan() {
+    LanceSparkReadOptions ftsOptions =
+        LanceSparkReadOptions.builder()
+            .datasetUri(TestUtils.TestTable1Config.readOptions.getDatasetUri())
+            .fullTextQuery(FullTextQuery.match("hello", "name"))
+            .build();
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            TEST_SCHEMA, ftsOptions, Collections.emptyMap(), null, Collections.emptyMap());
+    Aggregation countStar =
+        new Aggregation(new AggregateFunc[] {new CountStar()}, new Expression[] {});
+    assertTrue(builder.pushAggregation(countStar), "COUNT(*) must still be pushed down");
+    Scan scan = builder.build();
+    assertInstanceOf(
+        LanceScan.class,
+        scan,
+        "COUNT(*) with an active full-text query must be answered by a scan, not LanceLocalScan");
   }
 
   /** Minimal SortOrder implementation for testing pushTopN. */

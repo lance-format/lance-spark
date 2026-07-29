@@ -41,6 +41,7 @@ import org.lance.namespace.model.RenameTableResponse;
 import org.lance.namespace.model.TableExistsRequest;
 
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.junit.jupiter.api.AfterEach;
@@ -57,6 +58,7 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Verifies that FTS predicates work against a catalog-only namespace — one that manages table
@@ -105,8 +107,14 @@ public abstract class BaseFtsCatalogOnlyNamespaceTest {
   }
 
   /**
-   * Two fragments: ids 0-9 with body "hello world doc_N", then ids 10-14 with "foo bar doc_N" and
-   * ids 15-19 with "hello spark doc_N".
+   * Twenty rows in two INSERTs: ids 0-9 with body "hello world doc_N", then ids 10-14 with "foo bar
+   * doc_N" and ids 15-19 with "hello spark doc_N".
+   *
+   * <p>Each INSERT writes one fragment per write task, and {@code local[4]} gives four tasks, so
+   * the table has EIGHT fragments of 2-3 rows, not two. Slices land at 0-2/2-5/5-7/7-10 within each
+   * INSERT, so ids 17-19 share a fragment and no fragment holds more than three FTS hits. Any
+   * analysis of per-fragment pushdown (limit/top-N truncation in particular) must use eight, not
+   * two.
    */
   private void createAndIndexTable() {
     spark.sql(String.format("CREATE TABLE %s (id INT, body STRING) USING lance", fullTable));
@@ -151,6 +159,81 @@ public abstract class BaseFtsCatalogOnlyNamespaceTest {
                     "SELECT id FROM %s WHERE lance_match_phrase(body, 'hello world')", fullTable))
             .collectAsList();
     assertEquals(10, rows.size(), "Expected the 10 rows whose body contains 'hello world'");
+  }
+
+  /**
+   * COUNT(*) must respect an FTS predicate. The FTS rule moves the predicate out of the Filter and
+   * into the relation options, so no predicate is pushed; the metadata-only COUNT(*) shortcut must
+   * therefore also check for an active full-text query before answering from the manifest.
+   *
+   * <p>Also asserts the count was answered by the scan path rather than the metadata shortcut. The
+   * value alone does not pin that down: the row-scan path applies FTS correctly too, so an
+   * implementation that stopped pushing COUNT(*) altogether would still return 15. The scan's
+   * readSchema is the discriminating signal — {@code LanceScan.readSchema()} returns the
+   * single-column count schema only when an aggregation was pushed.
+   */
+  @Test
+  public void countStarRespectsFtsPredicate() {
+    Dataset<Row> df =
+        spark.sql(
+            String.format("SELECT count(*) FROM %s WHERE lance_match(body, 'hello')", fullTable));
+    assertCountPushedToScan(df);
+    List<Row> rows = df.collectAsList();
+    assertEquals(1, rows.size());
+    assertEquals(15L, rows.get(0).getLong(0), "count(*) must count only rows matching 'hello'");
+  }
+
+  /**
+   * Asserts the count was computed by the scan (i.e. by {@code LanceCountStarPartitionReader}) and
+   * not by re-aggregating scanned rows. The discriminating signal is the scan's output column list:
+   * when the aggregate is pushed, {@code LanceScan.readSchema()} returns the single-column count
+   * schema and the plan shows {@code BatchScan <table>[count#N]}; when it is not pushed, the scan
+   * projects nothing and the plan shows {@code BatchScan <table>[]}. Matching on the word "count"
+   * alone is not enough — the un-pushed plan also contains {@code count(1)} in its aggregate.
+   */
+  private void assertCountPushedToScan(Dataset<Row> df) {
+    String plan = df.queryExecution().executedPlan().toString();
+    assertTrue(
+        plan.matches("(?s).*BatchScan\\s+\\S*\\[count#\\d+L?\\].*"),
+        "COUNT(*) with an FTS predicate must be answered by the scan (BatchScan ...[count#N]), "
+            + "not by re-aggregating rows. Plan: "
+            + plan);
+  }
+
+  @Test
+  public void countStarRespectsNonMatchingFtsPredicate() {
+    List<Row> rows =
+        spark
+            .sql(
+                String.format(
+                    "SELECT count(*) FROM %s WHERE lance_match(body, 'zzz_no_such_term')",
+                    fullTable))
+            .collectAsList();
+    assertEquals(1, rows.size());
+    assertEquals(
+        0L, rows.get(0).getLong(0), "count(*) must be 0 when no row matches the FTS query");
+  }
+
+  /**
+   * The scan-based COUNT(*) path: a pushable scalar predicate defeats the metadata shortcut, so the
+   * count is computed by {@code LanceCountStarPartitionReader}, which must also apply the FTS
+   * query. {@code id >= 10} spans ids 10-14 ("foo bar", no match) and 15-19 ("hello spark", match),
+   * so the FTS-respecting answer (5) differs from the scalar-only answer (10).
+   */
+  @Test
+  public void countStarRespectsFtsPredicateCombinedWithScalarFilter() {
+    List<Row> rows =
+        spark
+            .sql(
+                String.format(
+                    "SELECT count(*) FROM %s WHERE lance_match(body, 'hello') AND id >= 10",
+                    fullTable))
+            .collectAsList();
+    assertEquals(1, rows.size());
+    assertEquals(
+        5L,
+        rows.get(0).getLong(0),
+        "count(*) must count only ids 15-19, which match both 'hello' and id >= 10");
   }
 
   /**

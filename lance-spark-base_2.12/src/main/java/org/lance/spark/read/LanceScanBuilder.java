@@ -446,8 +446,11 @@ public class LanceScanBuilder
       return false;
     }
     if (funcs.length == 1 && funcs[0] instanceof CountStar) {
-      // Check if we can use metadata-based count (no filters pushed)
-      if (pushedPredicates.length == 0) {
+      // Metadata-based count is only valid when nothing restricts the rows. A full-text query is
+      // carried in the read options rather than as a pushed predicate, because the FTS rule moves
+      // the predicate out of the Filter and into the relation options, so it must be checked
+      // separately or COUNT(*) would answer from the manifest and ignore the FTS query.
+      if (pushedPredicates.length == 0 && readOptions.getFullTextQuery() == null) {
         Optional<Long> metadataCount = getCountFromMetadata(getOrOpenDataset());
         if (metadataCount.isPresent()) {
           // Create LocalScan with pre-computed count result
@@ -458,7 +461,7 @@ public class LanceScanBuilder
           return true;
         }
       }
-      // Fall back to scan-based count (with filters or metadata unavailable)
+      // Fall back to scan-based count (with filters, a full-text query, or metadata unavailable)
       this.pushedAggregation = Optional.of(aggregation);
       return true;
     }

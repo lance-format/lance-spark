@@ -63,7 +63,9 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
   }
 
   private long computeCount() {
-    // This reader is only used when there are filters (metadata-based count uses LocalScan)
+    // Used whenever the metadata-based count is unavailable: a pushed filter, an active full-text
+    // query, or an unreadable manifest summary. A full-text query alone is enough, so
+    // inputPartition.getWhereCondition() may be empty here.
     LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
     long totalCount = 0;
 
@@ -84,6 +86,16 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
       scanOptionsBuilder.useScalarIndex(readOptions.isUseScalarIndex());
       if (inputPartition.getWhereCondition().isPresent()) {
         scanOptionsBuilder.filter(inputPartition.getWhereCondition().get());
+      }
+      // A full-text query restricts rows just like a filter does, so it must be applied here or the
+      // count would cover rows the query excludes. The empty column list below makes Lance treat
+      // this as an explicit projection, which would otherwise auto-append `_score` (and log a
+      // deprecation warning) for every task; the count only needs row counts, so opt out. Do NOT
+      // copy that opt-out to the row-scan path, which relies on the autoprojection to deliver the
+      // `_score` metadata column.
+      if (readOptions.getFullTextQuery() != null) {
+        scanOptionsBuilder.fullTextQuery(readOptions.getFullTextQuery());
+        scanOptionsBuilder.disableScoringAutoprojection(true);
       }
       scanOptionsBuilder.withRowId(true);
       scanOptionsBuilder.columns(Lists.newArrayList());
