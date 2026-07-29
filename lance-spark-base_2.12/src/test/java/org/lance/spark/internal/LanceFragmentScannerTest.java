@@ -14,9 +14,14 @@
 package org.lance.spark.internal;
 
 import org.lance.namespace.LanceNamespace;
+import org.lance.namespace.model.DescribeTableRequest;
+import org.lance.namespace.model.DescribeTableResponse;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.TestUtils;
+import org.lance.spark.read.LanceColumnarPartitionReader;
 import org.lance.spark.read.LanceInputPartition;
+import org.lance.spark.read.LanceSplit;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Optional;
 
@@ -25,6 +30,7 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.InvocationTargetException;
@@ -36,6 +42,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -224,54 +231,123 @@ public class LanceFragmentScannerTest {
 
   /**
    * Locks down the executor-branch contract for {@code executor_credential_refresh=false}: when an
-   * executor opens a fragment for a namespace-backed table with the flag disabled, {@link
-   * LanceFragmentScanner#create} must <i>not</i> reconstruct the namespace client. Without this
-   * gate, executors of Kerberized HMS catalogs hit {@code GSS initiate failed} because they lack a
-   * TGT for the eager {@code describeTable()} RPC.
-   *
-   * <p>Strategy: hand a real, loadable {@link LanceNamespace} impl to the partition. If the gate
-   * regresses (rebuild not skipped), {@code LanceNamespace.connect} would succeed via {@code
-   * Class.forName}, {@link RecordingNamespace#initialize} would run, and {@code
-   * readOptions.setNamespace(...)} would fire — all observable here. The bogus dataset URI lets the
-   * outer {@code Utils.openDatasetBuilder().build()} call fail predictably, since the gate runs
-   * <i>before</i> the dataset is opened. No real Lance dataset is required.
+   * executor opens a namespace-backed table with the flag disabled, the partition reader must
+   * <i>not</i> reconstruct the namespace client. Without this gate, executors of Kerberized HMS
+   * catalogs hit {@code GSS initiate failed} because they lack a TGT for the eager {@code
+   * describeTable()} RPC.
    */
   @Test
-  public void testCreateSkipsNamespaceRebuildWhenExecutorCredentialRefreshDisabled() {
-    RecordingNamespace.INITIALIZE_CALLS.set(0);
-
-    LanceSparkReadOptions readOptions =
-        LanceSparkReadOptions.builder()
-            .datasetUri("file:///tmp/__lance_nonexistent_for_executor_gate_test__")
-            .executorCredentialRefresh(false)
-            .build();
-
+  public void testPartitionReaderSkipsNamespaceWhenExecutorCredentialRefreshDisabled()
+      throws Exception {
+    RecordingNamespace.reset();
     LanceInputPartition partition =
-        new LanceInputPartition(
-            new StructType(),
-            0,
-            null,
-            readOptions,
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            "test-scan",
-            Collections.emptyMap(),
-            RecordingNamespace.class.getName(),
-            Collections.emptyMap(),
-            null);
-
-    assertThrows(RuntimeException.class, () -> LanceFragmentScanner.create(0, partition));
+        namespacePartition(
+            TestUtils.TestTable1Config.datasetUri,
+            Collections.singletonList(0),
+            "testPartitionReaderSkipsNamespaceWhenExecutorCredentialRefreshDisabled",
+            false);
+    try (LanceColumnarPartitionReader reader = new LanceColumnarPartitionReader(partition)) {
+      while (reader.next()) {
+        reader.get().close();
+      }
+    }
 
     assertNull(
-        readOptions.getNamespace(),
+        partition.getReadOptions().getNamespace(),
         "executor_credential_refresh=false must skip namespace rebuild on the executor");
     assertEquals(
         0,
         RecordingNamespace.INITIALIZE_CALLS.get(),
         "executor_credential_refresh=false must not load or initialize the namespace impl");
+  }
+
+  @Test
+  public void testPartitionReaderReusesAndClosesExecutorNamespace() throws Exception {
+    RecordingNamespace.reset();
+    LanceInputPartition partition =
+        namespacePartition(
+            TestUtils.TestTable1Config.datasetUri,
+            Arrays.asList(0, 1),
+            "testPartitionReaderReusesAndClosesExecutorNamespace",
+            true);
+
+    LanceColumnarPartitionReader reader = new LanceColumnarPartitionReader(partition);
+    int rowsRead = 0;
+    try {
+      while (reader.next()) {
+        ColumnarBatch batch = reader.get();
+        assertNotNull(batch);
+        rowsRead += batch.numRows();
+        batch.close();
+      }
+    } finally {
+      reader.close();
+    }
+    reader.close();
+
+    assertEquals(TestUtils.TestTable1Config.expectedValues.size(), rowsRead);
+    assertEquals(
+        1,
+        RecordingNamespace.INITIALIZE_CALLS.get(),
+        "all fragments in one Spark task must reuse one namespace client");
+    assertEquals(
+        1,
+        RecordingNamespace.CLOSE_CALLS.get(),
+        "the task-owned namespace client must be closed exactly once");
+  }
+
+  @Test
+  public void testPartitionReaderClosesExecutorNamespaceWhenFragmentOpenFails() throws Exception {
+    RecordingNamespace.reset();
+    LanceInputPartition partition =
+        namespacePartition(
+            TestUtils.TestTable1Config.datasetUri,
+            Collections.singletonList(999999),
+            "testPartitionReaderClosesExecutorNamespaceWhenFragmentOpenFails",
+            true);
+    LanceColumnarPartitionReader reader = new LanceColumnarPartitionReader(partition);
+
+    RuntimeException failure = assertThrows(RuntimeException.class, reader::next);
+
+    assertNotNull(failure.getCause());
+    assertEquals(1, RecordingNamespace.INITIALIZE_CALLS.get());
+    assertEquals(
+        1,
+        RecordingNamespace.CLOSE_CALLS.get(),
+        "namespace initialization must be rolled back when fragment open fails");
+    reader.close();
+    assertEquals(
+        1,
+        RecordingNamespace.CLOSE_CALLS.get(),
+        "close after failed initialization cleanup must be idempotent");
+  }
+
+  private LanceInputPartition namespacePartition(
+      String location,
+      List<Integer> fragments,
+      String scanId,
+      boolean executorCredentialRefresh) {
+    LanceSparkReadOptions readOptions =
+        LanceSparkReadOptions.builder()
+            .datasetUri(location)
+            .tableId(Collections.singletonList(TestUtils.TestTable1Config.datasetName))
+            .executorCredentialRefresh(executorCredentialRefresh)
+            .build();
+    return new LanceInputPartition(
+        TestUtils.TestTable1Config.schema,
+        0,
+        new LanceSplit(fragments),
+        readOptions,
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        scanId,
+        Collections.emptyMap(),
+        RecordingNamespace.class.getName(),
+        Collections.singletonMap("location", location),
+        null);
   }
 
   @Test
@@ -300,23 +376,41 @@ public class LanceFragmentScannerTest {
   }
 
   /**
-   * Public, top-level-by-FQCN, no-arg {@link LanceNamespace} so that {@link
-   * LanceNamespace#connect(String, Map, BufferAllocator)} can resolve it via {@code Class.forName}
-   * if the executor branch is (incorrectly) taken.
+   * Public, no-arg {@link LanceNamespace} so that {@link
+   * LanceNamespace#connect(String, Map, BufferAllocator)} can resolve it via {@code Class.forName}.
    */
-  public static class RecordingNamespace implements LanceNamespace {
+  public static class RecordingNamespace implements LanceNamespace, AutoCloseable {
     static final AtomicInteger INITIALIZE_CALLS = new AtomicInteger();
+    static final AtomicInteger CLOSE_CALLS = new AtomicInteger();
+
+    private String location;
 
     public RecordingNamespace() {}
+
+    static void reset() {
+      INITIALIZE_CALLS.set(0);
+      CLOSE_CALLS.set(0);
+    }
 
     @Override
     public void initialize(Map<String, String> properties, BufferAllocator allocator) {
       INITIALIZE_CALLS.incrementAndGet();
+      location = properties.get("location");
     }
 
     @Override
     public String namespaceId() {
       return "recording";
+    }
+
+    @Override
+    public DescribeTableResponse describeTable(DescribeTableRequest request) {
+      return new DescribeTableResponse().location(location);
+    }
+
+    @Override
+    public void close() {
+      CLOSE_CALLS.incrementAndGet();
     }
   }
 }

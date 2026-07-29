@@ -13,6 +13,9 @@
  */
 package org.lance.spark.read;
 
+import org.lance.namespace.LanceNamespace;
+import org.lance.spark.LanceRuntime;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.internal.LanceFragmentColumnarBatchScanner;
 import org.lance.spark.read.metric.LanceReadMetricsTracker;
 
@@ -29,6 +32,8 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
   private ColumnarBatch currentBatch;
   private final LanceReadMetricsTracker metricsTracker = new LanceReadMetricsTracker();
   private boolean currentScanStatsAdded = false;
+  private boolean executorNamespaceInitialized = false;
+  private LanceNamespace executorNamespace;
 
   public LanceColumnarPartitionReader(LanceInputPartition inputPartition) {
     this.inputPartition = inputPartition;
@@ -37,6 +42,14 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
 
   @Override
   public boolean next() throws IOException {
+    try {
+      return nextInternal();
+    } catch (Throwable t) {
+      throw asIOException(closeResources(t));
+    }
+  }
+
+  private boolean nextInternal() throws IOException {
     if (loadNextBatchFromCurrentReader()) {
       return true;
     }
@@ -49,6 +62,7 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
         fragmentReader = null;
         toClose.close();
       }
+      initializeExecutorNamespace();
       fragmentReader =
           LanceFragmentColumnarBatchScanner.create(
               inputPartition.getLanceSplit().getFragments().get(fragmentIndex), inputPartition);
@@ -64,6 +78,26 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
       }
     }
     return false;
+  }
+
+  private void initializeExecutorNamespace() {
+    if (executorNamespaceInitialized) {
+      return;
+    }
+    executorNamespaceInitialized = true;
+
+    LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
+    String namespaceImpl = inputPartition.getNamespaceImpl();
+    if (namespaceImpl == null || !readOptions.isExecutorCredentialRefresh()) {
+      return;
+    }
+    if (LanceRuntime.useNamespaceOnWorkers(namespaceImpl)) {
+      executorNamespace =
+          LanceRuntime.getOrCreateNamespace(namespaceImpl, inputPartition.getNamespaceProperties());
+      readOptions.setNamespace(executorNamespace);
+    } else {
+      readOptions.setNamespace(null);
+    }
   }
 
   private boolean loadNextBatchFromCurrentReader() throws IOException {
@@ -98,22 +132,64 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
 
   @Override
   public void close() throws IOException {
-    if (fragmentReader == null) {
-      return;
+    Throwable failure = null;
+    if (fragmentReader != null && !currentScanStatsAdded) {
+      try {
+        metricsTracker.addScanStats(fragmentReader.getScanStats());
+        currentScanStatsAdded = true;
+      } catch (Throwable t) {
+        failure = t;
+      }
     }
-    if (!currentScanStatsAdded) {
-      metricsTracker.addScanStats(fragmentReader.getScanStats());
-      currentScanStatsAdded = true;
+    failure = closeResources(failure);
+    if (failure != null) {
+      throw asIOException(failure);
     }
-    // Null-first so close() is idempotent (PartitionReader extends Closeable, whose contract
-    // requires it): a repeat call short-circuits rather than raising
-    // `ArrowArrayStream is already closed` from a second ArrowArrayStream.release().
-    LanceFragmentColumnarBatchScanner toClose = fragmentReader;
+  }
+
+  private Throwable closeResources(Throwable primary) {
+    LanceFragmentColumnarBatchScanner scannerToClose = fragmentReader;
     fragmentReader = null;
-    try {
-      toClose.close();
-    } catch (Exception e) {
-      throw new IOException(e);
+    LanceNamespace namespaceToClose = executorNamespace;
+    executorNamespace = null;
+
+    if (namespaceToClose != null
+        && inputPartition.getReadOptions().getNamespace() == namespaceToClose) {
+      inputPartition.getReadOptions().setNamespace(null);
     }
+
+    primary = closeResource(scannerToClose, primary);
+    if (namespaceToClose instanceof AutoCloseable) {
+      primary = closeResource((AutoCloseable) namespaceToClose, primary);
+    }
+    return primary;
+  }
+
+  private static Throwable closeResource(AutoCloseable resource, Throwable primary) {
+    if (resource == null) {
+      return primary;
+    }
+    try {
+      resource.close();
+    } catch (Throwable closeError) {
+      if (primary == null) {
+        return closeError;
+      }
+      primary.addSuppressed(closeError);
+    }
+    return primary;
+  }
+
+  private static IOException asIOException(Throwable failure) {
+    if (failure instanceof IOException) {
+      return (IOException) failure;
+    }
+    if (failure instanceof RuntimeException) {
+      throw (RuntimeException) failure;
+    }
+    if (failure instanceof Error) {
+      throw (Error) failure;
+    }
+    return new IOException(failure);
   }
 }
