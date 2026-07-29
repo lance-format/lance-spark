@@ -53,6 +53,7 @@ public class StagedCommit {
   // The non-staged path (LanceBatchWrite) uses boxed Boolean because null means
   // "user didn't specify" and lets lance-core inherit the flag from the manifest.
   private boolean enableStableRowIds;
+  private final String fileFormatVersion;
   private List<FragmentMetadata> fragments;
   private Schema schema;
   private ShardingSpec shardingSpec;
@@ -95,6 +96,7 @@ public class StagedCommit {
     this.storageOptions = new HashMap<>(options.getStorageOptions());
     this.isNewTable = datasetUri != null;
     this.enableStableRowIds = options.isEnableStableRowIds();
+    this.fileFormatVersion = options.getFileFormatVersion();
     this.namespace = options.getNamespace();
     this.tableId = options.getTableId();
     this.managedVersioning = options.isManagedVersioning();
@@ -150,6 +152,9 @@ public class StagedCommit {
     if (enableStableRowIds) {
       builder.useStableRowIds(true);
     }
+    if (fileFormatVersion != null) {
+      builder.storageFormat(fileFormatVersion);
+    }
     applyManagedVersioning(builder);
     try (Transaction txn = new Transaction.Builder().operation(operation).build();
         Dataset committed = builder.execute(txn)) {
@@ -167,6 +172,9 @@ public class StagedCommit {
     final CommitBuilder builder =
         new CommitBuilder(uri, LanceRuntime.allocator()).writeParams(storageOptions);
     builder.useStableRowIds(enableStableRowIds);
+    if (fileFormatVersion != null) {
+      builder.storageFormat(fileFormatVersion);
+    }
     applyManagedVersioning(builder);
     try (Dataset committed = commitOperation(builder, version, operation)) {
       SparkLanceShardingUtils.initializeMemWal(committed, shardingSpec);

@@ -49,12 +49,14 @@ public class StagedCommitOptionsTest {
         StagedCommitOptions.of(
             storageOptions,
             STABLE_ROW_IDS_ENABLED,
+            "2.2",
             NO_NAMESPACE,
             tableId,
             MANAGED_VERSIONING_ENABLED);
 
     assertEquals(storageOptions, options.getStorageOptions());
     assertTrue(options.isEnableStableRowIds());
+    assertEquals("2.2", options.getFileFormatVersion());
     assertNull(options.getNamespace());
     assertEquals(tableId, options.getTableId());
     assertTrue(options.isManagedVersioning());
@@ -69,6 +71,7 @@ public class StagedCommitOptionsTest {
         StagedCommitOptions.of(
             storageOptions,
             STABLE_ROW_IDS_DISABLED,
+            null,
             NO_NAMESPACE,
             tableId,
             MANAGED_VERSIONING_DISABLED);
@@ -82,10 +85,11 @@ public class StagedCommitOptionsTest {
     final Map<String, String> storageOptions = Collections.singletonMap("path", "/tmp/lance");
 
     final StagedCommitOptions options =
-        StagedCommitOptions.pathBased(storageOptions, STABLE_ROW_IDS_ENABLED);
+        StagedCommitOptions.pathBased(storageOptions, STABLE_ROW_IDS_ENABLED, "2.1");
 
     assertEquals(storageOptions, options.getStorageOptions());
     assertTrue(options.isEnableStableRowIds());
+    assertEquals("2.1", options.getFileFormatVersion());
     assertNull(options.getNamespace());
     assertNull(options.getTableId());
     assertFalse(options.isManagedVersioning());
@@ -96,7 +100,7 @@ public class StagedCommitOptionsTest {
     final Map<String, String> storageOptions = Collections.emptyMap();
 
     final StagedCommitOptions options =
-        StagedCommitOptions.pathBased(storageOptions, STABLE_ROW_IDS_DISABLED);
+        StagedCommitOptions.pathBased(storageOptions, STABLE_ROW_IDS_DISABLED, null);
 
     assertFalse(options.isEnableStableRowIds());
     assertNull(options.getNamespace());
@@ -110,6 +114,7 @@ public class StagedCommitOptionsTest {
         StagedCommitOptions.of(
             Collections.emptyMap(),
             STABLE_ROW_IDS_DISABLED,
+            null,
             NO_NAMESPACE,
             NO_TABLE_ID,
             MANAGED_VERSIONING_DISABLED);
@@ -124,7 +129,7 @@ public class StagedCommitOptionsTest {
     storageOptions.put("key", "original");
 
     final StagedCommitOptions options =
-        StagedCommitOptions.pathBased(storageOptions, STABLE_ROW_IDS_DISABLED);
+        StagedCommitOptions.pathBased(storageOptions, STABLE_ROW_IDS_DISABLED, null);
     storageOptions.put("key", "modified");
 
     assertEquals("modified", options.getStorageOptions().get("key"));

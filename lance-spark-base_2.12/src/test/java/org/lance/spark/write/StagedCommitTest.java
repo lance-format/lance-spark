@@ -60,7 +60,9 @@ public class StagedCommitTest {
         TestUtils.getDatasetUri(tempDir.toString(), testInfo.getTestMethod().get().getName());
     StagedCommit commit =
         StagedCommit.forNewTable(
-            ARROW_SCHEMA, datasetUri, StagedCommitOptions.pathBased(Collections.emptyMap(), false));
+            ARROW_SCHEMA,
+            datasetUri,
+            StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
     commit.commit();
     try (Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator())) {
       assertEquals(0, dataset.countRows());
@@ -73,7 +75,9 @@ public class StagedCommitTest {
     Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator());
     StagedCommit commit =
         StagedCommit.forExistingTable(
-            dataset, ARROW_SCHEMA, StagedCommitOptions.pathBased(Collections.emptyMap(), false));
+            dataset,
+            ARROW_SCHEMA,
+            StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
     commit.commit();
     try (Dataset reopened = Dataset.open(datasetUri, LanceRuntime.allocator())) {
       assertEquals(0, reopened.countRows());
@@ -86,7 +90,9 @@ public class StagedCommitTest {
         TestUtils.getDatasetUri(tempDir.toString(), testInfo.getTestMethod().get().getName());
     StagedCommit commit =
         StagedCommit.forNewTable(
-            ARROW_SCHEMA, datasetUri, StagedCommitOptions.pathBased(Collections.emptyMap(), false));
+            ARROW_SCHEMA,
+            datasetUri,
+            StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
     commit.abort();
   }
 
@@ -96,7 +102,9 @@ public class StagedCommitTest {
     Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator());
     StagedCommit commit =
         StagedCommit.forExistingTable(
-            dataset, ARROW_SCHEMA, StagedCommitOptions.pathBased(Collections.emptyMap(), false));
+            dataset,
+            ARROW_SCHEMA,
+            StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
     commit.abort();
   }
 
@@ -106,7 +114,7 @@ public class StagedCommitTest {
         StagedCommit.forNewTable(
             ARROW_SCHEMA,
             "unused://uri",
-            StagedCommitOptions.pathBased(Collections.emptyMap(), false));
+            StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
 
     Map<String, String> extra = new HashMap<>();
     extra.put("access_key_id", "AKIA...");
@@ -123,7 +131,7 @@ public class StagedCommitTest {
     base.put("region", "us-west-2");
     StagedCommit commit =
         StagedCommit.forNewTable(
-            ARROW_SCHEMA, "unused://uri", StagedCommitOptions.pathBased(base, false));
+            ARROW_SCHEMA, "unused://uri", StagedCommitOptions.pathBased(base, false, null));
 
     commit.mergeStorageOptions(Collections.singletonMap("access_key_id", "fresh-key"));
 
@@ -136,7 +144,7 @@ public class StagedCommitTest {
     Map<String, String> base = Collections.singletonMap("access_key_id", "AKIA...");
     StagedCommit commit =
         StagedCommit.forNewTable(
-            ARROW_SCHEMA, "unused://uri", StagedCommitOptions.pathBased(base, false));
+            ARROW_SCHEMA, "unused://uri", StagedCommitOptions.pathBased(base, false, null));
 
     commit.mergeStorageOptions(null);
     commit.mergeStorageOptions(Collections.emptyMap());
@@ -150,7 +158,7 @@ public class StagedCommitTest {
         StagedCommit.forNewTable(
             ARROW_SCHEMA,
             "unused://uri",
-            StagedCommitOptions.pathBased(Collections.emptyMap(), false));
+            StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
 
     Map<String, String> extra = new HashMap<>();
     extra.put("access_key_id", "AKIA...");
@@ -171,7 +179,7 @@ public class StagedCommitTest {
         StagedCommit.forNewTable(
             ARROW_SCHEMA,
             "unused://uri",
-            StagedCommitOptions.pathBased(unmodifiableCatalogOptions, false));
+            StagedCommitOptions.pathBased(unmodifiableCatalogOptions, false, null));
 
     assertDoesNotThrow(
         () -> commit.mergeStorageOptions(Collections.singletonMap("access_key_id", "AKIA...")));

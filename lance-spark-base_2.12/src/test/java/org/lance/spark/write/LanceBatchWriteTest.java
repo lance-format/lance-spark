@@ -155,7 +155,7 @@ public class LanceBatchWriteTest {
     // StagedCommit starts with no storage options, as for a path-based staged create.
     StagedCommit stagedCommit =
         StagedCommit.forNewTable(
-            schema, datasetUri, StagedCommitOptions.pathBased(Collections.emptyMap(), false));
+            schema, datasetUri, StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
 
     // initialStorageOptions represents namespace-vended credentials, passed to LanceBatchWrite
     // independently of how stagedCommit was constructed.
@@ -207,7 +207,7 @@ public class LanceBatchWriteTest {
 
     StagedCommit stagedCommit =
         StagedCommit.forNewTable(
-            schema, datasetUri, StagedCommitOptions.pathBased(Collections.emptyMap(), false));
+            schema, datasetUri, StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
 
     LanceBatchWrite batchWrite =
         new LanceBatchWrite(

@@ -202,6 +202,10 @@ public class LanceBatchWrite implements BatchWrite {
                 .writeParams(
                     LanceRuntime.mergeStorageOptions(
                         writeOptions.getStorageOptions(), initialStorageOptions));
+        String fileFormatVersion = writeOptions.getFileFormatVersion();
+        if (fileFormatVersion != null) {
+          commitBuilder.storageFormat(fileFormatVersion);
+        }
         // When enableStableRowIds is null (user didn't pass the option),
         // lance-core auto-inherits the flag from the existing manifest.
         // Appending to a table with stable row IDs works without
