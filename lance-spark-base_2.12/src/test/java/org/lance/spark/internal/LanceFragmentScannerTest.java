@@ -373,8 +373,9 @@ public class LanceFragmentScannerTest {
   }
 
   /**
-   * Public, no-arg {@link LanceNamespace} so that {@link LanceNamespace#connect(String, Map,
-   * BufferAllocator)} can resolve it via {@code Class.forName}.
+   * Public, top-level-by-FQCN, no-arg {@link LanceNamespace} so that {@link
+   * LanceNamespace#connect(String, Map, BufferAllocator)} can resolve it via {@code Class.forName}
+   * during executor-side namespace initialization.
    */
   public static class RecordingNamespace implements LanceNamespace, AutoCloseable {
     static final AtomicInteger INITIALIZE_CALLS = new AtomicInteger();
