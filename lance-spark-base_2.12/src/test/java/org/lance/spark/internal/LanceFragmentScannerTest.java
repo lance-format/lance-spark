@@ -323,10 +323,7 @@ public class LanceFragmentScannerTest {
   }
 
   private LanceInputPartition namespacePartition(
-      String location,
-      List<Integer> fragments,
-      String scanId,
-      boolean executorCredentialRefresh) {
+      String location, List<Integer> fragments, String scanId, boolean executorCredentialRefresh) {
     LanceSparkReadOptions readOptions =
         LanceSparkReadOptions.builder()
             .datasetUri(location)
@@ -376,8 +373,8 @@ public class LanceFragmentScannerTest {
   }
 
   /**
-   * Public, no-arg {@link LanceNamespace} so that {@link
-   * LanceNamespace#connect(String, Map, BufferAllocator)} can resolve it via {@code Class.forName}.
+   * Public, no-arg {@link LanceNamespace} so that {@link LanceNamespace#connect(String, Map,
+   * BufferAllocator)} can resolve it via {@code Class.forName}.
    */
   public static class RecordingNamespace implements LanceNamespace, AutoCloseable {
     static final AtomicInteger INITIALIZE_CALLS = new AtomicInteger();
