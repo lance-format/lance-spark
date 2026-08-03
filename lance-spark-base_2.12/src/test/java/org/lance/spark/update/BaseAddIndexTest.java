@@ -128,6 +128,35 @@ public abstract class BaseAddIndexTest {
   }
 
   @Test
+  public void testCreateIndexOnEmptyTable() {
+    spark.sql(String.format("create table %s (id int) using lance", fullTable));
+
+    long initialVersion;
+    try (org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build()) {
+      initialVersion = lanceDataset.version();
+    }
+
+    Row result =
+        spark
+            .sql(String.format("alter table %s create index idx_empty using btree (id)", fullTable))
+            .collectAsList()
+            .get(0);
+    Assertions.assertEquals(0L, result.getLong(0));
+
+    try (org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build()) {
+      Assertions.assertEquals(
+          initialVersion + 1,
+          lanceDataset.version(),
+          "Empty index creation should commit exactly one dataset version");
+
+      List<Index> indexes = lanceDataset.getIndexes();
+      Assertions.assertEquals(1, indexes.size());
+      Assertions.assertEquals("idx_empty", indexes.get(0).name());
+      Assertions.assertTrue(indexes.get(0).fragments().orElse(Collections.emptyList()).isEmpty());
+    }
+  }
+
+  @Test
   public void testCreateIndexDistributed() {
     prepareDataset();
 

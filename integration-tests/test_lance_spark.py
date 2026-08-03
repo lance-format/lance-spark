@@ -1000,7 +1000,7 @@ class TestDDLIndex:
         assert metadata["index_version"] == 2
 
     def test_create_index_empty_table(self, spark):
-        """Test CREATE INDEX on empty table."""
+        """Test creating scalar indexes on an empty table."""
         spark.sql("""
             CREATE TABLE default.test_table (
                 id INT,
@@ -1008,14 +1008,26 @@ class TestDDLIndex:
             )
         """)
 
-        # Creating index on empty table should return 0 fragments indexed
-        result = spark.sql("""
-            ALTER TABLE default.test_table
-            CREATE INDEX idx_id USING btree (id)
-        """).collect()
+        statements = [
+            "CREATE INDEX idx_id USING btree (id)",
+            "CREATE INDEX idx_name_zonemap USING zonemap (name)",
+            """CREATE INDEX idx_name_fts USING fts (name) WITH (
+                base_tokenizer = 'simple', language = 'English',
+                max_token_length = 40, lower_case = true, stem = false,
+                remove_stop_words = false, ascii_folding = false,
+                with_position = true
+            )""",
+        ]
 
-        # Should return with 0 fragments indexed
-        assert result[0][0] == 0
+        for statement in statements:
+            result = spark.sql(
+                f"ALTER TABLE default.test_table {statement}"
+            ).collect()
+            assert result[0]["fragments_indexed"] == 0
+
+        indexes = spark.sql("SHOW INDEXES IN default.test_table").collect()
+        index_names = {row["name"] for row in indexes}
+        assert index_names == {"idx_id", "idx_name_zonemap", "idx_name_fts"}
 
     def test_drop_index(self, spark):
         """Test DROP INDEX removes an existing index."""

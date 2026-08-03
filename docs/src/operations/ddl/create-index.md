@@ -193,6 +193,10 @@ to scanning the data until it is populated. There are two ways to populate it:
 index performs no segmented build at creation time, `num_segments` cannot be combined with
 `train = false` — pass it on the eager build that populates the index instead.
 
+Creating a scalar index on an empty table also registers an empty index with zero fragment
+coverage. The index is immediately visible through `SHOW INDEXES`. After data is appended, populate
+it by re-running `CREATE INDEX` or calling `Dataset.optimizeIndices`.
+
 ## Output
 
 The `CREATE INDEX` command returns the following information about the operation:
