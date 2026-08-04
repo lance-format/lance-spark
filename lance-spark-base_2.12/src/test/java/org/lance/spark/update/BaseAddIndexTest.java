@@ -18,7 +18,9 @@ import org.lance.index.IndexCriteria;
 import org.lance.index.IndexDescription;
 import org.lance.index.IndexType;
 import org.lance.index.OptimizeOptions;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.FieldPathUtils;
+import org.lance.spark.utils.Utils;
 
 import org.apache.spark.SparkException;
 import org.apache.spark.sql.Dataset;
@@ -130,9 +132,10 @@ public abstract class BaseAddIndexTest {
   @Test
   public void testCreateIndexOnEmptyTable() {
     spark.sql(String.format("create table %s (id int) using lance", fullTable));
+    LanceSparkReadOptions readOptions = LanceSparkReadOptions.from(tableDir);
 
     long initialVersion;
-    try (org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build()) {
+    try (var lanceDataset = Utils.openDatasetBuilder(readOptions).build()) {
       initialVersion = lanceDataset.version();
     }
 
@@ -143,7 +146,7 @@ public abstract class BaseAddIndexTest {
             .get(0);
     Assertions.assertEquals(0L, result.getLong(0));
 
-    try (org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build()) {
+    try (var lanceDataset = Utils.openDatasetBuilder(readOptions).build()) {
       Assertions.assertEquals(
           initialVersion + 1,
           lanceDataset.version(),
