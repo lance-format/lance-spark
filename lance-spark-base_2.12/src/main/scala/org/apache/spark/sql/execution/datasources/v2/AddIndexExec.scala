@@ -968,6 +968,19 @@ object IndexUtils extends Logging {
     IndexType.BLOOM_FILTER,
     IndexType.RTREE)
 
+  // ScalarIndexParams uses Lance Core's scalar plugin names, which are a separate contract from
+  // both Spark SQL method names and the Java IndexType enum names. Keep the mapping explicit instead
+  // of deriving it from either naming convention.
+  private val scalarParamTypesByIndexType: Map[IndexType, String] = Map(
+    IndexType.BTREE -> "btree",
+    IndexType.ZONEMAP -> "zonemap",
+    IndexType.BITMAP -> "bitmap",
+    IndexType.LABEL_LIST -> "labellist",
+    IndexType.NGRAM -> "ngram",
+    IndexType.BLOOM_FILTER -> "bloomfilter",
+    IndexType.RTREE -> "rtree",
+    IndexType.INVERTED -> "inverted")
+
   def scalarSegmentIndexType(method: String): Option[IndexType] =
     methodToIndexTypes
       .get(method.toLowerCase(Locale.ROOT))
@@ -1003,15 +1016,11 @@ object IndexUtils extends Logging {
   }
 
   def buildScalarIndexParamType(method: String): String = {
-    scalarSegmentIndexType(method)
-      .map(_.name().toLowerCase(Locale.ROOT).replace("_", ""))
-      .getOrElse {
-        method.toLowerCase(Locale.ROOT) match {
-          case "btree" => "btree"
-          case "fts" => "inverted"
-          case other => throw new UnsupportedOperationException(s"Unsupported index method: $other")
-        }
-      }
+    val normalized = method.toLowerCase(Locale.ROOT)
+    val indexType = buildIndexType(normalized)
+    scalarParamTypesByIndexType.getOrElse(
+      indexType,
+      throw new UnsupportedOperationException(s"Unsupported scalar index method: $normalized"))
   }
 
   def btreeBuildMode(indexType: IndexType, args: Seq[LanceNamedArgument]): Option[String] = {
