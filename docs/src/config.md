@@ -56,6 +56,7 @@ The following features require the Lance Spark SQL extension to be enabled:
 - [ADD COLUMNS with backfill](operations/dml/add-columns.md) - Add new columns and backfill existing rows with data
 - [UPDATE COLUMNS with backfill](operations/dml/update-columns.md) - Update existing columns using data from a source
 - [OPTIMIZE](operations/ddl/optimize.md) - Compact table fragments for improved query performance
+- [OPTIMIZE INDEX](operations/ddl/optimize-index.md) - Incrementally maintain a named index
 - [VACUUM](operations/ddl/vacuum.md) - Remove old versions and reclaim storage space
 
 ## Basic Setup

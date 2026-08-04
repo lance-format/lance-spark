@@ -137,4 +137,53 @@ public abstract class BaseOptimizeTest {
 
     Assertions.assertEquals("[10,1,10,1]", result.collectAsList().get(0).toString());
   }
+
+  @Test
+  public void testOptimizeIndex() {
+    prepareDataset();
+    spark.sql(String.format("alter table %s create index idx_id using zonemap (id)", fullTable));
+    spark.sql(String.format("insert into %s values (10, 'text_10')", fullTable));
+
+    Row before =
+        spark.sql(String.format("show indexes in %s", fullTable)).collectAsList().stream()
+            .filter(row -> "idx_id".equals(row.getAs("name")))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("Index not found: idx_id"));
+    long unindexedFragments = before.getAs("num_unindexed_fragments");
+    Assertions.assertTrue(unindexedFragments > 0);
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s optimize index idx_id "
+                    + "with (num_indices_to_merge=0, retrain=false)",
+                fullTable));
+
+    Assertions.assertEquals(
+        "StructType(StructField(index_name,StringType,false),StructField(fragments_indexed,LongType,false),StructField(segments_before,LongType,false),StructField(segments_after,LongType,false))",
+        result.schema().toString());
+    Row optimized = result.collectAsList().get(0);
+    Assertions.assertEquals("idx_id", optimized.getAs("index_name"));
+    Assertions.assertEquals(unindexedFragments, optimized.<Long>getAs("fragments_indexed"));
+    Assertions.assertTrue(
+        optimized.<Long>getAs("segments_after") >= optimized.<Long>getAs("segments_before"));
+
+    Row after =
+        spark.sql(String.format("show indexes in %s", fullTable)).collectAsList().stream()
+            .filter(row -> "idx_id".equals(row.getAs("name")))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("Index not found: idx_id"));
+    Assertions.assertEquals(0L, after.<Long>getAs("num_unindexed_fragments"));
+  }
+
+  @Test
+  public void testOptimizeMissingIndex() {
+    prepareDataset();
+
+    Exception error =
+        Assertions.assertThrows(
+            Exception.class,
+            () -> spark.sql(String.format("alter table %s optimize index missing", fullTable)));
+    Assertions.assertTrue(error.toString().contains("Index 'missing' does not exist"));
+  }
 }

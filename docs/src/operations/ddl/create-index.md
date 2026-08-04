@@ -181,12 +181,12 @@ to scanning the data until it is populated. There are two ways to populate it:
     ALTER TABLE lance.db.users CREATE INDEX idx_id USING zonemap (id);
     ```
 
-- **Incremental build through the SDK:** when only some fragments are unindexed (for example after
-  appending data to an already-built index), `Dataset.optimizeIndices` indexes just the unindexed
-  fragments. This currently runs on a single node:
+- **Incremental maintenance:** when only some fragments are unindexed (for example after appending
+  data to an already-built index), [`OPTIMIZE INDEX`](optimize-index.md) indexes the uncovered
+  fragments. This currently runs on the Spark driver:
 
-    ```java
-    dataset.optimizeIndices(OptimizeOptions.builder().build());
+    ```sql
+    ALTER TABLE lance.db.users OPTIMIZE INDEX idx_id;
     ```
 
 `train = false` is supported for all index methods (`btree`, `fts`, `zonemap`). Because a deferred
@@ -223,4 +223,4 @@ The `CREATE INDEX` command operates as follows:
 - **Index Methods**: The `zonemap`, `btree`, and `fts` methods are supported for scalar index creation.
 - **Zonemap Column Count**: Zonemap indexes currently support a single column only. The generic `CREATE INDEX` grammar accepts a column list, but Lance rejects multi-column zonemap creation.
 - **Index Replacement**: If you create an index with the same name as an existing one, the old index will be replaced by the new one.
-- **Deferred Training**: With `train = false` the index is registered empty and is populated later, either by re-running `CREATE INDEX` (a full distributed build that replaces the empty index) or, for incremental coverage of newly appended fragments, by `Dataset.optimizeIndices` in the SDK. The SQL `OPTIMIZE` command compacts fragments and does not train deferred indexes.
+- **Deferred Training**: With `train = false` the index is registered empty and is populated later, either by re-running `CREATE INDEX` (a full distributed build that replaces the empty index) or through `ALTER TABLE ... OPTIMIZE INDEX` for driver-side incremental maintenance. The table-level `OPTIMIZE` command compacts fragments and does not train deferred indexes.
