@@ -22,6 +22,8 @@ import org.apache.spark.sql.catalyst.parser.extensions.LanceSqlExtensionsLexer;
 import org.apache.spark.sql.catalyst.parser.extensions.LanceSqlExtensionsParser;
 import org.apache.spark.sql.catalyst.plans.logical.AddColumnsBackfill;
 import org.apache.spark.sql.catalyst.plans.logical.AddIndex;
+import org.apache.spark.sql.catalyst.plans.logical.LanceNamedArgument;
+import org.apache.spark.sql.catalyst.plans.logical.LanceOptimizeIndex;
 import org.apache.spark.sql.catalyst.plans.logical.Optimize;
 import org.apache.spark.sql.catalyst.plans.logical.ShowIndexes;
 import org.apache.spark.sql.catalyst.plans.logical.UpdateColumnsBackfill;
@@ -180,6 +182,28 @@ public class LanceSqlExtensionsAstBuilderTest {
 
     assertEquals(1, plan.args().size());
     assertEquals("target_rows_per_fragment", plan.args().apply(0).name());
+  }
+
+  @Test
+  public void testOptimizeIndexWithOptions() {
+    LanceSqlExtensionsParser parser =
+        createParser(
+            "ALTER TABLE `my-catalog`.`my-table` OPTIMIZE INDEX `my-idx` "
+                + "WITH (NUM_INDICES_TO_MERGE = 2, RETRAIN = FALSE)");
+    LanceOptimizeIndex plan =
+        (LanceOptimizeIndex) astBuilder.visitSingleStatement(parser.singleStatement());
+
+    UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
+    assertEquals(
+        List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+    assertEquals("my-idx", plan.indexName());
+
+    List<LanceNamedArgument> args = JavaConverters.seqAsJavaList(plan.args());
+    assertEquals(2, args.size());
+    assertEquals("NUM_INDICES_TO_MERGE", args.get(0).name());
+    assertEquals(2L, args.get(0).value());
+    assertEquals("RETRAIN", args.get(1).name());
+    assertEquals(false, args.get(1).value());
   }
 
   @Test

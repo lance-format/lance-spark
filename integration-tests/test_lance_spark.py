@@ -915,6 +915,39 @@ class TestDDLIndex:
         )
         assert spark.sql("SELECT * FROM default.test_table").count() == 4
 
+    def test_optimize_index(self, spark):
+        """Test incremental index maintenance through Spark SQL."""
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'one'), (2, 'two')")
+        spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX idx_id USING zonemap (id)
+        """)
+        spark.sql("INSERT INTO default.test_table VALUES (3, 'three')")
+
+        before = next(
+            row
+            for row in spark.sql("SHOW INDEXES IN default.test_table").collect()
+            if row.name == "idx_id"
+        )
+        assert before.num_unindexed_fragments > 0
+
+        result = spark.sql("""
+            ALTER TABLE default.test_table OPTIMIZE INDEX idx_id
+            WITH (num_indices_to_merge = 0, retrain = false)
+        """).first()
+
+        assert result.index_name == "idx_id"
+        assert result.fragments_indexed == before.num_unindexed_fragments
+        assert result.segments_after >= result.segments_before
+
+        after = next(
+            row
+            for row in spark.sql("SHOW INDEXES IN default.test_table").collect()
+            if row.name == "idx_id"
+        )
+        assert after.num_unindexed_fragments == 0
+
     def test_create_btree_index_on_nested_literal_dot_field(self, spark):
         """Test CREATE INDEX on nested struct fields, including literal dots."""
         spark.sql("""
