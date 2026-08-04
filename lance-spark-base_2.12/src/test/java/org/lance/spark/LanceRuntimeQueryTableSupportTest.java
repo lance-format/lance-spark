@@ -47,6 +47,24 @@ class LanceRuntimeQueryTableSupportTest {
     assertFalse(LanceRuntime.supportsQueryTable("org.lance.namespace.DoesNotExist"));
   }
 
+  @Test
+  void openTelemetryCanBeEnabledBySystemProperty() {
+    String previous = System.getProperty(LanceRuntime.SPARK_CONF_OPEN_TELEMETRY_ENABLED);
+    try {
+      System.setProperty(LanceRuntime.SPARK_CONF_OPEN_TELEMETRY_ENABLED, "false");
+      assertFalse(LanceRuntime.isOpenTelemetryEnabled());
+
+      System.setProperty(LanceRuntime.SPARK_CONF_OPEN_TELEMETRY_ENABLED, "true");
+      assertTrue(LanceRuntime.isOpenTelemetryEnabled());
+    } finally {
+      if (previous == null) {
+        System.clearProperty(LanceRuntime.SPARK_CONF_OPEN_TELEMETRY_ENABLED);
+      } else {
+        System.setProperty(LanceRuntime.SPARK_CONF_OPEN_TELEMETRY_ENABLED, previous);
+      }
+    }
+  }
+
   /** Stands in for catalog-only namespaces such as Glue, which never implement queryTable. */
   public static class CatalogOnlyNamespace implements LanceNamespace {
     public CatalogOnlyNamespace() {}

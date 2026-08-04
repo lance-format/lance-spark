@@ -109,6 +109,7 @@
             */
         </spotless.license.header>
 
+        <opentelemetry.version>1.64.0</opentelemetry.version>
         <junit.version>5.10.1</junit.version>
         <scalatest.version>3.2.10</scalatest.version>
 
@@ -218,6 +219,11 @@
                     <artifactId>slf4j-api</artifactId>
                 </exclusion>
             </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-api</artifactId>
+            <version>${opentelemetry.version}</version>
         </dependency>
         <dependency>
             <groupId>org.lance</groupId>

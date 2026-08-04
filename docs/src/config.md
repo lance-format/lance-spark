@@ -72,6 +72,23 @@ and namespace-specific options:
 | `spark.sql.catalog.{name}.parent`           | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                             |
 | `spark.sql.catalog.{name}.parent_delimiter` | String | ✗        | Delimiter for parent prefix (default: `.`). See [Note on Namespace Levels](#note-on-namespace-levels).                           |
 
+## OpenTelemetry Metrics
+
+Lance Spark can bridge Lance's native Java metrics into the JVM OpenTelemetry
+pipeline. Enable it with:
+
+```shell
+--conf spark.lance.otel.enabled=true
+```
+
+or set `LANCE_SPARK_OTEL_ENABLED=true` in each JVM environment.
+
+The bridge uses the OpenTelemetry `GlobalOpenTelemetry` meter provider, so
+configure your exporter, resource, and reader with the standard OpenTelemetry
+Java SDK settings. Spark driver and executor JVMs are independent processes;
+set the Spark conf or environment variable for every process that should emit
+Lance metrics.
+
 ## Example Namespace Implementations
 
 ### Directory Namespace

@@ -16,9 +16,13 @@ package org.lance.spark;
 import org.lance.Session;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.QueryTableRequest;
+import org.lance.otel.LanceMetrics;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.spark.SparkEnv;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Method;
 import java.util.Collections;
@@ -48,6 +52,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * }</pre>
  */
 public final class LanceRuntime {
+  private static final Logger LOG = LoggerFactory.getLogger(LanceRuntime.class);
 
   /** Environment variable for allocator size. */
   public static final String ENV_ALLOCATOR_SIZE = "LANCE_ALLOCATOR_SIZE";
@@ -57,6 +62,12 @@ public final class LanceRuntime {
 
   /** Environment variable for metadata cache size in bytes. */
   public static final String ENV_METADATA_CACHE_SIZE = "LANCE_METADATA_CACHE_SIZE";
+
+  /** Spark configuration key that enables Lance OpenTelemetry metrics in each JVM. */
+  public static final String SPARK_CONF_OPEN_TELEMETRY_ENABLED = "spark.lance.otel.enabled";
+
+  /** Environment variable fallback for enabling Lance OpenTelemetry metrics in each JVM. */
+  public static final String ENV_OPEN_TELEMETRY_ENABLED = "LANCE_SPARK_OTEL_ENABLED";
 
   /** Default allocator size (unlimited). */
   public static final long DEFAULT_ALLOCATOR_SIZE = Long.MAX_VALUE;
@@ -198,6 +209,42 @@ public final class LanceRuntime {
   public static Session session(String catalogName) {
     String key = catalogName != null ? catalogName : DEFAULT_CATALOG;
     return CATALOG_SESSIONS.computeIfAbsent(key, k -> createSession());
+  }
+
+  /**
+   * Installs Lance's JNI-backed OpenTelemetry metrics bridge when enabled.
+   *
+   * <p>The bridge is process-global and {@link LanceMetrics#instrument()} is idempotent, so Spark
+   * driver and executor code paths can call this before Lance work starts in each JVM.
+   *
+   * @return true if OpenTelemetry was enabled and the bridge was installed, false otherwise
+   */
+  public static boolean enableOpenTelemetry() {
+    if (!isOpenTelemetryEnabled()) {
+      return false;
+    }
+
+    boolean instrumented = LanceMetrics.instrument();
+    if (!instrumented) {
+      LOG.warn(
+          "Lance OpenTelemetry metrics were enabled, but the native metrics recorder could not be"
+              + " installed. Another Rust metrics recorder may already be installed in this JVM.");
+    }
+    return instrumented;
+  }
+
+  static boolean isOpenTelemetryEnabled() {
+    String configured = System.getProperty(SPARK_CONF_OPEN_TELEMETRY_ENABLED);
+    if (configured == null || configured.isEmpty()) {
+      SparkEnv sparkEnv = SparkEnv.get();
+      if (sparkEnv != null) {
+        configured = sparkEnv.conf().get(SPARK_CONF_OPEN_TELEMETRY_ENABLED, null);
+      }
+    }
+    if (configured == null || configured.isEmpty()) {
+      configured = System.getenv(ENV_OPEN_TELEMETRY_ENABLED);
+    }
+    return Boolean.parseBoolean(configured);
   }
 
   private static Session createSession() {
