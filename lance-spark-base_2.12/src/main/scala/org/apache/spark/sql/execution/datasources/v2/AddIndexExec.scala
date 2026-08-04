@@ -950,7 +950,7 @@ object IndexUtils extends Logging {
 
   private val jsonMapper = new ObjectMapper()
 
-  private val MethodToIndexType: Map[String, IndexType] = Map(
+  private val methodToIndexTypes: Map[String, IndexType] = Map(
     "btree" -> IndexType.BTREE,
     "zonemap" -> IndexType.ZONEMAP,
     "bitmap" -> IndexType.BITMAP,
@@ -960,7 +960,7 @@ object IndexUtils extends Logging {
     "rtree" -> IndexType.RTREE,
     "fts" -> IndexType.INVERTED)
 
-  private val ScalarSegmentIndexTypes: Set[IndexType] = Set(
+  private val scalarSegmentIndexTypes: Set[IndexType] = Set(
     IndexType.ZONEMAP,
     IndexType.BITMAP,
     IndexType.LABEL_LIST,
@@ -969,9 +969,9 @@ object IndexUtils extends Logging {
     IndexType.RTREE)
 
   def scalarSegmentIndexType(method: String): Option[IndexType] =
-    MethodToIndexType
+    methodToIndexTypes
       .get(method.toLowerCase(Locale.ROOT))
-      .filter(ScalarSegmentIndexTypes.contains)
+      .filter(scalarSegmentIndexTypes.contains)
 
   /**
    * Extracts the `train` option from named arguments, defaulting to `true`.
@@ -997,7 +997,7 @@ object IndexUtils extends Logging {
    */
   def buildIndexType(method: String): IndexType = {
     val normalized = method.toLowerCase(Locale.ROOT)
-    MethodToIndexType.getOrElse(
+    methodToIndexTypes.getOrElse(
       normalized,
       throw new UnsupportedOperationException(s"Unsupported index method: $normalized"))
   }
