@@ -25,23 +25,36 @@ import org.lance.spark.utils.Utils;
 import org.apache.spark.SparkException;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.MetadataBuilder;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.IOException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 /** Base test for distributed CREATE INDEX. */
 public abstract class BaseAddIndexTest {
@@ -363,6 +376,166 @@ public abstract class BaseAddIndexTest {
     }
   }
 
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("scalarSegmentIndexMethods")
+  public void testCreateScalarSegmentIndex(
+      String method,
+      String column,
+      IndexType expectedIndexType,
+      int numSegments,
+      String methodOptions)
+      throws Exception {
+    prepareScalarSegmentDataset(method);
+    List<String> rowsBeforeIndex = tableRowsAsJson();
+    String indexName = "test_segment_" + method;
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index %s using %s (%s) " + "with (num_segments = %d%s)",
+                fullTable, indexName, method, column, numSegments, methodOptions));
+
+    Row resultRow = result.collectAsList().get(0);
+    Assertions.assertEquals(indexName, resultRow.getString(1));
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      Set<Integer> expectedFragments =
+          lanceDataset.getFragments().stream()
+              .map(fragment -> Integer.valueOf(fragment.getId()))
+              .collect(Collectors.toSet());
+      Assertions.assertTrue(expectedFragments.size() >= 2, "Expected multiple fragments");
+      Assertions.assertEquals(
+          expectedFragments.size(),
+          resultRow.getLong(0),
+          "fragments_indexed should report every source fragment");
+
+      List<Index> segments =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> indexName.equals(index.name()))
+              .collect(Collectors.toList());
+      Assertions.assertEquals(
+          Math.min(numSegments, expectedFragments.size()),
+          segments.size(),
+          "The number of physical segments should match num_segments up to the fragment count");
+
+      Set<Integer> coveredFragments = new HashSet<>();
+      for (Index segment : segments) {
+        Assertions.assertEquals(expectedIndexType, segment.indexType());
+        List<Integer> segmentFragments = segment.fragments().orElse(Collections.emptyList());
+        Assertions.assertFalse(
+            segmentFragments.isEmpty(), "Each physical segment must cover at least one fragment");
+        for (Integer fragmentId : segmentFragments) {
+          Assertions.assertTrue(
+              coveredFragments.add(fragmentId),
+              "Physical segment fragment coverage must be disjoint: " + fragmentId);
+        }
+      }
+      Assertions.assertEquals(
+          expectedFragments,
+          coveredFragments,
+          "Physical segments must cover all source fragments exactly once");
+    } finally {
+      lanceDataset.close();
+    }
+
+    Assertions.assertEquals(
+        rowsBeforeIndex,
+        tableRowsAsJson(),
+        "Creating an index must not change the table's readable rows");
+  }
+
+  private static Stream<Arguments> scalarSegmentIndexMethods() {
+    return Stream.of(
+        Arguments.of("zonemap", "value", IndexType.ZONEMAP, 2, ""),
+        Arguments.of("bitmap", "value", IndexType.BITMAP, 1, ""),
+        Arguments.of("label_list", "labels", IndexType.LABEL_LIST, 2, ""),
+        Arguments.of("ngram", "text", IndexType.NGRAM, 2, ""),
+        Arguments.of(
+            "bloomfilter",
+            "value",
+            IndexType.BLOOM_FILTER,
+            2,
+            ", number_of_items = 16, probability = 0.01"),
+        Arguments.of("rtree", "geometry", IndexType.RTREE, 2, ", page_size = 16"));
+  }
+
+  private void prepareScalarSegmentDataset(String method) throws Exception {
+    StructType schema = scalarSegmentSchema(method);
+    spark
+        .createDataFrame(scalarSegmentRows(method, 0, 4), schema)
+        .coalesce(1)
+        .writeTo(fullTable)
+        .using("lance")
+        .create();
+    spark
+        .createDataFrame(scalarSegmentRows(method, 4, 8), schema)
+        .coalesce(1)
+        .writeTo(fullTable)
+        .append();
+  }
+
+  private StructType scalarSegmentSchema(String method) {
+    switch (method) {
+      case "label_list":
+        return new StructType(
+            new StructField[] {
+              new StructField(
+                  "labels",
+                  DataTypes.createArrayType(DataTypes.IntegerType, false),
+                  false,
+                  Metadata.empty())
+            });
+      case "ngram":
+        return new StructType(
+            new StructField[] {
+              new StructField("text", DataTypes.StringType, false, Metadata.empty())
+            });
+      case "rtree":
+        StructType pointType =
+            new StructType(
+                new StructField[] {
+                  new StructField("x", DataTypes.DoubleType, false, Metadata.empty()),
+                  new StructField("y", DataTypes.DoubleType, false, Metadata.empty())
+                });
+        Metadata geoArrowPoint =
+            new MetadataBuilder().putString("ARROW:extension:name", "geoarrow.point").build();
+        return new StructType(
+            new StructField[] {new StructField("geometry", pointType, false, geoArrowPoint)});
+      default:
+        return new StructType(
+            new StructField[] {
+              new StructField("value", DataTypes.IntegerType, false, Metadata.empty())
+            });
+    }
+  }
+
+  private List<Row> scalarSegmentRows(String method, int startInclusive, int endExclusive) {
+    List<Row> rows = new ArrayList<>();
+    for (int i = startInclusive; i < endExclusive; i++) {
+      switch (method) {
+        case "label_list":
+          rows.add(RowFactory.create(Arrays.asList(i % 3, (i + 1) % 3)));
+          break;
+        case "ngram":
+          rows.add(RowFactory.create("document_" + i));
+          break;
+        case "rtree":
+          rows.add(RowFactory.create(RowFactory.create((double) i, i * 2.0)));
+          break;
+        default:
+          rows.add(RowFactory.create(i % 4));
+      }
+    }
+    return rows;
+  }
+
+  private List<String> tableRowsAsJson() {
+    List<String> rows = spark.table(fullTable).toJSON().collectAsList();
+    Collections.sort(rows);
+    return rows;
+  }
+
   @Test
   public void testRepeatedCreateZonemapIndexReplacesExistingSegments() {
     prepareDataset();
@@ -432,6 +605,32 @@ public abstract class BaseAddIndexTest {
             spark.sql(
                 String.format(
                     "alter table %s create index idx_multi using zonemap (id, text)", fullTable)));
+  }
+
+  @Test
+  public void testIndexBuildFailureUsesIndexTypeName() {
+    prepareDataset();
+
+    Exception failure =
+        Assertions.assertThrows(
+            Exception.class,
+            () ->
+                spark.sql(
+                    String.format(
+                        "alter table %s create index idx_bad_rtree using rtree (id)", fullTable)));
+
+    Assertions.assertTrue(
+        hasMessageInCauseChain(failure, "RTREE index build failed"),
+        "Expected a type-specific RTree build error, got: " + failure);
+  }
+
+  private boolean hasMessageInCauseChain(Throwable failure, String expectedText) {
+    for (Throwable current = failure; current != null; current = current.getCause()) {
+      if (current.getMessage() != null && current.getMessage().contains(expectedText)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**

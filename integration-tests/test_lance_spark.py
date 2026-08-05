@@ -782,7 +782,7 @@ class TestDDLBlobV2:
 
 
 class TestDDLIndex:
-    """Test DDL index operations: CREATE INDEX (BTree, FTS)."""
+    """Test DDL index operations."""
 
     def test_create_btree_index_on_int(self, spark):
         """Test CREATE INDEX with BTree on integer column."""
@@ -889,6 +889,31 @@ class TestDDLIndex:
         """).collect()
         assert len(query_result) == 1
         assert query_result[0].id == 50
+
+    def test_create_distributed_bitmap_index(self, spark):
+        """Test distributed Bitmap creation with multiple fragments in one segment."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                status INT
+            )
+        """)
+        spark.sql("INSERT INTO default.test_table VALUES (1, 10), (2, 20)")
+        spark.sql("INSERT INTO default.test_table VALUES (3, 10), (4, 20)")
+
+        result = spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX idx_status_bitmap USING bitmap (status)
+            WITH (num_segments = 1)
+        """).collect()
+
+        assert len(result) == 1
+        assert result[0][0] >= 2
+        assert result[0][1] == "idx_status_bitmap"
+        _assert_lance_index_metadata(
+            spark, "default.test_table", "idx_status_bitmap", "BITMAP"
+        )
+        assert spark.sql("SELECT * FROM default.test_table").count() == 4
 
     def test_create_btree_index_on_nested_literal_dot_field(self, spark):
         """Test CREATE INDEX on nested struct fields, including literal dots."""

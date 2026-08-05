@@ -22,11 +22,16 @@ The command uses the `ALTER TABLE` syntax to add an index.
 
 The following index methods are supported:
 
-| Method  | Description                                                                 |
-|---------|-----------------------------------------------------------------------------|
-| `zonemap` | Lightweight min/max index for fragment pruning on a scalar column. |
-| `btree` | B-tree index for efficient range queries and point lookups on scalar columns. |
-| `fts`   | Full-text search (inverted) index for text search on string columns.        |
+| Method        | Description                                                                   |
+|---------------|-------------------------------------------------------------------------------|
+| `zonemap`     | Lightweight min/max index for fragment pruning on a scalar column.            |
+| `btree`       | B-tree index for efficient range queries and point lookups on ordered values. |
+| `bitmap`      | Bitmap index for low-cardinality values.                                      |
+| `label_list`  | Label membership index for array/list columns.                                |
+| `ngram`       | N-gram index for string values.                                               |
+| `bloomfilter` | Bloom filter index for approximate membership pruning.                        |
+| `rtree`       | R-tree index for GeoArrow geometry columns.                                   |
+| `fts`         | Full-text search (inverted) index for text search on string columns.          |
 
 ## Options
 
@@ -40,14 +45,22 @@ These options apply to all index methods:
 |---------|---------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `train` | Boolean | When `false`, defer index training: register an empty index covering no rows without scanning any data, to be populated later. Default `true`. See [Deferred Index Creation](#deferred-index-creation). |
 
+### Distributed Index Options
+
+The distributed build used by `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, and
+`rtree` supports:
+
+| Option         | Type    | Description                                                                                                                                                                                                 |
+|----------------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `num_segments` | Integer | Target number of parallel build tasks (upper bound; clamped to fragment count when larger). Each task covers a contiguous batch of fragments. Defaults to `min(fragment_count, spark.default.parallelism)`. |
+
 ### ZoneMap Options
 
 For the `zonemap` method, the following options are supported:
 
-| Option          | Type | Description                                  |
-|-----------------|------|----------------------------------------------|
-| `rows_per_zone` | Long    | The approximate number of rows per zonemap zone. |
-| `num_segments`  | Integer | Target number of index segments (upper bound; clamped to fragment count when larger). Each segment covers a batch of fragments. Defaults to `min(fragment_count, spark.default.parallelism)`. |
+| Option          | Type | Description                                      |
+|-----------------|------|--------------------------------------------------|
+| `rows_per_zone` | Long | The approximate number of rows per zonemap zone. |
 
 ### BTree Options
 
@@ -140,6 +153,73 @@ Create a zonemap index and specify the approximate number of rows per zone:
     ALTER TABLE lance.db.users CREATE INDEX idx_id_zonemap USING zonemap (id) WITH (rows_per_zone = 2048);
     ```
 
+### Bitmap
+
+Use `bitmap` for columns with a relatively small number of distinct values.
+
+=== "SQL"
+    ```sql
+    ALTER TABLE lance.db.events CREATE INDEX idx_status_bitmap
+        USING bitmap (status) WITH (num_segments = 8);
+    ```
+
+### Label List
+
+Use `label_list` for membership filtering on an array/list column. The list item type must be
+non-nested.
+
+=== "SQL"
+    ```sql
+    ALTER TABLE lance.db.events CREATE INDEX idx_labels
+        USING label_list (labels) WITH (num_segments = 8);
+    ```
+
+### NGram
+
+Use `ngram` to build a fixed trigram index on a string column.
+
+=== "SQL"
+    ```sql
+    ALTER TABLE lance.db.documents CREATE INDEX idx_content_ngram
+        USING ngram (content) WITH (num_segments = 8);
+    ```
+
+### Bloom Filter
+
+Use `bloomfilter` for membership pruning when a compact probabilistic index is appropriate.
+
+| Option            | Type   | Description                                                                                              |
+|-------------------|--------|----------------------------------------------------------------------------------------------------------|
+| `number_of_items` | Long   | Expected number of values per Bloom filter block. Default `8192`.                                        |
+| `probability`     | Double | Target false-positive probability. Default `0.00057` (approximately one false positive in 1,754 probes). |
+
+=== "SQL"
+    ```sql
+    ALTER TABLE lance.db.events CREATE INDEX idx_id_bloom
+        USING bloomfilter (id) WITH (
+            number_of_items = 16384,
+            probability = 0.001,
+            num_segments = 8
+        );
+    ```
+
+### RTree
+
+Use `rtree` for spatial filtering on a supported GeoArrow geometry column. For example, a point
+can be represented by a struct carrying `ARROW:extension:name=geoarrow.point` metadata.
+
+| Option      | Type    | Description                                            |
+|-------------|---------|--------------------------------------------------------|
+| `page_size` | Integer | Maximum number of entries per R-tree page. Minimum `2`; default `4096`. |
+
+=== "SQL"
+    ```sql
+    ALTER TABLE lance.db.places CREATE INDEX idx_geometry
+        USING rtree (geometry) WITH (page_size = 2048, num_segments = 8);
+    ```
+
+Lance validates each method's column type and parameters during index creation.
+
 ### Full-Text Search Index
 
 Create an FTS index on a text column:
@@ -189,9 +269,9 @@ to scanning the data until it is populated. There are two ways to populate it:
     dataset.optimizeIndices(OptimizeOptions.builder().build());
     ```
 
-`train = false` is supported for all index methods (`btree`, `fts`, `zonemap`). Because a deferred
-index performs no segmented build at creation time, `num_segments` cannot be combined with
-`train = false` — pass it on the eager build that populates the index instead.
+`train = false` is supported for all index methods. Because deferred index creation does not build
+index data, `num_segments` cannot be combined with `train = false` — pass it on the eager build
+that populates the index instead.
 
 Creating a scalar index on an empty table also registers an empty index with zero fragment
 coverage. The index is immediately visible through `SHOW INDEXES`. After data is appended, populate
@@ -218,13 +298,13 @@ Consider creating an index when:
 
 The `CREATE INDEX` command operates as follows:
 
-1.  **Index Build Execution**: Lance Spark chooses an execution path based on the index method. Methods such as `btree`, `fts`, and `zonemap` can build physical index segments in parallel across fragments. `zonemap` publishes those segments directly as one logical index. Range-mode `btree` uses Spark repartitioning and sorted preprocessed data.
+1.  **Index Build Execution**: Lance Spark chooses an execution path based on the index method. `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, and `rtree` split source fragments into batches and build them in parallel. Range-mode `btree` uses Spark repartitioning and sorted preprocessed data. FTS uses its existing fragment-parallel metadata flow.
 2.  **Metadata Finalization**: Lance Spark merges or commits the resulting index metadata on the driver so the new logical index becomes visible atomically.
 3.  **Transactional Commit**: A new table version is committed with the new index information. The operation is atomic and ensures that concurrent reads are not affected.
 
 ## Notes and Limitations
 
-- **Index Methods**: The `zonemap`, `btree`, and `fts` methods are supported for scalar index creation.
-- **Zonemap Column Count**: Zonemap indexes currently support a single column only. The generic `CREATE INDEX` grammar accepts a column list, but Lance rejects multi-column zonemap creation.
+- **Index Methods**: The `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, `rtree`, `btree`, and `fts` methods are supported for index creation.
+- **Indexed Column Count**: `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, and `rtree` currently support exactly one indexed column.
 - **Index Replacement**: If you create an index with the same name as an existing one, the old index will be replaced by the new one.
 - **Deferred Training**: With `train = false` the index is registered empty and is populated later, either by re-running `CREATE INDEX` (a full distributed build that replaces the empty index) or, for incremental coverage of newly appended fragments, by `Dataset.optimizeIndices` in the SDK. The SQL `OPTIMIZE` command compacts fragments and does not train deferred indexes.
