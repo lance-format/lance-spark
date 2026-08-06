@@ -17,6 +17,7 @@ import org.lance.memwal.ShardingSpec;
 import org.lance.spark.read.LanceScanBuilder;
 import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.BlobUtils;
+import org.lance.spark.utils.SchemaConverter;
 import org.lance.spark.write.AddColumnsBackfillWrite;
 import org.lance.spark.write.LanceWriteSchemaValidator;
 import org.lance.spark.write.SparkWrite;
@@ -387,6 +388,13 @@ public class LanceDataset
     }
     LanceSparkWriteOptions writeOptions = writeOptionsBuilder.build();
 
+    // Apply encoding metadata from write options to the schema. This handles the case
+    // where compression options are passed via .option() on df.write().format("lance").save(path),
+    // since Spark's DataFrameWriter passes properties=Map.empty to createTable for the
+    // SupportsCatalogOptions path, causing compression metadata to be lost at table creation time.
+    StructType effectiveSchema =
+        SchemaConverter.processSchemaWithProperties(sparkSchema, mergedOptions);
+
     List<String> backfillColumns =
         Arrays.stream(
                 sparkWriteOptions.getOrDefault(LanceConstant.BACKFILL_COLUMNS_KEY, "").split(","))
@@ -395,7 +403,7 @@ public class LanceDataset
             .collect(Collectors.toList());
     if (!backfillColumns.isEmpty()) {
       return new AddColumnsBackfillWrite.AddColumnsWriteBuilder(
-          sparkSchema,
+          effectiveSchema,
           writeOptions,
           backfillColumns,
           initialStorageOptions,
@@ -412,7 +420,7 @@ public class LanceDataset
             .collect(Collectors.toList());
     if (!updateColumns.isEmpty()) {
       return new UpdateColumnsBackfillWrite.UpdateColumnsWriteBuilder(
-          sparkSchema,
+          effectiveSchema,
           writeOptions,
           updateColumns,
           initialStorageOptions,
@@ -423,7 +431,7 @@ public class LanceDataset
 
     SparkWrite.SparkWriteBuilder builder =
         new SparkWrite.SparkWriteBuilder(
-            sparkSchema,
+            effectiveSchema,
             writeOptions,
             initialStorageOptions,
             namespaceImpl,
