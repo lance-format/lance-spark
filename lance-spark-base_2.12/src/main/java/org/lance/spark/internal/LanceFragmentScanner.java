@@ -17,6 +17,7 @@ import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
+import org.lance.ipc.ScanStats;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
@@ -32,6 +33,7 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -127,6 +129,10 @@ public class LanceFragmentScanner implements AutoCloseable {
         scanOptions.filter(inputPartition.getWhereCondition().get());
       }
       scanOptions.batchSize(readOptions.getBatchSize());
+      if (readOptions.getFullTextQuery() != null) {
+        scanOptions.fullTextQuery(readOptions.getFullTextQuery());
+      }
+      scanOptions.useScalarIndex(readOptions.isUseScalarIndex());
       if (inputPartition.getLimit().isPresent()) {
         scanOptions.limit(inputPartition.getLimit().get());
       }
@@ -136,6 +142,10 @@ public class LanceFragmentScanner implements AutoCloseable {
       if (inputPartition.getTopNSortOrders().isPresent()) {
         scanOptions.setColumnOrderings(inputPartition.getTopNSortOrders().get());
       }
+
+      // Collect scan stats
+      scanOptions.collectStats(true);
+
       boolean withFragmentId = scanSchema.getFieldIndex(LanceConstant.FRAGMENT_ID).nonEmpty();
       long scanCreateStart = System.nanoTime();
       lanceScanner = fragment.newScan(scanOptions.build());
@@ -272,6 +282,7 @@ public class LanceFragmentScanner implements AutoCloseable {
                         && !name.equals(LanceConstant.ROW_ADDRESS)
                         && !name.equals(LanceConstant.ROW_CREATED_AT_VERSION)
                         && !name.equals(LanceConstant.ROW_LAST_UPDATED_AT_VERSION)
+                        && !name.equals(LanceConstant.SCORE)
                         && !name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)
                         && !name.endsWith(LanceConstant.BLOB_SIZE_SUFFIX))
             .collect(Collectors.toList());
@@ -292,5 +303,9 @@ public class LanceFragmentScanner implements AutoCloseable {
       }
     }
     return false;
+  }
+
+  public Optional<ScanStats> getScanStats() {
+    return scanner == null ? Optional.empty() : scanner.getStats();
   }
 }

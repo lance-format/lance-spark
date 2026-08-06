@@ -81,12 +81,16 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
       metricsTracker.addNumFragmentsScanned(fragmentIds.size());
 
       ScanOptions.Builder scanOptionsBuilder = new ScanOptions.Builder();
+      scanOptionsBuilder.useScalarIndex(readOptions.isUseScalarIndex());
       if (inputPartition.getWhereCondition().isPresent()) {
         scanOptionsBuilder.filter(inputPartition.getWhereCondition().get());
       }
       scanOptionsBuilder.withRowId(true);
       scanOptionsBuilder.columns(Lists.newArrayList());
       scanOptionsBuilder.fragmentIds(fragmentIds);
+
+      // Collect scan stats
+      scanOptionsBuilder.collectStats(true);
 
       long scanCreateStart = System.nanoTime();
       try (LanceScanner scanner = dataset.newScan(scanOptionsBuilder.build())) {
@@ -106,6 +110,7 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
             metricsTracker.addNumRowsScanned(rowCount);
           }
         }
+        metricsTracker.addScanStats(scanner.getStats());
       } catch (Exception e) {
         throw new RuntimeException("Failed to scan fragment " + fragmentIds, e);
       }

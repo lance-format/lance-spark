@@ -14,12 +14,19 @@
 package org.lance.spark.write;
 
 import org.lance.Version;
+import org.lance.WriteParams;
 import org.lance.spark.LanceDataSource;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
 
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
@@ -40,6 +47,7 @@ import java.io.File;
 import java.nio.file.Path;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -732,6 +740,73 @@ public abstract class BaseSparkConnectorWriteTest {
           org.apache.arrow.vector.types.pojo.ArrowType.LargeUtf8.INSTANCE,
           idField.getType(),
           "id field should be LargeUtf8 when use_large_var_types=true on createOrReplace path");
+    }
+  }
+
+  /**
+   * Regression for #687 / #697: appending into a dataset whose Arrow List child is named {@code
+   * element} (the pre-#697 lance-spark convention, and what a dataset written by an older
+   * lance-spark or a hand-built producer looks like) must not fail lance-core's by-name schema
+   * validation. The fix records the non-default child name in Spark metadata on read and restores
+   * it on writeback; this test drives the full driver-to-executor write path so a regression in the
+   * write buffer's schema source turns the suite red instead of surfacing on a real legacy table.
+   */
+  @Test
+  public void appendIntoLegacyElementChildDataset(TestInfo testInfo) throws NoSuchTableException {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    // Seed a dataset directly through the Lance JNI with a List child explicitly named "element",
+    // bypassing the Spark write path (which would name it "item" today).
+    Field elementField = new Field("element", FieldType.nullable(ArrowType.Utf8.INSTANCE), null);
+    Field tagsField =
+        new Field(
+            "tags",
+            FieldType.nullable(ArrowType.List.INSTANCE),
+            Collections.singletonList(elementField));
+    Field idField = new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null);
+    Schema legacySchema = new Schema(Arrays.asList(idField, tagsField));
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      org.lance.Dataset.create(allocator, path, legacySchema, new WriteParams.Builder().build())
+          .close();
+    }
+
+    // Confirm the seeded dataset really uses "element", otherwise the test would be vacuous.
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      assertEquals("element", ds.getSchema().findField("tags").getChildren().get(0).getName());
+    }
+
+    StructType sparkSchema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, true)
+            .add("tags", DataTypes.createArrayType(DataTypes.StringType, true), true);
+    List<Row> rows =
+        Arrays.asList(
+            RowFactory.create(1, Arrays.asList("a", "b")),
+            RowFactory.create(2, Collections.emptyList()));
+    Dataset<Row> df = spark.createDataFrame(rows, sparkSchema);
+
+    // Append through the documented catalog-routed path. Before #697 this failed lance-core
+    // validation with "element" != "item".
+    df.writeTo("lance.`" + path + "`").append();
+
+    Dataset<Row> afterCatalog =
+        spark.read().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, path).load();
+    assertEquals(2, afterCatalog.count());
+
+    // Append through the path-based DataSource save() path as well, covering the getTable() branch
+    // that adopts the caller-provided schema.
+    df.write().format(LanceDataSource.name).mode(SaveMode.Append).save(path);
+
+    Dataset<Row> afterPath =
+        spark.read().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, path).load();
+    assertEquals(4, afterPath.count());
+
+    // The stored List child name must be unchanged after the appends.
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      assertEquals("element", ds.getSchema().findField("tags").getChildren().get(0).getName());
     }
   }
 }

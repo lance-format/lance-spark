@@ -148,13 +148,38 @@ public class LanceDataset
         }
       };
 
+  /**
+   * Relevance score, auto-projected by Lance only when a full-text query is active on the scan.
+   * Advertised unconditionally because {@code metadataColumns()} is consulted by the analyzer
+   * before the query is known to contain FTS; selecting it without a full-text search yields an
+   * empty scan result for this column rather than a plan-time error (validation is a follow-up).
+   */
+  public static final MetadataColumn SCORE_COLUMN =
+      new MetadataColumn() {
+        @Override
+        public String name() {
+          return LanceConstant.SCORE;
+        }
+
+        @Override
+        public DataType dataType() {
+          return DataTypes.FloatType;
+        }
+
+        @Override
+        public boolean isNullable() {
+          return true;
+        }
+      };
+
   public static final MetadataColumn[] METADATA_COLUMNS =
       new MetadataColumn[] {
         ROW_ID_COLUMN,
         ROW_ADDRESS_COLUMN,
         ROW_LAST_UPDATED_AT_VERSION_COLUMN,
         ROW_CREATED_AT_VERSION_COLUMN,
-        FRAGMENT_ID_COLUMN
+        FRAGMENT_ID_COLUMN,
+        SCORE_COLUMN
       };
 
   protected final LanceSparkReadOptions readOptions;

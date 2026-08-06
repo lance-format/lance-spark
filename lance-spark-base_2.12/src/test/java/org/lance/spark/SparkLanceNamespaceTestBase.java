@@ -14,15 +14,23 @@
 package org.lance.spark;
 
 import org.lance.Version;
+import org.lance.spark.function.LanceMatchFunction;
+import org.lance.spark.function.LanceMultiMatchFunction;
+import org.lance.spark.function.LancePhraseFunction;
 
 import org.apache.spark.sql.AnalysisException;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
+import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
+import org.apache.spark.sql.connector.catalog.FunctionCatalog;
 import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.SupportsNamespaces;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.catalog.TableChange;
+import org.apache.spark.sql.connector.catalog.functions.UnboundFunction;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -31,11 +39,13 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.format.DateTimeFormatter;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -694,6 +704,88 @@ public abstract class SparkLanceNamespaceTestBase {
   }
 
   @Test
+  public void testListFunctionsContainsLanceMatch() throws Exception {
+    FunctionCatalog functionCatalog = (FunctionCatalog) catalog;
+    String[] namespace = new String[] {};
+    Identifier[] identifiers = functionCatalog.listFunctions(namespace);
+
+    boolean found = false;
+    for (Identifier id : identifiers) {
+      if (LanceMatchFunction.NAME.equalsIgnoreCase(id.name())) {
+        assertNotNull(id.namespace());
+        assertArrayEquals(namespace, id.namespace());
+        found = true;
+        break;
+      }
+    }
+    assertTrue(found, "listFunctions() must include an identifier for " + LanceMatchFunction.NAME);
+  }
+
+  @Test
+  public void testListFunctionsContainsLanceMatchPhrase() throws Exception {
+    FunctionCatalog functionCatalog = (FunctionCatalog) catalog;
+    String[] namespace = new String[] {};
+    Identifier[] identifiers = functionCatalog.listFunctions(namespace);
+
+    boolean found = false;
+    for (Identifier id : identifiers) {
+      if (LancePhraseFunction.NAME.equalsIgnoreCase(id.name())) {
+        assertNotNull(id.namespace());
+        assertArrayEquals(namespace, id.namespace());
+        found = true;
+        break;
+      }
+    }
+    assertTrue(found, "listFunctions() must include an identifier for " + LancePhraseFunction.NAME);
+  }
+
+  @Test
+  public void testLoadFunctionLanceMatch() throws Exception {
+    FunctionCatalog functionCatalog = (FunctionCatalog) catalog;
+    Identifier ident = Identifier.of(new String[] {}, LanceMatchFunction.NAME);
+    UnboundFunction fn = functionCatalog.loadFunction(ident);
+    assertNotNull(fn, "loadFunction() must return non-null for " + LanceMatchFunction.NAME);
+    assertEquals(LanceMatchFunction.NAME, fn.name());
+  }
+
+  @Test
+  public void testLoadFunctionLanceMatchPhrase() throws Exception {
+    FunctionCatalog functionCatalog = (FunctionCatalog) catalog;
+    Identifier ident = Identifier.of(new String[] {}, LancePhraseFunction.NAME);
+    UnboundFunction fn = functionCatalog.loadFunction(ident);
+    assertNotNull(fn, "loadFunction() must return non-null for " + LancePhraseFunction.NAME);
+    assertEquals(LancePhraseFunction.NAME, fn.name());
+  }
+
+  @Test
+  public void testListFunctionsContainsLanceMultiMatch() throws Exception {
+    FunctionCatalog functionCatalog = (FunctionCatalog) catalog;
+    String[] namespace = new String[] {};
+    Identifier[] identifiers = functionCatalog.listFunctions(namespace);
+
+    boolean found = false;
+    for (Identifier id : identifiers) {
+      if (LanceMultiMatchFunction.NAME.equalsIgnoreCase(id.name())) {
+        assertNotNull(id.namespace());
+        assertArrayEquals(namespace, id.namespace());
+        found = true;
+        break;
+      }
+    }
+    assertTrue(
+        found, "listFunctions() must include an identifier for " + LanceMultiMatchFunction.NAME);
+  }
+
+  @Test
+  public void testLoadFunctionLanceMultiMatch() throws Exception {
+    FunctionCatalog functionCatalog = (FunctionCatalog) catalog;
+    Identifier ident = Identifier.of(new String[] {}, LanceMultiMatchFunction.NAME);
+    UnboundFunction fn = functionCatalog.loadFunction(ident);
+    assertNotNull(fn, "loadFunction() must return non-null for " + LanceMultiMatchFunction.NAME);
+    assertEquals(LanceMultiMatchFunction.NAME, fn.name());
+  }
+
+  @Test
   public void testTableExistsReturnsFalseForNonExistentTable() {
     // This exercises the loadTable path used by Spark 4.0+ internally
     // when calling spark.catalog.tableExists()
@@ -1026,6 +1118,120 @@ public abstract class SparkLanceNamespaceTestBase {
               spark.sql("ALTER TABLE " + full1 + " RENAME TO " + full2);
             });
     assertEquals("TABLE_ALREADY_EXISTS", ex.getErrorClass());
+  }
+
+  @Test
+  public void testCtasCreatesAndPopulatesTable() throws Exception {
+    String fullName = catalogName + ".default." + generateTableName("ctas");
+
+    spark.sql(
+        "CREATE TABLE "
+            + fullName
+            + " USING lance AS SELECT * FROM VALUES (1, 'a'), (2, 'b') AS t(id, name)");
+
+    assertTrue(checkDataset(2, fullName));
+  }
+
+  @Test
+  public void testReplaceTableRewritesData() throws Exception {
+    String fullName = catalogName + ".default." + generateTableName("replace");
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, 'old'), (2, 'old')");
+    assertTrue(checkDataset(2, fullName));
+
+    spark.sql(
+        "REPLACE TABLE "
+            + fullName
+            + " USING lance AS SELECT * FROM VALUES (9, 'new') AS t(id, name)");
+
+    List<Row> rows = spark.sql("SELECT id FROM " + fullName).collectAsList();
+    assertEquals(1, rows.size());
+    assertEquals(9, rows.get(0).getInt(0));
+  }
+
+  @Test
+  public void testCreateOrReplaceCreatesNewTable() throws Exception {
+    String fullName = catalogName + ".default." + generateTableName("cor_new");
+
+    spark.sql(
+        "CREATE OR REPLACE TABLE "
+            + fullName
+            + " USING lance AS SELECT * FROM VALUES (1, 'a'), (2, 'b'), (3, 'c') AS t(id, name)");
+
+    assertTrue(checkDataset(3, fullName));
+  }
+
+  @Test
+  public void testCreateOrReplaceOverwritesExistingTable() throws Exception {
+    String fullName = catalogName + ".default." + generateTableName("cor_existing");
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, 'old'), (2, 'old'), (3, 'old')");
+    assertTrue(checkDataset(3, fullName));
+
+    spark.sql(
+        "CREATE OR REPLACE TABLE "
+            + fullName
+            + " USING lance AS SELECT * FROM VALUES (7, 'new') AS t(id, name)");
+
+    assertTrue(checkDataset(1, fullName));
+  }
+
+  @Test
+  public void testCreateExistingTableThrows() throws Exception {
+    String fullName = catalogName + ".default." + generateTableName("dup");
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL)");
+
+    AnalysisException ex =
+        assertThrows(
+            AnalysisException.class,
+            () -> spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL)"));
+    assertEquals("TABLE_OR_VIEW_ALREADY_EXISTS", ex.getErrorClass());
+  }
+
+  @Test
+  public void testListFunctionsAtRootAreLoadable() throws Exception {
+    FunctionCatalog functions = (FunctionCatalog) catalog;
+    Identifier[] rootFunctions = functions.listFunctions(new String[0]);
+    assertEquals(5, rootFunctions.length);
+    for (Identifier function : rootFunctions) {
+      assertNotNull(functions.loadFunction(function));
+    }
+  }
+
+  @Test
+  public void testListFunctionsForNonRootNamespaceIsEmpty() throws Exception {
+    FunctionCatalog functions = (FunctionCatalog) catalog;
+    assertEquals(0, functions.listFunctions(new String[] {"default"}).length);
+  }
+
+  @Test
+  public void testCreateExistingNamespaceThrows() throws Exception {
+    SupportsNamespaces namespaces = (SupportsNamespaces) catalog;
+    String[] namespace = {"dup_ns_" + UUID.randomUUID().toString().replace("-", "")};
+    namespaces.createNamespace(namespace, Collections.emptyMap());
+
+    assertThrows(
+        NamespaceAlreadyExistsException.class,
+        () -> namespaces.createNamespace(namespace, Collections.emptyMap()));
+  }
+
+  @Test
+  public void testLoadMissingNamespaceMetadataThrows() {
+    SupportsNamespaces namespaces = (SupportsNamespaces) catalog;
+    String[] namespace = {"missing_" + UUID.randomUUID().toString().replace("-", "")};
+
+    assertThrows(NoSuchNamespaceException.class, () -> namespaces.loadNamespaceMetadata(namespace));
+  }
+
+  @Test
+  public void testMissingNamespaceDoesNotExist() {
+    SupportsNamespaces namespaces = (SupportsNamespaces) catalog;
+    String[] namespace = {"missing_" + UUID.randomUUID().toString().replace("-", "")};
+
+    assertFalse(namespaces.namespaceExists(namespace));
   }
 
   private boolean checkDataset(int expectedSize, String tableName) {

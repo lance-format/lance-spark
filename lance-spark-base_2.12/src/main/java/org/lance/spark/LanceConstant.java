@@ -18,6 +18,12 @@ public class LanceConstant {
   public static final String ROW_ID = "_rowid";
   public static final String ROW_ADDRESS = "_rowaddr";
 
+  /**
+   * Relevance score column. Lance auto-projects it onto the scan output whenever a full-text query
+   * is set, so it is exposed as a metadata column and stripped from the native column projection.
+   */
+  public static final String SCORE = "_score";
+
   // CDF (Change Data Feed) version tracking columns
   public static final String ROW_CREATED_AT_VERSION = "_row_created_at_version";
   public static final String ROW_LAST_UPDATED_AT_VERSION = "_row_last_updated_at_version";

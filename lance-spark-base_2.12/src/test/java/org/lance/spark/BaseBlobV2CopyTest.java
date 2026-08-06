@@ -27,10 +27,24 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public abstract class BaseBlobV2CopyTest extends AbstractBlobV2CopyTest {
+
+  /**
+   * A null blob yields a null descriptor struct, so every projected field reads back null. Prior to
+   * lance 9 the writer emitted a redundant rep/def validity layer, which made the descriptor decode
+   * as a non-null zero-filled struct and silently dropped the null.
+   */
+  private static void assertNullBlobDescriptor(Row descriptor) {
+    for (int i = 0; i < 5; i++) {
+      assertTrue(
+          descriptor.isNullAt(i), "expected null blob descriptor field " + i + " to be null");
+    }
+  }
 
   @Test
   public void insertSelect_copiesNullBlobAsNull() throws Exception {
@@ -50,17 +64,14 @@ public abstract class BaseBlobV2CopyTest extends AbstractBlobV2CopyTest {
                       + fqSrc
                       + " WHERE id = 2")
               .first();
-      assertEquals((short) 0, nullDesc.getShort(0));
-      assertEquals(0L, nullDesc.getLong(1));
-      assertEquals(0L, nullDesc.getLong(2));
-      assertEquals(0L, nullDesc.getLong(3));
-      assertEquals("", nullDesc.getString(4));
+      assertNullBlobDescriptor(nullDesc);
 
       spark.sql("INSERT INTO " + fqTgt + " SELECT id, data FROM " + fqSrc);
 
       List<Row> rows = spark.sql("SELECT id, data FROM " + fqTgt + " ORDER BY id").collectAsList();
       assertEquals(2, rows.size());
       assertFalse(rows.get(0).isNullAt(1));
+      assertTrue(rows.get(1).isNullAt(1));
 
       Row tgtNullDesc =
           spark
@@ -70,11 +81,7 @@ public abstract class BaseBlobV2CopyTest extends AbstractBlobV2CopyTest {
                       + fqTgt
                       + " WHERE id = 2")
               .first();
-      assertEquals((short) 0, tgtNullDesc.getShort(0));
-      assertEquals(0L, tgtNullDesc.getLong(1));
-      assertEquals(0L, tgtNullDesc.getLong(2));
-      assertEquals(0L, tgtNullDesc.getLong(3));
-      assertEquals("", tgtNullDesc.getString(4));
+      assertNullBlobDescriptor(tgtNullDesc);
 
       List<Long> tgtAddrs = rowAddressesOf(fqTgt);
       assertEquals(2, tgtAddrs.size());
@@ -83,7 +90,12 @@ public abstract class BaseBlobV2CopyTest extends AbstractBlobV2CopyTest {
               .allocator(LanceRuntime.allocator())
               .uri(datasetUriOf(tgt))
               .build()) {
-        assertEquals(1, ds.takeBlobs(tgtAddrs, "data").size(), "v2 takeBlobs skips null rows");
+        List<org.lance.BlobFile> blobs = ds.takeBlobs(tgtAddrs, "data");
+        assertEquals(2, blobs.size(), "v2 takeBlobs preserves null rows");
+        try (org.lance.BlobFile nonNullBlob = blobs.get(0)) {
+          assertNotNull(nonNullBlob, "non-null blob should return a BlobFile");
+          assertNull(blobs.get(1), "null blob should return a null element");
+        }
       }
 
       assertTargetBlobBytes(

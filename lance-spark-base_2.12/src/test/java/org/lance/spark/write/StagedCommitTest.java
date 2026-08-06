@@ -31,6 +31,8 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -96,5 +98,84 @@ public class StagedCommitTest {
         StagedCommit.forExistingTable(
             dataset, ARROW_SCHEMA, StagedCommitOptions.pathBased(Collections.emptyMap(), false));
     commit.abort();
+  }
+
+  @Test
+  public void testMergeStorageOptionsAddsNewKeys() {
+    StagedCommit commit =
+        StagedCommit.forNewTable(
+            ARROW_SCHEMA,
+            "unused://uri",
+            StagedCommitOptions.pathBased(Collections.emptyMap(), false));
+
+    Map<String, String> extra = new HashMap<>();
+    extra.put("access_key_id", "AKIA...");
+    extra.put("secret_access_key", "s3cr3t");
+    commit.mergeStorageOptions(extra);
+
+    assertEquals(extra, commit.getStorageOptions());
+  }
+
+  @Test
+  public void testMergeStorageOptionsOverridesExistingKeys() {
+    Map<String, String> base = new HashMap<>();
+    base.put("access_key_id", "stale-key");
+    base.put("region", "us-west-2");
+    StagedCommit commit =
+        StagedCommit.forNewTable(
+            ARROW_SCHEMA, "unused://uri", StagedCommitOptions.pathBased(base, false));
+
+    commit.mergeStorageOptions(Collections.singletonMap("access_key_id", "fresh-key"));
+
+    assertEquals("fresh-key", commit.getStorageOptions().get("access_key_id"));
+    assertEquals("us-west-2", commit.getStorageOptions().get("region"));
+  }
+
+  @Test
+  public void testMergeStorageOptionsNullAndEmptyAreNoOps() {
+    Map<String, String> base = Collections.singletonMap("access_key_id", "AKIA...");
+    StagedCommit commit =
+        StagedCommit.forNewTable(
+            ARROW_SCHEMA, "unused://uri", StagedCommitOptions.pathBased(base, false));
+
+    commit.mergeStorageOptions(null);
+    commit.mergeStorageOptions(Collections.emptyMap());
+
+    assertEquals(base, commit.getStorageOptions());
+  }
+
+  @Test
+  public void testMergeStorageOptionsDoesNotMutateCallerMap() {
+    StagedCommit commit =
+        StagedCommit.forNewTable(
+            ARROW_SCHEMA,
+            "unused://uri",
+            StagedCommitOptions.pathBased(Collections.emptyMap(), false));
+
+    Map<String, String> extra = new HashMap<>();
+    extra.put("access_key_id", "AKIA...");
+    commit.mergeStorageOptions(extra);
+    commit.getStorageOptions().put("access_key_id", "mutated-after-merge");
+
+    assertEquals("AKIA...", extra.get("access_key_id"));
+  }
+
+  @Test
+  public void testMergeStorageOptionsAcceptsUnmodifiableBaseMap() {
+    // Path-based staged creates pass catalogConfig.getStorageOptions() directly, which
+    // LanceSparkCatalogConfig wraps in Collections.unmodifiableMap(...). Without a defensive
+    // copy in the constructor, merging into that map throws UnsupportedOperationException.
+    Map<String, String> unmodifiableCatalogOptions =
+        Collections.unmodifiableMap(Collections.singletonMap("region", "us-west-2"));
+    StagedCommit commit =
+        StagedCommit.forNewTable(
+            ARROW_SCHEMA,
+            "unused://uri",
+            StagedCommitOptions.pathBased(unmodifiableCatalogOptions, false));
+
+    assertDoesNotThrow(
+        () -> commit.mergeStorageOptions(Collections.singletonMap("access_key_id", "AKIA...")));
+    assertEquals("AKIA...", commit.getStorageOptions().get("access_key_id"));
+    assertEquals("us-west-2", commit.getStorageOptions().get("region"));
   }
 }

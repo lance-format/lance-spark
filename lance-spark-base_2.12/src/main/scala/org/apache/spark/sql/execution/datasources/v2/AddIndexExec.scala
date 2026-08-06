@@ -58,19 +58,22 @@ private case class AddIndexTableSnapshot(
  *   {@code build_mode='fragment'}.
  * <li><b>FTS / INVERTED</b>: processes each fragment independently in parallel, merges index
  *   metadata, and commits an index-creation transaction.
- * <li><b>ZONEMAP</b>: builds uncommitted index segments in parallel across fragment batches
- *   and commits the logical index on the driver.
+ * <li><b>ZONEMAP / BITMAP / LABEL_LIST / NGRAM / BLOOMFILTER / RTREE</b>: build uncommitted
+ *   index segments in parallel across fragment batches and commit the logical index on the driver.
  * </ul>
  *
  * <p><b>Deferred training ({@code WITH (train=false)})</b>: commits an empty index on the driver
  * with an empty fragment bitmap (all rows appear unindexed), skipping data processing. Supported
- * for the scalar index types ({@code btree}, {@code fts}, {@code zonemap}); rejected for
- * {@code IVF_*} vector index types because Lance does not currently expose a vector-aware
- * empty-index commit path. Ignored for empty tables. Populate it later by re-running
+ * for all scalar index methods ({@code btree}, {@code fts}, and the scalar-segment methods —
+ * {@code zonemap}, {@code bitmap}, {@code label_list}, {@code ngram}, {@code bloomfilter},
+ * {@code rtree}). Rejected for {@code IVF_*} vector index types because Lance does not currently
+ * expose a vector-aware empty-index commit path. Empty scalar tables use the same path even when
+ * {@code train=true}; empty tables with an {@code IVF_*} method are rejected with a clear message
+ * because there are no vectors to train the centroids on. Populate the index later by re-running
  * {@code CREATE INDEX} with the same name (a full distributed build that replaces the empty
  * index) or, for incremental coverage of appended fragments, by {@code Dataset.optimizeIndices}
- * (the SQL {@code OPTIMIZE} only compacts fragments). {@code num_segments} is rejected with this
- * option, since no segmented build occurs.
+ * (the SQL {@code OPTIMIZE} only compacts fragments). {@code num_segments} is rejected with
+ * {@code train=false}, since no segmented build occurs.
  *
  * <p>The following options are consumed at the Spark execution layer and are never forwarded
  * to the Lance index backend: {@code train}, {@code build_mode}, {@code rows_per_range},
@@ -99,8 +102,8 @@ case class AddIndexExec(
 
     val train = IndexUtils.extractTrain(args)
     val indexType = IndexUtils.buildIndexType(method)
+    val scalarSegmentIndexType = IndexUtils.scalarSegmentIndexType(method)
     val btreeBuildMode = IndexUtils.btreeBuildMode(indexType, args)
-    val useLogicalSegmentCommit = IndexUtils.useLogicalSegmentCommit(indexType)
 
     // Deferred training (train=false) is only supported for scalar index methods today.
     // commitEmptyIndex(...) below builds ScalarIndexParams via buildScalarIndexParamType,
@@ -115,9 +118,9 @@ case class AddIndexExec(
     }
 
     val numSegmentsOpt = args.find(_.name == "num_segments")
-    if (numSegmentsOpt.isDefined && !useLogicalSegmentCommit) {
+    if (numSegmentsOpt.isDefined && !IndexUtils.useLogicalSegmentCommit(indexType)) {
       throw new IllegalArgumentException(
-        "num_segments option is only supported for index types that use segmented builds (e.g., zonemap)")
+        s"num_segments is not supported for ${indexType.name()} indexes")
     }
     if (numSegmentsOpt.isDefined && !train) {
       throw new IllegalArgumentException(
@@ -167,11 +170,18 @@ case class AddIndexExec(
         parsedNumSegments
       }
 
+    // Resolve canonical columns + fragment ids + (optional) vector plan against a pinned
+    // dataset version. Absorbs the upstream #740 change to use resolveField for scalar-segment
+    // methods so container fields (label_list / rtree) resolve, while other methods keep the
+    // existing resolveLeafField semantics.
     val snapshot: AddIndexTableSnapshot = {
       val ds = IndexUtils.openDataset(baseReadOptions, initialStorageOpts, nsImpl, nsProps, tableId)
       try {
         val canonical = columns.map { column =>
-          val field = FieldPathUtils.resolveLeafField(ds.getLanceSchema, column)
+          val field = scalarSegmentIndexType match {
+            case Some(_) => FieldPathUtils.resolveField(ds.getLanceSchema, column)
+            case None => FieldPathUtils.resolveLeafField(ds.getLanceSchema, column)
+          }
           FieldPathUtils.pathByFieldId(ds.getLanceSchema, field.getId)
         }
         // Single-column check: no index type currently supports more than one column.
@@ -219,21 +229,26 @@ case class AddIndexExec(
     val fragmentIds = snapshot.fragmentIds
     val canonicalColumns = snapshot.canonicalColumns
 
-    if (fragmentIds.isEmpty) {
-      // No fragments to index
-      return Seq(new GenericInternalRow(Array[Any](0L, UTF8String.fromString(indexName))))
+    // Goal-mode C: align empty-table CREATE INDEX behaviour with upstream #739 for scalar
+    // methods (register empty index metadata visible to SHOW INDEXES) while explicitly
+    // rejecting IVF_* on empty tables — Lance cannot train IVF centroids without vectors,
+    // and commitEmptyIndex resolves scalar params only.
+    if (fragmentIds.isEmpty && IndexUtils.isIvfIndexType(indexType)) {
+      throw new IllegalArgumentException(
+        s"CREATE INDEX $indexType on an empty table is not supported: there are no vectors " +
+          "to train IVF centroids. Insert data before running CREATE INDEX, or use " +
+          "Dataset.optimizeIndices to build incrementally after appending fragments.")
     }
 
-    // train=false: commit an empty index on the driver for any index type,
-    // skipping all data processing. See the class doc for how it is populated.
-    if (!train) {
+    // train=false, or an empty scalar table: commit an empty index on the driver and skip
+    // data processing. Index and option validation above still applies to empty tables.
+    if (!train || fragmentIds.isEmpty) {
       val uuid = UUID.randomUUID()
       val dataset =
         IndexUtils.openDataset(readOptions, initialStorageOpts, nsImpl, nsProps, tableId)
       try {
         return commitEmptyIndex(
           dataset,
-          readOptions,
           indexName,
           indexType,
           canonicalColumns,
@@ -243,11 +258,14 @@ case class AddIndexExec(
       }
     }
 
-    // Logical segment commit path: ZONEMAP and IVF_*
-    if (useLogicalSegmentCommit) {
+    // Logical segment commit path: scalar-segment methods (ZONEMAP / BITMAP / LABEL_LIST /
+    // NGRAM / BLOOM_FILTER / RTREE) go through ScalarSegmentIndexJob; IVF_* goes through
+    // VectorIndexJob.
+    if (IndexUtils.useLogicalSegmentCommit(indexType)) {
       val segments: Seq[Index] = indexType match {
-        case IndexType.ZONEMAP =>
-          val zonemapJob = new ZonemapIndexJob(
+        case scalar if scalarSegmentIndexType.isDefined =>
+          val _ = scalar
+          val scalarSegmentJob = new ScalarSegmentIndexJob(
             this.copy(columns = canonicalColumns),
             readOptions,
             fragmentIds,
@@ -256,7 +274,7 @@ case class AddIndexExec(
             nsProps,
             tableId,
             initialStorageOpts)
-          zonemapJob.run()
+          scalarSegmentJob.run()
 
         case vectorType if IndexUtils.isIvfIndexType(vectorType) =>
           val plan = snapshot.vectorPlan.getOrElse {
@@ -279,6 +297,7 @@ case class AddIndexExec(
         case other =>
           throw new IllegalStateException(s"Unexpected logical-segment type: $other")
       }
+      // Atomic add+remove via Lance core; see commitIndexSegments
       // Atomic add+remove via Lance core; see commitIndexSegments
       commitIndexSegments(readOptions, canonicalColumns.head, segments)
       return Seq(new GenericInternalRow(Array[Any](
@@ -397,7 +416,6 @@ case class AddIndexExec(
   /** Commits an empty (untrained) index on the driver, with an empty fragment bitmap. */
   private def commitEmptyIndex(
       dataset: Dataset,
-      readOptions: LanceSparkReadOptions,
       indexName: String,
       indexType: IndexType,
       canonicalColumns: Seq[String],
@@ -415,45 +433,9 @@ case class AddIndexExec(
       .train(false)
       .build()
 
-    val emptyIndex = dataset.createIndex(opts)
-
-    val fieldIds = canonicalColumns.map { column =>
-      FieldPathUtils.resolveLeafField(dataset.getLanceSchema, column).getId
-    }.toList
-
-    val indexBuilder = Index
-      .builder()
-      .uuid(uuid)
-      .name(indexName)
-      .fields(fieldIds.map(java.lang.Integer.valueOf).asJava)
-      .datasetVersion(dataset.version())
-      .indexDetails(emptyIndex.indexDetails().orElse(Array.empty[Byte]))
-      .indexVersion(emptyIndex.indexVersion())
-      .indexType(indexType)
-      .fragments(java.util.Collections.emptyList())
-    emptyIndex.createdAt().ifPresent(indexBuilder.createdAt)
-    val index = indexBuilder.build()
-
-    val removedIndices = dataset.getIndexes.asScala
-      .filter(_.name() == indexName)
-      .toList.asJava
-
-    val op = AddIndexOperation.builder()
-      .withNewIndices(Collections.singletonList(index))
-      .withRemovedIndices(removedIndices)
-      .build()
-    val txn = new Transaction.Builder()
-      .readVersion(dataset.version())
-      .operation(op)
-      .build()
-    try {
-      val newDataset = new CommitBuilder(dataset)
-        .writeParams(readOptions.getStorageOptions)
-        .execute(txn)
-      newDataset.close()
-    } finally {
-      txn.close()
-    }
+    // Without fragmentIds, Lance commits createIndex atomically. Do not manually commit the
+    // returned metadata a second time.
+    dataset.createIndex(opts)
 
     Seq(new GenericInternalRow(Array[Any](0L, UTF8String.fromString(indexName))))
   }
@@ -942,11 +924,11 @@ case class RangeBTreeIndexBuilder(
 }
 
 /**
- * A job implementation for creating zonemap indexes using logical segment commit.
+ * A job implementation for creating scalar segment indexes using logical segment commit.
  * Fragments are batched into segments, each built in parallel, and committed
  * as a logical index on the driver.
  */
-class ZonemapIndexJob(
+class ScalarSegmentIndexJob(
     addIndexExec: AddIndexExec,
     readOptions: LanceSparkReadOptions,
     fragmentIds: List[Integer],
@@ -957,22 +939,24 @@ class ZonemapIndexJob(
     initialStorageOpts: Option[Map[String, String]]) {
 
   def run(): Seq[Index] = {
+    val indexType = IndexUtils.scalarSegmentIndexType(addIndexExec.method).getOrElse {
+      throw new UnsupportedOperationException(
+        s"Unsupported Lance index method: ${addIndexExec.method}")
+    }
     val encodedReadOptions = encode(readOptions)
     val columns = addIndexExec.columns.toList
     val argsJson = IndexUtils.toJson(addIndexExec.args)
-    val fragmentBatches =
-      IndexUtils.batchFragments(
-        fragmentIds,
-        numSegments,
-        addIndexExec.session.sparkContext.defaultParallelism)
+    val fragmentBatches = IndexUtils.batchFragments(
+      fragmentIds,
+      numSegments,
+      addIndexExec.session.sparkContext.defaultParallelism)
 
     val tasks = fragmentBatches.map { batch =>
-      ZonemapIndexTask(
+      ScalarSegmentIndexTask(
         encodedReadOptions,
         columns,
         addIndexExec.method,
         argsJson,
-        addIndexExec.indexName,
         batch,
         nsImpl,
         nsProps,
@@ -983,20 +967,19 @@ class ZonemapIndexJob(
     IndexUtils.runSegmentTasks(
       addIndexExec.session.sparkContext,
       tasks,
-      "Zonemap segment build failed. Uncommitted segments are not " +
+      s"${indexType.name()} index build failed. Uncommitted segments are not " +
         "visible to readers and will not affect query correctness.")(_.execute())
   }
 }
 
 /**
- * A task to create a zonemap index segment on a batch of fragments.
+ * A task to create a scalar index segment on a batch of fragments.
  */
-case class ZonemapIndexTask(
+case class ScalarSegmentIndexTask(
     encodedReadOptions: String,
     columns: List[String],
     method: String,
     argsJson: String,
-    indexName: String,
     fragmentIds: List[Integer],
     namespaceImpl: Option[String],
     namespaceProperties: Option[Map[String, String]],
@@ -1005,9 +988,13 @@ case class ZonemapIndexTask(
 
   def execute(): String = {
     val readOptions = decode[LanceSparkReadOptions](encodedReadOptions)
-    val indexType = IndexUtils.buildIndexType(method)
+    val indexType = IndexUtils.scalarSegmentIndexType(method).getOrElse {
+      throw new UnsupportedOperationException(
+        s"Unsupported Lance index method: $method")
+    }
     val params = IndexParams.builder()
-      .setScalarIndexParams(ScalarIndexParams.create(method, argsJson))
+      .setScalarIndexParams(
+        ScalarIndexParams.create(IndexUtils.buildScalarIndexParamType(method), argsJson))
       .build()
 
     val indexOptions = IndexOptions
@@ -1053,18 +1040,52 @@ object IndexUtils extends org.apache.spark.internal.Logging {
     IndexType.IVF_SQ,
     IndexType.IVF_HNSW_SQ)
 
-  private val LogicalSegmentIndexTypes: Set[IndexType] =
-    Set(IndexType.ZONEMAP) ++ IvfIndexTypes
-
-  private val MethodToIndexType: Map[String, IndexType] = Map(
+  // Method → IndexType. Includes the six scalar-segment methods brought in by upstream #740
+  // (zonemap / bitmap / label_list / ngram / bloomfilter / rtree) plus btree, fts, and the IVF
+  // family. Keyed on lower-cased method names to normalise case-insensitive callers.
+  private val methodToIndexTypes: Map[String, IndexType] = Map(
     "btree" -> IndexType.BTREE,
     "zonemap" -> IndexType.ZONEMAP,
+    "bitmap" -> IndexType.BITMAP,
+    "label_list" -> IndexType.LABEL_LIST,
+    "ngram" -> IndexType.NGRAM,
+    "bloomfilter" -> IndexType.BLOOM_FILTER,
+    "rtree" -> IndexType.RTREE,
     "fts" -> IndexType.INVERTED,
     "ivf_flat" -> IndexType.IVF_FLAT,
     "ivf_pq" -> IndexType.IVF_PQ,
     "ivf_sq" -> IndexType.IVF_SQ,
     "ivf_hnsw_pq" -> IndexType.IVF_HNSW_PQ,
     "ivf_hnsw_sq" -> IndexType.IVF_HNSW_SQ)
+
+  // Scalar-segment methods use the shared ScalarSegmentIndexJob path (uncommitted segments
+  // built in parallel across fragment batches, then committed atomically on the driver).
+  private val scalarSegmentIndexTypes: Set[IndexType] = Set(
+    IndexType.ZONEMAP,
+    IndexType.BITMAP,
+    IndexType.LABEL_LIST,
+    IndexType.NGRAM,
+    IndexType.BLOOM_FILTER,
+    IndexType.RTREE)
+
+  // ScalarIndexParams uses Lance Core's scalar plugin names, which are a separate contract
+  // from both Spark SQL method names and the Java IndexType enum names. Keep the mapping
+  // explicit instead of deriving it from either naming convention.
+  private val scalarParamTypesByIndexType: Map[IndexType, String] = Map(
+    IndexType.BTREE -> "btree",
+    IndexType.ZONEMAP -> "zonemap",
+    IndexType.BITMAP -> "bitmap",
+    IndexType.LABEL_LIST -> "labellist",
+    IndexType.NGRAM -> "ngram",
+    IndexType.BLOOM_FILTER -> "bloomfilter",
+    IndexType.RTREE -> "rtree",
+    IndexType.INVERTED -> "inverted")
+
+  // All index types whose commit goes through the logical-segment path:
+  // scalar-segment methods (zonemap / bitmap / label_list / ngram / bloomfilter / rtree)
+  // plus the IVF_* vector family. Excludes BTree and FTS which use their own paths.
+  private val logicalSegmentIndexTypes: Set[IndexType] =
+    scalarSegmentIndexTypes ++ IvfIndexTypes
 
   def isIvfIndexType(indexType: IndexType): Boolean = IvfIndexTypes.contains(indexType)
 
@@ -1076,6 +1097,16 @@ object IndexUtils extends org.apache.spark.internal.Logging {
    * the SQ-shared-artifact follow-up against lance-format/lance.
    */
   def isSqIvfIndexType(indexType: IndexType): Boolean = SqIvfIndexTypes.contains(indexType)
+
+  /**
+   * Returns the [[IndexType]] for a scalar-segment method (zonemap / bitmap / label_list /
+   * ngram / bloomfilter / rtree). Returns None for any other method — including BTree, FTS,
+   * and IVF_*.
+   */
+  def scalarSegmentIndexType(method: String): Option[IndexType] =
+    methodToIndexTypes
+      .get(method.toLowerCase(Locale.ROOT))
+      .filter(scalarSegmentIndexTypes.contains)
 
   /**
    * Extracts the `train` option from named arguments, defaulting to `true`.
@@ -1107,19 +1138,18 @@ object IndexUtils extends org.apache.spark.internal.Logging {
           "IVF_HNSW_FLAT is not currently supported because Lance requires a PQ or SQ " +
             "quantizer for HNSW vector indexes. Use ivf_hnsw_pq or ivf_hnsw_sq instead.")
       case other =>
-        MethodToIndexType.getOrElse(
+        methodToIndexTypes.getOrElse(
           other,
           throw new UnsupportedOperationException(s"Unsupported index method: $other"))
     }
   }
 
   def buildScalarIndexParamType(method: String): String = {
-    method.toLowerCase(Locale.ROOT) match {
-      case "btree" => "btree"
-      case "zonemap" => "zonemap"
-      case "fts" => "inverted"
-      case other => throw new UnsupportedOperationException(s"Unsupported index method: $other")
-    }
+    val normalized = method.toLowerCase(Locale.ROOT)
+    val indexType = buildIndexType(normalized)
+    scalarParamTypesByIndexType.getOrElse(
+      indexType,
+      throw new UnsupportedOperationException(s"Unsupported scalar index method: $normalized"))
   }
 
   def btreeBuildMode(indexType: IndexType, args: Seq[LanceNamedArgument]): Option[String] = {
@@ -1138,7 +1168,7 @@ object IndexUtils extends org.apache.spark.internal.Logging {
   }
 
   def useLogicalSegmentCommit(indexType: IndexType): Boolean =
-    LogicalSegmentIndexTypes.contains(indexType)
+    logicalSegmentIndexTypes.contains(indexType)
 
   def openDataset(
       readOptions: LanceSparkReadOptions,
@@ -1262,7 +1292,8 @@ object IndexUtils extends org.apache.spark.internal.Logging {
 
   /**
    * Split fragment ids into roughly equal batches for parallel index segment
-   * builds. Used by zonemap and IVF_* logical-segment commit paths.
+   * builds. Used by the scalar-segment (zonemap / bitmap / label_list / ngram /
+   * bloomfilter / rtree) and IVF_* logical-segment commit paths.
    *
    * @param fragmentIds       fragments to split (preserves input order)
    * @param numSegments       caller-supplied N; clamped to [1, fragmentIds.size]
@@ -1270,6 +1301,7 @@ object IndexUtils extends org.apache.spark.internal.Logging {
    * @param defaultParallelism fallback when numSegments is None
    * @return non-empty batches; sum of sizes equals fragmentIds.size
    */
+
   def batchFragments(
       fragmentIds: List[Integer],
       numSegments: Option[Int],
@@ -1280,7 +1312,6 @@ object IndexUtils extends org.apache.spark.internal.Logging {
       case Some(req) =>
         val clamped = math.max(1, math.min(n, req))
         if (clamped != req) {
-          // Same wording as the existing zonemap path so users see one message.
           logWarning(s"num_segments=$req clamped to $clamped (fragment count=$n)")
         }
         clamped

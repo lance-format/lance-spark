@@ -13,6 +13,13 @@
  */
 package org.lance.spark.update;
 
+import org.lance.index.IndexOptions;
+import org.lance.index.IndexParams;
+import org.lance.index.IndexType;
+import org.lance.index.scalar.ScalarIndexParams;
+import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.utils.Utils;
+
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
@@ -130,5 +137,72 @@ public abstract class BaseShowIndexesTest {
     // num_indexed_rows should be at least 1
     long numIndexedRows = row.getLong(4);
     Assertions.assertTrue(numIndexedRows >= 1L, "num_indexed_rows should be at least 1");
+  }
+
+  @Test
+  public void testShowIndexesFiltersMemWalIndex() {
+    spark.sql(
+        String.format(
+            "create table %s (id int, region string) using lance "
+                + "partitioned by (bucket(4, region))",
+            fullTable));
+    spark.sql(
+        String.format(
+            "insert into %s values (1, 'east'), (2, 'west'), (3, 'north'), (4, 'south')",
+            fullTable));
+
+    List<Row> systemOnly =
+        spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+    Assertions.assertTrue(systemOnly.isEmpty(), "MemWAL must not appear in SHOW INDEXES");
+
+    spark.sql(String.format("alter table %s create index test_index using btree (id)", fullTable));
+    List<Row> rows = spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+
+    Assertions.assertEquals(1, rows.size());
+    Row row = rows.get(0);
+    Assertions.assertEquals("test_index", row.getString(0));
+    Assertions.assertEquals("btree", row.getString(2));
+    Assertions.assertTrue(row.getLong(3) >= 1L);
+    Assertions.assertTrue(row.getLong(4) >= 1L);
+  }
+
+  @Test
+  public void testShowIndexesFiltersFragmentReuseIndex() {
+    prepareDataset();
+
+    // Use one index segment over all fragments so compaction rewrites indexed data. Distributed
+    // CREATE INDEX produces per-task segments that the compaction planner keeps in separate bins.
+    IndexParams indexParams =
+        IndexParams.builder().setScalarIndexParams(ScalarIndexParams.create("BTREE")).build();
+    try (var dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.builder().datasetUri(tableDir).build())
+            .build()) {
+      dataset.createIndex(
+          IndexOptions.builder(List.of("id"), IndexType.BTREE, indexParams)
+              .replace(true)
+              .train(true)
+              .withIndexName("test_index")
+              .build());
+    }
+
+    spark.sql(
+        String.format(
+            "optimize %s with (target_rows_per_fragment=20000, defer_index_remap=true)",
+            fullTable));
+
+    try (var dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.builder().datasetUri(tableDir).build())
+            .build()) {
+      Assertions.assertTrue(
+          dataset.getIndexes().stream()
+              .anyMatch(index -> "__lance_frag_reuse".equalsIgnoreCase(index.name())),
+          "OPTIMIZE with deferred index remapping must create a fragment-reuse system index");
+    }
+
+    List<Row> rows = spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+
+    Assertions.assertEquals(1, rows.size());
+    Assertions.assertEquals("test_index", rows.get(0).getString(0));
+    Assertions.assertEquals("btree", rows.get(0).getString(2));
   }
 }

@@ -13,6 +13,8 @@
  */
 package org.lance.spark.read;
 
+import org.lance.ipc.FullTextQuery;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 
 import org.apache.spark.sql.catalyst.InternalRow;
@@ -38,6 +40,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 public class LanceScanTest {
 
@@ -239,6 +242,36 @@ public class LanceScanTest {
     scan.planInputPartitions();
     Partitioning partitioning = scan.outputPartitioning();
     assertInstanceOf(UnknownPartitioning.class, partitioning);
+  }
+
+  // --- getMetaData: fullTextQuery key ---
+
+  @Test
+  public void testGetMetaDataFullTextQueryKeyAbsentWhenNull() {
+    LanceScan scan = buildScan();
+    Map<String, String> meta = scala.collection.JavaConverters.mapAsJavaMap(scan.getMetaData());
+    assertFalse(
+        meta.containsKey("fullTextQuery"),
+        "fullTextQuery key must be absent when getFullTextQuery() == null");
+  }
+
+  @Test
+  public void testGetMetaDataFullTextQueryKeyPresentWhenSet() {
+    LanceSparkReadOptions opts =
+        LanceSparkReadOptions.builder()
+            .datasetUri(TestUtils.TestTable1Config.readOptions.getDatasetUri())
+            .fullTextQuery(FullTextQuery.match("hello world", "body"))
+            .build();
+    LanceScan scan =
+        (LanceScan)
+            new LanceScanBuilder(
+                    TEST_SCHEMA, opts, Collections.emptyMap(), null, Collections.emptyMap(), null)
+                .build();
+    Map<String, String> meta = scala.collection.JavaConverters.mapAsJavaMap(scan.getMetaData());
+    assertTrue(
+        meta.containsKey("fullTextQuery"),
+        "fullTextQuery key must be present when getFullTextQuery() != null");
+    assertNotNull(meta.get("fullTextQuery"), "fullTextQuery metadata value must not be null");
   }
 
   @Test

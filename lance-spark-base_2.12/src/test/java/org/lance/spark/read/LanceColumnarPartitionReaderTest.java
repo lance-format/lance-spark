@@ -24,8 +24,10 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class LanceColumnarPartitionReaderTest {
   @Test
@@ -154,6 +156,81 @@ public class LanceColumnarPartitionReaderTest {
         }
         batch.close();
       }
+    }
+  }
+
+  @Test
+  public void testCloseAfterMidIterationCreateFailure() throws Exception {
+    // Fragment 0 exists; fragment 999999 does not. Iterating 0 → 999999 must fail on the second
+    // fragment; close() must then be idempotent — not re-close the already-closed fragment 0
+    // scanner and raise `ArrowArrayStream is already closed`.
+    LanceSplit split = new LanceSplit(Arrays.asList(0, 999999));
+    LanceInputPartition partition =
+        new LanceInputPartition(
+            TestUtils.TestTable1Config.schema,
+            0 /* partitionId */,
+            split,
+            TestUtils.TestTable1Config.readOptions,
+            Optional.empty() /* whereCondition */,
+            Optional.empty() /* limit */,
+            Optional.empty() /* offset */,
+            Optional.empty() /* topNSortOrders */,
+            Optional.empty() /* pushedAggregation */,
+            "testCloseAfterMidIterationCreateFailure" /* scanId */,
+            null /* initialStorageOptions */,
+            null /* namespaceImpl */,
+            null /* namespaceProperties */,
+            null /* partitionKeyRow */);
+    LanceColumnarPartitionReader reader = new LanceColumnarPartitionReader(partition);
+    try {
+      // Drain fragment 0 first so next() advances into the create(fragment=999999) branch, which
+      // must throw.
+      assertThrows(
+          RuntimeException.class,
+          () -> {
+            while (reader.next()) {
+              ColumnarBatch batch = reader.get();
+              assertNotNull(batch);
+              batch.close();
+            }
+          });
+      assertDoesNotThrow(reader::close, "close() must be idempotent after mid-iteration failure");
+    } finally {
+      // Defensive close in case an AssertionError above (from assertNotNull / assertDoesNotThrow)
+      // bypassed the inline close() call — AssertionError is not caught by assertThrows.
+      reader.close();
+    }
+  }
+
+  @Test
+  public void testCloseIsIdempotent() throws Exception {
+    // Second close() must be a no-op — verifies the null-first idempotence guard.
+    LanceSplit split = new LanceSplit(Collections.singletonList(0));
+    LanceInputPartition partition =
+        new LanceInputPartition(
+            TestUtils.TestTable1Config.schema,
+            0 /* partitionId */,
+            split,
+            TestUtils.TestTable1Config.readOptions,
+            Optional.empty() /* whereCondition */,
+            Optional.empty() /* limit */,
+            Optional.empty() /* offset */,
+            Optional.empty() /* topNSortOrders */,
+            Optional.empty() /* pushedAggregation */,
+            "testCloseIsIdempotent" /* scanId */,
+            null /* initialStorageOptions */,
+            null /* namespaceImpl */,
+            null /* namespaceProperties */,
+            null /* partitionKeyRow */);
+    LanceColumnarPartitionReader reader = new LanceColumnarPartitionReader(partition);
+    try {
+      while (reader.next()) {
+        reader.get().close();
+      }
+      assertDoesNotThrow(reader::close, "first close() after full iteration must succeed");
+      assertDoesNotThrow(reader::close, "second close() must be a no-op");
+    } finally {
+      reader.close();
     }
   }
 }

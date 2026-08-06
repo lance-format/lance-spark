@@ -28,6 +28,7 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
   private LanceFragmentColumnarBatchScanner fragmentReader;
   private ColumnarBatch currentBatch;
   private final LanceReadMetricsTracker metricsTracker = new LanceReadMetricsTracker();
+  private boolean currentScanStatsAdded = false;
 
   public LanceColumnarPartitionReader(LanceInputPartition inputPartition) {
     this.inputPartition = inputPartition;
@@ -40,16 +41,24 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
       return true;
     }
     while (fragmentIndex < inputPartition.getLanceSplit().getFragments().size()) {
+      // Null-first so if create(...) below throws, the subsequent close() sees fragmentReader ==
+      // null and short-circuits, rather than re-closing the already-closed previous scanner and
+      // raising `ArrowArrayStream is already closed`.
       if (fragmentReader != null) {
-        fragmentReader.close();
+        LanceFragmentColumnarBatchScanner toClose = fragmentReader;
+        fragmentReader = null;
+        toClose.close();
       }
       fragmentReader =
           LanceFragmentColumnarBatchScanner.create(
               inputPartition.getLanceSplit().getFragments().get(fragmentIndex), inputPartition);
       fragmentIndex++;
+
+      currentScanStatsAdded = false;
       metricsTracker.addNumFragmentsScanned(1);
       metricsTracker.addDatasetOpenTimeNs(fragmentReader.getDatasetOpenTimeNs());
       metricsTracker.addScannerCreateTimeNs(fragmentReader.getScannerCreateTimeNs());
+
       if (loadNextBatchFromCurrentReader()) {
         return true;
       }
@@ -68,6 +77,12 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
       metricsTracker.addBatchLoadTimeNs(fragmentReader.getLastBatchLoadTimeNs());
       return true;
     }
+
+    // Lance scan stats are populated when the scan stream is fully consumed
+    if (!currentScanStatsAdded) {
+      metricsTracker.addScanStats(fragmentReader.getScanStats());
+      currentScanStatsAdded = true;
+    }
     return false;
   }
 
@@ -83,12 +98,22 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
 
   @Override
   public void close() throws IOException {
-    if (fragmentReader != null) {
-      try {
-        fragmentReader.close();
-      } catch (Exception e) {
-        throw new IOException(e);
-      }
+    if (fragmentReader == null) {
+      return;
+    }
+    if (!currentScanStatsAdded) {
+      metricsTracker.addScanStats(fragmentReader.getScanStats());
+      currentScanStatsAdded = true;
+    }
+    // Null-first so close() is idempotent (PartitionReader extends Closeable, whose contract
+    // requires it): a repeat call short-circuits rather than raising
+    // `ArrowArrayStream is already closed` from a second ArrowArrayStream.release().
+    LanceFragmentColumnarBatchScanner toClose = fragmentReader;
+    fragmentReader = null;
+    try {
+      toClose.close();
+    } catch (Exception e) {
+      throw new IOException(e);
     }
   }
 }

@@ -149,6 +149,20 @@ public class LanceFragmentScannerTest {
   }
 
   @Test
+  public void testGetColumnNamesExcludesScore() throws Exception {
+    // _score is auto-projected by Lance when a full-text query is set, so it must not be requested
+    // in the native column projection.
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.LongType, true),
+              DataTypes.createStructField(LanceConstant.SCORE, DataTypes.FloatType, true)
+            });
+
+    assertEquals(Arrays.asList("id"), callGetColumnNames(schema));
+  }
+
+  @Test
   public void testGetColumnNamesExcludesBlobColumns() throws Exception {
     StructType schema =
         new StructType(

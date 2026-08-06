@@ -17,6 +17,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, Project}
 import org.apache.spark.sql.connector.catalog._
+import org.apache.spark.sql.types.{MetadataBuilder, StructType}
 import org.lance.spark.{LanceConstant, LanceDataset}
 
 /**
@@ -63,10 +64,15 @@ case class UpdateColumnsBackfillExec(
       query
     }
 
+    val writeSchema = UpdateColumnsBackfillExec.withTargetMetadataForUpdateColumns(
+      actualQuery.schema,
+      originalTable.schema(),
+      columnNames)
+
     val relation = DataSourceV2Relation.create(
       new LanceDataset(
         originalTable.readOptions(),
-        actualQuery.schema,
+        writeSchema,
         originalTable.getInitialStorageOptions,
         originalTable.getNamespaceImpl,
         originalTable.getNamespaceProperties,
@@ -84,5 +90,28 @@ case class UpdateColumnsBackfillExec(
     qe.assertCommandExecuted()
 
     Nil
+  }
+}
+
+object UpdateColumnsBackfillExec {
+  private[sql] def withTargetMetadataForUpdateColumns(
+      sourceSchema: StructType,
+      targetSchema: StructType,
+      columnNames: Seq[String]): StructType = {
+    val updateColumnSet = columnNames.toSet
+    val targetFieldsByName = targetSchema.fields.map(field => field.name -> field).toMap
+
+    StructType(sourceSchema.fields.map { sourceField =>
+      targetFieldsByName.get(sourceField.name) match {
+        case Some(targetField) if updateColumnSet.contains(sourceField.name) =>
+          val metadata = new MetadataBuilder()
+            .withMetadata(sourceField.metadata)
+            .withMetadata(targetField.metadata)
+            .build()
+          sourceField.copy(metadata = metadata)
+        case _ =>
+          sourceField
+      }
+    })
   }
 }

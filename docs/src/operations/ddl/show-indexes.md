@@ -58,6 +58,7 @@ The `SHOW INDEXES` command returns the following columns:
 ## Notes
 
 - The `fields` column returns the logical column names from the Lance schema, ordered according to the index definition.
+- Lance-maintained system indexes, including fragment-reuse and MemWAL indexes, are excluded from the output.
 
 ## See Also
 

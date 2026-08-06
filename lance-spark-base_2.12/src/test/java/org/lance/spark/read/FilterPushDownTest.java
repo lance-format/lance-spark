@@ -20,7 +20,6 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.sql.Date;
-import java.sql.Timestamp;
 import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -209,14 +208,80 @@ public class FilterPushDownTest {
   @Test
   public void testTimestampFilterPushDown() {
     // Timestamp literals must use the 'timestamp' keyword so Lance's DataFusion parser produces
-    // Timestamp, not Utf8.
+    // Timestamp, not Utf8. Spark hands timestamps to pushdown as micros-since-epoch UTC, so the
+    // literal is built from a UTC instant (not Timestamp.valueOf, which would parse in the JVM
+    // default zone) and rendered as the UTC wall clock with no trailing fractional zeros.
+    long micros = epochMicros("2024-01-15T10:30:00Z");
+    Predicate[] filters = new Predicate[] {TestPredicates.eqTimestampMicros("created_at", micros)};
+    Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
+    assertTrue(whereClause.isPresent());
+    assertEquals("(created_at == timestamp '2024-01-15 10:30:00')", whereClause.get());
+  }
+
+  @Test
+  public void testTimestampFilterPushDownIsTimeZoneIndependent() {
+    // Regression: Spark TimestampType is micros-since-epoch UTC. The pushed literal must be the
+    // UTC wall clock regardless of the driver JVM's default time zone. Before the fix,
+    // java.sql.Timestamp.toString() rendered in the default zone, shifting the literal (here it
+    // would become 02:30 under America/Los_Angeles) and silently matching the wrong rows.
+    long micros = epochMicros("2024-01-15T10:30:00.123456Z");
+    java.util.TimeZone original = java.util.TimeZone.getDefault();
+    try {
+      java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone("America/Los_Angeles"));
+      Predicate[] filters =
+          new Predicate[] {TestPredicates.eqTimestampMicros("created_at", micros)};
+      Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
+      assertTrue(whereClause.isPresent());
+      assertEquals("(created_at == timestamp '2024-01-15 10:30:00.123456')", whereClause.get());
+    } finally {
+      java.util.TimeZone.setDefault(original);
+    }
+  }
+
+  @Test
+  public void testTimestampFilterPushDownTrimsTrailingFractionalZeros() {
+    // appendFraction(..., true) trims trailing zeros: .120000 micros must render as .12, not
+    // .120000 -- a property a naive zero-padded reimplementation would get wrong.
+    long micros = epochMicros("2024-01-15T10:30:00.120000Z");
+    Predicate[] filters = new Predicate[] {TestPredicates.eqTimestampMicros("created_at", micros)};
+    Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
+    assertTrue(whereClause.isPresent());
+    assertEquals("(created_at == timestamp '2024-01-15 10:30:00.12')", whereClause.get());
+  }
+
+  @Test
+  public void testTimestampFilterPushDownHandlesPreEpochMicros() {
+    // Math.floorDiv/floorMod render pre-1970 (negative) micros as the correct UTC wall clock;
+    // plain / and % would produce a wrong nano-of-second for negative values.
+    long micros = epochMicros("1969-12-31T23:59:59.750000Z");
+    Predicate[] filters = new Predicate[] {TestPredicates.eqTimestampMicros("created_at", micros)};
+    Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
+    assertTrue(whereClause.isPresent());
+    assertEquals("(created_at == timestamp '1969-12-31 23:59:59.75')", whereClause.get());
+  }
+
+  @Test
+  public void testTimestampRangePushDownUsesUtcForAllOperators() {
+    // The canonical timestamp use case is a half-open range, not equality. Both bounds and the AND
+    // composition route through the same compileLiteral chokepoint, so non-= operators must render
+    // the UTC wall clock too -- this guards the binaryOp path, not just `=`.
+    long lo = epochMicros("2024-01-15T00:00:00Z");
+    long hi = epochMicros("2024-01-16T00:00:00Z");
     Predicate[] filters =
         new Predicate[] {
-          TestPredicates.eq("created_at", Timestamp.valueOf("2024-01-15 10:30:00.0"))
+          TestPredicates.cmpTimestampMicros(">=", "created_at", lo),
+          TestPredicates.cmpTimestampMicros("<", "created_at", hi)
         };
     Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
     assertTrue(whereClause.isPresent());
-    assertEquals("(created_at == timestamp '2024-01-15 10:30:00.0')", whereClause.get());
+    assertEquals(
+        "(created_at >= timestamp '2024-01-15 00:00:00') AND (created_at < timestamp '2024-01-16 00:00:00')",
+        whereClause.get());
+  }
+
+  private static long epochMicros(String isoInstant) {
+    java.time.Instant instant = java.time.Instant.parse(isoInstant);
+    return instant.getEpochSecond() * 1_000_000L + instant.getNano() / 1_000L;
   }
 
   @Test

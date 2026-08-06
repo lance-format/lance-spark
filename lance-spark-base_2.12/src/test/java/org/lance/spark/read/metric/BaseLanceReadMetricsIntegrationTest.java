@@ -13,32 +13,34 @@
  */
 package org.lance.spark.read.metric;
 
-import org.lance.spark.LanceDataSource;
-import org.lance.spark.LanceSparkReadOptions;
-import org.lance.spark.TestUtils;
-
 import org.apache.spark.scheduler.SparkListener;
 import org.apache.spark.scheduler.SparkListenerTaskEnd;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.connector.metric.CustomMetric;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import scala.collection.JavaConverters;
 
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public abstract class BaseLanceReadMetricsIntegrationTest {
-  private static SparkSession spark;
-  private static Dataset<Row> data;
-  private static MetricsCapturingListener metricsListener;
+  private SparkSession spark;
+  private MetricsCapturingListener metricsListener;
+
+  @TempDir Path tempDir;
+  private String fullTable = "lance.default.metrics_test";
 
   // Spark registers custom metric accumulators using description() as the name,
   // so we build a reverse lookup: description -> metric name.
@@ -51,8 +53,8 @@ public abstract class BaseLanceReadMetricsIntegrationTest {
   }
 
   /**
-   * SparkListener that captures custom metric accumulator values from task-end events. Keyed by
-   * metric name (e.g. "numFragmentsScanned"), translated from the description that Spark uses as
+   * SparkListener that captures custom metric accumulator values FROM task-end events. Keyed by
+   * metric name (e.g. "numFragmentsScanned"), translated FROM the description that Spark uses as
    * the accumulator name.
    */
   static class MetricsCapturingListener extends SparkListener {
@@ -87,62 +89,71 @@ public abstract class BaseLanceReadMetricsIntegrationTest {
     }
   }
 
-  @BeforeAll
-  static void setup() {
+  @BeforeEach
+  public void setup() {
     spark =
         SparkSession.builder()
             .appName("lance-metrics-test")
             .master("local")
             .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
+            .config(
+                "spark.sql.extensions", "org.lance.spark.extensions.LanceSparkSessionExtensions")
+            .config("spark.sql.catalog.lance.impl", "dir")
+            .config("spark.sql.catalog.lance.root", tempDir.toString())
             .getOrCreate();
     metricsListener = new MetricsCapturingListener();
     spark.sparkContext().addSparkListener(metricsListener);
-    data =
-        spark
-            .read()
-            .format(LanceDataSource.name)
-            .option(
-                LanceSparkReadOptions.CONFIG_DATASET_URI,
-                TestUtils.getDatasetUri(
-                    TestUtils.TestTable1Config.dbPath, TestUtils.TestTable1Config.datasetName))
-            .load();
+
+    prepareDataset();
   }
 
-  @AfterAll
-  static void tearDown() {
+  @AfterEach
+  public void tearDown() {
     if (spark != null) {
       spark.stop();
     }
   }
 
+  private void prepareDataset() {
+    spark.sql(String.format("CREATE TABLE %s (id INT, text STRING) USING LANCE;", fullTable));
+    spark.sql(
+        String.format(
+            "INSERT INTO %s (id, text) VALUES %s ;",
+            fullTable,
+            IntStream.range(0, 10)
+                .boxed()
+                .map(i -> String.format("(%d, 'text_%d')", i, i))
+                .collect(Collectors.joining(","))));
+  }
+
   @Test
   void testSupportedCustomMetricsCount() {
     CustomMetric[] metrics = LanceCustomMetrics.allMetrics();
-    assertEquals(6, metrics.length);
+    assertEquals(12, metrics.length);
   }
 
   @Test
   void testReadQueryCompletes() {
     // Execute a read query and collect results to verify metrics don't break normal reading
-    Dataset<Row> result = data.select("x", "y");
-    long count = result.count();
-    assertTrue(count > 0, "Should read at least one row");
+    Dataset<Row> result = spark.sql(String.format("SELECT id FROM %s", fullTable));
+    long COUNT = result.count();
+    assertTrue(COUNT > 0, "Should read at least one row");
   }
 
   @Test
   void testCountStarWithFilterCompletes() {
-    // COUNT(*) with filter goes through LanceCountStarPartitionReader
-    data.createOrReplaceTempView("metrics_test");
-    Dataset<Row> result = spark.sql("SELECT COUNT(*) FROM metrics_test WHERE x > 0");
+    Dataset<Row> result =
+        spark.sql(String.format("SELECT COUNT(*) FROM %s WHERE id > 0", fullTable));
     Row row = result.collectAsList().get(0);
-    long count = row.getLong(0);
-    assertTrue(count > 0, "Filtered count should be > 0");
+    long COUNT = row.getLong(0);
+    assertTrue(COUNT > 0, "Filtered COUNT should be > 0");
   }
 
   @Test
   void testSelectAllColumnsCompletes() {
     // Full row read exercises the columnar partition reader metrics path
-    java.util.List<Row> rows = data.collectAsList();
+    java.util.List<Row> rows =
+        spark.sql(String.format("SELECT COUNT(*) FROM %s", fullTable)).collectAsList();
     assertTrue(rows.size() > 0, "Should collect at least one row");
   }
 
@@ -150,7 +161,7 @@ public abstract class BaseLanceReadMetricsIntegrationTest {
   void testReadMetricsValues() throws Exception {
     metricsListener.reset();
     // Execute a full read query to trigger columnar partition reader metrics
-    data.select("x", "y").collect();
+    spark.sql(String.format("SELECT * FROM %s", fullTable)).collectAsList();
     // Allow listener to process events
     spark.sparkContext().listenerBus().waitUntilEmpty(5000);
 
@@ -174,13 +185,84 @@ public abstract class BaseLanceReadMetricsIntegrationTest {
     assertTrue(
         metrics.getOrDefault(LanceCustomMetrics.BATCH_LOAD_TIME_NS, 0L) > 0,
         "batchLoadTimeNs should be > 0");
+
+    assertTrue(metrics.getOrDefault(LanceCustomMetrics.NUM_IOPS, 0L) > 0, "numIops should be > 0");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_REQUESTS, 0L) > 0, "numRequests should be > 0");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_BYTES_READ, 0L) > 0,
+        "numBytesRead should be > 0");
+
+    // No indexes to read
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_INDICES_LOADED, 0L) == 0,
+        "numIndicesLoaded should be == 0");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_PARTS_LOADED, 0L) == 0,
+        "numPartsLoaded should be == 0");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_INDEX_COMPARISONS, 0L) == 0,
+        "numIndexComparisons should be == 0");
+  }
+
+  @Test
+  void testReadMetricsForIndices() throws Exception {
+    metricsListener.reset();
+
+    // Create btree indices
+    spark
+        .sql(String.format("ALTER TABLE %s CREATE INDEX idx_btree_id USING BTREE(id)", fullTable))
+        .collectAsList();
+
+    spark.sql(String.format("SELECT * FROM %s WHERE id > 1", fullTable)).collectAsList();
+
+    // Allow listener to process events
+    spark.sparkContext().listenerBus().waitUntilEmpty(5000);
+
+    Map<String, Long> metrics = metricsListener.getMetricValues();
+
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_FRAGMENTS_SCANNED, 0L) > 0,
+        "numFragmentsScanned should be > 0");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_BATCHES_LOADED, 0L) >= 1,
+        "numBatchesLoaded should be >= 1");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_ROWS_SCANNED, 0L) > 0,
+        "numRowsScanned should be > 0");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.DATASET_OPEN_TIME_NS, 0L) > 0,
+        "datasetOpenTimeNs should be > 0");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.SCANNER_CREATE_TIME_NS, 0L) > 0,
+        "scannerCreateTimeNs should be > 0");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.BATCH_LOAD_TIME_NS, 0L) > 0,
+        "batchLoadTimeNs should be > 0");
+
+    assertTrue(metrics.getOrDefault(LanceCustomMetrics.NUM_IOPS, 0L) > 0, "numIops should be > 0");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_REQUESTS, 0L) > 0, "numRequests should be > 0");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_BYTES_READ, 0L) > 0,
+        "numBytesRead should be > 0");
+
+    // Some indexes to read
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_INDICES_LOADED, 0L) > 0,
+        "numIndicesLoaded should be > 0");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_PARTS_LOADED, 0L) > 0,
+        "numPartsLoaded should be > 0");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_INDEX_COMPARISONS, 0L) > 0,
+        "numIndexComparisons should be > 0");
   }
 
   @Test
   void testCountStarMetricsValues() throws Exception {
     metricsListener.reset();
-    data.createOrReplaceTempView("metrics_count_test");
-    spark.sql("SELECT COUNT(*) FROM metrics_count_test WHERE x > 0").collect();
+    spark.sql(String.format("SELECT COUNT(*) FROM %s WHERE id > 0", fullTable)).collect();
     spark.sparkContext().listenerBus().waitUntilEmpty(5000);
 
     Map<String, Long> metrics = metricsListener.getMetricValues();
@@ -203,5 +285,25 @@ public abstract class BaseLanceReadMetricsIntegrationTest {
     assertTrue(
         metrics.getOrDefault(LanceCustomMetrics.BATCH_LOAD_TIME_NS, 0L) > 0,
         "batchLoadTimeNs should be > 0 for COUNT(*)");
+
+    // Test new metrics
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_IOPS, 0L) > 0,
+        "numIops should be >= 0 for COUNT(*)");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_REQUESTS, 0L) > 0,
+        "numRequests should be >= 0 for COUNT(*)");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_BYTES_READ, 0L) > 0,
+        "numBytesRead should be >= 0 for COUNT(*)");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_INDICES_LOADED, 0L) >= 0,
+        "numIndicesLoaded should be >= 0 for COUNT(*)");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_PARTS_LOADED, 0L) >= 0,
+        "numPartsLoaded should be >= 0 for COUNT(*)");
+    assertTrue(
+        metrics.getOrDefault(LanceCustomMetrics.NUM_INDEX_COMPARISONS, 0L) >= 0,
+        "numIndexComparisons should be >= 0 for COUNT(*)");
   }
 }

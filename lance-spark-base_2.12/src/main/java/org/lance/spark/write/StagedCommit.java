@@ -31,6 +31,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -91,7 +92,7 @@ public class StagedCommit {
     this.fragments = new ArrayList<>(fragments);
     this.schema = schema;
     this.datasetUri = datasetUri;
-    this.storageOptions = options.getStorageOptions();
+    this.storageOptions = new HashMap<>(options.getStorageOptions());
     this.isNewTable = datasetUri != null;
     this.enableStableRowIds = options.isEnableStableRowIds();
     this.namespace = options.getNamespace();
@@ -113,6 +114,24 @@ public class StagedCommit {
 
   public void setShardingSpec(ShardingSpec shardingSpec) {
     this.shardingSpec = shardingSpec;
+  }
+
+  /**
+   * Merges additional storage options into this staged commit's storage options, for options that
+   * were not yet known when this {@code StagedCommit} was constructed.
+   *
+   * @param extra additional storage options to merge in; a no-op when null or empty. Keys in {@code
+   *     extra} take precedence over any existing entry with the same key.
+   */
+  public void mergeStorageOptions(Map<String, String> extra) {
+    if (extra != null && !extra.isEmpty()) {
+      this.storageOptions.putAll(extra);
+    }
+  }
+
+  /** Returns the current storage options. Visible for testing. */
+  Map<String, String> getStorageOptions() {
+    return storageOptions;
   }
 
   /** Performs the actual commit using the stored dataset and fragments. */

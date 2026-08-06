@@ -173,6 +173,38 @@ class IndexUtilsTest {
     }
   }
 
+  // From upstream #740: exercises every scalar-segment method's mapping to IndexType
+  // AND the core scalar-plugin param-type name (which uses "labellist" / "bloomfilter"
+  // spellings that don't match either the SQL method names or the enum names).
+  @Test
+  def scalarSegmentIndexType_mapsAllSupportedMethods(): Unit = {
+    val expected = Seq(
+      ("zonemap", IndexType.ZONEMAP, "zonemap"),
+      ("bitmap", IndexType.BITMAP, "bitmap"),
+      ("label_list", IndexType.LABEL_LIST, "labellist"),
+      ("ngram", IndexType.NGRAM, "ngram"),
+      ("bloomfilter", IndexType.BLOOM_FILTER, "bloomfilter"),
+      ("rtree", IndexType.RTREE, "rtree"))
+
+    expected.foreach { case (method, indexType, coreParamType) =>
+      Seq(method, method.toUpperCase).foreach { spelling =>
+        assertEquals(indexType, IndexUtils.scalarSegmentIndexType(spelling).get)
+        assertEquals(indexType, IndexUtils.buildIndexType(spelling))
+        assertEquals(coreParamType, IndexUtils.buildScalarIndexParamType(spelling))
+      }
+    }
+  }
+
+  @Test
+  def scalarSegmentIndexType_rejectsAliases(): Unit = {
+    Seq("labellist", "bloom_filter", "r_tree").foreach { alias =>
+      assertTrue(IndexUtils.scalarSegmentIndexType(alias).isEmpty)
+      assertThrows(
+        classOf[UnsupportedOperationException],
+        () => IndexUtils.buildIndexType(alias))
+    }
+  }
+
   @Test
   def buildIndexType_throwsOnUnknown(): Unit = {
     assertThrows(
@@ -191,9 +223,14 @@ class IndexUtilsTest {
   }
 
   @Test
-  def useLogicalSegmentCommitTrueForZonemapAndSupportedIvf(): Unit = {
+  def useLogicalSegmentCommitTrueForScalarSegmentAndSupportedIvf(): Unit = {
     Seq(
       IndexType.ZONEMAP,
+      IndexType.BITMAP,
+      IndexType.LABEL_LIST,
+      IndexType.NGRAM,
+      IndexType.BLOOM_FILTER,
+      IndexType.RTREE,
       IndexType.IVF_FLAT,
       IndexType.IVF_PQ,
       IndexType.IVF_SQ,
@@ -229,9 +266,10 @@ class IndexUtilsTest {
   def batchFragmentsCoversAllFragmentsExactlyOnce(): Unit = {
     val ids = (0 until 7).map(java.lang.Integer.valueOf).toList
     val batches = IndexUtils.batchFragments(ids, Some(3), 4)
-    val flattened = batches.flatten
-    assertEquals(7, flattened.size, "all 7 ids must appear")
-    assertEquals(7, flattened.distinct.size, "no duplicates")
-    assertTrue(batches.forall(_.nonEmpty), "no empty batch")
+
+    assertEquals(Seq(2, 2, 3), batches.map(_.size))
+    assertEquals(ids, batches.flatten)
+    assertEquals(ids.size, batches.flatten.distinct.size)
+    assertTrue(batches.forall(_.nonEmpty))
   }
 }

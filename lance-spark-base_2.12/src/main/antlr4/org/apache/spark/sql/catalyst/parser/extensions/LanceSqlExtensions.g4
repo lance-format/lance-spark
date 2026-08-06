@@ -22,7 +22,23 @@ statement
     : ALTER TABLE multipartIdentifier ADD COLUMNS columnList FROM identifier                    #addColumnsBackfill
     | ALTER TABLE multipartIdentifier UPDATE COLUMNS columnList FROM identifier                 #updateColumnsBackfill
     | ALTER TABLE multipartIdentifier CREATE INDEX indexName=identifier USING method=identifier '(' fieldPathList ')' (WITH '(' (namedArgument (',' namedArgument)*)? ')')? #createIndex
-    | ALTER TABLE multipartIdentifier DROP INDEX indexName=identifier                             #dropIndex
+    | ALTER TABLE multipartIdentifier DROP INDEX indexName=identifier                           #dropIndex
+    | ALTER TABLE multipartIdentifier CREATE BRANCH (IF NOT EXISTS)? branchName=identifier
+        (AS OF VERSION refMainVersion=versionNumber)?                                           #createBranchRefMain
+    | ALTER TABLE multipartIdentifier CREATE BRANCH (IF NOT EXISTS)? branchName=identifier
+        AS OF BRANCH refBranchName=identifier (VERSION refBranchVersion=versionNumber)?         #createBranchRefBranch
+    | ALTER TABLE multipartIdentifier CREATE BRANCH (IF NOT EXISTS)? branchName=identifier
+        AS OF TAG refTagName=identifier                                                         #createBranchRefTag
+    | ALTER TABLE multipartIdentifier CREATE TAG (IF NOT EXISTS)? tagName=identifier
+        (AS OF VERSION refMainVersion=versionNumber)?                                           #createTagRefMain
+    | ALTER TABLE multipartIdentifier CREATE TAG (IF NOT EXISTS)? tagName=identifier
+        AS OF BRANCH refBranchName=identifier (VERSION refBranchVersion=versionNumber)?         #createTagRefBranch
+    | ALTER TABLE multipartIdentifier CREATE TAG (IF NOT EXISTS)? tagName=identifier
+        AS OF TAG refTagName=identifier                                                         #createTagRefTag
+    | ALTER TABLE multipartIdentifier DROP BRANCH (IF EXISTS)? branchName=identifier            #dropBranch
+    | ALTER TABLE multipartIdentifier DROP TAG (IF EXISTS)? tagName=identifier                  #dropTag
+    | SHOW (BRANCHES | BRANCH) (FROM | IN) multipartIdentifier                                  #showBranches
+    | SHOW (TAGS | TAG) (FROM | IN) multipartIdentifier                                         #showTags
     | SHOW (INDEXES | INDEX) (FROM | IN) multipartIdentifier                                    #showIndexes
     | OPTIMIZE multipartIdentifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')?        #optimize
     | VACUUM multipartIdentifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')?          #vacuum
@@ -74,25 +90,39 @@ number
     | MINUS? DOUBLE_LITERAL             #doubleLiteral
     ;
 
+versionNumber
+    : BIGINT_LITERAL
+    ;
+
 ADD: 'ADD';
 ALTER: 'ALTER';
+AS: 'AS';
+BRANCHES: 'BRANCHES';
+BRANCH: 'BRANCH';
 COLUMNS: 'COLUMNS';
 CREATE: 'CREATE';
 DROP: 'DROP';
+EXISTS: 'EXISTS';
 FROM: 'FROM';
+IF: 'IF';
 IN: 'IN';
 INDEX: 'INDEX';
 INDEXES: 'INDEXES';
 KEY: 'KEY';
+NOT: 'NOT';
+OF: 'OF';
 OPTIMIZE: 'OPTIMIZE';
 PRIMARY: 'PRIMARY';
 SET: 'SET';
 SHOW: 'SHOW';
 TABLE: 'TABLE';
+TAGS: 'TAGS';
+TAG: 'TAG';
 UNENFORCED: 'UNENFORCED';
 UPDATE: 'UPDATE';
 USING: 'USING';
 VACUUM: 'VACUUM';
+VERSION: 'VERSION';
 WITH: 'WITH';
 
 TRUE: 'TRUE';

@@ -18,6 +18,8 @@ import org.lance.namespace.model.QueryTableRequestColumns;
 import org.lance.namespace.model.QueryTableRequestFullTextQuery;
 import org.lance.namespace.model.QueryTableRequestVector;
 import org.lance.namespace.model.StringFtsQuery;
+import org.lance.spark.utils.FullTextQueryConverter;
+import org.lance.spark.utils.FullTextQueryUtils;
 
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -57,6 +59,7 @@ public class LanceSearchQuery implements Serializable {
   private final Boolean prefilter;
   private final String textQuery;
   private final List<String> searchColumns;
+  private final String fullTextQueryJson;
 
   private LanceSearchQuery(Builder builder) {
     this.searchType = builder.searchType;
@@ -82,6 +85,7 @@ public class LanceSearchQuery implements Serializable {
     this.prefilter = builder.prefilter;
     this.textQuery = builder.textQuery;
     this.searchColumns = immutableList(builder.searchColumns);
+    this.fullTextQueryJson = builder.fullTextQueryJson;
   }
 
   public static Builder builder(SearchType searchType) {
@@ -156,6 +160,13 @@ public class LanceSearchQuery implements Serializable {
       if (prefilter != null) {
         request.prefilter(prefilter);
       }
+    } else if (fullTextQueryJson != null) {
+      // Unified path: a structured FullTextQuery carried through the shared scan spec.
+      request.fullTextQuery(
+          new QueryTableRequestFullTextQuery()
+              .structuredQuery(
+                  FullTextQueryConverter.toStructuredFtsQuery(
+                      FullTextQueryUtils.stringToFullTextQuery(fullTextQueryJson))));
     } else {
       StringFtsQuery stringQuery = new StringFtsQuery().query(textQuery);
       if (!searchColumns.isEmpty()) {
@@ -205,6 +216,7 @@ public class LanceSearchQuery implements Serializable {
     private Boolean prefilter;
     private String textQuery;
     private List<String> searchColumns = Collections.emptyList();
+    private String fullTextQueryJson;
 
     private Builder(SearchType searchType) {
       this.searchType = searchType;
@@ -320,6 +332,12 @@ public class LanceSearchQuery implements Serializable {
       return this;
     }
 
+    /** Serialized structured FullTextQuery for the unified scan path (see FullTextQueryUtils). */
+    public Builder fullTextQueryJson(String fullTextQueryJson) {
+      this.fullTextQueryJson = fullTextQueryJson;
+      return this;
+    }
+
     public LanceSearchQuery build() {
       if (searchType == null) {
         throw new IllegalArgumentException("search type is required");
@@ -330,7 +348,7 @@ public class LanceSearchQuery implements Serializable {
       if (namespaceImpl == null || namespaceImpl.isEmpty()) {
         throw new IllegalArgumentException("namespace implementation is required");
       }
-      if (k == null || k <= 0) {
+      if (k != null && k <= 0) {
         throw new IllegalArgumentException("k must be positive");
       }
       if (offset != null && offset < 0) {
@@ -339,7 +357,9 @@ public class LanceSearchQuery implements Serializable {
       if (searchType == SearchType.VECTOR && (vector == null || vector.isEmpty())) {
         throw new IllegalArgumentException("query_vector is required");
       }
-      if (searchType == SearchType.FULL_TEXT && (textQuery == null || textQuery.isEmpty())) {
+      if (searchType == SearchType.FULL_TEXT
+          && (textQuery == null || textQuery.isEmpty())
+          && fullTextQueryJson == null) {
         throw new IllegalArgumentException("query is required");
       }
       return new LanceSearchQuery(this);

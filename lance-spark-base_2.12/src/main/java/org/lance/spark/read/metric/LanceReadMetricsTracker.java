@@ -13,7 +13,11 @@
  */
 package org.lance.spark.read.metric;
 
+import org.lance.ipc.ScanStats;
+
 import org.apache.spark.sql.connector.metric.CustomTaskMetric;
+
+import java.util.Optional;
 
 /**
  * Accumulates read-path metrics on the executor side. Thread-confined (one instance per
@@ -29,6 +33,12 @@ public class LanceReadMetricsTracker {
   private long numFragmentsScanned;
   private long numBatchesLoaded;
   private long numRowsScanned;
+  private long numIops;
+  private long numRequests;
+  private long numBytesRead;
+  private long numIndicesLoaded;
+  private long numPartsLoaded;
+  private long numIndexComparisons;
   private long datasetOpenTimeNs;
   private long scannerCreateTimeNs;
   private long batchLoadTimeNs;
@@ -66,6 +76,72 @@ public class LanceReadMetricsTracker {
           @Override
           public long value() {
             return numRowsScanned;
+          }
+        },
+        new CustomTaskMetric() {
+          @Override
+          public String name() {
+            return LanceCustomMetrics.NUM_IOPS;
+          }
+
+          @Override
+          public long value() {
+            return numIops;
+          }
+        },
+        new CustomTaskMetric() {
+          @Override
+          public String name() {
+            return LanceCustomMetrics.NUM_REQUESTS;
+          }
+
+          @Override
+          public long value() {
+            return numRequests;
+          }
+        },
+        new CustomTaskMetric() {
+          @Override
+          public String name() {
+            return LanceCustomMetrics.NUM_BYTES_READ;
+          }
+
+          @Override
+          public long value() {
+            return numBytesRead;
+          }
+        },
+        new CustomTaskMetric() {
+          @Override
+          public String name() {
+            return LanceCustomMetrics.NUM_INDICES_LOADED;
+          }
+
+          @Override
+          public long value() {
+            return numIndicesLoaded;
+          }
+        },
+        new CustomTaskMetric() {
+          @Override
+          public String name() {
+            return LanceCustomMetrics.NUM_PARTS_LOADED;
+          }
+
+          @Override
+          public long value() {
+            return numPartsLoaded;
+          }
+        },
+        new CustomTaskMetric() {
+          @Override
+          public String name() {
+            return LanceCustomMetrics.NUM_INDEX_COMPARISONS;
+          }
+
+          @Override
+          public long value() {
+            return numIndexComparisons;
           }
         },
         new CustomTaskMetric() {
@@ -127,6 +203,18 @@ public class LanceReadMetricsTracker {
     batchLoadTimeNs += ns;
   }
 
+  public void addScanStats(Optional<ScanStats> scanStats) {
+    if (scanStats.isEmpty()) return;
+
+    ScanStats stats = scanStats.get();
+    numIops += stats.getIops();
+    numRequests += stats.getRequests();
+    numBytesRead += stats.getBytesRead();
+    numIndicesLoaded += stats.getIndicesLoaded();
+    numPartsLoaded += stats.getPartsLoaded();
+    numIndexComparisons += stats.getIndexComparisons();
+  }
+
   /** Returns current snapshot of all metrics. Called by PartitionReader.currentMetricsValues(). */
   public CustomTaskMetric[] currentMetricsValues() {
     return taskMetrics;
@@ -155,5 +243,29 @@ public class LanceReadMetricsTracker {
 
   public long getBatchLoadTimeNs() {
     return batchLoadTimeNs;
+  }
+
+  public long getNumIops() {
+    return numIops;
+  }
+
+  public long getNumRequests() {
+    return numRequests;
+  }
+
+  public long getNumBytesRead() {
+    return numBytesRead;
+  }
+
+  public long getNumIndicesLoaded() {
+    return numIndicesLoaded;
+  }
+
+  public long getNumPartsLoaded() {
+    return numPartsLoaded;
+  }
+
+  public long getNumIndexComparisons() {
+    return numIndexComparisons;
   }
 }

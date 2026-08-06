@@ -622,25 +622,33 @@ public abstract class BaseAddVectorIndexTest {
 
   @Test
   public void testCreateIndexEmptyTable() {
-    // Create an empty table without inserting any rows
+    // Create an empty table without inserting any rows. Under goal-mode C we reject IVF_*
+    // CREATE INDEX on empty tables with a clear message, since Lance cannot train IVF
+    // centroids without vectors; scalar-only empty-table creation is exercised in the
+    // scalar index test suite.
     spark.sql(
         String.format(
             "CREATE TABLE %s (id INT NOT NULL, vec ARRAY<FLOAT> NOT NULL) USING lance "
                 + "TBLPROPERTIES ('vec.arrow.fixed-size-list.size' = '%d')",
             fullTable, VEC_DIM));
 
-    Dataset<Row> result =
-        spark.sql(
-            String.format(
-                "ALTER TABLE %s CREATE INDEX vec_idx USING IVF_FLAT (vec) "
-                    + "WITH (num_partitions=4)",
-                fullTable));
+    RuntimeException ex =
+        Assertions.assertThrows(
+            RuntimeException.class,
+            () ->
+                spark
+                    .sql(
+                        String.format(
+                            "ALTER TABLE %s CREATE INDEX vec_idx USING IVF_FLAT (vec) "
+                                + "WITH (num_partitions=4)",
+                            fullTable))
+                    .collect());
+    String message = rootCauseMessage(ex);
+    Assertions.assertTrue(message.contains("empty table"), "got: " + message);
+    Assertions.assertTrue(
+        message.contains("IVF") || message.contains("ivf"), "got: " + message);
 
-    Row row = result.collectAsList().get(0);
-    Assertions.assertEquals(0L, row.getLong(0));
-    Assertions.assertEquals("vec_idx", row.getString(1));
-
-    // No fragments -> no segments committed; SHOW INDEXES should not contain vec_idx
+    // No index was committed.
     Dataset<Row> rows = spark.sql(String.format("SHOW INDEXES IN %s", fullTable));
     long match =
         rows.collectAsList().stream()

@@ -26,6 +26,7 @@ import org.lance.namespace.errors.TableNotFoundException;
 import org.lance.namespace.model.DeclareTableRequest;
 import org.lance.namespace.model.DeclareTableResponse;
 import org.lance.namespace.model.DeregisterTableRequest;
+import org.lance.namespace.model.DescribeNamespaceRequest;
 import org.lance.namespace.model.DescribeTableRequest;
 import org.lance.namespace.model.DescribeTableResponse;
 import org.lance.namespace.model.DropNamespaceRequest;
@@ -38,6 +39,9 @@ import org.lance.operation.UpdateConfig;
 import org.lance.operation.UpdateMap;
 import org.lance.spark.function.LanceBucketFunction;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
+import org.lance.spark.function.LanceMatchFunction;
+import org.lance.spark.function.LanceMultiMatchFunction;
+import org.lance.spark.function.LancePhraseFunction;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.Utils;
@@ -98,14 +102,32 @@ public abstract class BaseLanceNamespaceSparkCatalog
                   TableCatalog.PROP_OWNER,
                   TableCatalog.PROP_PROVIDER)));
 
-  /**
-   * Used to specify the namespace implementation to use. Optional when using path-based access
-   * only.
-   */
   private static final String CONFIG_IMPL = "impl";
 
-  /** Indicates path-based only mode when impl is not configured. */
+  /**
+   * Virtual "default" namespace for flat backends; REST may auto-enable if ListNamespaces fails.
+   */
+  private static final String CONFIG_SINGLE_LEVEL_NS = "single_level_ns";
+
+  private static final String CREATE_TABLE_PROPERTY_LOCATION = "location";
+
+  /** Parent prefix for multi-level namespaces (e.g. Hive3). */
+  private static final String CONFIG_PARENT = "parent";
+
+  private static final String CONFIG_PARENT_DELIMITER = "parent_delimiter";
+  private static final String CONFIG_PARENT_DELIMITER_DEFAULT = ".";
+
   private boolean pathBasedOnly = false;
+
+  private LanceNamespace namespace;
+  private String name;
+  private boolean singleLevelNs;
+  private Optional<List<String>> parentPrefix;
+  private LanceSparkCatalogConfig catalogConfig;
+  private Map<String, String> storageOptions;
+
+  private String namespaceImpl;
+  private Map<String, String> namespaceProperties;
 
   /**
    * Checks if an identifier represents a path-based table location (e.g., /path/to/table or
@@ -179,49 +201,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
     sb.append(name);
     return sb.toString();
   }
-
-  /**
-   * Enable single-level namespace mode with a virtual "default" namespace.
-   *
-   * <p>When true: Tables are accessed as catalog.default.table, where "default" is a virtual
-   * namespace that maps to the root level. CREATE NAMESPACE is not allowed.
-   *
-   * <p>When false (default): Multi-level namespace mode. Namespaces must be created explicitly with
-   * CREATE NAMESPACE before creating tables. Tables use manifest-based storage with hash-prefixed
-   * paths for better scalability.
-   *
-   * <p>For REST implementations: if ListNamespaces fails, single_level_ns is automatically enabled
-   * for backward compatibility with flat namespace backends.
-   */
-  private static final String CONFIG_SINGLE_LEVEL_NS = "single_level_ns";
-
-  /** Supply in CREATE TABLE options to supply a different location to use for the table */
-  private static final String CREATE_TABLE_PROPERTY_LOCATION = "location";
-
-  /** Parent prefix configuration for multi-level namespaces like Hive3 */
-  private static final String CONFIG_PARENT = "parent";
-
-  private static final String CONFIG_PARENT_DELIMITER = "parent_delimiter";
-  private static final String CONFIG_PARENT_DELIMITER_DEFAULT = ".";
-
-  private LanceNamespace namespace;
-  private String name;
-  private boolean singleLevelNs;
-  private Optional<List<String>> parentPrefix;
-  private LanceSparkCatalogConfig catalogConfig;
-  private Map<String, String> storageOptions;
-
-  /**
-   * The namespace implementation type (e.g., "rest", "dir"). Saved for creating storage options
-   * providers on workers.
-   */
-  private String namespaceImpl;
-
-  /**
-   * The namespace properties for connection. Saved for creating storage options providers on
-   * workers.
-   */
-  private Map<String, String> namespaceProperties;
 
   @Override
   public void initialize(String name, CaseInsensitiveStringMap options) {
@@ -302,13 +281,18 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   @Override
   public Identifier[] listFunctions(String[] namespace) throws NoSuchNamespaceException {
-    if (namespace != null && namespace.length > 0 && !namespaceExists(namespace)) {
-      throw new NoSuchNamespaceException(namespace);
+    if (namespace != null && namespace.length > 0) {
+      if (!namespaceExists(namespace)) {
+        throw new NoSuchNamespaceException(namespace);
+      }
+      return new Identifier[0];
     }
-    String[] targetNamespace = namespace == null ? new String[0] : namespace;
     return new Identifier[] {
-      Identifier.of(targetNamespace, LanceFragmentIdWithDefaultFunction.NAME),
-      Identifier.of(targetNamespace, LanceBucketFunction.NAME)
+      Identifier.of(new String[0], LanceFragmentIdWithDefaultFunction.NAME),
+      Identifier.of(new String[0], LanceMatchFunction.NAME),
+      Identifier.of(new String[0], LancePhraseFunction.NAME),
+      Identifier.of(new String[0], LanceMultiMatchFunction.NAME),
+      Identifier.of(new String[0], LanceBucketFunction.NAME)
     };
   }
 
@@ -320,6 +304,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
     if (LanceFragmentIdWithDefaultFunction.NAME.equalsIgnoreCase(ident.name())) {
       return new LanceFragmentIdWithDefaultFunction();
     }
+    if (LanceMatchFunction.NAME.equalsIgnoreCase(ident.name())) {
+      return new LanceMatchFunction();
+    }
+    if (LancePhraseFunction.NAME.equalsIgnoreCase(ident.name())) {
+      return new LancePhraseFunction();
+    }
+    if (LanceMultiMatchFunction.NAME.equalsIgnoreCase(ident.name())) {
+      return new LanceMultiMatchFunction();
+    }
     if (LanceBucketFunction.NAME.equalsIgnoreCase(ident.name())) {
       return new LanceBucketFunction();
     }
@@ -327,9 +320,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
   }
 
   @Override
-  public void alterNamespace(String[] namespace, NamespaceChange... changes)
-      throws NoSuchNamespaceException {
-    // Namespace alteration is not supported in the current API
+  public void alterNamespace(String[] namespace, NamespaceChange... changes) {
     throw new UnsupportedOperationException("Namespace alteration is not supported");
   }
 
@@ -367,8 +358,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
       }
 
       return result.toArray(new String[0][]);
-    } catch (Exception e) {
-      throw new NoSuchNamespaceException(new String[0]);
+    } catch (LanceNamespaceException e) {
+      if (e.getErrorCode() == ErrorCode.NAMESPACE_NOT_FOUND) {
+        throw new NoSuchNamespaceException(new String[0]);
+      }
+      throw e;
     }
   }
 
@@ -396,8 +390,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
       }
 
       return result.toArray(new String[0][]);
-    } catch (Exception e) {
-      throw new NoSuchNamespaceException(parent);
+    } catch (LanceNamespaceException e) {
+      if (e.getErrorCode() == ErrorCode.NAMESPACE_NOT_FOUND) {
+        throw new NoSuchNamespaceException(parent);
+      }
+      throw e;
     }
   }
 
@@ -419,8 +416,31 @@ public abstract class BaseLanceNamespaceSparkCatalog
     try {
       this.namespace.namespaceExists(request);
       return true;
-    } catch (Exception e) {
-      return false;
+    } catch (LanceNamespaceException e) {
+      if (e.getErrorCode() == ErrorCode.NAMESPACE_NOT_FOUND) {
+        return false;
+      }
+      if (e.getErrorCode() == ErrorCode.UNSUPPORTED) {
+        return namespaceExistsViaDescribe(request.getId());
+      }
+      throw e;
+    }
+  }
+
+  private boolean namespaceExistsViaDescribe(List<String> namespaceId) {
+    DescribeNamespaceRequest request = new DescribeNamespaceRequest();
+    request.setId(namespaceId);
+    try {
+      namespace.describeNamespace(request);
+      return true;
+    } catch (LanceNamespaceException e) {
+      if (e.getErrorCode() == ErrorCode.NAMESPACE_NOT_FOUND) {
+        return false;
+      }
+      if (e.getErrorCode() == ErrorCode.TABLE_NOT_FOUND) {
+        return false;
+      }
+      throw e;
     }
   }
 
@@ -441,8 +461,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
       Map<String, String> properties = response.getProperties();
       return properties != null ? properties : Collections.emptyMap();
-    } catch (Exception e) {
-      throw new NoSuchNamespaceException(namespace);
+    } catch (LanceNamespaceException e) {
+      if (e.getErrorCode() == ErrorCode.NAMESPACE_NOT_FOUND) {
+        throw new NoSuchNamespaceException(namespace);
+      }
+      throw e;
     }
   }
 
@@ -463,11 +486,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     try {
       this.namespace.createNamespace(request);
-    } catch (Exception e) {
-      if (e.getMessage() != null && e.getMessage().contains("already exists")) {
+    } catch (LanceNamespaceException e) {
+      if (e.getErrorCode() == ErrorCode.NAMESPACE_ALREADY_EXISTS) {
         throw new NamespaceAlreadyExistsException(namespace);
       }
-      throw new RuntimeException("Failed to create namespace", e);
+      throw e;
     }
   }
 
@@ -1531,37 +1554,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
     List<String> result = new ArrayList<>(parentPrefix.get());
     result.addAll(Arrays.asList(namespace));
     return result.toArray(new String[0]);
-  }
-
-  /**
-   * Removes parent prefix from namespace array for Spark. For example, with
-   * parentPrefix=["catalog1"], ["catalog1", "ns1"] becomes ["ns1"]
-   */
-  private String[] removeParentPrefix(String[] namespace) {
-    if (parentPrefix.isEmpty()) {
-      return namespace;
-    }
-
-    List<String> prefix = parentPrefix.get();
-    if (namespace.length >= prefix.size()) {
-      // Check if namespace starts with the parent prefix
-      boolean hasPrefix = true;
-      for (int i = 0; i < prefix.size(); i++) {
-        if (!prefix.get(i).equals(namespace[i])) {
-          hasPrefix = false;
-          break;
-        }
-      }
-
-      if (hasPrefix) {
-        // Remove the prefix
-        String[] result = new String[namespace.length - prefix.size()];
-        System.arraycopy(namespace, prefix.size(), result, 0, result.length);
-        return result;
-      }
-    }
-
-    return namespace;
   }
 
   /**

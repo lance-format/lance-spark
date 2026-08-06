@@ -22,6 +22,9 @@ import org.apache.spark.sql.catalyst.parser.extensions.LanceSqlExtensionsLexer;
 import org.apache.spark.sql.catalyst.parser.extensions.LanceSqlExtensionsParser;
 import org.apache.spark.sql.catalyst.plans.logical.AddColumnsBackfill;
 import org.apache.spark.sql.catalyst.plans.logical.AddIndex;
+import org.apache.spark.sql.catalyst.plans.logical.LanceCreateBranch;
+import org.apache.spark.sql.catalyst.plans.logical.LanceDropBranch;
+import org.apache.spark.sql.catalyst.plans.logical.LanceShowBranches;
 import org.apache.spark.sql.catalyst.plans.logical.Optimize;
 import org.apache.spark.sql.catalyst.plans.logical.ShowIndexes;
 import org.apache.spark.sql.catalyst.plans.logical.UpdateColumnsBackfill;
@@ -205,6 +208,142 @@ public class LanceSqlExtensionsAstBuilderTest {
   public void testVacuumWithBacktickedTableName() {
     LanceSqlExtensionsParser parser = createParser("VACUUM `my-catalog`.`my-table`");
     Vacuum plan = (Vacuum) astBuilder.visitSingleStatement(parser.singleStatement());
+
+    UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
+    assertEquals(
+        List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+  }
+
+  @Test
+  public void testCreateBranchFromMain() {
+    LanceSqlExtensionsParser parser =
+        createParser(
+            "ALTER TABLE `my-catalog`.`my-table` CREATE BRANCH IF NOT EXISTS `branch-a` AS OF VERSION 7");
+    LanceCreateBranch plan =
+        (LanceCreateBranch) astBuilder.visitSingleStatement(parser.singleStatement());
+
+    UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
+    assertEquals(
+        List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+    assertEquals("branch-a", plan.branchName());
+    assertEquals(true, plan.ifNotExists());
+    assertTrue(plan.ref().getBranchName().isEmpty());
+    assertEquals(7, plan.ref().getVersionNumber().get());
+  }
+
+  @Test
+  public void testCreateBranchFromBranch() {
+    LanceSqlExtensionsParser parser =
+        createParser(
+            "ALTER TABLE `my-catalog`.`my-table` CREATE BRANCH IF NOT EXISTS `branch-a` AS OF BRANCH `source-branch` VERSION 7");
+    LanceCreateBranch plan =
+        (LanceCreateBranch) astBuilder.visitSingleStatement(parser.singleStatement());
+
+    UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
+    assertEquals(
+        List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+    assertEquals("branch-a", plan.branchName());
+    assertEquals(true, plan.ifNotExists());
+    assertEquals("source-branch", plan.ref().getBranchName().get());
+    assertEquals(7, plan.ref().getVersionNumber().get());
+  }
+
+  @Test
+  public void testDropBranch() {
+    LanceSqlExtensionsParser parser =
+        createParser("ALTER TABLE `my-catalog`.`my-table` DROP BRANCH IF EXISTS `branch-a`");
+    LanceDropBranch plan =
+        (LanceDropBranch) astBuilder.visitSingleStatement(parser.singleStatement());
+
+    UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
+    assertEquals(
+        List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+    assertEquals("branch-a", plan.branchName());
+    assertEquals(true, plan.ifExists());
+  }
+
+  @Test
+  public void testShowBranch() {
+    LanceSqlExtensionsParser parser = createParser("SHOW BRANCH IN `my-catalog`.`my-table`");
+    LanceShowBranches plan =
+        (LanceShowBranches) astBuilder.visitSingleStatement(parser.singleStatement());
+
+    UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
+    assertEquals(
+        List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+  }
+
+  @Test
+  public void testCreateTagFromMain() {
+    LanceSqlExtensionsParser parser =
+        createParser(
+            "ALTER TABLE `my-catalog`.`my-table` CREATE TAG IF NOT EXISTS `tag-a` AS OF VERSION 7");
+    org.apache.spark.sql.catalyst.plans.logical.LanceCreateTag plan =
+        (org.apache.spark.sql.catalyst.plans.logical.LanceCreateTag)
+            astBuilder.visitSingleStatement(parser.singleStatement());
+
+    UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
+    assertEquals(
+        List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+    assertEquals("tag-a", plan.tagName());
+    assertEquals(true, plan.ifNotExists());
+    assertTrue(plan.ref().getBranchName().isEmpty());
+    assertEquals(7, plan.ref().getVersionNumber().get());
+  }
+
+  @Test
+  public void testCreateTagFromBranch() {
+    LanceSqlExtensionsParser parser =
+        createParser(
+            "ALTER TABLE `my-catalog`.`my-table` CREATE TAG IF NOT EXISTS `tag-a` AS OF BRANCH `source-branch` VERSION 7");
+    org.apache.spark.sql.catalyst.plans.logical.LanceCreateTag plan =
+        (org.apache.spark.sql.catalyst.plans.logical.LanceCreateTag)
+            astBuilder.visitSingleStatement(parser.singleStatement());
+
+    UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
+    assertEquals(
+        List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+    assertEquals("tag-a", plan.tagName());
+    assertEquals(true, plan.ifNotExists());
+    assertEquals("source-branch", plan.ref().getBranchName().get());
+    assertEquals(7, plan.ref().getVersionNumber().get());
+  }
+
+  @Test
+  public void testCreateTagFromTag() {
+    LanceSqlExtensionsParser parser =
+        createParser(
+            "ALTER TABLE `my-catalog`.`my-table` CREATE TAG IF NOT EXISTS `tag-a` AS OF TAG `source-tag`");
+    org.apache.spark.sql.catalyst.plans.logical.LanceCreateTag plan =
+        (org.apache.spark.sql.catalyst.plans.logical.LanceCreateTag)
+            astBuilder.visitSingleStatement(parser.singleStatement());
+
+    assertEquals("tag-a", plan.tagName());
+    assertEquals(true, plan.ifNotExists());
+    assertEquals("source-tag", plan.ref().getTagName().get());
+  }
+
+  @Test
+  public void testDropTag() {
+    LanceSqlExtensionsParser parser =
+        createParser("ALTER TABLE `my-catalog`.`my-table` DROP TAG IF EXISTS `tag-a`");
+    org.apache.spark.sql.catalyst.plans.logical.LanceDropTag plan =
+        (org.apache.spark.sql.catalyst.plans.logical.LanceDropTag)
+            astBuilder.visitSingleStatement(parser.singleStatement());
+
+    UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
+    assertEquals(
+        List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+    assertEquals("tag-a", plan.tagName());
+    assertEquals(true, plan.ifExists());
+  }
+
+  @Test
+  public void testShowTag() {
+    LanceSqlExtensionsParser parser = createParser("SHOW TAG IN `my-catalog`.`my-table`");
+    org.apache.spark.sql.catalyst.plans.logical.LanceShowTags plan =
+        (org.apache.spark.sql.catalyst.plans.logical.LanceShowTags)
+            astBuilder.visitSingleStatement(parser.singleStatement());
 
     UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
     assertEquals(

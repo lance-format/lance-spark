@@ -15,10 +15,12 @@ package org.lance.spark;
 
 import org.lance.Session;
 import org.lance.namespace.LanceNamespace;
+import org.lance.namespace.model.QueryTableRequest;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 
+import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -76,6 +78,9 @@ public final class LanceRuntime {
   private static final Map<String, Boolean> USE_NAMESPACE_ON_WORKERS =
       createUseNamespaceOnWorkers();
 
+  /** Cached {@code queryTable} support per namespace impl alias or class name. */
+  private static final Map<String, Boolean> QUERY_TABLE_SUPPORT = new ConcurrentHashMap<>();
+
   private LanceRuntime() {}
 
   private static Map<String, String> createExternalNamespaceImpls() {
@@ -104,6 +109,43 @@ public final class LanceRuntime {
 
   public static boolean useNamespaceOnWorkers(String namespaceImpl) {
     return USE_NAMESPACE_ON_WORKERS.getOrDefault(namespaceImpl, true);
+  }
+
+  /**
+   * Returns whether the namespace implementation executes queries server-side through {@code
+   * queryTable}.
+   *
+   * <p>{@link LanceNamespace#queryTable} is a default interface method that throws {@link
+   * org.lance.namespace.errors.UnsupportedOperationException}, and catalog-only implementations
+   * such as Glue, Hive, and Iceberg never override it. Callers use this to decide whether a query
+   * can be pushed to the namespace or has to be executed against the dataset directly.
+   *
+   * @param namespaceImpl the namespace implementation alias or class name
+   * @return true if the implementation overrides {@code queryTable}
+   */
+  public static boolean supportsQueryTable(String namespaceImpl) {
+    if (namespaceImpl == null) {
+      return false;
+    }
+    return QUERY_TABLE_SUPPORT.computeIfAbsent(namespaceImpl, LanceRuntime::probeQueryTable);
+  }
+
+  private static boolean probeQueryTable(String namespaceImpl) {
+    registerKnownNamespaceImpl(namespaceImpl);
+    String className = LanceNamespace.NATIVE_IMPLS.get(namespaceImpl);
+    if (className == null) {
+      className = LanceNamespace.REGISTERED_IMPLS.get(namespaceImpl);
+    }
+    if (className == null) {
+      className = namespaceImpl;
+    }
+    try {
+      Method queryTable = Class.forName(className).getMethod("queryTable", QueryTableRequest.class);
+      return !queryTable.isDefault();
+    } catch (ClassNotFoundException | NoSuchMethodException | LinkageError e) {
+      // Treat an unresolvable implementation as unsupported; connect() reports the real error.
+      return false;
+    }
   }
 
   /**
