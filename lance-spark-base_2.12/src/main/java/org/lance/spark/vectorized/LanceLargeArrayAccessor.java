@@ -42,7 +42,18 @@ public class LanceLargeArrayAccessor {
   public ColumnarArray getArray(int rowId) {
     long start = accessor.getElementStartIndex(rowId);
     long end = accessor.getElementEndIndex(rowId);
-    return new ColumnarArray(arrayData, (int) start, (int) (end - start));
+    return new ColumnarArray(
+        arrayData, toSparkArrayInt(start, "offset"), toSparkArrayInt(end - start, "length"));
+  }
+
+  static int toSparkArrayInt(long value, String description) {
+    if (value < 0 || value > Integer.MAX_VALUE) {
+      throw new UnsupportedOperationException(
+          String.format(
+              "LargeList %s %,d cannot be represented by Spark's 32-bit array indexing",
+              description, value));
+    }
+    return (int) value;
   }
 
   public void close() {

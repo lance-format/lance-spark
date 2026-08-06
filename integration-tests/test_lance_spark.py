@@ -782,7 +782,7 @@ class TestDDLBlobV2:
 
 
 class TestDDLIndex:
-    """Test DDL index operations: CREATE INDEX (BTree, FTS)."""
+    """Test DDL index operations."""
 
     def test_create_btree_index_on_int(self, spark):
         """Test CREATE INDEX with BTree on integer column."""
@@ -889,6 +889,31 @@ class TestDDLIndex:
         """).collect()
         assert len(query_result) == 1
         assert query_result[0].id == 50
+
+    def test_create_distributed_bitmap_index(self, spark):
+        """Test distributed Bitmap creation with multiple fragments in one segment."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                status INT
+            )
+        """)
+        spark.sql("INSERT INTO default.test_table VALUES (1, 10), (2, 20)")
+        spark.sql("INSERT INTO default.test_table VALUES (3, 10), (4, 20)")
+
+        result = spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX idx_status_bitmap USING bitmap (status)
+            WITH (num_segments = 1)
+        """).collect()
+
+        assert len(result) == 1
+        assert result[0][0] >= 2
+        assert result[0][1] == "idx_status_bitmap"
+        _assert_lance_index_metadata(
+            spark, "default.test_table", "idx_status_bitmap", "BITMAP"
+        )
+        assert spark.sql("SELECT * FROM default.test_table").count() == 4
 
     def test_create_btree_index_on_nested_literal_dot_field(self, spark):
         """Test CREATE INDEX on nested struct fields, including literal dots."""
@@ -1000,7 +1025,7 @@ class TestDDLIndex:
         assert metadata["index_version"] == 2
 
     def test_create_index_empty_table(self, spark):
-        """Test CREATE INDEX on empty table."""
+        """Test creating scalar indexes on an empty table."""
         spark.sql("""
             CREATE TABLE default.test_table (
                 id INT,
@@ -1008,14 +1033,26 @@ class TestDDLIndex:
             )
         """)
 
-        # Creating index on empty table should return 0 fragments indexed
-        result = spark.sql("""
-            ALTER TABLE default.test_table
-            CREATE INDEX idx_id USING btree (id)
-        """).collect()
+        statements = [
+            "CREATE INDEX idx_id USING btree (id)",
+            "CREATE INDEX idx_name_zonemap USING zonemap (name)",
+            """CREATE INDEX idx_name_fts USING fts (name) WITH (
+                base_tokenizer = 'simple', language = 'English',
+                max_token_length = 40, lower_case = true, stem = false,
+                remove_stop_words = false, ascii_folding = false,
+                with_position = true
+            )""",
+        ]
 
-        # Should return with 0 fragments indexed
-        assert result[0][0] == 0
+        for statement in statements:
+            result = spark.sql(
+                f"ALTER TABLE default.test_table {statement}"
+            ).collect()
+            assert result[0]["fragments_indexed"] == 0
+
+        indexes = spark.sql("SHOW INDEXES IN default.test_table").collect()
+        index_names = {row["name"] for row in indexes}
+        assert index_names == {"idx_id", "idx_name_zonemap", "idx_name_fts"}
 
     def test_drop_index(self, spark):
         """Test DROP INDEX removes an existing index."""

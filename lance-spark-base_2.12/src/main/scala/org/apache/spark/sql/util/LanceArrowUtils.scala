@@ -155,7 +155,7 @@ object LanceArrowUtils {
       case ts: ArrowType.Timestamp =>
         if (ts.getTimezone != null && ts.getTimezone.nonEmpty) TimestampType
         else TimestampNTZType
-      case l: ArrowType.List =>
+      case _: ArrowType.List | _: ArrowType.LargeList =>
         val children = field.getChildren
         if (children.isEmpty) {
           throw new SparkException(s"List field ${field.getName} has no children")
@@ -256,7 +256,7 @@ object LanceArrowUtils {
 
   private def augmentChildMetadata(builder: MetadataBuilder, field: Field): Unit = {
     field.getType match {
-      case _: ArrowType.FixedSizeList | _: ArrowType.List =>
+      case _: ArrowType.FixedSizeList | _: ArrowType.List | _: ArrowType.LargeList =>
         val children = field.getChildren
         if (!children.isEmpty) {
           val childField = children.get(0)
