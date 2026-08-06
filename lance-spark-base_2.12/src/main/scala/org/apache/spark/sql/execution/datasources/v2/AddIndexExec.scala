@@ -168,17 +168,22 @@ case class AddIndexExec(
       }
 
     val snapshot: AddIndexTableSnapshot = {
-      val ds = openDataset(baseReadOptions, initialStorageOpts, nsImpl, nsProps, tableId)
+      val ds = IndexUtils.openDataset(baseReadOptions, initialStorageOpts, nsImpl, nsProps, tableId)
       try {
         val canonical = columns.map { column =>
           val field = FieldPathUtils.resolveLeafField(ds.getLanceSchema, column)
           FieldPathUtils.pathByFieldId(ds.getLanceSchema, field.getId)
         }
+        // Single-column check: no index type currently supports more than one column.
+        // Centralising here avoids per-type checks scattered further down (ZONEMAP, IVF, FTS).
+        // The range-based BTree path re-validates on its own args-derived list; that separate
+        // check stays local to that job.
+        if (canonical.size != 1) {
+          throw new UnsupportedOperationException(
+            s"$indexType supports a single column only " +
+              s"(got ${canonical.size}: ${canonical.mkString(", ")})")
+        }
         val vectorPlan = if (IndexUtils.isIvfIndexType(indexType)) {
-          if (canonical.size != 1) {
-            throw new UnsupportedOperationException(
-              s"$indexType currently supports a single vector column only")
-          }
           val arrowSchema = ds.getLanceSchema.asArrowSchema()
           val arrowField =
             try {
@@ -214,11 +219,6 @@ case class AddIndexExec(
     val fragmentIds = snapshot.fragmentIds
     val canonicalColumns = snapshot.canonicalColumns
 
-    if (indexType == IndexType.ZONEMAP && canonicalColumns.size != 1) {
-      throw new UnsupportedOperationException(
-        "Zonemap index currently supports a single column only")
-    }
-
     if (fragmentIds.isEmpty) {
       // No fragments to index
       return Seq(new GenericInternalRow(Array[Any](0L, UTF8String.fromString(indexName))))
@@ -228,7 +228,8 @@ case class AddIndexExec(
     // skipping all data processing. See the class doc for how it is populated.
     if (!train) {
       val uuid = UUID.randomUUID()
-      val dataset = openDataset(readOptions, initialStorageOpts, nsImpl, nsProps, tableId)
+      val dataset =
+        IndexUtils.openDataset(readOptions, initialStorageOpts, nsImpl, nsProps, tableId)
       try {
         return commitEmptyIndex(
           dataset,
@@ -258,10 +259,6 @@ case class AddIndexExec(
           zonemapJob.run()
 
         case vectorType if IndexUtils.isIvfIndexType(vectorType) =>
-          if (canonicalColumns.size != 1) {
-            throw new UnsupportedOperationException(
-              s"$vectorType currently supports a single vector column only")
-          }
           val plan = snapshot.vectorPlan.getOrElse {
             throw new IllegalStateException(s"Vector plan was not resolved for $vectorType")
           }
@@ -477,15 +474,6 @@ case class AddIndexExec(
     } finally {
       dataset.close()
     }
-  }
-
-  private def openDataset(
-      readOptions: LanceSparkReadOptions,
-      initialStorageOpts: Option[Map[String, String]],
-      nsImpl: Option[String],
-      nsProps: Option[Map[String, String]],
-      tableId: Option[List[String]]): Dataset = {
-    IndexUtils.openDataset(readOptions, initialStorageOpts, nsImpl, nsProps, tableId)
   }
 
   private def extractNamespaceInfo(
@@ -1041,7 +1029,7 @@ case class ZonemapIndexTask(
 /**
  * Utility methods for working with index types.
  */
-object IndexUtils {
+object IndexUtils extends org.apache.spark.internal.Logging {
 
   private val jsonMapper = new ObjectMapper()
 
@@ -1293,9 +1281,7 @@ object IndexUtils {
         val clamped = math.max(1, math.min(n, req))
         if (clamped != req) {
           // Same wording as the existing zonemap path so users see one message.
-          org.slf4j.LoggerFactory.getLogger(
-            "org.apache.spark.sql.execution.datasources.v2.IndexUtils")
-            .warn(s"num_segments=$req clamped to $clamped (fragment count=$n)")
+          logWarning(s"num_segments=$req clamped to $clamped (fragment count=$n)")
         }
         clamped
       case None =>
