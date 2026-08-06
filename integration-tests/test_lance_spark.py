@@ -1102,6 +1102,155 @@ class TestDDLIndex:
         assert query_result[0].id == 50
 
 
+class TestDDLVectorIndex:
+    """Test DDL vector index (IVF_*) operations.
+
+    Exercises the distributed vector index build introduced in PR #605:
+    driver-side IVF centroid / PQ codebook training, executor-parallel
+    segment build, and atomic ``commitExistingIndexSegments`` on the driver.
+    Runs against every ``spark`` fixture parameter (local FS, Azurite, MinIO).
+    """
+
+    # Small but valid vector dimension: 8 divides evenly by num_sub_vectors=4.
+    _VECTOR_DIM = 8
+    # Enough rows to satisfy lance-core's IVF training threshold
+    # (~num_partitions * 39 rows recommended); we use 4 partitions.
+    _ROWS_PER_BATCH = 100
+    _NUM_BATCHES = 3
+
+    def _zero_vector_sql(self):
+        return "array(" + ", ".join(["0.0"] * self._VECTOR_DIM) + ")"
+
+    def _create_and_populate(self, spark, table):
+        """Create a vector table and write ``_NUM_BATCHES`` fragments.
+
+        Multiple fragments are required to exercise the multi-segment build
+        path for non-SQ IVF variants.
+        """
+        spark.sql(f"""
+            CREATE TABLE {table} (
+                id INT NOT NULL,
+                vec ARRAY<FLOAT> NOT NULL
+            ) USING lance
+            TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '{self._VECTOR_DIM}')
+        """)
+        for batch in range(self._NUM_BATCHES):
+            rows = [
+                (
+                    batch * self._ROWS_PER_BATCH + i,
+                    [
+                        float((batch * self._ROWS_PER_BATCH + i + d) % 7)
+                        for d in range(self._VECTOR_DIM)
+                    ],
+                )
+                for i in range(self._ROWS_PER_BATCH)
+            ]
+            df = spark.createDataFrame(rows, ["id", "vec"])
+            df.writeTo(table).append()
+
+    @pytest.mark.parametrize("method", ["ivf_flat", "ivf_pq", "ivf_hnsw_pq"])
+    def test_create_ivf_index_multi_segment(self, spark, method):
+        """Distributed build for IVF variants that support multi-segment commit."""
+        table = "default.test_table"
+        self._create_and_populate(spark, table)
+
+        with_opts = "num_partitions=4"
+        if "pq" in method:
+            with_opts += ", num_sub_vectors=4"
+
+        result = spark.sql(f"""
+            ALTER TABLE {table}
+            CREATE INDEX idx_vec USING {method} (vec)
+            WITH ({with_opts})
+        """).collect()
+
+        assert len(result) == 1
+        assert result[0][1] == "idx_vec"
+        assert result[0][0] > 0  # fragments indexed
+
+        _assert_lance_index_metadata(spark, table, "idx_vec", method.upper())
+
+        # Sanity: index-backed VECTOR_SEARCH returns the exact-zero row first.
+        rows = spark.sql(f"""
+            SELECT id, _distance FROM VECTOR_SEARCH(
+                '{table}', {self._zero_vector_sql()}, 2)
+            ORDER BY _distance, id
+        """).collect()
+        assert len(rows) == 2
+        assert rows[0]["_distance"] <= rows[1]["_distance"]
+
+    @pytest.mark.parametrize("method", ["ivf_sq", "ivf_hnsw_sq"])
+    def test_create_ivf_sq_index_clamps_num_segments(self, spark, method):
+        """SQ-quantized IVF variants must be built as a single segment.
+
+        Requesting ``num_segments > 1`` should log a downgrade warning and
+        succeed (see AddIndexExec.scala ``validatedNumSegments`` — lance-core
+        does not currently reconcile per-shard ScalarQuantizer bounds).
+        """
+        table = "default.test_table"
+        self._create_and_populate(spark, table)
+
+        result = spark.sql(f"""
+            ALTER TABLE {table}
+            CREATE INDEX idx_vec USING {method} (vec)
+            WITH (num_partitions=4, num_segments=4)
+        """).collect()
+
+        assert len(result) == 1
+        assert result[0][1] == "idx_vec"
+        _assert_lance_index_metadata(spark, table, "idx_vec", method.upper())
+
+    def test_train_false_rejected_for_ivf(self, spark):
+        """``train=false`` deferred build is not yet supported for IVF_*."""
+        table = "default.test_table"
+        self._create_and_populate(spark, table)
+
+        with pytest.raises(Exception) as excinfo:
+            spark.sql(f"""
+                ALTER TABLE {table}
+                CREATE INDEX idx_vec USING ivf_pq (vec)
+                WITH (num_partitions=4, num_sub_vectors=4, train=false)
+            """).collect()
+
+        # Message asserted in AddIndexExec.scala :110-115.
+        assert "train=false is not supported" in str(excinfo.value)
+
+    def test_reject_multi_column_ivf_index(self, spark):
+        """No index type supports more than one column (central check)."""
+        table = "default.test_table"
+        self._create_and_populate(spark, table)
+
+        with pytest.raises(Exception) as excinfo:
+            spark.sql(f"""
+                ALTER TABLE {table}
+                CREATE INDEX idx_vec USING ivf_pq (id, vec)
+                WITH (num_partitions=4, num_sub_vectors=4)
+            """).collect()
+
+        assert "supports a single column only" in str(excinfo.value)
+
+    def test_create_ivf_index_on_empty_table(self, spark):
+        """Empty tables report zero indexed fragments without failing."""
+        table = "default.test_table"
+        spark.sql(f"""
+            CREATE TABLE {table} (
+                id INT NOT NULL,
+                vec ARRAY<FLOAT> NOT NULL
+            ) USING lance
+            TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '{self._VECTOR_DIM}')
+        """)
+
+        result = spark.sql(f"""
+            ALTER TABLE {table}
+            CREATE INDEX idx_vec USING ivf_pq (vec)
+            WITH (num_partitions=4, num_sub_vectors=4)
+        """).collect()
+
+        assert len(result) == 1
+        assert result[0][0] == 0
+        assert result[0][1] == "idx_vec"
+
+
 class TestDDLOptimize:
     """Test DDL OPTIMIZE operations for compacting table fragments."""
 
