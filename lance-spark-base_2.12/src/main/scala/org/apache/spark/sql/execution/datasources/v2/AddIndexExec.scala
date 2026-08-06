@@ -229,10 +229,10 @@ case class AddIndexExec(
     val fragmentIds = snapshot.fragmentIds
     val canonicalColumns = snapshot.canonicalColumns
 
-    // Goal-mode C: align empty-table CREATE INDEX behaviour with upstream #739 for scalar
-    // methods (register empty index metadata visible to SHOW INDEXES) while explicitly
-    // rejecting IVF_* on empty tables — Lance cannot train IVF centroids without vectors,
-    // and commitEmptyIndex resolves scalar params only.
+    // Empty-table CREATE INDEX: scalar methods fall through to commitEmptyIndex below and
+    // register a zero-fragment index visible to SHOW INDEXES. IVF_* is rejected up front —
+    // Lance cannot train IVF centroids without vectors, and commitEmptyIndex resolves
+    // scalar params only.
     if (fragmentIds.isEmpty && IndexUtils.isIvfIndexType(indexType)) {
       throw new IllegalArgumentException(
         s"CREATE INDEX $indexType on an empty table is not supported: there are no vectors " +

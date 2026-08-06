@@ -622,10 +622,9 @@ public abstract class BaseAddVectorIndexTest {
 
   @Test
   public void testCreateIndexEmptyTable() {
-    // Create an empty table without inserting any rows. Under goal-mode C we reject IVF_*
-    // CREATE INDEX on empty tables with a clear message, since Lance cannot train IVF
-    // centroids without vectors; scalar-only empty-table creation is exercised in the
-    // scalar index test suite.
+    // Create an empty table without inserting any rows. IVF_* CREATE INDEX on empty tables
+    // is rejected with a clear message, since Lance cannot train IVF centroids without
+    // vectors; scalar-only empty-table creation is exercised in the scalar index test suite.
     spark.sql(
         String.format(
             "CREATE TABLE %s (id INT NOT NULL, vec ARRAY<FLOAT> NOT NULL) USING lance "
@@ -645,8 +644,7 @@ public abstract class BaseAddVectorIndexTest {
                     .collect());
     String message = rootCauseMessage(ex);
     Assertions.assertTrue(message.contains("empty table"), "got: " + message);
-    Assertions.assertTrue(
-        message.contains("IVF") || message.contains("ivf"), "got: " + message);
+    Assertions.assertTrue(message.contains("IVF") || message.contains("ivf"), "got: " + message);
 
     // No index was committed.
     Dataset<Row> rows = spark.sql(String.format("SHOW INDEXES IN %s", fullTable));
