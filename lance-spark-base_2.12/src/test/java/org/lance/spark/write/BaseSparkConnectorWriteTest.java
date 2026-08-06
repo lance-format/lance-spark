@@ -52,6 +52,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 import static org.apache.spark.sql.functions.col;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -741,6 +742,66 @@ public abstract class BaseSparkConnectorWriteTest {
           idField.getType(),
           "id field should be LargeUtf8 when use_large_var_types=true on createOrReplace path");
     }
+  }
+
+  /**
+   * Regression: reading a Lance table with a LargeBinary column, transforming it in Spark, and
+   * writing back must not fail. Spark maps both Arrow Binary and LargeBinary onto its single
+   * BinaryType, so without a metadata marker the round trip silently narrows LargeBinary -> Binary
+   * and the append is rejected by Lance's schema validation.
+   */
+  @Test
+  public void appendAfterTransformPreservesLargeBinary(TestInfo testInfo) throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    StructType schema =
+        new StructType().add("id", DataTypes.IntegerType).add("image_bytes", DataTypes.BinaryType);
+    Dataset<Row> data =
+        spark.createDataFrame(
+            Arrays.asList(
+                RowFactory.create(1, new byte[] {1, 2, 3}),
+                RowFactory.create(2, new byte[] {4, 5, 6})),
+            schema);
+    data.writeTo("lance.`" + path + "`")
+        .using("lance")
+        .option("use_large_var_types", "true")
+        .create();
+
+    // Read back, apply a transform that leaves image_bytes untouched, and append.
+    // This is the exact shape of the reported failure.
+    Dataset<Row> transformed =
+        spark
+            .read()
+            .format(LanceDataSource.name)
+            .option(LanceSparkReadOptions.CONFIG_DATASET_URI, path)
+            .load()
+            .withColumn("id", col("id").plus(10));
+
+    transformed.writeTo("lance.`" + path + "`").append();
+
+    // The on-disk Arrow type must still be LargeBinary, not silently narrowed to Binary.
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      assertEquals(
+          org.apache.arrow.vector.types.pojo.ArrowType.LargeBinary.INSTANCE,
+          ds.getSchema().findField("image_bytes").getType(),
+          "image_bytes must remain LargeBinary after a read -> transform -> write round trip");
+    }
+
+    List<Row> rows =
+        spark
+            .read()
+            .format(LanceDataSource.name)
+            .option(LanceSparkReadOptions.CONFIG_DATASET_URI, path)
+            .load()
+            .orderBy("id")
+            .collectAsList();
+    assertEquals(4, rows.size());
+    assertArrayEquals(new byte[] {1, 2, 3}, (byte[]) rows.get(0).get(1));
+    assertArrayEquals(new byte[] {4, 5, 6}, (byte[]) rows.get(1).get(1));
+    assertArrayEquals(new byte[] {1, 2, 3}, (byte[]) rows.get(2).get(1));
+    assertArrayEquals(new byte[] {4, 5, 6}, (byte[]) rows.get(3).get(1));
   }
 
   /**
