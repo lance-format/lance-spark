@@ -79,7 +79,8 @@ public abstract class BaseAddIndexTest {
     spark =
         SparkSession.builder()
             .appName("lance-create-index-test")
-            .master("local[10]")
+            .master("local[3]")
+            .config("spark.default.parallelism", "10")
             .config(
                 "spark.sql.catalog." + catalogName, "org.lance.spark.LanceNamespaceSparkCatalog")
             .config(
@@ -600,15 +601,29 @@ public abstract class BaseAddIndexTest {
     }
   }
 
-  @Test
-  public void testZonemapRejectsMultipleColumns() {
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("singleColumnIndexMethods")
+  public void testIndexesRejectMultipleColumns(String method, IndexType indexType) {
     prepareDataset();
-    Assertions.assertThrows(
-        Exception.class,
-        () ->
-            spark.sql(
-                String.format(
-                    "alter table %s create index idx_multi using zonemap (id, text)", fullTable)));
+    Exception failure =
+        Assertions.assertThrows(
+            Exception.class,
+            () ->
+                spark.sql(
+                    String.format(
+                        "alter table %s create index idx_multi using %s (id, text)",
+                        fullTable, method)));
+    Assertions.assertTrue(
+        hasMessageInCauseChain(
+            failure, indexType.name() + " indexes currently support a single column only"),
+        "Expected a single-column validation error for " + method + ", got: " + failure);
+  }
+
+  private static Stream<Arguments> singleColumnIndexMethods() {
+    return Stream.of(
+        Arguments.of("btree", IndexType.BTREE),
+        Arguments.of("zonemap", IndexType.ZONEMAP),
+        Arguments.of("fts", IndexType.INVERTED));
   }
 
   @Test
@@ -773,15 +788,42 @@ public abstract class BaseAddIndexTest {
   }
 
   @Test
-  public void testNumSegmentsRejectedForBtree() {
+  public void testBTreeFragmentSupportsNumSegments() {
     prepareDataset();
-    Assertions.assertThrows(
-        Exception.class,
-        () ->
-            spark.sql(
-                String.format(
-                    "alter table %s create index idx_btree_seg using btree (id) with (num_segments=3)",
-                    fullTable)));
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index idx_btree_seg using btree (id) with (num_segments=3)",
+                fullTable));
+
+    Assertions.assertEquals("idx_btree_seg", result.collectAsList().get(0).getString(1));
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int fragmentCount = lanceDataset.getFragments().size();
+      int expectedSegmentCount = Math.min(fragmentCount, 3);
+      List<Index> segments =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> "idx_btree_seg".equals(index.name()))
+              .collect(Collectors.toList());
+
+      Assertions.assertEquals(
+          expectedSegmentCount,
+          segments.size(),
+          "Expected BTree num_segments=3 to produce exactly 3 segments (or fewer if fragment count < 3)");
+
+      int coveredFragments =
+          segments.stream()
+              .map(index -> index.fragments().orElse(Collections.emptyList()).size())
+              .mapToInt(Integer::intValue)
+              .sum();
+      Assertions.assertEquals(
+          fragmentCount,
+          coveredFragments,
+          "Expected committed BTree segments to cover all fragments exactly once");
+    } finally {
+      lanceDataset.close();
+    }
   }
 
   @Test
@@ -926,7 +968,8 @@ public abstract class BaseAddIndexTest {
     Dataset<Row> result =
         spark.sql(
             String.format(
-                "alter table %s create index test_index_btree_fragment using btree (id) with (build_mode='fragment')",
+                "alter table %s create index test_index_btree_fragment using btree (id) "
+                    + "with (build_mode='fragment', num_segments=3)",
                 fullTable));
 
     Row row = result.collectAsList().get(0);

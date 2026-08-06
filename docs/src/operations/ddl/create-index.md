@@ -48,8 +48,8 @@ These options apply to all index methods:
 
 ### Distributed Index Options
 
-The distributed build used by `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, `rtree`,
-and `fts` (or `inverted`) supports:
+The distributed build used by `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`,
+`rtree`, `fts` (or `inverted`), and `btree` with `build_mode = 'fragment'` supports:
 
 | Option         | Type    | Description                                                                                                                                                                                                 |
 |----------------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -120,12 +120,8 @@ Create a simple B-tree index on a single column:
 
 ### Indexing Multiple Columns
 
-Create a composite index on multiple columns.
-
-=== "SQL"
-    ```sql
-    ALTER TABLE lance.db.logs CREATE INDEX idx_ts_level USING btree (timestamp, level);
-    ```
+Scalar indexes currently support exactly one indexed column. Create separate indexes when you
+need to accelerate filters on multiple columns.
 
 ### Lightweight Fragment Pruning
 
@@ -300,13 +296,13 @@ Consider creating an index when:
 
 The `CREATE INDEX` command operates as follows:
 
-1.  **Index Build Execution**: Lance Spark chooses an execution path based on the index method. `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, `rtree`, and `fts` split source fragments into batches and build them in parallel. Range-mode `btree` uses Spark repartitioning and sorted preprocessed data.
+1.  **Index Build Execution**: Lance Spark chooses an execution path based on the index method. `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, `rtree`, `fts` (or `inverted`), and fragment-mode `btree` split source fragments into batches and build them in parallel. Range-mode `btree` uses Spark repartitioning and sorted preprocessed data.
 2.  **Metadata Finalization**: Lance Spark merges or commits the resulting index metadata on the driver so the new logical index becomes visible atomically.
 3.  **Transactional Commit**: A new table version is committed with the new index information. The operation is atomic and ensures that concurrent reads are not affected.
 
 ## Notes and Limitations
 
 - **Index Methods**: The `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, `rtree`, `btree`, and `fts` (or `inverted`) methods are supported for index creation.
-- **Indexed Column Count**: `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, `rtree`, and `fts` (or `inverted`) currently support exactly one indexed column.
+- **Indexed Column Count**: All supported index methods currently support exactly one indexed column.
 - **Index Replacement**: If you create an index with the same name as an existing one, the old index will be replaced by the new one.
 - **Deferred Training**: With `train = false` the index is registered empty and is populated later, either by re-running `CREATE INDEX` (a full distributed build that replaces the empty index) or, for incremental coverage of newly appended fragments, by `Dataset.optimizeIndices` in the SDK. The SQL `OPTIMIZE` command compacts fragments and does not train deferred indexes.
