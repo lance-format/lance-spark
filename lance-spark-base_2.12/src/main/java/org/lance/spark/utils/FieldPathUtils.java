@@ -44,13 +44,16 @@ public final class FieldPathUtils {
   }
 
   public static LanceField resolveLeafField(LanceSchema schema, String canonicalPath) {
-    List<String> parts = parseCanonicalPath(canonicalPath);
-    LanceField field = resolveField(schema, parts);
+    LanceField field = resolveField(schema, canonicalPath);
     if (!field.getChildren().isEmpty()) {
       throw new IllegalArgumentException(
           "Index column must be a leaf field, got: " + canonicalPath);
     }
     return field;
+  }
+
+  public static LanceField resolveField(LanceSchema schema, String canonicalPath) {
+    return resolveField(schema, parseCanonicalPath(canonicalPath));
   }
 
   public static String pathByFieldId(LanceSchema schema, int fieldId) {

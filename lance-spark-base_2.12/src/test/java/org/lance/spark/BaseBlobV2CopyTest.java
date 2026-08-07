@@ -27,6 +27,8 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -88,7 +90,12 @@ public abstract class BaseBlobV2CopyTest extends AbstractBlobV2CopyTest {
               .allocator(LanceRuntime.allocator())
               .uri(datasetUriOf(tgt))
               .build()) {
-        assertEquals(1, ds.takeBlobs(tgtAddrs, "data").size(), "v2 takeBlobs skips null rows");
+        List<org.lance.BlobFile> blobs = ds.takeBlobs(tgtAddrs, "data");
+        assertEquals(2, blobs.size(), "v2 takeBlobs preserves null rows");
+        try (org.lance.BlobFile nonNullBlob = blobs.get(0)) {
+          assertNotNull(nonNullBlob, "non-null blob should return a BlobFile");
+          assertNull(blobs.get(1), "null blob should return a null element");
+        }
       }
 
       assertTargetBlobBytes(
