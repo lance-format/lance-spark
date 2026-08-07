@@ -1053,6 +1053,90 @@ public abstract class SparkLanceNamespaceTestBase {
   }
 
   @Test
+  public void testAlterTableRejectsRequestAtomically() throws Exception {
+    String tableName = generateTableName("atomic_reject");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+
+    // A supported ADD COLUMN batched with an unsupported column-type change must be rejected as a
+    // whole: neither change may take effect.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    assertThrows(
+        UnsupportedOperationException.class,
+        () ->
+            catalog.alterTable(
+                ident,
+                TableChange.addColumn(new String[] {"added"}, DataTypes.IntegerType),
+                TableChange.updateColumnType(new String[] {"id"}, DataTypes.LongType)));
+
+    assertFalse(Arrays.asList(catalog.loadTable(ident).schema().fieldNames()).contains("added"));
+  }
+
+  @Test
+  public void testDropColumnIfExistsMissingIsNoOp() throws Exception {
+    String tableName = generateTableName("drop_if_exists");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+
+    // DROP COLUMN IF EXISTS on a missing column must not fail.
+    spark.sql("ALTER TABLE " + fullName + " DROP COLUMN IF EXISTS missing");
+
+    assertArrayEquals(new String[] {"id", "name"}, spark.table(fullName).schema().fieldNames());
+  }
+
+  @Test
+  public void testAddColumnWithDefaultRejected() throws Exception {
+    String tableName = generateTableName("add_default");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL)");
+
+    // A DEFAULT value cannot be honored, so it must be rejected rather than silently dropped.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    UnsupportedOperationException ex =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () ->
+                catalog.alterTable(
+                    ident,
+                    TableChange.addColumn(
+                        new String[] {"with_default"},
+                        DataTypes.IntegerType,
+                        true,
+                        null,
+                        null,
+                        new org.apache.spark.sql.connector.catalog.ColumnDefaultValue(
+                            "7",
+                            new org.apache.spark.sql.connector.expressions.LiteralValue<>(
+                                7, DataTypes.IntegerType)))));
+    assertTrue(ex.getMessage().contains("DEFAULT"));
+  }
+
+  @Test
+  public void testAddColumnRejectedOnLegacyFormat() throws Exception {
+    String tableName = generateTableName("add_legacy");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql(
+        "CREATE TABLE "
+            + fullName
+            + " (id INT NOT NULL) TBLPROPERTIES ('file_format_version'='LEGACY')");
+
+    // ADD COLUMN is unsupported on legacy-format tables and must fail loudly rather than surface a
+    // raw core error.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    UnsupportedOperationException ex =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () ->
+                catalog.alterTable(
+                    ident, TableChange.addColumn(new String[] {"added"}, DataTypes.IntegerType)));
+    assertTrue(ex.getMessage().contains("legacy"));
+  }
+
+  @Test
   public void testShowTablePropertiesEmpty() throws Exception {
     String tableName = generateTableName("show_props_empty");
     String fullName = catalogName + ".default." + tableName;

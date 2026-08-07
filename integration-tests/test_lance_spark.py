@@ -614,6 +614,13 @@ class TestDDLAlterTableColumns:
         assert "age" not in columns
         assert columns == ["id", "name"]
 
+    def test_drop_column_if_exists_missing(self, spark):
+        """DROP COLUMN IF EXISTS on a missing column is a no-op."""
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("ALTER TABLE default.test_table DROP COLUMN IF EXISTS missing")
+
+        assert spark.table("default.test_table").columns == ["id", "name"]
+
     def test_rename_column(self, spark):
         """RENAME COLUMN renames the column while preserving data."""
         spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")

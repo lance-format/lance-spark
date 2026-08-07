@@ -60,6 +60,7 @@ Remove a column from the table:
 
 ```sql
 ALTER TABLE users DROP COLUMN age;
+ALTER TABLE users DROP COLUMN IF EXISTS age;
 ```
 
 ## RENAME COLUMN
@@ -79,9 +80,15 @@ ALTER TABLE users ALTER COLUMN id DROP NOT NULL;
 ```
 
 !!! note
-Column schema evolution operates on top-level columns. Adding a column at a specific position
-(`FIRST`/`AFTER`) is not supported — columns are always appended. Changing a column's data type
-(`ALTER COLUMN ... TYPE`) and updating a column comment are not currently supported.
+Column schema evolution operates on top-level columns. When several column changes are given in
+one statement, the whole request is validated first — if any change is unsupported, none is
+applied. The following are **not** currently supported and are rejected before any change is
+written:
+
+- Adding a column at a specific position (`FIRST`/`AFTER`) — columns are always appended.
+- Adding a column with a `DEFAULT` value — new columns are filled with `NULL`.
+- Adding a column to a legacy-format (`file_format_version='LEGACY'`) table.
+- Changing a column's data type (`ALTER COLUMN ... TYPE`) or updating a column comment.
 
 ## Rename Table
 
