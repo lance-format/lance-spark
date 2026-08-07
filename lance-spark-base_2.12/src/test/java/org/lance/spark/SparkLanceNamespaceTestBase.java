@@ -1220,13 +1220,30 @@ public abstract class SparkLanceNamespaceTestBase {
     String tableName = generateTableName("drop_special");
     String fullName = catalogName + ".default." + tableName;
 
-    // A top-level column name with special characters is passed to the core verbatim.
+    // A top-level column name containing Lance path syntax (here a space) is escaped into a
+    // canonical field path before it reaches the core.
     spark.sql("CREATE TABLE " + fullName + " (`weird name` INT, keep INT)");
 
     Identifier ident = Identifier.of(new String[] {"default"}, tableName);
     catalog.alterTable(ident, TableChange.deleteColumn(new String[] {"weird name"}, false));
 
     assertArrayEquals(new String[] {"keep"}, catalog.loadTable(ident).schema().fieldNames());
+  }
+
+  @Test
+  public void testRenameColumnWithSpecialCharacterName() throws Exception {
+    String tableName = generateTableName("rename_special");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (`weird name` INT NOT NULL, keep INT)");
+
+    // Rename and nullability sources are canonicalized too.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    catalog.alterTable(ident, TableChange.renameColumn(new String[] {"weird name"}, "renamed"));
+
+    List<String> columns = Arrays.asList(catalog.loadTable(ident).schema().fieldNames());
+    assertTrue(columns.contains("renamed"));
+    assertFalse(columns.contains("weird name"));
   }
 
   @Test

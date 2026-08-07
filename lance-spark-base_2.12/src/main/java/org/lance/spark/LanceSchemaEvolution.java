@@ -15,6 +15,7 @@ package org.lance.spark;
 
 import org.lance.Dataset;
 import org.lance.schema.ColumnAlteration;
+import org.lance.spark.utils.FieldPathUtils;
 
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -30,6 +31,7 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -219,8 +221,7 @@ final class LanceSchemaEvolution {
       if (delete.ifExists() && !currentFields.contains(name)) {
         continue;
       }
-      // Only top-level columns are supported, so the Lance path is the field name verbatim.
-      toDrop.add(name);
+      toDrop.add(canonicalPath(name));
     }
     if (!toDrop.isEmpty()) {
       dataset.dropColumns(toDrop);
@@ -235,11 +236,13 @@ final class LanceSchemaEvolution {
       if (change instanceof RenameColumn) {
         RenameColumn rename = (RenameColumn) change;
         alterations.add(
-            new ColumnAlteration.Builder(rename.fieldNames()[0]).rename(rename.newName()).build());
+            new ColumnAlteration.Builder(canonicalPath(rename.fieldNames()[0]))
+                .rename(rename.newName())
+                .build());
       } else if (change instanceof UpdateColumnNullability) {
         UpdateColumnNullability updateNull = (UpdateColumnNullability) change;
         alterations.add(
-            new ColumnAlteration.Builder(updateNull.fieldNames()[0])
+            new ColumnAlteration.Builder(canonicalPath(updateNull.fieldNames()[0]))
                 .nullable(updateNull.nullable())
                 .build());
       }
@@ -258,6 +261,14 @@ final class LanceSchemaEvolution {
     if (!currentFields.contains(name)) {
       throw new UnsupportedOperationException("Cannot alter missing column: " + name);
     }
+  }
+
+  /**
+   * Escapes a top-level column name into a canonical Lance field path so names containing path
+   * syntax (dots, spaces, etc.) resolve correctly.
+   */
+  private static String canonicalPath(String name) {
+    return FieldPathUtils.canonicalPath(Collections.singletonList(name));
   }
 
   private static void requireDistinct(Set<String> touched, String name) {
