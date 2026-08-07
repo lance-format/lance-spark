@@ -81,11 +81,13 @@ ALTER TABLE users ALTER COLUMN id DROP NOT NULL;
 
 !!! note
 Column schema evolution operates on top-level columns. Each `ALTER TABLE` is committed as a single
-atomic Lance operation, so one statement may batch changes of the same kind (e.g. adding several
-columns), but it may not mix column additions, drops, and alterations, nor combine a column change
-with `TBLPROPERTIES` changes — issue those as separate statements. The whole request is validated
-first, so if any change is unsupported, none is applied. The following are **not** currently
-supported and are rejected before any change is written:
+atomic Lance operation against the current schema, so one statement may batch changes of the same
+kind that target distinct columns (e.g. adding several columns), but it may not mix column
+additions, drops, and alterations, combine a column change with `TBLPROPERTIES` changes, target the
+same column more than once, or apply a change that depends on an earlier change in the same
+statement (such as altering a column by its just-assigned new name) — issue those as separate
+statements. The whole request is validated first, so if any change is unsupported, none is applied.
+The following are **not** currently supported and are rejected before any change is written:
 
 - Adding a column at a specific position (`FIRST`/`AFTER`) — columns are always appended.
 - Adding a column with a `DEFAULT` value — new columns are filled with `NULL`.

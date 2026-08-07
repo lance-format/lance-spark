@@ -1134,6 +1134,87 @@ public abstract class SparkLanceNamespaceTestBase {
   }
 
   @Test
+  public void testAlterTableRejectsRenameDependentChange() throws Exception {
+    String tableName = generateTableName("rename_dependent");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING NOT NULL)");
+
+    // A change that depends on an earlier rename in the same request cannot be expressed as one
+    // core batch (which targets the current schema), so it is rejected before any mutation.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    assertThrows(
+        UnsupportedOperationException.class,
+        () ->
+            catalog.alterTable(
+                ident,
+                TableChange.renameColumn(new String[] {"name"}, "full_name"),
+                TableChange.updateColumnNullability(new String[] {"full_name"}, true)));
+
+    assertArrayEquals(new String[] {"id", "name"}, catalog.loadTable(ident).schema().fieldNames());
+  }
+
+  @Test
+  public void testAlterTableRejectsRepeatedColumnTarget() throws Exception {
+    String tableName = generateTableName("repeated_target");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+
+    // Two changes targeting the same column would lose their order when collapsed into one core
+    // batch, so the request is rejected.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    UnsupportedOperationException ex =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () ->
+                catalog.alterTable(
+                    ident,
+                    TableChange.updateColumnNullability(new String[] {"name"}, false),
+                    TableChange.updateColumnNullability(new String[] {"name"}, true)));
+    assertTrue(ex.getMessage().contains("more than one change"));
+  }
+
+  @Test
+  public void testDropNestedColumnRejected() throws Exception {
+    String tableName = generateTableName("drop_nested");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, s STRUCT<x: INT>)");
+
+    // Validation is top-level only; a nested path (even with IF EXISTS) is rejected up front
+    // rather than reaching the core with a path it would error on.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    assertThrows(
+        UnsupportedOperationException.class,
+        () ->
+            catalog.alterTable(
+                ident, TableChange.deleteColumn(new String[] {"s", "missing"}, true)));
+
+    assertArrayEquals(new String[] {"id", "s"}, catalog.loadTable(ident).schema().fieldNames());
+  }
+
+  @Test
+  public void testRenameThenNullabilityOnDistinctColumns() throws Exception {
+    String tableName = generateTableName("alter_distinct");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+
+    // Renaming one column and relaxing another column's nullability in one statement targets two
+    // distinct existing columns, so it commits as a single alterColumns batch.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    catalog.alterTable(
+        ident,
+        TableChange.renameColumn(new String[] {"name"}, "full_name"),
+        TableChange.updateColumnNullability(new String[] {"id"}, true));
+
+    StructType schema = catalog.loadTable(ident).schema();
+    assertArrayEquals(new String[] {"id", "full_name"}, schema.fieldNames());
+    assertTrue(schema.apply(schema.fieldIndex("id")).nullable());
+  }
+
+  @Test
   public void testDropColumnIfExistsMissingIsNoOp() throws Exception {
     String tableName = generateTableName("drop_if_exists");
     String fullName = catalogName + ".default." + tableName;

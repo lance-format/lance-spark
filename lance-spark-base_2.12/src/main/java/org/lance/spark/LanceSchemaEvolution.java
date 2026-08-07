@@ -15,7 +15,6 @@ package org.lance.spark;
 
 import org.lance.Dataset;
 import org.lance.schema.ColumnAlteration;
-import org.lance.spark.utils.FieldPathUtils;
 
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -31,24 +30,30 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.LinkedHashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 
 /**
  * Translates a Spark {@link ColumnChange} schema-evolution request (produced by {@code ALTER TABLE
  * ADD/DROP/RENAME/ALTER COLUMN}) into a single atomic {@link Dataset} mutation.
  *
- * <p>To preserve Spark's all-or-nothing {@code alterTable} contract, an accepted request is
- * committed through exactly one core operation: {@code addColumns}, {@code dropColumns}, or {@code
- * alterColumns} (each of which commits its whole batch atomically). The request is fully validated
- * against the current schema, and requests that would require more than one core mutation are
- * rejected, <em>before</em> anything is written — so a rejected request never leaves the table
- * partially mutated. Heterogeneous batching (mixing additions, drops, and alterations in one
- * commit) is not supported by the core yet, so such requests must be issued as separate statements.
+ * <p>To preserve Spark's ordered, all-or-nothing {@code alterTable} contract, an accepted request
+ * is committed through exactly one core operation ({@code addColumns}, {@code dropColumns}, or
+ * {@code alterColumns} — each commits its whole batch atomically <em>against the current
+ * schema</em> with no ordering between the batched entries). Because the batch cannot express
+ * changes that depend on an earlier change in the same request, the request is validated against
+ * the current schema and the following are rejected <em>before</em> anything is written, so a
+ * rejected request never leaves the table partially mutated:
+ *
+ * <ul>
+ *   <li>requests that would require more than one core mutation (mixing additions, drops, and
+ *       alterations, since heterogeneous batching is not supported by the core yet);
+ *   <li>requests where two changes target the same column (their order would be lost when collapsed
+ *       into one batch);
+ *   <li>nested (multi-part) column paths, since validation is top-level only.
+ * </ul>
  */
 final class LanceSchemaEvolution {
 
@@ -70,14 +75,16 @@ final class LanceSchemaEvolution {
     }
 
     boolean legacyFormat = LEGACY_FILE_FORMAT_VERSION.equals(dataset.getLanceFileFormatVersion());
-    Set<String> fields = topLevelFieldNames(dataset);
+    Set<String> currentFields = topLevelFieldNames(dataset);
 
-    // Validate the whole request and confirm it compiles to a single core mutation before writing
-    // anything. `fields` tracks the names each change introduces or removes so an ordered request
-    // is checked against the evolving schema.
+    // Validate the whole request against the current schema and confirm it compiles to a single
+    // core mutation before writing anything. Because the batched core operation applies to the
+    // current schema with no ordering between entries, a column may be targeted at most once and
+    // every referenced column is checked against the current schema (not an evolving one).
     Kind kind = null;
+    Set<String> touched = new HashSet<>();
     for (ColumnChange change : changes) {
-      Kind changeKind = validate(change, fields, legacyFormat);
+      Kind changeKind = validate(change, currentFields, touched, legacyFormat);
       if (kind == null) {
         kind = changeKind;
       } else if (kind != changeKind) {
@@ -92,7 +99,7 @@ final class LanceSchemaEvolution {
         applyAdds(dataset, changes);
         break;
       case DROP:
-        applyDrops(dataset, changes);
+        applyDrops(dataset, changes, currentFields);
         break;
       case ALTER:
         applyAlters(dataset, changes);
@@ -103,13 +110,10 @@ final class LanceSchemaEvolution {
   }
 
   private static Kind validate(
-      ColumnChange change, Set<String> topLevelFields, boolean legacyFormat) {
+      ColumnChange change, Set<String> currentFields, Set<String> touched, boolean legacyFormat) {
     if (change instanceof AddColumn) {
       AddColumn add = (AddColumn) change;
-      if (add.fieldNames().length != 1) {
-        throw new UnsupportedOperationException(
-            "Adding nested columns is not supported: " + path(add.fieldNames()));
-      }
+      requireTopLevel(add.fieldNames(), "Adding nested columns");
       if (add.position() != null) {
         throw new UnsupportedOperationException(
             "ADD COLUMN with FIRST/AFTER position is not supported; columns are appended.");
@@ -124,26 +128,32 @@ final class LanceSchemaEvolution {
                 + LEGACY_FILE_FORMAT_VERSION
                 + ") tables.");
       }
-      topLevelFields.add(add.fieldNames()[0]);
+      String name = add.fieldNames()[0];
+      if (currentFields.contains(name)) {
+        throw new UnsupportedOperationException("Cannot add existing column: " + name);
+      }
+      requireDistinct(touched, name);
       return Kind.ADD;
     } else if (change instanceof DeleteColumn) {
       DeleteColumn delete = (DeleteColumn) change;
-      if (topLevelFields.contains(topLevelName(delete.fieldNames()))) {
-        topLevelFields.remove(topLevelName(delete.fieldNames()));
-      } else if (!delete.ifExists()) {
-        throw new UnsupportedOperationException(
-            "Cannot drop missing column: " + path(delete.fieldNames()));
+      requireTopLevel(delete.fieldNames(), "Dropping nested columns");
+      String name = delete.fieldNames()[0];
+      if (!currentFields.contains(name) && !delete.ifExists()) {
+        throw new UnsupportedOperationException("Cannot drop missing column: " + name);
       }
+      requireDistinct(touched, name);
       return Kind.DROP;
     } else if (change instanceof RenameColumn) {
       RenameColumn rename = (RenameColumn) change;
-      requireExists(topLevelFields, rename.fieldNames());
-      topLevelFields.remove(topLevelName(rename.fieldNames()));
-      topLevelFields.add(rename.newName());
+      requireTopLevel(rename.fieldNames(), "Renaming nested columns");
+      requireExists(currentFields, rename.fieldNames()[0]);
+      requireDistinct(touched, rename.fieldNames()[0]);
       return Kind.ALTER;
     } else if (change instanceof UpdateColumnNullability) {
       UpdateColumnNullability updateNull = (UpdateColumnNullability) change;
-      requireExists(topLevelFields, updateNull.fieldNames());
+      requireTopLevel(updateNull.fieldNames(), "Altering nested columns");
+      requireExists(currentFields, updateNull.fieldNames()[0]);
+      requireDistinct(touched, updateNull.fieldNames()[0]);
       return Kind.ALTER;
     } else if (change instanceof UpdateColumnType) {
       UpdateColumnType updateType = (UpdateColumnType) change;
@@ -151,7 +161,7 @@ final class LanceSchemaEvolution {
       // turning a type change into a no-op. Reject it explicitly rather than lying about it.
       throw new UnsupportedOperationException(
           "Changing the type of column '"
-              + path(updateType.fieldNames())
+              + String.join(".", updateType.fieldNames())
               + "' is not supported by the current Lance version.");
     } else {
       throw new UnsupportedOperationException(
@@ -177,15 +187,18 @@ final class LanceSchemaEvolution {
     dataset.addColumns(arrowSchema.getFields());
   }
 
-  private static void applyDrops(Dataset dataset, List<ColumnChange> changes) {
-    Set<String> current = topLevelFieldNames(dataset);
+  private static void applyDrops(
+      Dataset dataset, List<ColumnChange> changes, Set<String> currentFields) {
     List<String> toDrop = new ArrayList<>(changes.size());
     for (ColumnChange change : changes) {
       DeleteColumn delete = (DeleteColumn) change;
-      if (delete.ifExists() && !current.contains(topLevelName(delete.fieldNames()))) {
+      String name = delete.fieldNames()[0];
+      // Validation already guaranteed a non-ifExists drop targets an existing column; skip a
+      // missing IF EXISTS target so the core is never asked to drop a nonexistent column.
+      if (delete.ifExists() && !currentFields.contains(name)) {
         continue;
       }
-      toDrop.add(path(delete.fieldNames()));
+      toDrop.add(name);
     }
     if (!toDrop.isEmpty()) {
       dataset.dropColumns(toDrop);
@@ -193,32 +206,45 @@ final class LanceSchemaEvolution {
   }
 
   private static void applyAlters(Dataset dataset, List<ColumnChange> changes) {
-    // Merge rename and nullability edits that target the same column into one alteration so the
-    // whole request stays a single alterColumns commit.
-    Map<String, ColumnAlteration.Builder> builders = new LinkedHashMap<>();
+    // Each change targets a distinct existing column (enforced during validation), so one
+    // ColumnAlteration per change keeps the request a single alterColumns commit.
+    List<ColumnAlteration> alterations = new ArrayList<>(changes.size());
     for (ColumnChange change : changes) {
       if (change instanceof RenameColumn) {
         RenameColumn rename = (RenameColumn) change;
-        builders
-            .computeIfAbsent(path(rename.fieldNames()), ColumnAlteration.Builder::new)
-            .rename(rename.newName());
+        alterations.add(
+            new ColumnAlteration.Builder(rename.fieldNames()[0]).rename(rename.newName()).build());
       } else if (change instanceof UpdateColumnNullability) {
         UpdateColumnNullability updateNull = (UpdateColumnNullability) change;
-        builders
-            .computeIfAbsent(path(updateNull.fieldNames()), ColumnAlteration.Builder::new)
-            .nullable(updateNull.nullable());
+        alterations.add(
+            new ColumnAlteration.Builder(updateNull.fieldNames()[0])
+                .nullable(updateNull.nullable())
+                .build());
       }
-    }
-    List<ColumnAlteration> alterations = new ArrayList<>(builders.size());
-    for (ColumnAlteration.Builder builder : builders.values()) {
-      alterations.add(builder.build());
     }
     dataset.alterColumns(alterations);
   }
 
-  private static void requireExists(Set<String> topLevelFields, String[] fieldNames) {
-    if (!topLevelFields.contains(topLevelName(fieldNames))) {
-      throw new UnsupportedOperationException("Cannot alter missing column: " + path(fieldNames));
+  private static void requireTopLevel(String[] fieldNames, String action) {
+    if (fieldNames.length != 1) {
+      throw new UnsupportedOperationException(
+          action + " is not supported: " + String.join(".", fieldNames));
+    }
+  }
+
+  private static void requireExists(Set<String> currentFields, String name) {
+    if (!currentFields.contains(name)) {
+      throw new UnsupportedOperationException("Cannot alter missing column: " + name);
+    }
+  }
+
+  private static void requireDistinct(Set<String> touched, String name) {
+    if (!touched.add(name)) {
+      throw new UnsupportedOperationException(
+          "Column '"
+              + name
+              + "' is targeted by more than one change in the same ALTER TABLE; "
+              + "issue the changes as separate statements.");
     }
   }
 
@@ -228,13 +254,5 @@ final class LanceSchemaEvolution {
       names.add(field.getName());
     }
     return names;
-  }
-
-  private static String topLevelName(String[] fieldNames) {
-    return fieldNames[0];
-  }
-
-  private static String path(String[] fieldNames) {
-    return FieldPathUtils.canonicalPath(Arrays.asList(fieldNames));
   }
 }
