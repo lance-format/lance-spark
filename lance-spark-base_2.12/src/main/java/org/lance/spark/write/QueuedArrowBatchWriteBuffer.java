@@ -120,41 +120,6 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
     }
   }
 
-  public QueuedArrowBatchWriteBuffer(
-      BufferAllocator allocator, Schema schema, StructType sparkSchema, int batchSize) {
-    this(
-        allocator,
-        schema,
-        sparkSchema,
-        batchSize,
-        DEFAULT_QUEUE_DEPTH,
-        LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES,
-        null);
-  }
-
-  /** Simplified constructor that uses LanceRuntime allocator and converts Spark schema to Arrow. */
-  public QueuedArrowBatchWriteBuffer(StructType sparkSchema, int batchSize, int queueDepth) {
-    this(
-        sparkSchema,
-        batchSize,
-        queueDepth,
-        false,
-        LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES,
-        null);
-  }
-
-  /** Constructor with large var types support, using LanceRuntime allocator. */
-  public QueuedArrowBatchWriteBuffer(
-      StructType sparkSchema, int batchSize, int queueDepth, boolean useLargeVarTypes) {
-    this(
-        sparkSchema,
-        batchSize,
-        queueDepth,
-        useLargeVarTypes,
-        LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES,
-        null);
-  }
-
   /** Constructor with all tuning parameters, using LanceRuntime allocator. */
   public QueuedArrowBatchWriteBuffer(
       StructType sparkSchema,
@@ -173,7 +138,48 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
         resolver);
   }
 
+  /** Constructor with large var types support, using default max batch bytes. */
   public QueuedArrowBatchWriteBuffer(
+      StructType sparkSchema, int batchSize, int queueDepth, boolean useLargeVarTypes) {
+    this(
+        sparkSchema,
+        batchSize,
+        queueDepth,
+        useLargeVarTypes,
+        LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES,
+        null);
+  }
+
+  public QueuedArrowBatchWriteBuffer(
+      Schema schema,
+      StructType sparkSchema,
+      int batchSize,
+      int queueDepth,
+      long maxBatchBytes,
+      BlobReferenceResolver resolver) {
+    this(
+        LanceRuntime.allocator(),
+        schema,
+        sparkSchema,
+        batchSize,
+        queueDepth,
+        maxBatchBytes,
+        resolver);
+  }
+
+  QueuedArrowBatchWriteBuffer(
+      BufferAllocator allocator, Schema schema, StructType sparkSchema, int batchSize) {
+    this(
+        allocator,
+        schema,
+        sparkSchema,
+        batchSize,
+        DEFAULT_QUEUE_DEPTH,
+        LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES,
+        null);
+  }
+
+  QueuedArrowBatchWriteBuffer(
       BufferAllocator allocator,
       Schema schema,
       StructType sparkSchema,
@@ -189,7 +195,7 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
         null);
   }
 
-  public QueuedArrowBatchWriteBuffer(
+  QueuedArrowBatchWriteBuffer(
       BufferAllocator allocator,
       Schema schema,
       StructType sparkSchema,

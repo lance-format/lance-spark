@@ -435,10 +435,11 @@ public class LanceDataset
 
     if (stagedCommit != null) {
       builder.setStagedCommit(stagedCommit);
-      // Set write mode to OVERWRITE so that Fragment.create() infers schema from the
-      // arrow stream rather than validating against the existing dataset schema. This
-      // allows replacing a table with a different schema.
-      builder.truncate();
+      // For staged replace/create-or-replace, force native write mode OVERWRITE so
+      // Fragment.create() infers schema from the arrow stream instead of validating
+      // against existing dataset schema. Do not mark this as truncate-overwrite,
+      // which is reserved for df.write.mode("overwrite") schema-preservation.
+      builder.forceOverwriteWriteMode();
     }
     return builder;
   }

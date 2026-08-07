@@ -88,8 +88,12 @@ object LanceArrowWriter {
       case (BooleanType, vector: BitVector) => new BooleanWriter(vector)
       case (ByteType, vector: TinyIntVector) => new ByteWriter(vector)
       case (ShortType, vector: SmallIntVector) => new ShortWriter(vector)
+      case (ShortType, vector: UInt1Vector) => new ShortToUnsignedByteWriter(vector)
       case (IntegerType, vector: IntVector) => new IntegerWriter(vector)
+      case (IntegerType, vector: UInt2Vector) => new IntToUnsignedShortWriter(vector)
+      case (IntegerType, vector: UInt4Vector) => new UnsignedIntWriter(vector)
       case (LongType, vector: BigIntVector) => new LongWriter(vector)
+      case (LongType, vector: UInt4Vector) => new LongToUnsignedIntWriter(vector)
       case (LongType, vector: UInt8Vector) => new UnsignedLongWriter(vector)
       case (FloatType, vector)
           if vector.getClass.getName == "org.apache.arrow.vector.Float2Vector" =>
@@ -289,6 +293,42 @@ private[arrow] class UnsignedLongWriter(val valueVector: UInt8Vector)
   override def setNull(): Unit = {}
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
     valueVector.setSafe(count, input.getLong(ordinal))
+  }
+}
+
+/** Writes Spark ShortType data into a UInt1Vector (uint8). */
+private[arrow] class ShortToUnsignedByteWriter(val valueVector: UInt1Vector)
+  extends LanceArrowFieldWriter {
+  override def setNull(): Unit = {}
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    valueVector.setSafe(count, input.getShort(ordinal).toByte)
+  }
+}
+
+/** Writes Spark IntegerType data into a UInt2Vector (uint16). */
+private[arrow] class IntToUnsignedShortWriter(val valueVector: UInt2Vector)
+  extends LanceArrowFieldWriter {
+  override def setNull(): Unit = {}
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    valueVector.setSafe(count, input.getInt(ordinal).toChar)
+  }
+}
+
+/** Writes Spark IntegerType data into a UInt4Vector (uint32). */
+private[arrow] class UnsignedIntWriter(val valueVector: UInt4Vector)
+  extends LanceArrowFieldWriter {
+  override def setNull(): Unit = {}
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    valueVector.setSafe(count, input.getInt(ordinal))
+  }
+}
+
+/** Writes Spark LongType data into a UInt4Vector (uint32). Used when Spark widens uint32 to Long. */
+private[arrow] class LongToUnsignedIntWriter(val valueVector: UInt4Vector)
+  extends LanceArrowFieldWriter {
+  override def setNull(): Unit = {}
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    valueVector.setSafe(count, input.getLong(ordinal).toInt)
   }
 }
 

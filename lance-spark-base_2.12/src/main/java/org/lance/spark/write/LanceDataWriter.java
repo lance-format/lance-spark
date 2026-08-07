@@ -29,6 +29,7 @@ import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.write.DataWriter;
 import org.apache.spark.sql.connector.write.DataWriterFactory;
@@ -235,6 +236,13 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
      */
     private final Map<String, BlobSourceContext> blobSourceContexts;
 
+    /**
+     * JSON representation of the original Arrow Schema from the existing dataset. Used in overwrite
+     * mode to construct the write buffer with the correct schema, avoiding information loss during
+     * Spark to Arrow conversion. Null for append mode or new datasets.
+     */
+    private final String originalArrowSchemaJson;
+
     public WriterFactory(
         StructType schema,
         LanceSparkWriteOptions writeOptions,
@@ -250,7 +258,8 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
           namespaceProperties,
           tableId,
           null,
-          Collections.emptyMap());
+          Collections.emptyMap(),
+          null);
     }
 
     public WriterFactory(
@@ -261,7 +270,8 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
         Map<String, String> namespaceProperties,
         List<String> tableId,
         ShardingSpec shardingSpec,
-        Map<String, BlobSourceContext> blobSourceContexts) {
+        Map<String, BlobSourceContext> blobSourceContexts,
+        String originalArrowSchemaJson) {
       // Everything passed to writer factory should be serializable
       this.schema = schema;
       this.writeOptions = writeOptions;
@@ -275,6 +285,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
               : ShardingSpecSnapshot.from(shardingSpec);
       this.blobSourceContexts =
           blobSourceContexts == null ? Collections.emptyMap() : blobSourceContexts;
+      this.originalArrowSchemaJson = originalArrowSchemaJson;
     }
 
     private BufferAndTask buildBufferAndTask(BlobReferenceResolver resolver) {
@@ -287,17 +298,15 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
           writeOptions.toBuilder().enableStableRowIds(false).build();
       WriteParams params = fragmentWriteOptions.toWriteParams(initialStorageOptions);
 
-      ArrowBatchWriteBuffer writeBuffer;
-      if (useQueuedBuffer) {
-        int queueDepth = writeOptions.getQueueDepth();
-        writeBuffer =
-            new QueuedArrowBatchWriteBuffer(
-                schema, batchSize, queueDepth, useLargeVarTypes, maxBatchBytes, resolver);
-      } else {
-        writeBuffer =
-            new SemaphoreArrowBatchWriteBuffer(
-                schema, batchSize, useLargeVarTypes, maxBatchBytes, resolver);
-      }
+      Schema originalSchema = deserializeAndValidateOriginalSchema();
+      ArrowBatchWriteBuffer writeBuffer =
+          createWriteBuffer(
+              useQueuedBuffer,
+              batchSize,
+              useLargeVarTypes,
+              maxBatchBytes,
+              resolver,
+              originalSchema);
 
       final ArrowBatchWriteBuffer bufferRef = writeBuffer;
       Callable<List<FragmentMetadata>> fragmentCreator =
@@ -311,6 +320,53 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
       FutureTask<List<FragmentMetadata>> task = writeBuffer.createTrackedTask(fragmentCreator);
       Thread thread = new Thread(task);
       return new BufferAndTask(writeBuffer, task, thread);
+    }
+
+    private Schema deserializeAndValidateOriginalSchema() {
+      if (originalArrowSchemaJson == null) {
+        return null;
+      }
+      final Schema originalSchema;
+      try {
+        originalSchema = Schema.fromJSON(originalArrowSchemaJson);
+      } catch (IOException e) {
+        throw new RuntimeException("Failed to deserialize original Arrow schema", e);
+      }
+      // Validate field count matches between Spark schema and original dataset schema.
+      if (originalSchema.getFields().size() != schema.fields().length) {
+        throw new IllegalStateException(
+            String.format(
+                "Schema mismatch: existing dataset has %d fields"
+                    + " but write DataFrame has %d fields."
+                    + " Overwrite must not change the schema.",
+                originalSchema.getFields().size(), schema.fields().length));
+      }
+      return originalSchema;
+    }
+
+    private ArrowBatchWriteBuffer createWriteBuffer(
+        boolean useQueuedBuffer,
+        int batchSize,
+        boolean useLargeVarTypes,
+        long maxBatchBytes,
+        BlobReferenceResolver resolver,
+        Schema originalSchema) {
+      if (useQueuedBuffer) {
+        int queueDepth = writeOptions.getQueueDepth();
+        if (originalSchema != null) {
+          return new QueuedArrowBatchWriteBuffer(
+              originalSchema, schema, batchSize, queueDepth, maxBatchBytes, resolver);
+        }
+        return new QueuedArrowBatchWriteBuffer(
+            schema, batchSize, queueDepth, useLargeVarTypes, maxBatchBytes, resolver);
+      }
+
+      if (originalSchema != null) {
+        return new SemaphoreArrowBatchWriteBuffer(
+            originalSchema, schema, batchSize, maxBatchBytes, resolver);
+      }
+      return new SemaphoreArrowBatchWriteBuffer(
+          schema, batchSize, useLargeVarTypes, maxBatchBytes, resolver);
     }
 
     @Override

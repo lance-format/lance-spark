@@ -2,6 +2,17 @@
 
 Replace all existing data in a table with new data. This operation removes all existing rows and inserts the new data atomically.
 
+## Schema Preservation Semantics
+
+For explicit DataFrame overwrite paths (for example, `mode("overwrite")` and `writeTo(...).overwritePartitions()`), Lance-Spark prefers the existing table's original Arrow schema instead of rebuilding from Spark-expressible types.
+
+This preserves schema-level semantics such as unsigned types, `FixedSizeList`, `FixedSizeBinary`, field nullability, and field metadata.
+
+If the original schema cannot be loaded or is structurally incompatible with the incoming DataFrame schema, the write fails fast to avoid silent schema drift.
+
+!!! note
+    `REPLACE TABLE` and `CREATE OR REPLACE TABLE` are staged-replace operations and may rebuild the target schema. They are not governed by the explicit-overwrite schema-preservation rules above.
+
 ## Basic Overwrite
 
 === "SQL"

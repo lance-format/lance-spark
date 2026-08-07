@@ -174,6 +174,7 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
     private final LanceSparkWriteOptions writeOptions;
     private final StructType schema;
     private boolean overwrite = false;
+    private boolean forceOverwriteWriteMode = false;
     private StagedCommit stagedCommit;
 
     /**
@@ -237,10 +238,18 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
       this.stagedCommit = stagedCommit;
     }
 
+    /**
+     * Force native write mode to OVERWRITE without enabling schema-preservation behavior that is
+     * reserved for explicit truncate overwrite.
+     */
+    public void forceOverwriteWriteMode() {
+      this.forceOverwriteWriteMode = true;
+    }
+
     @Override
     public Write build() {
       LanceSparkWriteOptions options =
-          !overwrite
+          !(overwrite || forceOverwriteWriteMode)
               ? writeOptions
               : writeOptions.toBuilder().writeMode(WriteParams.WriteMode.OVERWRITE).build();
 
