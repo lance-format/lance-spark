@@ -80,10 +80,12 @@ ALTER TABLE users ALTER COLUMN id DROP NOT NULL;
 ```
 
 !!! note
-Column schema evolution operates on top-level columns. When several column changes are given in
-one statement, the whole request is validated first — if any change is unsupported, none is
-applied. The following are **not** currently supported and are rejected before any change is
-written:
+Column schema evolution operates on top-level columns. Each `ALTER TABLE` is committed as a single
+atomic Lance operation, so one statement may batch changes of the same kind (e.g. adding several
+columns), but it may not mix column additions, drops, and alterations, nor combine a column change
+with `TBLPROPERTIES` changes — issue those as separate statements. The whole request is validated
+first, so if any change is unsupported, none is applied. The following are **not** currently
+supported and are rejected before any change is written:
 
 - Adding a column at a specific position (`FIRST`/`AFTER`) — columns are always appended.
 - Adding a column with a `DEFAULT` value — new columns are filled with `NULL`.

@@ -1074,6 +1074,66 @@ public abstract class SparkLanceNamespaceTestBase {
   }
 
   @Test
+  public void testAddMultipleColumnsInOneStatement() throws Exception {
+    String tableName = generateTableName("add_multi");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL)");
+    spark.sql("ALTER TABLE " + fullName + " ADD COLUMNS (age INT, email STRING)");
+
+    List<String> columns = Arrays.asList(spark.table(fullName).schema().fieldNames());
+    assertTrue(columns.contains("age"));
+    assertTrue(columns.contains("email"));
+  }
+
+  @Test
+  public void testAlterTableRejectsMixedColumnChangeKinds() throws Exception {
+    String tableName = generateTableName("mixed_kinds");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+
+    // ADD and DROP compile to different core mutations and cannot be committed atomically together.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    UnsupportedOperationException ex =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () ->
+                catalog.alterTable(
+                    ident,
+                    TableChange.addColumn(new String[] {"added"}, DataTypes.IntegerType),
+                    TableChange.deleteColumn(new String[] {"name"}, false)));
+    assertTrue(ex.getMessage().contains("cannot mix"));
+
+    List<String> columns = Arrays.asList(catalog.loadTable(ident).schema().fieldNames());
+    assertFalse(columns.contains("added"));
+    assertTrue(columns.contains("name"));
+  }
+
+  @Test
+  public void testAlterTableRejectsColumnChangeMixedWithProperties() throws Exception {
+    String tableName = generateTableName("mixed_prop");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL)");
+
+    // A column change and a TBLPROPERTIES change are separate commits, so combining them is
+    // rejected before either is written.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    UnsupportedOperationException ex =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () ->
+                catalog.alterTable(
+                    ident,
+                    TableChange.addColumn(new String[] {"added"}, DataTypes.IntegerType),
+                    TableChange.setProperty("k", "v")));
+    assertTrue(ex.getMessage().contains("TBLPROPERTIES"));
+
+    assertFalse(Arrays.asList(catalog.loadTable(ident).schema().fieldNames()).contains("added"));
+  }
+
+  @Test
   public void testDropColumnIfExistsMissingIsNoOp() throws Exception {
     String tableName = generateTableName("drop_if_exists");
     String fullName = catalogName + ".default." + tableName;

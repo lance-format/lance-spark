@@ -942,9 +942,20 @@ public abstract class BaseLanceNamespaceSparkCatalog
               + " can only be set at table creation.");
     }
 
-    if (propsToSet.isEmpty() && keysToRemove.isEmpty() && columnChanges.isEmpty()) {
+    boolean hasPropertyChange = !propsToSet.isEmpty() || !keysToRemove.isEmpty();
+
+    if (!hasPropertyChange && columnChanges.isEmpty()) {
       // No changes to apply, just return the current table
       return loadTable(ident);
+    }
+
+    // Column schema evolution and property updates commit through separate core mutations, so a
+    // request mixing them cannot be applied atomically. Reject it before writing anything rather
+    // than risk a partially-applied ALTER TABLE.
+    if (hasPropertyChange && !columnChanges.isEmpty()) {
+      throw new UnsupportedOperationException(
+          "A single ALTER TABLE cannot combine column schema evolution with TBLPROPERTIES "
+              + "changes; issue them as separate statements.");
     }
 
     ResolvedTable resolved = resolveIdentifier(ident);
@@ -954,9 +965,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         // Schema-evolution changes commit through the dataset's own handler, which
         // openDatasetBuilder wires for managed versioning when applicable.
         LanceSchemaEvolution.apply(dataset, columnChanges);
-      }
-
-      if (!propsToSet.isEmpty() || !keysToRemove.isEmpty()) {
+      } else {
         // Dataset.updateConfig uses replace semantics (overwrites entire config),
         // so we must read-merge-write to preserve existing properties.
         Map<String, String> merged = new HashMap<>(dataset.getConfig());

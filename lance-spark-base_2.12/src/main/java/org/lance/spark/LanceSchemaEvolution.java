@@ -17,6 +17,7 @@ import org.lance.Dataset;
 import org.lance.schema.ColumnAlteration;
 import org.lance.spark.utils.FieldPathUtils;
 
+import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.connector.catalog.TableChange.AddColumn;
 import org.apache.spark.sql.connector.catalog.TableChange.ColumnChange;
@@ -29,48 +30,79 @@ import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 
+import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
- * Translates Spark {@link ColumnChange} schema evolution requests (produced by {@code ALTER TABLE
- * ADD/DROP/RENAME/ALTER COLUMN}) into the corresponding {@link Dataset} operations.
+ * Translates a Spark {@link ColumnChange} schema-evolution request (produced by {@code ALTER TABLE
+ * ADD/DROP/RENAME/ALTER COLUMN}) into a single atomic {@link Dataset} mutation.
  *
- * <p>The whole ordered request is validated against the current schema first and any unsupported
- * option is rejected <em>before</em> any change is written, so a rejected request never leaves the
- * table partially mutated. Validated changes are then applied in the order Spark supplies them.
+ * <p>To preserve Spark's all-or-nothing {@code alterTable} contract, an accepted request is
+ * committed through exactly one core operation: {@code addColumns}, {@code dropColumns}, or {@code
+ * alterColumns} (each of which commits its whole batch atomically). The request is fully validated
+ * against the current schema, and requests that would require more than one core mutation are
+ * rejected, <em>before</em> anything is written — so a rejected request never leaves the table
+ * partially mutated. Heterogeneous batching (mixing additions, drops, and alterations in one
+ * commit) is not supported by the core yet, so such requests must be issued as separate statements.
  */
 final class LanceSchemaEvolution {
 
   /** Lance file format version string for the legacy ("0.1") format. */
   private static final String LEGACY_FILE_FORMAT_VERSION = "0.1";
 
+  /** The single core mutation an accepted request compiles down to. */
+  private enum Kind {
+    ADD,
+    DROP,
+    ALTER
+  }
+
   private LanceSchemaEvolution() {}
 
   static void apply(Dataset dataset, List<ColumnChange> changes) {
-    boolean legacyFormat = LEGACY_FILE_FORMAT_VERSION.equals(dataset.getLanceFileFormatVersion());
-
-    // Validate the entire request before mutating anything, so a rejected change never leaves the
-    // table partially mutated. Validation runs against a simulated copy of the field set that
-    // tracks the names each change introduces or removes, so ordered requests are checked against
-    // the evolving schema.
-    Set<String> simulated = topLevelFieldNames(dataset);
-    for (ColumnChange change : changes) {
-      validate(change, simulated, legacyFormat);
+    if (changes.isEmpty()) {
+      return;
     }
 
-    // Apply against a fresh live copy so per-change decisions (e.g. DROP COLUMN IF EXISTS) reflect
-    // the schema state at the point each change is applied.
-    Set<String> current = topLevelFieldNames(dataset);
+    boolean legacyFormat = LEGACY_FILE_FORMAT_VERSION.equals(dataset.getLanceFileFormatVersion());
+    Set<String> fields = topLevelFieldNames(dataset);
+
+    // Validate the whole request and confirm it compiles to a single core mutation before writing
+    // anything. `fields` tracks the names each change introduces or removes so an ordered request
+    // is checked against the evolving schema.
+    Kind kind = null;
     for (ColumnChange change : changes) {
-      applyOne(dataset, change, current);
+      Kind changeKind = validate(change, fields, legacyFormat);
+      if (kind == null) {
+        kind = changeKind;
+      } else if (kind != changeKind) {
+        throw new UnsupportedOperationException(
+            "A single ALTER TABLE cannot mix column additions, drops, and alterations; "
+                + "issue them as separate statements.");
+      }
+    }
+
+    switch (kind) {
+      case ADD:
+        applyAdds(dataset, changes);
+        break;
+      case DROP:
+        applyDrops(dataset, changes);
+        break;
+      case ALTER:
+        applyAlters(dataset, changes);
+        break;
+      default:
+        throw new IllegalStateException("Unexpected change kind: " + kind);
     }
   }
 
-  private static void validate(
+  private static Kind validate(
       ColumnChange change, Set<String> topLevelFields, boolean legacyFormat) {
     if (change instanceof AddColumn) {
       AddColumn add = (AddColumn) change;
@@ -93,22 +125,26 @@ final class LanceSchemaEvolution {
                 + ") tables.");
       }
       topLevelFields.add(add.fieldNames()[0]);
+      return Kind.ADD;
     } else if (change instanceof DeleteColumn) {
       DeleteColumn delete = (DeleteColumn) change;
-      if (topLevelFields.contains(topLevelName(delete.fieldNames())) || delete.ifExists()) {
+      if (topLevelFields.contains(topLevelName(delete.fieldNames()))) {
         topLevelFields.remove(topLevelName(delete.fieldNames()));
-      } else {
+      } else if (!delete.ifExists()) {
         throw new UnsupportedOperationException(
             "Cannot drop missing column: " + path(delete.fieldNames()));
       }
+      return Kind.DROP;
     } else if (change instanceof RenameColumn) {
       RenameColumn rename = (RenameColumn) change;
       requireExists(topLevelFields, rename.fieldNames());
       topLevelFields.remove(topLevelName(rename.fieldNames()));
       topLevelFields.add(rename.newName());
+      return Kind.ALTER;
     } else if (change instanceof UpdateColumnNullability) {
       UpdateColumnNullability updateNull = (UpdateColumnNullability) change;
       requireExists(topLevelFields, updateNull.fieldNames());
+      return Kind.ALTER;
     } else if (change instanceof UpdateColumnType) {
       UpdateColumnType updateType = (UpdateColumnType) change;
       // The current lance-core JNI drops the cast target type on the way to Rust, silently
@@ -123,48 +159,61 @@ final class LanceSchemaEvolution {
     }
   }
 
-  private static void applyOne(Dataset dataset, ColumnChange change, Set<String> current) {
-    if (change instanceof AddColumn) {
+  private static void applyAdds(Dataset dataset, List<ColumnChange> changes) {
+    List<StructField> fields = new ArrayList<>(changes.size());
+    for (ColumnChange change : changes) {
       AddColumn add = (AddColumn) change;
-      addColumn(dataset, add);
-      current.add(add.fieldNames()[0]);
-    } else if (change instanceof DeleteColumn) {
+      MetadataBuilder metadataBuilder = new MetadataBuilder();
+      if (add.comment() != null) {
+        metadataBuilder.putString("comment", add.comment());
+      }
+      fields.add(
+          new StructField(
+              add.fieldNames()[0], add.dataType(), add.isNullable(), metadataBuilder.build()));
+    }
+    Schema arrowSchema =
+        LanceArrowUtils.toArrowSchema(
+            new StructType(fields.toArray(new StructField[0])), "UTC", true);
+    dataset.addColumns(arrowSchema.getFields());
+  }
+
+  private static void applyDrops(Dataset dataset, List<ColumnChange> changes) {
+    Set<String> current = topLevelFieldNames(dataset);
+    List<String> toDrop = new ArrayList<>(changes.size());
+    for (ColumnChange change : changes) {
       DeleteColumn delete = (DeleteColumn) change;
       if (delete.ifExists() && !current.contains(topLevelName(delete.fieldNames()))) {
-        return;
+        continue;
       }
-      current.remove(topLevelName(delete.fieldNames()));
-      dataset.dropColumns(Collections.singletonList(path(delete.fieldNames())));
-    } else if (change instanceof RenameColumn) {
-      RenameColumn rename = (RenameColumn) change;
-      dataset.alterColumns(
-          Collections.singletonList(
-              new ColumnAlteration.Builder(path(rename.fieldNames()))
-                  .rename(rename.newName())
-                  .build()));
-      current.remove(topLevelName(rename.fieldNames()));
-      current.add(rename.newName());
-    } else if (change instanceof UpdateColumnNullability) {
-      UpdateColumnNullability updateNull = (UpdateColumnNullability) change;
-      dataset.alterColumns(
-          Collections.singletonList(
-              new ColumnAlteration.Builder(path(updateNull.fieldNames()))
-                  .nullable(updateNull.nullable())
-                  .build()));
+      toDrop.add(path(delete.fieldNames()));
+    }
+    if (!toDrop.isEmpty()) {
+      dataset.dropColumns(toDrop);
     }
   }
 
-  private static void addColumn(Dataset dataset, AddColumn add) {
-    MetadataBuilder metadataBuilder = new MetadataBuilder();
-    if (add.comment() != null) {
-      metadataBuilder.putString("comment", add.comment());
+  private static void applyAlters(Dataset dataset, List<ColumnChange> changes) {
+    // Merge rename and nullability edits that target the same column into one alteration so the
+    // whole request stays a single alterColumns commit.
+    Map<String, ColumnAlteration.Builder> builders = new LinkedHashMap<>();
+    for (ColumnChange change : changes) {
+      if (change instanceof RenameColumn) {
+        RenameColumn rename = (RenameColumn) change;
+        builders
+            .computeIfAbsent(path(rename.fieldNames()), ColumnAlteration.Builder::new)
+            .rename(rename.newName());
+      } else if (change instanceof UpdateColumnNullability) {
+        UpdateColumnNullability updateNull = (UpdateColumnNullability) change;
+        builders
+            .computeIfAbsent(path(updateNull.fieldNames()), ColumnAlteration.Builder::new)
+            .nullable(updateNull.nullable());
+      }
     }
-    StructField field =
-        new StructField(
-            add.fieldNames()[0], add.dataType(), add.isNullable(), metadataBuilder.build());
-    Schema arrowSchema =
-        LanceArrowUtils.toArrowSchema(new StructType(new StructField[] {field}), "UTC", true);
-    dataset.addColumns(arrowSchema.getFields());
+    List<ColumnAlteration> alterations = new ArrayList<>(builders.size());
+    for (ColumnAlteration.Builder builder : builders.values()) {
+      alterations.add(builder.build());
+    }
+    dataset.alterColumns(alterations);
   }
 
   private static void requireExists(Set<String> topLevelFields, String[] fieldNames) {
@@ -175,7 +224,9 @@ final class LanceSchemaEvolution {
 
   private static Set<String> topLevelFieldNames(Dataset dataset) {
     Set<String> names = new LinkedHashSet<>();
-    dataset.getSchema().getFields().forEach(f -> names.add(f.getName()));
+    for (Field field : dataset.getSchema().getFields()) {
+      names.add(field.getName());
+    }
     return names;
   }
 
