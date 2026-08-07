@@ -19,6 +19,7 @@ import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.vector.DateMilliVector;
 import org.apache.arrow.vector.DecimalVector;
 import org.apache.arrow.vector.FixedSizeBinaryVector;
+import org.apache.arrow.vector.LargeVarBinaryVector;
 import org.apache.arrow.vector.LargeVarCharVector;
 import org.apache.arrow.vector.TimeMicroVector;
 import org.apache.arrow.vector.TimeMilliVector;
@@ -62,6 +63,7 @@ public class LanceArrowColumnVector extends ColumnVector {
   private LanceMapAccessor mapAccessor;
   private LanceLargeArrayAccessor largeArrayAccessor;
   private LargeVarCharAccessor largeVarCharAccessor;
+  private LargeVarBinaryAccessor largeVarBinaryAccessor;
   private Float2Accessor float2Accessor;
   private DateMilliAccessor dateMilliAccessor;
   private TimestampUnitAccessor timestampUnitAccessor;
@@ -113,6 +115,8 @@ public class LanceArrowColumnVector extends ColumnVector {
       largeArrayAccessor = new LanceLargeArrayAccessor((LargeListVector) vector);
     } else if (vector instanceof LargeVarCharVector) {
       largeVarCharAccessor = new LargeVarCharAccessor((LargeVarCharVector) vector);
+    } else if (vector instanceof LargeVarBinaryVector) {
+      largeVarBinaryAccessor = new LargeVarBinaryAccessor((LargeVarBinaryVector) vector);
     } else if (vector instanceof TimeStampSecVector) {
       timestampUnitAccessor =
           new TimestampUnitAccessor((TimeStampSecVector) vector, 1_000_000L, 1L);
@@ -188,6 +192,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     if (largeArrayAccessor != null) {
       largeArrayAccessor.close();
     }
+    if (largeVarBinaryAccessor != null) {
+      largeVarBinaryAccessor.close();
+    }
     if (largeVarCharAccessor != null) {
       largeVarCharAccessor.close();
     }
@@ -245,6 +252,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (largeArrayAccessor != null) {
       return largeArrayAccessor.getNullCount() > 0;
+    }
+    if (largeVarBinaryAccessor != null) {
+      return largeVarBinaryAccessor.getNullCount() > 0;
     }
     if (largeVarCharAccessor != null) {
       return largeVarCharAccessor.getNullCount() > 0;
@@ -305,6 +315,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     if (largeArrayAccessor != null) {
       return largeArrayAccessor.getNullCount();
     }
+    if (largeVarBinaryAccessor != null) {
+      return largeVarBinaryAccessor.getNullCount();
+    }
     if (largeVarCharAccessor != null) {
       return largeVarCharAccessor.getNullCount();
     }
@@ -363,6 +376,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (largeArrayAccessor != null) {
       return largeArrayAccessor.isNullAt(rowId);
+    }
+    if (largeVarBinaryAccessor != null) {
+      return largeVarBinaryAccessor.isNullAt(rowId);
     }
     if (largeVarCharAccessor != null) {
       return largeVarCharAccessor.isNullAt(rowId);
@@ -525,6 +541,9 @@ public class LanceArrowColumnVector extends ColumnVector {
   public byte[] getBinary(int rowId) {
     if (fixedSizeBinaryAccessor != null) {
       return fixedSizeBinaryAccessor.getBinary(rowId);
+    }
+    if (largeVarBinaryAccessor != null) {
+      return largeVarBinaryAccessor.getBinary(rowId);
     }
     if (blobStructAccessor != null) {
       return blobStructAccessor.getBlobReference(rowId);
