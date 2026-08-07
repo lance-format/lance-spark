@@ -81,10 +81,14 @@ final class LanceSchemaEvolution {
     // core mutation before writing anything. Because the batched core operation applies to the
     // current schema with no ordering between entries, a column may be targeted at most once and
     // every referenced column is checked against the current schema (not an evolving one).
+    // `occupied` additionally simulates the request in order (removing rename sources, inserting
+    // destinations) so ordered rename semantics — e.g. rejecting a rename whose destination name is
+    // already taken at that step — are preserved even though the core batch itself is unordered.
     Kind kind = null;
     Set<String> touched = new HashSet<>();
+    Set<String> occupied = new LinkedHashSet<>(currentFields);
     for (ColumnChange change : changes) {
-      Kind changeKind = validate(change, currentFields, touched, legacyFormat);
+      Kind changeKind = validate(change, currentFields, touched, occupied, legacyFormat);
       if (kind == null) {
         kind = changeKind;
       } else if (kind != changeKind) {
@@ -110,7 +114,11 @@ final class LanceSchemaEvolution {
   }
 
   private static Kind validate(
-      ColumnChange change, Set<String> currentFields, Set<String> touched, boolean legacyFormat) {
+      ColumnChange change,
+      Set<String> currentFields,
+      Set<String> touched,
+      Set<String> occupied,
+      boolean legacyFormat) {
     if (change instanceof AddColumn) {
       AddColumn add = (AddColumn) change;
       requireTopLevel(add.fieldNames(), "Adding nested columns");
@@ -146,8 +154,21 @@ final class LanceSchemaEvolution {
     } else if (change instanceof RenameColumn) {
       RenameColumn rename = (RenameColumn) change;
       requireTopLevel(rename.fieldNames(), "Renaming nested columns");
-      requireExists(currentFields, rename.fieldNames()[0]);
-      requireDistinct(touched, rename.fieldNames()[0]);
+      String source = rename.fieldNames()[0];
+      requireExists(currentFields, source);
+      requireDistinct(touched, source);
+      // Simulate the rename in request order: the destination must not already be occupied at this
+      // step (by an original column or an earlier rename's destination). This preserves Spark's
+      // ordered semantics even though the core alterColumns batch applies without ordering.
+      occupied.remove(source);
+      if (!occupied.add(rename.newName())) {
+        throw new UnsupportedOperationException(
+            "Cannot rename column '"
+                + source
+                + "' to '"
+                + rename.newName()
+                + "': the target name is already in use.");
+      }
       return Kind.ALTER;
     } else if (change instanceof UpdateColumnNullability) {
       UpdateColumnNullability updateNull = (UpdateColumnNullability) change;
@@ -198,6 +219,7 @@ final class LanceSchemaEvolution {
       if (delete.ifExists() && !currentFields.contains(name)) {
         continue;
       }
+      // Only top-level columns are supported, so the Lance path is the field name verbatim.
       toDrop.add(name);
     }
     if (!toDrop.isEmpty()) {

@@ -1195,6 +1195,41 @@ public abstract class SparkLanceNamespaceTestBase {
   }
 
   @Test
+  public void testAlterTableRejectsRenameToOccupiedName() throws Exception {
+    String tableName = generateTableName("rename_occupied");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (a INT, b INT)");
+
+    // In Spark's ordered semantics, `a -> b` must fail because `b` already exists at that step, so
+    // the whole request is rejected before any mutation.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    assertThrows(
+        UnsupportedOperationException.class,
+        () ->
+            catalog.alterTable(
+                ident,
+                TableChange.renameColumn(new String[] {"a"}, "b"),
+                TableChange.renameColumn(new String[] {"b"}, "c")));
+
+    assertArrayEquals(new String[] {"a", "b"}, catalog.loadTable(ident).schema().fieldNames());
+  }
+
+  @Test
+  public void testDropColumnWithSpecialCharacterName() throws Exception {
+    String tableName = generateTableName("drop_special");
+    String fullName = catalogName + ".default." + tableName;
+
+    // A top-level column name with special characters is passed to the core verbatim.
+    spark.sql("CREATE TABLE " + fullName + " (`weird name` INT, keep INT)");
+
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    catalog.alterTable(ident, TableChange.deleteColumn(new String[] {"weird name"}, false));
+
+    assertArrayEquals(new String[] {"keep"}, catalog.loadTable(ident).schema().fieldNames());
+  }
+
+  @Test
   public void testRenameThenNullabilityOnDistinctColumns() throws Exception {
     String tableName = generateTableName("alter_distinct");
     String fullName = catalogName + ".default." + tableName;
