@@ -45,6 +45,44 @@ CREATE TABLE users (id BIGINT, name STRING)
 ALTER TABLE users SET TBLPROPERTIES ('enable_stable_row_ids' = 'true');
 ```
 
+## ADD COLUMN
+
+Add one or more top-level columns. New columns are appended and filled with `NULL` for existing rows:
+
+```sql
+ALTER TABLE users ADD COLUMN age INT;
+ALTER TABLE users ADD COLUMNS (age INT, email STRING);
+```
+
+## DROP COLUMN
+
+Remove a column from the table:
+
+```sql
+ALTER TABLE users DROP COLUMN age;
+```
+
+## RENAME COLUMN
+
+Rename a column:
+
+```sql
+ALTER TABLE users RENAME COLUMN name TO full_name;
+```
+
+## ALTER COLUMN
+
+Change a column's nullability:
+
+```sql
+ALTER TABLE users ALTER COLUMN id DROP NOT NULL;
+```
+
+!!! note
+Column schema evolution operates on top-level columns. Adding a column at a specific position
+(`FIRST`/`AFTER`) is not supported — columns are always appended. Changing a column's data type
+(`ALTER COLUMN ... TYPE`) and updating a column comment are not currently supported.
+
 ## Rename Table
 
 Rename a table within the same namespace:

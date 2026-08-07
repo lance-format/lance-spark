@@ -916,6 +916,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
   public Table alterTable(Identifier ident, TableChange... changes) throws NoSuchTableException {
     Map<String, String> propsToSet = new HashMap<>();
     Set<String> keysToRemove = new HashSet<>();
+    List<TableChange.ColumnChange> columnChanges = new ArrayList<>();
 
     for (TableChange change : changes) {
       if (change instanceof TableChange.SetProperty) {
@@ -924,11 +925,13 @@ public abstract class BaseLanceNamespaceSparkCatalog
       } else if (change instanceof TableChange.RemoveProperty) {
         TableChange.RemoveProperty removeProp = (TableChange.RemoveProperty) change;
         keysToRemove.add(removeProp.property());
+      } else if (change instanceof TableChange.ColumnChange) {
+        columnChanges.add((TableChange.ColumnChange) change);
       } else {
         throw new UnsupportedOperationException(
             "Unsupported table change type: "
                 + change.getClass().getSimpleName()
-                + ". Only SET/UNSET TBLPROPERTIES is supported.");
+                + ". Only SET/UNSET TBLPROPERTIES and column schema evolution are supported.");
       }
     }
 
@@ -939,7 +942,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
               + " can only be set at table creation.");
     }
 
-    if (propsToSet.isEmpty() && keysToRemove.isEmpty()) {
+    if (propsToSet.isEmpty() && keysToRemove.isEmpty() && columnChanges.isEmpty()) {
       // No changes to apply, just return the current table
       return loadTable(ident);
     }
@@ -947,15 +950,23 @@ public abstract class BaseLanceNamespaceSparkCatalog
     ResolvedTable resolved = resolveIdentifier(ident);
 
     try (Dataset dataset = Utils.openDatasetBuilder(resolved.readOptions).build()) {
-      // Dataset.updateConfig uses replace semantics (overwrites entire config),
-      // so we must read-merge-write to preserve existing properties.
-      Map<String, String> merged = new HashMap<>(dataset.getConfig());
-      merged.putAll(propsToSet);
-      keysToRemove.forEach(merged::remove);
-      boolean managedVersioning =
-          resolved.describeResponse != null
-              && Boolean.TRUE.equals(resolved.describeResponse.getManagedVersioning());
-      updateDatasetConfig(dataset, merged, managedVersioning, resolved.tableIdList);
+      if (!columnChanges.isEmpty()) {
+        // Schema-evolution changes commit through the dataset's own handler, which
+        // openDatasetBuilder wires for managed versioning when applicable.
+        LanceSchemaEvolution.apply(dataset, columnChanges);
+      }
+
+      if (!propsToSet.isEmpty() || !keysToRemove.isEmpty()) {
+        // Dataset.updateConfig uses replace semantics (overwrites entire config),
+        // so we must read-merge-write to preserve existing properties.
+        Map<String, String> merged = new HashMap<>(dataset.getConfig());
+        merged.putAll(propsToSet);
+        keysToRemove.forEach(merged::remove);
+        boolean managedVersioning =
+            resolved.describeResponse != null
+                && Boolean.TRUE.equals(resolved.describeResponse.getManagedVersioning());
+        updateDatasetConfig(dataset, merged, managedVersioning, resolved.tableIdList);
+      }
     }
 
     return loadTable(ident);

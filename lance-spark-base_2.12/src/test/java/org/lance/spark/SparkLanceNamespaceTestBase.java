@@ -31,6 +31,8 @@ import org.apache.spark.sql.connector.catalog.SupportsNamespaces;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.catalog.TableChange;
 import org.apache.spark.sql.connector.catalog.functions.UnboundFunction;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -39,6 +41,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -953,16 +956,100 @@ public abstract class SparkLanceNamespaceTestBase {
     spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
 
     Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    // Updating a column comment is a recognized column change that Lance does not support.
     UnsupportedOperationException ex =
         assertThrows(
             UnsupportedOperationException.class,
             () -> {
               catalog.alterTable(
-                  ident,
-                  TableChange.addColumn(
-                      new String[] {"new_col"}, org.apache.spark.sql.types.DataTypes.StringType));
+                  ident, TableChange.updateColumnComment(new String[] {"id"}, "the id"));
             });
-    assertTrue(ex.getMessage().contains("Only SET/UNSET TBLPROPERTIES is supported"));
+    assertTrue(ex.getMessage().contains("Unsupported column change type: UpdateColumnComment"));
+  }
+
+  @Test
+  public void testAddColumn() throws Exception {
+    String tableName = generateTableName("add_column");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, 'Alice')");
+    spark.sql("ALTER TABLE " + fullName + " ADD COLUMN age INT");
+
+    StructType schema = spark.table(fullName).schema();
+    assertTrue(Arrays.asList(schema.fieldNames()).contains("age"));
+
+    Row row = spark.sql("SELECT id, name, age FROM " + fullName).collectAsList().get(0);
+    assertEquals(1L, row.getLong(0));
+    assertEquals("Alice", row.getString(1));
+    assertTrue(row.isNullAt(2));
+  }
+
+  @Test
+  public void testDropColumn() throws Exception {
+    String tableName = generateTableName("drop_column");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING, age INT)");
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, 'Alice', 30)");
+    spark.sql("ALTER TABLE " + fullName + " DROP COLUMN age");
+
+    StructType schema = spark.table(fullName).schema();
+    assertFalse(Arrays.asList(schema.fieldNames()).contains("age"));
+
+    Row row = spark.sql("SELECT * FROM " + fullName).collectAsList().get(0);
+    assertEquals(2, row.length());
+    assertEquals(1L, row.getLong(0));
+    assertEquals("Alice", row.getString(1));
+  }
+
+  @Test
+  public void testRenameColumn() throws Exception {
+    String tableName = generateTableName("rename_column");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, 'Alice')");
+    spark.sql("ALTER TABLE " + fullName + " RENAME COLUMN name TO full_name");
+
+    StructType schema = spark.table(fullName).schema();
+    assertTrue(Arrays.asList(schema.fieldNames()).contains("full_name"));
+    assertFalse(Arrays.asList(schema.fieldNames()).contains("name"));
+
+    Row row = spark.sql("SELECT id, full_name FROM " + fullName).collectAsList().get(0);
+    assertEquals("Alice", row.getString(1));
+  }
+
+  @Test
+  public void testAlterColumnTypeUnsupported() throws Exception {
+    String tableName = generateTableName("alter_column_type");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id INT NOT NULL, name STRING)");
+
+    // Changing a column type is not supported by the current Lance version; it must fail loudly
+    // rather than silently no-op.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    UnsupportedOperationException ex =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () ->
+                catalog.alterTable(
+                    ident, TableChange.updateColumnType(new String[] {"id"}, DataTypes.LongType)));
+    assertTrue(ex.getMessage().contains("Changing the type of column"));
+  }
+
+  @Test
+  public void testAlterColumnDropNotNull() throws Exception {
+    String tableName = generateTableName("alter_column_nullable");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    assertFalse(spark.table(fullName).schema().apply(0).nullable());
+
+    spark.sql("ALTER TABLE " + fullName + " ALTER COLUMN id DROP NOT NULL");
+
+    assertTrue(spark.table(fullName).schema().apply(0).nullable());
   }
 
   @Test
