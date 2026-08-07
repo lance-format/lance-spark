@@ -131,18 +131,11 @@ public class LanceBatchWrite implements BatchWrite {
     this.blobSourceContexts =
         blobSourceContexts == null ? java.util.Collections.emptyMap() : blobSourceContexts;
 
-    // Always read original schema to preserve unsigned/FSL types on overwrite.
-    // For staged operations, the dataset is managed by StagedCommit.
-    // For non-staged operations, pin the dataset version for OCC.
+    // Explicit overwrite schema-preservation is only for non-staged truncate-overwrite.
+    // Staged create/replace/create-or-replace should not reuse existing schema.
     if (stagedCommit != null) {
       this.writeOptions = writeOptions;
-      Schema fetchedSchema = null;
-      try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
-        fetchedSchema = ds.getSchema();
-      } catch (IllegalArgumentException e) {
-        // New dataset — no original schema to preserve
-      }
-      this.originalArrowSchema = fetchedSchema;
+      this.originalArrowSchema = null;
     } else {
       try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
         this.originalArrowSchema =
@@ -156,10 +149,11 @@ public class LanceBatchWrite implements BatchWrite {
 
   @Override
   public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
-    // In explicit truncate-overwrite mode, pass original schema JSON so executor writes with
-    // correct Arrow types.
+    // In explicit non-staged truncate-overwrite mode, pass original schema JSON so executor writes
+    // with correct Arrow types.
+    boolean isExplicitOverwrite = overwrite && stagedCommit == null;
     String originalSchemaJson = null;
-    if (overwrite && originalArrowSchema != null) {
+    if (isExplicitOverwrite && originalArrowSchema != null) {
       originalSchemaJson = originalArrowSchema.toJson();
     }
     return new LanceDataWriter.WriterFactory(
@@ -192,9 +186,10 @@ public class LanceBatchWrite implements BatchWrite {
     Schema arrowSchema =
         LanceArrowUtils.toArrowSchema(schema, "UTC", true, writeOptions.isUseLargeVarTypes());
     boolean isOverwrite = overwrite;
+    boolean isExplicitOverwrite = overwrite && stagedCommit == null;
 
-    // In overwrite mode, original schema must exist and must remain compatible.
-    if (isOverwrite) {
+    // In explicit non-staged overwrite mode, original schema must exist and remain compatible.
+    if (isExplicitOverwrite) {
       if (originalArrowSchema == null) {
         throw new IllegalStateException(
             "Overwrite requires existing Lance schema, but none was found.");
