@@ -1231,6 +1231,25 @@ public abstract class SparkLanceNamespaceTestBase {
   }
 
   @Test
+  public void testDropColumnWithBacktickNameRejected() throws Exception {
+    String tableName = generateTableName("drop_backtick");
+    String fullName = catalogName + ".default." + tableName;
+
+    // The current core drop API cannot resolve a backtick-containing name, so the request is
+    // rejected before any mutation rather than failing mid-commit.
+    spark.sql("CREATE TABLE " + fullName + " (`a``b` INT, keep INT)");
+
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    UnsupportedOperationException ex =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () -> catalog.alterTable(ident, TableChange.deleteColumn(new String[] {"a`b"}, false)));
+    assertTrue(ex.getMessage().contains("backtick"));
+
+    assertArrayEquals(new String[] {"a`b", "keep"}, catalog.loadTable(ident).schema().fieldNames());
+  }
+
+  @Test
   public void testRenameColumnWithSpecialCharacterName() throws Exception {
     String tableName = generateTableName("rename_special");
     String fullName = catalogName + ".default." + tableName;
