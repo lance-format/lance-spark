@@ -1250,6 +1250,21 @@ public abstract class SparkLanceNamespaceTestBase {
   }
 
   @Test
+  public void testDropColumnIfExistsMissingBacktickNameIsNoOp() throws Exception {
+    String tableName = generateTableName("drop_missing_backtick");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id INT)");
+
+    // IF EXISTS is an existence contract: a missing name is a no-op regardless of whether the core
+    // could represent it, so an absent backtick name must not raise.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    catalog.alterTable(ident, TableChange.deleteColumn(new String[] {"missing`name"}, true));
+
+    assertArrayEquals(new String[] {"id"}, catalog.loadTable(ident).schema().fieldNames());
+  }
+
+  @Test
   public void testRenameColumnWithSpecialCharacterName() throws Exception {
     String tableName = generateTableName("rename_special");
     String fullName = catalogName + ".default." + tableName;

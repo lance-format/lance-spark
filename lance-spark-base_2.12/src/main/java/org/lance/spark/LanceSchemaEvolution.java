@@ -148,17 +148,21 @@ final class LanceSchemaEvolution {
       DeleteColumn delete = (DeleteColumn) change;
       requireTopLevel(delete.fieldNames(), "Dropping nested columns");
       String name = delete.fieldNames()[0];
-      // The current core drop API cannot resolve a column whose name contains a backtick under
-      // either the canonical (escaped) or raw representation, so reject it up front instead of
-      // failing mid-commit with a confusing "field not found".
-      if (name.indexOf('`') >= 0) {
+      // Resolve absence first: DROP COLUMN IF EXISTS on a missing column is a no-op regardless of
+      // how the absent name is spelled, so its representability must not be considered.
+      boolean present = currentFields.contains(name);
+      if (!present) {
+        if (!delete.ifExists()) {
+          throw new UnsupportedOperationException("Cannot drop missing column: " + name);
+        }
+      } else if (name.indexOf('`') >= 0) {
+        // Only an existing column actually reaches dropColumns, and the current core drop API
+        // cannot resolve a backtick-containing name under either the canonical (escaped) or raw
+        // representation. Reject it up front instead of failing mid-commit with "field not found".
         throw new UnsupportedOperationException(
             "Dropping a column whose name contains a backtick is not supported by the current "
                 + "Lance version: "
                 + name);
-      }
-      if (!currentFields.contains(name) && !delete.ifExists()) {
-        throw new UnsupportedOperationException("Cannot drop missing column: " + name);
       }
       requireDistinct(touched, name);
       return Kind.DROP;
