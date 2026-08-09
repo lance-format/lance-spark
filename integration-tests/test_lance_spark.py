@@ -16,7 +16,16 @@ import os
 import time
 import pytest
 from packaging.version import Version
-from pyspark.sql.types import StructType, StructField, IntegerType, StringType, DoubleType, BinaryType
+from pyspark.sql.types import (
+    ArrayType,
+    BinaryType,
+    DoubleType,
+    FloatType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
+)
 
 SPARK_VERSION = Version(os.environ.get("SPARK_VERSION", "3.5"))
 
@@ -1182,6 +1191,19 @@ class TestDDLVectorIndex:
             ) USING lance
             TBLPROPERTIES ('vec.arrow.fixed-size-list.size' = '{self._VECTOR_DIM}')
         """)
+        # Spark 3.4's TableOutputResolver rejects writes from nullable source
+        # columns to NOT NULL target columns at analysis time; 3.5+ downgrades
+        # this to a runtime AssertNotNull. ``createDataFrame(rows, names)``
+        # defaults every field to nullable=True, so pin the schema explicitly
+        # to make the write compatible across all Spark versions.
+        schema = StructType([
+            StructField("id", IntegerType(), nullable=False),
+            StructField(
+                "vec",
+                ArrayType(FloatType(), containsNull=False),
+                nullable=False,
+            ),
+        ])
         for batch in range(self._NUM_BATCHES):
             rows = [
                 (
@@ -1193,7 +1215,7 @@ class TestDDLVectorIndex:
                 )
                 for i in range(self._ROWS_PER_BATCH)
             ]
-            df = spark.createDataFrame(rows, ["id", "vec"])
+            df = spark.createDataFrame(rows, schema)
             df.writeTo(table).append()
 
     @pytest.mark.parametrize("method", ["ivf_flat", "ivf_pq", "ivf_hnsw_pq"])
@@ -1222,7 +1244,10 @@ class TestDDLVectorIndex:
         # ``vector_column`` is required because the table's vector column is
         # ``vec`` (Lance-core defaults to a column named ``vector`` otherwise).
         # VECTOR_SEARCH does not support mixing named and positional arguments,
-        # so pass everything by name.
+        # so pass everything by name — which requires Spark 3.5+'s
+        # NamedArgumentExpression (SPARK-43922). Skip on 3.4.
+        if SPARK_VERSION < Version("3.5"):
+            return
         rows = spark.sql(f"""
             SELECT id, _distance FROM VECTOR_SEARCH(
                 table => '{table}',
