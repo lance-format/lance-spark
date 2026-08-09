@@ -18,10 +18,10 @@ import org.lance.index.IndexCriteria;
 import org.lance.index.IndexDescription;
 import org.lance.index.IndexType;
 import org.lance.index.OptimizeOptions;
-import org.lance.spark.LanceSparkReadOptions;
 import org.lance.ipc.FullTextQuery;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.FieldPathUtils;
 import org.lance.spark.utils.Utils;
 
