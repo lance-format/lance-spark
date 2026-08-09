@@ -111,7 +111,18 @@ def _assert_lance_index_metadata(spark, table_name, index_name, expected_type):
     metadata = _lance_index_metadata(spark, table_name, index_name)
     if metadata is None:
         return None
-    assert metadata["index_type"] == expected_type
+    # lance-core empirically surfaces some IVF families as the umbrella VECTOR
+    # rather than the concrete IVF_* subtype (mirrors
+    # BaseAddVectorIndexTest.checkVectorIndex in the Java test suite). Accept
+    # either the concrete type or VECTOR for the IVF_* family.
+    actual_type = metadata["index_type"]
+    if expected_type.startswith("IVF_"):
+        assert actual_type == expected_type or actual_type == "VECTOR", (
+            f"Unexpected index_type '{actual_type}' for {index_name} "
+            f"(expected '{expected_type}' or 'VECTOR')"
+        )
+    else:
+        assert actual_type == expected_type
     assert metadata["index_details_present"]
     assert metadata["index_details_length"] > 0
     return metadata
@@ -1169,7 +1180,7 @@ class TestDDLVectorIndex:
                 id INT NOT NULL,
                 vec ARRAY<FLOAT> NOT NULL
             ) USING lance
-            TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '{self._VECTOR_DIM}')
+            TBLPROPERTIES ('vec.arrow.fixed-size-list.size' = '{self._VECTOR_DIM}')
         """)
         for batch in range(self._NUM_BATCHES):
             rows = [
@@ -1208,9 +1219,16 @@ class TestDDLVectorIndex:
         _assert_lance_index_metadata(spark, table, "idx_vec", method.upper())
 
         # Sanity: index-backed VECTOR_SEARCH returns the exact-zero row first.
+        # ``vector_column`` is required because the table's vector column is
+        # ``vec`` (Lance-core defaults to a column named ``vector`` otherwise).
+        # VECTOR_SEARCH does not support mixing named and positional arguments,
+        # so pass everything by name.
         rows = spark.sql(f"""
             SELECT id, _distance FROM VECTOR_SEARCH(
-                '{table}', {self._zero_vector_sql()}, 2)
+                table => '{table}',
+                query_vector => {self._zero_vector_sql()},
+                k => 2,
+                vector_column => 'vec')
             ORDER BY _distance, id
         """).collect()
         assert len(rows) == 2
@@ -1274,7 +1292,7 @@ class TestDDLVectorIndex:
                 id INT NOT NULL,
                 vec ARRAY<FLOAT> NOT NULL
             ) USING lance
-            TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '{self._VECTOR_DIM}')
+            TBLPROPERTIES ('vec.arrow.fixed-size-list.size' = '{self._VECTOR_DIM}')
         """)
 
         with pytest.raises(Exception) as excinfo:
