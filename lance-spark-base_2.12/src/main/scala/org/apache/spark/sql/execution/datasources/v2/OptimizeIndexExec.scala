@@ -22,6 +22,8 @@ import org.lance.index.OptimizeOptions
 import org.lance.spark.LanceDataset
 import org.lance.spark.utils.Utils
 
+import java.util.Locale
+
 import scala.collection.JavaConverters._
 
 /**
@@ -29,17 +31,18 @@ import scala.collection.JavaConverters._
  *
  * Incrementally merges unindexed (newly-appended) fragments into existing indexes via lance-core's
  * optimizeIndices API. This is distinct from CREATE INDEX, which performs a full distributed
- * rebuild over all fragments. When indexName is empty, all indexes are optimized. This runs on the
- * driver (single node).
+ * rebuild over all fragments. When indexName is empty, all user indexes are optimized. This runs on
+ * the driver (single node).
  *
  * Supported WITH options (option names are case-insensitive):
  * <ul>
- *   <li>{@code retrain} (boolean, default false): rebuild the index from its source data instead
- *       of an incremental merge. Applies to whichever index is targeted; useful when the data
- *       distribution has shifted. This is still cheaper than dropping and re-creating the index.
  *   <li>{@code num_indices_to_merge} (integer &gt;= 0, default core-defined): number of delta
  *       indices to merge per index; 0 creates a new delta index instead of merging into the base.
  * </ul>
+ *
+ * <p>The {@code retrain} option is intentionally not exposed here: in lance-core it is a
+ * v3-vector-index rebuild and has no effect for the scalar indexes this incremental command
+ * targets. Use {@code Dataset.optimizeIndices} in the SDK to retrain vector indexes.
  */
 case class OptimizeIndexExec(
     catalog: TableCatalog,
@@ -49,17 +52,17 @@ case class OptimizeIndexExec(
 
   override def output: Seq[Attribute] = OptimizeIndexOutputType.SCHEMA
 
-  private val RETRAIN = "retrain"
   private val NUM_INDICES_TO_MERGE = "num_indices_to_merge"
-  private val ALLOWED_OPTIONS = Set(RETRAIN, NUM_INDICES_TO_MERGE)
+  private val ALLOWED_OPTIONS = Set(NUM_INDICES_TO_MERGE)
 
   /**
-   * Validates the WITH options and builds the core OptimizeOptions. Option names are matched
-   * case-insensitively; unknown names, duplicates, wrong value types, and out-of-range integers are
-   * rejected rather than silently ignored or reinterpreted.
+   * Validates the WITH options and builds the core OptimizeOptions. Option names are normalized
+   * with {@code Locale.ROOT} (locale-independent) and matched case-insensitively; unknown names,
+   * duplicates, wrong value types, and out-of-range integers are rejected rather than silently
+   * ignored or reinterpreted.
    */
   private def buildOptions(): OptimizeOptions = {
-    val normalized = args.map(arg => (arg.name.toLowerCase, arg))
+    val normalized = args.map(arg => (arg.name.toLowerCase(Locale.ROOT), arg))
 
     val unknown = normalized.map(_._1).filterNot(ALLOWED_OPTIONS.contains)
     if (unknown.nonEmpty) {
@@ -76,15 +79,6 @@ case class OptimizeIndexExec(
 
     val builder = OptimizeOptions.builder()
     indexName.foreach(name => builder.indexNames(List(name).asJava))
-
-    byName.get(RETRAIN).foreach { occurrences =>
-      occurrences.head._2.value match {
-        case b: java.lang.Boolean => builder.retrain(b)
-        case other =>
-          throw new IllegalArgumentException(
-            s"OPTIMIZE INDEX option '$RETRAIN' expects a boolean, got: $other")
-      }
-    }
 
     byName.get(NUM_INDICES_TO_MERGE).foreach { occurrences =>
       occurrences.head._2.value match {
@@ -117,14 +111,20 @@ case class OptimizeIndexExec(
     val dataset = Utils.openDatasetBuilder(readOptions).build()
     try {
       // lance-core exact-matches indexNames and treats an empty match set as a successful no-op,
-      // so a typo would otherwise be reported as completed maintenance. Validate up front that an
-      // explicitly named index exists before optimizing.
+      // so a typo (or a system-index name that core filters out) would otherwise be reported as
+      // completed maintenance. Validate up front against the user-optimizable index set (the same
+      // system-index filtering SHOW INDEXES uses), and reject system indexes explicitly.
       indexName.foreach { name =>
-        val existing = dataset.listIndexes().asScala
-        if (!existing.contains(name)) {
+        if (LanceSystemIndex.isSystemIndex(name)) {
+          throw new IllegalArgumentException(
+            s"Index '$name' is a Lance system index and cannot be optimized.")
+        }
+        val userIndexes =
+          dataset.listIndexes().asScala.filterNot(LanceSystemIndex.isSystemIndex)
+        if (!userIndexes.contains(name)) {
           throw new IllegalArgumentException(
             s"Index '$name' does not exist on table ${ident.name()}. "
-              + s"Existing indexes: ${existing.toSeq.sorted.mkString(", ")}")
+              + s"Existing indexes: ${userIndexes.toSeq.sorted.mkString(", ")}")
         }
       }
       dataset.optimizeIndices(options)

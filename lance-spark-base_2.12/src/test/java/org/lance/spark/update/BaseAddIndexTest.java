@@ -777,8 +777,8 @@ public abstract class BaseAddIndexTest {
   }
 
   /**
-   * OPTIMIZE INDEX option names are case-insensitive: an unquoted (upper-cased) RETRAIN option is
-   * applied rather than silently ignored.
+   * OPTIMIZE INDEX option names are normalized locale-independently and matched case-insensitively:
+   * an unquoted (upper-cased) option name is recognized rather than rejected as unknown.
    */
   @Test
   public void testOptimizeIndexOptionNameCaseInsensitive() {
@@ -788,10 +788,12 @@ public abstract class BaseAddIndexTest {
         String.format(
             "alter table %s create index idx_ci using zonemap (id) with (train=false)", fullTable));
 
-    // RETRAIN (unquoted -> upper-cased by the parser) must be recognized and not rejected/ignored.
+    // NUM_INDICES_TO_MERGE (unquoted -> upper-cased by the parser) must be recognized, not
+    // rejected.
     Dataset<Row> result =
         spark.sql(
-            String.format("alter table %s optimize index idx_ci with (RETRAIN = true)", fullTable));
+            String.format(
+                "alter table %s optimize index idx_ci with (NUM_INDICES_TO_MERGE = 1)", fullTable));
     Assertions.assertEquals("optimized", result.collectAsList().get(0).getString(1));
 
     org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
@@ -804,7 +806,7 @@ public abstract class BaseAddIndexTest {
               .mapToInt(Integer::intValue)
               .sum();
       Assertions.assertEquals(
-          fragmentCount, coveredFragments, "Expected retrain to cover all fragments");
+          fragmentCount, coveredFragments, "Expected OPTIMIZE INDEX to cover all fragments");
     } finally {
       lanceDataset.close();
     }
@@ -826,6 +828,71 @@ public abstract class BaseAddIndexTest {
                 .sql(
                     String.format(
                         "alter table %s optimize index idx_uk with (bogus = true)", fullTable))
+                .collect());
+  }
+
+  /**
+   * OPTIMIZE INDEX rejects the {@code retrain} option: it is a vector-index rebuild in lance-core
+   * and is not exposed through this incremental SQL command.
+   */
+  @Test
+  public void testOptimizeIndexRetrainOptionRejected() {
+    prepareDataset();
+
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_rt using zonemap (id) with (train=false)", fullTable));
+
+    Assertions.assertThrows(
+        Exception.class,
+        () ->
+            spark
+                .sql(
+                    String.format(
+                        "alter table %s optimize index idx_rt with (retrain = true)", fullTable))
+                .collect());
+  }
+
+  /**
+   * OPTIMIZE INDEX on a Lance system index (e.g. {@code __lance_frag_reuse}) fails instead of
+   * silently reporting success. lance-core filters system indexes before optimizing, so without
+   * this guard the executor would emit {@code optimized} for a no-op.
+   */
+  @Test
+  public void testOptimizeIndexSystemIndexRejected() {
+    prepareDataset();
+
+    // Create one full-coverage segment, then OPTIMIZE with deferred remap to produce the
+    // __lance_frag_reuse system index (mirrors testShowIndexesFiltersFragmentReuseIndex).
+    org.lance.index.IndexParams indexParams =
+        org.lance.index.IndexParams.builder()
+            .setScalarIndexParams(org.lance.index.scalar.ScalarIndexParams.create("BTREE"))
+            .build();
+    try (org.lance.Dataset dataset = org.lance.Dataset.open().uri(tableDir).build()) {
+      dataset.createIndex(
+          org.lance.index.IndexOptions.builder(List.of("id"), IndexType.BTREE, indexParams)
+              .replace(true)
+              .train(true)
+              .withIndexName("test_index")
+              .build());
+    }
+    spark.sql(
+        String.format(
+            "optimize %s with (target_rows_per_fragment=20000, defer_index_remap=true)",
+            fullTable));
+
+    try (org.lance.Dataset dataset = org.lance.Dataset.open().uri(tableDir).build()) {
+      Assertions.assertTrue(
+          dataset.getIndexes().stream()
+              .anyMatch(index -> "__lance_frag_reuse".equalsIgnoreCase(index.name())),
+          "Expected a fragment-reuse system index to exist for this test");
+    }
+
+    Assertions.assertThrows(
+        Exception.class,
+        () ->
+            spark
+                .sql(String.format("alter table %s optimize index __lance_frag_reuse", fullTable))
                 .collect());
   }
 

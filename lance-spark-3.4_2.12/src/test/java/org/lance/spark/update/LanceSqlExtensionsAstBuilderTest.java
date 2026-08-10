@@ -179,19 +179,18 @@ public class LanceSqlExtensionsAstBuilderTest {
 
   @Test
   public void testOptimizeIndexWithArgs() {
+    // The grammar accepts arbitrary named arguments; option validation happens in the executor.
     // The unit-test lexer sees raw input (no UpperCaseCharStream), so its IDENTIFIER rule only
-    // matches [A-Z]; backtick-quote the lowercase argument names so they tokenize here.
+    // matches [A-Z]; backtick-quote the lowercase argument name so it tokenizes here.
     LanceSqlExtensionsParser parser =
         createParser(
-            "ALTER TABLE CATALOG.TBL OPTIMIZE INDEX MY_IDX WITH (`retrain` = TRUE, `num_indices_to_merge` = 2)");
+            "ALTER TABLE CATALOG.TBL OPTIMIZE INDEX MY_IDX WITH (`num_indices_to_merge` = 2)");
     OptimizeIndex plan = (OptimizeIndex) astBuilder.visitSingleStatement(parser.singleStatement());
 
     assertEquals("MY_IDX", plan.indexName().get());
-    assertEquals(2, plan.args().size());
-    assertEquals("retrain", plan.args().apply(0).name());
-    assertEquals(true, plan.args().apply(0).value());
-    assertEquals("num_indices_to_merge", plan.args().apply(1).name());
-    assertEquals(2L, plan.args().apply(1).value());
+    assertEquals(1, plan.args().size());
+    assertEquals("num_indices_to_merge", plan.args().apply(0).name());
+    assertEquals(2L, plan.args().apply(0).value());
   }
 
   @Test
