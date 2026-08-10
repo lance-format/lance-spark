@@ -115,6 +115,10 @@ case class AddIndexExec(
     }
 
     val numSegmentsOpt = args.find(_.name == "num_segments")
+    if (numSegmentsOpt.isDefined && btreeBuildMode.contains("range")) {
+      throw new IllegalArgumentException(
+        "num_segments is only supported for BTREE indexes with build_mode='fragment'")
+    }
     if (numSegmentsOpt.isDefined && scalarSegmentIndexType.isEmpty) {
       throw new IllegalArgumentException(
         s"num_segments is not supported for ${indexType.name()} indexes")

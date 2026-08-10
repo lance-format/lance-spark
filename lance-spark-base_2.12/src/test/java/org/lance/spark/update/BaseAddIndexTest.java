@@ -827,6 +827,24 @@ public abstract class BaseAddIndexTest {
   }
 
   @Test
+  public void testBTreeRangeRejectsNumSegments() {
+    prepareDataset();
+    Exception failure =
+        Assertions.assertThrows(
+            Exception.class,
+            () ->
+                spark.sql(
+                    String.format(
+                        "alter table %s create index idx_btree_range_seg using btree (id) "
+                            + "with (build_mode='range', num_segments=3)",
+                        fullTable)));
+    Assertions.assertTrue(
+        hasMessageInCauseChain(
+            failure, "num_segments is only supported for BTREE indexes with build_mode='fragment'"),
+        "Expected range-mode BTree to reject num_segments, got: " + failure);
+  }
+
+  @Test
   public void testNumSegmentsRejectsZeroAndNegative() {
     prepareDataset();
     Assertions.assertThrows(
