@@ -276,9 +276,17 @@ to scanning the data until it is populated. There are two ways to populate it:
         -- optimize all indexes on the table
         ALTER TABLE lance.db.users OPTIMIZE INDEX;
 
-        -- retrain from scratch instead of an incremental merge
+        -- retrain from source data instead of an incremental merge
         ALTER TABLE lance.db.users OPTIMIZE INDEX idx_id WITH (retrain = true);
         ```
+
+    A named index must already exist; optimizing a missing index raises an error rather than
+    silently succeeding. Supported `WITH` options (names are case-insensitive):
+
+    | Option | Type | Description |
+    |--------|------|-------------|
+    | `retrain` | Boolean (default `false`) | Rebuild the index from its source data instead of an incremental merge. Useful after the data distribution shifts; still cheaper than dropping and re-creating. |
+    | `num_indices_to_merge` | Integer >= 0 (default core-defined) | Number of delta indices to merge per index; `0` creates a new delta index instead of merging into the base. |
 
     The same operation is available in the SDK via `Dataset.optimizeIndices`:
 

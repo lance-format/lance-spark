@@ -761,6 +761,75 @@ public abstract class BaseAddIndexTest {
   }
 
   /**
+   * OPTIMIZE INDEX on a non-existent index name fails instead of silently reporting success (which
+   * would make a typo indistinguishable from completed maintenance).
+   */
+  @Test
+  public void testOptimizeIndexMissingNameFails() {
+    prepareDataset();
+
+    Assertions.assertThrows(
+        Exception.class,
+        () ->
+            spark
+                .sql(String.format("alter table %s optimize index missing_idx", fullTable))
+                .collect());
+  }
+
+  /**
+   * OPTIMIZE INDEX option names are case-insensitive: an unquoted (upper-cased) RETRAIN option is
+   * applied rather than silently ignored.
+   */
+  @Test
+  public void testOptimizeIndexOptionNameCaseInsensitive() {
+    prepareDataset();
+
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_ci using zonemap (id) with (train=false)", fullTable));
+
+    // RETRAIN (unquoted -> upper-cased by the parser) must be recognized and not rejected/ignored.
+    Dataset<Row> result =
+        spark.sql(
+            String.format("alter table %s optimize index idx_ci with (RETRAIN = true)", fullTable));
+    Assertions.assertEquals("optimized", result.collectAsList().get(0).getString(1));
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int fragmentCount = lanceDataset.getFragments().size();
+      int coveredFragments =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> "idx_ci".equals(index.name()))
+              .map(index -> index.fragments().orElse(Collections.emptyList()).size())
+              .mapToInt(Integer::intValue)
+              .sum();
+      Assertions.assertEquals(
+          fragmentCount, coveredFragments, "Expected retrain to cover all fragments");
+    } finally {
+      lanceDataset.close();
+    }
+  }
+
+  /** OPTIMIZE INDEX rejects unknown WITH options rather than silently ignoring them. */
+  @Test
+  public void testOptimizeIndexUnknownOptionFails() {
+    prepareDataset();
+
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_uk using zonemap (id) with (train=false)", fullTable));
+
+    Assertions.assertThrows(
+        Exception.class,
+        () ->
+            spark
+                .sql(
+                    String.format(
+                        "alter table %s optimize index idx_uk with (bogus = true)", fullTable))
+                .collect());
+  }
+
+  /**
    * A deferred ZONEMAP can be populated by re-running CREATE INDEX (eager): the distributed segment
    * build replaces the empty index and covers all fragments.
    */
