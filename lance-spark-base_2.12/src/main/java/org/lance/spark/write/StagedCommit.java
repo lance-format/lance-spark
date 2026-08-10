@@ -53,7 +53,7 @@ public class StagedCommit {
   // The non-staged path (LanceBatchWrite) uses boxed Boolean because null means
   // "user didn't specify" and lets lance-core inherit the flag from the manifest.
   private boolean enableStableRowIds;
-  private final String fileFormatVersion;
+  private String fileFormatVersion;
   private List<FragmentMetadata> fragments;
   private Schema schema;
   private ShardingSpec shardingSpec;
@@ -114,6 +114,10 @@ public class StagedCommit {
     this.enableStableRowIds = enableStableRowIds;
   }
 
+  public void setFileFormatVersion(String fileFormatVersion) {
+    this.fileFormatVersion = fileFormatVersion;
+  }
+
   public void setShardingSpec(ShardingSpec shardingSpec) {
     this.shardingSpec = shardingSpec;
   }
@@ -134,6 +138,11 @@ public class StagedCommit {
   /** Returns the current storage options. Visible for testing. */
   Map<String, String> getStorageOptions() {
     return storageOptions;
+  }
+
+  /** Returns the current file format version. Visible for testing. */
+  String getFileFormatVersion() {
+    return fileFormatVersion;
   }
 
   /** Performs the actual commit using the stored dataset and fragments. */

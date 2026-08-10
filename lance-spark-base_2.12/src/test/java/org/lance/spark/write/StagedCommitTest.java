@@ -169,6 +169,37 @@ public class StagedCommitTest {
   }
 
   @Test
+  public void testCommitNewTableWithFileFormatVersion(TestInfo testInfo) {
+    String datasetUri =
+        TestUtils.getDatasetUri(tempDir.toString(), testInfo.getTestMethod().get().getName());
+    StagedCommit commit =
+        StagedCommit.forNewTable(
+            ARROW_SCHEMA,
+            datasetUri,
+            StagedCommitOptions.pathBased(Collections.emptyMap(), false, "2.1"));
+    commit.commit();
+    try (Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+      assertEquals("2.1", dataset.getLanceFileFormatVersion());
+    }
+  }
+
+  @Test
+  public void testSetFileFormatVersionOverridesStageTime(TestInfo testInfo) {
+    String datasetUri =
+        TestUtils.getDatasetUri(tempDir.toString(), testInfo.getTestMethod().get().getName());
+    StagedCommit commit =
+        StagedCommit.forNewTable(
+            ARROW_SCHEMA,
+            datasetUri,
+            StagedCommitOptions.pathBased(Collections.emptyMap(), false, "2.0"));
+    commit.setFileFormatVersion("2.1");
+    commit.commit();
+    try (Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+      assertEquals("2.1", dataset.getLanceFileFormatVersion());
+    }
+  }
+
+  @Test
   public void testMergeStorageOptionsAcceptsUnmodifiableBaseMap() {
     // Path-based staged creates pass catalogConfig.getStorageOptions() directly, which
     // LanceSparkCatalogConfig wraps in Collections.unmodifiableMap(...). Without a defensive
