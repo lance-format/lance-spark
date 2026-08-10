@@ -78,6 +78,30 @@ public class LanceStatisticsTest {
   }
 
   @Test
+  public void testEstimatePostPruningByRowsHandlesUnevenFragments() {
+    LanceStatistics stats = LanceStatistics.estimatePostPruningByRows(1_000_020, 10_000_200, 20);
+
+    assertEquals(20, stats.numRows().getAsLong());
+    assertEquals(200, stats.sizeInBytes().getAsLong());
+  }
+
+  @Test
+  public void testEstimatePostPruningByRowsKeepsEmptyDatasetSize() {
+    LanceStatistics stats = LanceStatistics.estimatePostPruningByRows(0, 128, 0);
+
+    assertEquals(0, stats.numRows().getAsLong());
+    assertEquals(128, stats.sizeInBytes().getAsLong());
+  }
+
+  @Test
+  public void testEstimatePostPruningByRowsWithNoSurvivors() {
+    LanceStatistics stats = LanceStatistics.estimatePostPruningByRows(100, 1_000, 0);
+
+    assertEquals(0, stats.numRows().getAsLong());
+    assertEquals(0, stats.sizeInBytes().getAsLong());
+  }
+
+  @Test
   public void testEstimateProjectedScalesByColumnWidthRatio() {
     // Full schema has 9 columns; project 3 of equal width → size should scale by 3/9.
     // 24_000_000 full bytes × (3×8)/(9×8) = 8_000_000.

@@ -251,9 +251,13 @@ public class LanceScanBuilder
       long projectedRows = summary.getTotalRows();
       long projectedFullSize = summary.getTotalFilesSize();
       if (survivingFragmentIds != null && !liveFragmentIds.isEmpty()) {
-        double ratio = (double) survivingFragmentIds.size() / liveFragmentIds.size();
-        projectedRows = (long) (projectedRows * ratio);
-        projectedFullSize = (long) (projectedFullSize * ratio);
+        long survivingRows =
+            survivingFragmentIds.stream().mapToLong(scanPlan.getFragmentRowCounts()::get).sum();
+        LanceStatistics postPruning =
+            LanceStatistics.estimatePostPruningByRows(
+                summary.getTotalRows(), summary.getTotalFilesSize(), survivingRows);
+        projectedRows = postPruning.numRows().getAsLong();
+        projectedFullSize = postPruning.sizeInBytes().getAsLong();
       }
       LanceStatistics statistics =
           LanceStatistics.estimateProjected(projectedRows, projectedFullSize, fullSchema, schema);
