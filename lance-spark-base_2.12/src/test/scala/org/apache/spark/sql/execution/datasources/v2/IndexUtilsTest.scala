@@ -173,6 +173,20 @@ class IndexUtilsTest {
     }
   }
 
+  @Test
+  def buildIndexType_ftsAndInvertedReturnInverted(): Unit = {
+    assertEquals(IndexType.INVERTED, IndexUtils.buildIndexType("fts"))
+    assertEquals(IndexType.INVERTED, IndexUtils.buildIndexType("FTS"))
+    assertEquals(IndexType.INVERTED, IndexUtils.buildIndexType("inverted"))
+    assertEquals(IndexType.INVERTED, IndexUtils.buildIndexType("INVERTED"))
+  }
+
+  @Test
+  def buildScalarIndexParamType_ftsAndInvertedReturnInverted(): Unit = {
+    assertEquals("inverted", IndexUtils.buildScalarIndexParamType("fts"))
+    assertEquals("inverted", IndexUtils.buildScalarIndexParamType("inverted"))
+  }
+
   // From upstream #740: exercises every scalar-segment method's mapping to IndexType
   // AND the core scalar-plugin param-type name (which uses "labellist" / "bloomfilter"
   // spellings that don't match either the SQL method names or the enum names).
@@ -184,7 +198,9 @@ class IndexUtilsTest {
       ("label_list", IndexType.LABEL_LIST, "labellist"),
       ("ngram", IndexType.NGRAM, "ngram"),
       ("bloomfilter", IndexType.BLOOM_FILTER, "bloomfilter"),
-      ("rtree", IndexType.RTREE, "rtree"))
+      ("rtree", IndexType.RTREE, "rtree"),
+      ("fts", IndexType.INVERTED, "inverted"),
+      ("inverted", IndexType.INVERTED, "inverted"))
 
     expected.foreach { case (method, indexType, coreParamType) =>
       Seq(method, method.toUpperCase).foreach { spelling =>
@@ -231,6 +247,7 @@ class IndexUtilsTest {
       IndexType.NGRAM,
       IndexType.BLOOM_FILTER,
       IndexType.RTREE,
+      IndexType.INVERTED,
       IndexType.IVF_FLAT,
       IndexType.IVF_PQ,
       IndexType.IVF_SQ,
@@ -245,7 +262,6 @@ class IndexUtilsTest {
   @Test
   def useLogicalSegmentCommitFalseForUnsupported(): Unit = {
     assertFalse(IndexUtils.useLogicalSegmentCommit(IndexType.BTREE))
-    assertFalse(IndexUtils.useLogicalSegmentCommit(IndexType.INVERTED))
     // IVF_HNSW_FLAT is unsupported in the first pass: lance-core Java
     // VectorIndexParams.Builder.build() rejects HNSW without a PQ/SQ quantizer.
     assertFalse(IndexUtils.useLogicalSegmentCommit(IndexType.IVF_HNSW_FLAT))

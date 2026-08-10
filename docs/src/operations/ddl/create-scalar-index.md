@@ -32,6 +32,7 @@ The following scalar index methods are supported:
 | `bloomfilter` | Bloom filter index for approximate membership pruning.                        |
 | `rtree`       | R-tree index for GeoArrow geometry columns.                                   |
 | `fts`         | Full-text search (inverted) index for text search on string columns.          |
+| `inverted`    | Alias for `fts`; creates the same full-text inverted index.                   |
 
 ## Options
 
@@ -47,8 +48,8 @@ These options apply to scalar index methods (`btree`, `zonemap`, `fts`):
 
 ### Distributed Index Options
 
-The distributed build used by `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, and
-`rtree` supports:
+The distributed build used by `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, `rtree`,
+and `fts` (or `inverted`) supports:
 
 | Option         | Type    | Description                                                                                                                                                                                                 |
 |----------------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -73,9 +74,9 @@ For the `btree` method, the following options are supported:
 | `rows_per_range` | Long   | The number of rows per range when built using range mode. Default is 1000000.                                                                                                                            |
 
 
-### FTS Options
+### FTS / Inverted Options
 
-For the `fts` method, the following options are required:
+For the `fts` method (or its `inverted` alias), the following options are required:
 
 | Option             | Type    | Description                                                    |
 |--------------------|---------|----------------------------------------------------------------|
@@ -104,7 +105,7 @@ Lance FTS index format v2 is selected by the Lance runtime environment variable 
         ...
     ```
 
-Spark SQL currently does not expose a per-index `fts_version` option. Use `USING fts` with the normal FTS options shown above; Spark records the index details and version returned by Lance.
+Spark SQL currently does not expose a per-index `fts_version` option. Use `USING fts` (or `USING inverted`) with the normal FTS options shown above; Spark records the index details and version returned by Lance.
 
 ## Examples
 
@@ -234,7 +235,8 @@ Create an FTS index on a text column:
         stem = false,
         remove_stop_words = false,
         ascii_folding = false,
-        with_position = true
+        with_position = true,
+        num_segments = 8
     );
     ```
 
@@ -305,14 +307,14 @@ Consider creating an index when:
 
 The `CREATE INDEX` command operates as follows:
 
-1.  **Index Build Execution**: Lance Spark chooses an execution path based on the index method. `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, and `rtree` split source fragments into batches and build them in parallel. Range-mode `btree` uses Spark repartitioning and sorted preprocessed data. FTS uses its existing fragment-parallel metadata flow.
+1.  **Index Build Execution**: Lance Spark chooses an execution path based on the index method. `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, `rtree`, and `fts` split source fragments into batches and build them in parallel. Range-mode `btree` uses Spark repartitioning and sorted preprocessed data.
 2.  **Metadata Finalization**: Lance Spark merges or commits the resulting index metadata on the driver so the new logical index becomes visible atomically.
 3.  **Transactional Commit**: A new table version is committed with the new index information. The operation is atomic and ensures that concurrent reads are not affected.
 
 ## Notes and Limitations
 
-- **Index Methods**: The `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, `rtree`, `btree`, and `fts` methods are supported for index creation.
-- **Indexed Column Count**: `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, and `rtree` currently support exactly one indexed column.
+- **Index Methods**: The `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, `rtree`, `btree`, and `fts` (or `inverted`) methods are supported for index creation.
+- **Indexed Column Count**: `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, `rtree`, and `fts` (or `inverted`) currently support exactly one indexed column.
 - **Index Replacement**: If you create an index with the same name as an existing one, the old index will be replaced by the new one.
 - **Deferred Training**: With `train = false` the index is registered empty and is populated later, either by re-running `CREATE INDEX` (a full distributed build that replaces the empty index) or, for incremental coverage of newly appended fragments, by `Dataset.optimizeIndices` in the SDK. The SQL `OPTIMIZE` command compacts fragments and does not train deferred indexes. `train = false` is supported only for scalar index methods (`btree`, `fts`, and the scalar-segment methods `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, `rtree`); `IVF_*` vector methods reject it because Lance does not currently expose a vector-aware empty-index commit path.
 - **Empty Tables**: Creating any scalar index on an empty table registers an empty index visible through `SHOW INDEXES` and returns `fragments_indexed = 0`. `IVF_*` vector methods reject empty-table creation because there are no vectors to train IVF centroids on.

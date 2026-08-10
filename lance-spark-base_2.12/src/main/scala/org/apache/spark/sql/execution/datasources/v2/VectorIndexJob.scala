@@ -64,8 +64,8 @@ class VectorIndexJob(
    * Dataset.commitExistingIndexSegments.
    *
    * NOTE: vector indices use the logical-segment commit path (like
-   * ZonemapIndexJob) and return Seq[Index] instead of IndexBuildResult, so
-   * VectorIndexJob deliberately does not extend the IndexJob trait.
+   * ScalarSegmentIndexJob) and return Seq[Index] rather than any per-job
+   * result wrapper.
    */
   def runSegments(): Seq[Index] = {
     val sc = addIndexExec.session.sparkContext

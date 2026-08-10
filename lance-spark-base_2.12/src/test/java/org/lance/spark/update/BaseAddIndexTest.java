@@ -18,10 +18,14 @@ import org.lance.index.IndexCriteria;
 import org.lance.index.IndexDescription;
 import org.lance.index.IndexType;
 import org.lance.index.OptimizeOptions;
+import org.lance.ipc.FullTextQuery;
+import org.lance.ipc.LanceScanner;
+import org.lance.ipc.ScanOptions;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.FieldPathUtils;
 import org.lance.spark.utils.Utils;
 
+import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.spark.SparkException;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
@@ -1139,6 +1143,88 @@ public abstract class BaseAddIndexTest {
   }
 
   @Test
+  public void testCreateFtsSegmentIndexSupportsTermAndPhraseQueries() throws Exception {
+    spark.sql(String.format("create table %s (id int, body string) using lance", fullTable));
+    spark.sql(
+        String.format(
+            "insert into %s values " + "(1, 'hello world'), " + "(2, 'hello lance')", fullTable));
+    spark.sql(
+        String.format(
+            "insert into %s values " + "(3, 'world hello'), " + "(4, 'other text')", fullTable));
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index body_fts_segments using fts (body) with ("
+                    + "base_tokenizer='simple', "
+                    + "language='English', "
+                    + "max_token_length=40, "
+                    + "lower_case=true, "
+                    + "stem=false, "
+                    + "remove_stop_words=false, "
+                    + "ascii_folding=false, "
+                    + "with_position=true, "
+                    + "num_segments=2"
+                    + ")",
+                fullTable));
+
+    Row output = result.collectAsList().get(0);
+    Assertions.assertEquals("body_fts_segments", output.getString(1));
+
+    try (org.lance.Dataset dataset = org.lance.Dataset.open().uri(tableDir).build()) {
+      int fragmentCount = dataset.getFragments().size();
+      List<Index> segments =
+          dataset.getIndexes().stream()
+              .filter(index -> "body_fts_segments".equals(index.name()))
+              .collect(Collectors.toList());
+
+      Assertions.assertEquals(
+          Math.min(2, fragmentCount),
+          segments.size(),
+          "num_segments=2 should produce two physical FTS segments when two fragments exist");
+      Assertions.assertEquals(
+          segments.size(),
+          segments.stream().map(Index::uuid).collect(Collectors.toSet()).size(),
+          "Every committed FTS segment must have a distinct UUID");
+      Assertions.assertTrue(
+          segments.stream().allMatch(index -> index.indexType() == IndexType.INVERTED),
+          "Every physical segment must be an INVERTED index");
+
+      List<Integer> coveredFragments =
+          segments.stream()
+              .flatMap(index -> index.fragments().orElse(Collections.emptyList()).stream())
+              .collect(Collectors.toList());
+      Assertions.assertEquals(
+          fragmentCount,
+          coveredFragments.size(),
+          "FTS segment coverage must include every fragment exactly once");
+      Assertions.assertEquals(
+          coveredFragments.size(),
+          coveredFragments.stream().collect(Collectors.toSet()).size(),
+          "FTS segment coverage must not overlap");
+
+      byte[] expectedDetails = segments.get(0).indexDetails().orElseThrow(AssertionError::new);
+      Assertions.assertTrue(
+          segments.stream()
+              .allMatch(
+                  segment ->
+                      segment.indexDetails().isPresent()
+                          && java.util.Arrays.equals(
+                              expectedDetails, segment.indexDetails().get())),
+          "All FTS segments must preserve identical tokenizer parameters");
+
+      Assertions.assertEquals(
+          3L,
+          countFtsMatches(dataset, FullTextQuery.match("hello", "body")),
+          "Term query should search across all physical segments");
+      Assertions.assertEquals(
+          1L,
+          countFtsMatches(dataset, FullTextQuery.phrase("hello world", "body")),
+          "Phrase query should use positions across the logical FTS index");
+    }
+  }
+
+  @Test
   public void testCreateFtsIndexWithStemming() {
     prepareDataset();
 
@@ -1397,6 +1483,18 @@ public abstract class BaseAddIndexTest {
     Assertions.assertTrue(index.indexVersion() > 0, "FTS index version should be positive");
     if ("2".equals(System.getenv("LANCE_FTS_FORMAT_VERSION"))) {
       Assertions.assertEquals(2, index.indexVersion());
+    }
+  }
+
+  private long countFtsMatches(org.lance.Dataset dataset, FullTextQuery query) throws Exception {
+    ScanOptions scanOptions = new ScanOptions.Builder().fullTextQuery(query).build();
+    try (LanceScanner scanner = dataset.newScan(scanOptions);
+        ArrowReader reader = scanner.scanBatches()) {
+      long count = 0L;
+      while (reader.loadNextBatch()) {
+        count += reader.getVectorSchemaRoot().getRowCount();
+      }
+      return count;
     }
   }
 
