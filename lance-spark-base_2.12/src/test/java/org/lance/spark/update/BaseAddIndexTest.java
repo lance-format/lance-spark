@@ -717,6 +717,50 @@ public abstract class BaseAddIndexTest {
   }
 
   /**
+   * A deferred ZONEMAP can be populated incrementally through the SQL {@code OPTIMIZE INDEX}
+   * command, which merges the unindexed fragments into the existing index.
+   */
+  @Test
+  public void testDeferredZonemapPopulatedByOptimizeIndexSql() {
+    prepareDataset();
+
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_oi using zonemap (id) with (train=false)", fullTable));
+
+    // Incrementally populate the deferred index via SQL (not the SDK).
+    Dataset<Row> result =
+        spark.sql(String.format("alter table %s optimize index idx_oi", fullTable));
+    Row row = result.collectAsList().get(0);
+    Assertions.assertEquals("idx_oi", row.getString(0));
+    Assertions.assertEquals("optimized", row.getString(1));
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int fragmentCount = lanceDataset.getFragments().size();
+      Assertions.assertTrue(fragmentCount >= 2, "Expected multiple fragments");
+      int coveredFragments =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> "idx_oi".equals(index.name()))
+              .map(index -> index.fragments().orElse(Collections.emptyList()).size())
+              .mapToInt(Integer::intValue)
+              .sum();
+      Assertions.assertEquals(
+          fragmentCount,
+          coveredFragments,
+          "Expected OPTIMIZE INDEX to populate the deferred zonemap over all fragments");
+    } finally {
+      lanceDataset.close();
+    }
+
+    // Query remains correct after the index is populated.
+    Dataset<Row> afterOptimize =
+        spark.sql(String.format("select * from %s where id=15", fullTable));
+    Assertions.assertEquals(1L, afterOptimize.count());
+    Assertions.assertEquals("text_15", afterOptimize.collectAsList().get(0).getString(1));
+  }
+
+  /**
    * A deferred ZONEMAP can be populated by re-running CREATE INDEX (eager): the distributed segment
    * build replaces the empty index and covers all fragments.
    */

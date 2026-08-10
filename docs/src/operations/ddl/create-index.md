@@ -263,9 +263,24 @@ to scanning the data until it is populated. There are two ways to populate it:
     ALTER TABLE lance.db.users CREATE INDEX idx_id USING zonemap (id);
     ```
 
-- **Incremental build through the SDK:** when only some fragments are unindexed (for example after
-  appending data to an already-built index), `Dataset.optimizeIndices` indexes just the unindexed
-  fragments. This currently runs on a single node:
+- **Incremental build with `OPTIMIZE INDEX`:** when only some fragments are unindexed (for example
+  after appending data to an already-built index), `ALTER TABLE ... OPTIMIZE INDEX` merges just the
+  unindexed fragments into existing indexes. Unlike `CREATE INDEX`, it does not rebuild coverage
+  already committed. This currently runs on a single node (the driver):
+
+    === "SQL"
+        ```sql
+        -- optimize a single index
+        ALTER TABLE lance.db.users OPTIMIZE INDEX idx_id;
+
+        -- optimize all indexes on the table
+        ALTER TABLE lance.db.users OPTIMIZE INDEX;
+
+        -- retrain from scratch instead of an incremental merge
+        ALTER TABLE lance.db.users OPTIMIZE INDEX idx_id WITH (retrain = true);
+        ```
+
+    The same operation is available in the SDK via `Dataset.optimizeIndices`:
 
     ```java
     dataset.optimizeIndices(OptimizeOptions.builder().build());
@@ -277,7 +292,7 @@ that populates the index instead.
 
 Creating a scalar index on an empty table also registers an empty index with zero fragment
 coverage. The index is immediately visible through `SHOW INDEXES`. After data is appended, populate
-it by re-running `CREATE INDEX` or calling `Dataset.optimizeIndices`.
+it by re-running `CREATE INDEX` or running `ALTER TABLE ... OPTIMIZE INDEX`.
 
 ## Output
 
@@ -309,4 +324,4 @@ The `CREATE INDEX` command operates as follows:
 - **Index Methods**: The `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, `rtree`, `btree`, and `fts` (or `inverted`) methods are supported for index creation.
 - **Indexed Column Count**: `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, `rtree`, and `fts` (or `inverted`) currently support exactly one indexed column.
 - **Index Replacement**: If you create an index with the same name as an existing one, the old index will be replaced by the new one.
-- **Deferred Training**: With `train = false` the index is registered empty and is populated later, either by re-running `CREATE INDEX` (a full distributed build that replaces the empty index) or, for incremental coverage of newly appended fragments, by `Dataset.optimizeIndices` in the SDK. The SQL `OPTIMIZE` command compacts fragments and does not train deferred indexes.
+- **Deferred Training**: With `train = false` the index is registered empty and is populated later, either by re-running `CREATE INDEX` (a full distributed build that replaces the empty index) or, for incremental coverage of newly appended fragments, by `ALTER TABLE ... OPTIMIZE INDEX` (equivalently `Dataset.optimizeIndices` in the SDK). The SQL `OPTIMIZE` command compacts fragments and does not train deferred indexes; use `OPTIMIZE INDEX` for that.

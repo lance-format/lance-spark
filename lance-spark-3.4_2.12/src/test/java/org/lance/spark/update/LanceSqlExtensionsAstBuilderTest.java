@@ -23,6 +23,7 @@ import org.apache.spark.sql.catalyst.parser.extensions.LanceSqlExtensionsParser;
 import org.apache.spark.sql.catalyst.plans.logical.AddColumnsBackfill;
 import org.apache.spark.sql.catalyst.plans.logical.AddIndex;
 import org.apache.spark.sql.catalyst.plans.logical.Optimize;
+import org.apache.spark.sql.catalyst.plans.logical.OptimizeIndex;
 import org.apache.spark.sql.catalyst.plans.logical.ShowIndexes;
 import org.apache.spark.sql.catalyst.plans.logical.UpdateColumnsBackfill;
 import org.apache.spark.sql.catalyst.plans.logical.Vacuum;
@@ -150,6 +151,47 @@ public class LanceSqlExtensionsAstBuilderTest {
     UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
     assertEquals(
         List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+  }
+
+  @Test
+  public void testOptimizeIndexWithIndexName() {
+    LanceSqlExtensionsParser parser =
+        createParser("ALTER TABLE `my-catalog`.`my-table` OPTIMIZE INDEX `my-idx`");
+    OptimizeIndex plan = (OptimizeIndex) astBuilder.visitSingleStatement(parser.singleStatement());
+
+    UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
+    assertEquals(
+        List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+    assertEquals("my-idx", plan.indexName().get());
+    assertTrue(plan.args().isEmpty());
+  }
+
+  @Test
+  public void testOptimizeIndexAllIndexes() {
+    LanceSqlExtensionsParser parser = createParser("ALTER TABLE CATALOG.TBL OPTIMIZE INDEX");
+    OptimizeIndex plan = (OptimizeIndex) astBuilder.visitSingleStatement(parser.singleStatement());
+
+    UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
+    assertEquals(List.of("CATALOG", "TBL"), JavaConverters.seqAsJavaList(table.nameParts()));
+    assertTrue(plan.indexName().isEmpty());
+    assertTrue(plan.args().isEmpty());
+  }
+
+  @Test
+  public void testOptimizeIndexWithArgs() {
+    // The unit-test lexer sees raw input (no UpperCaseCharStream), so its IDENTIFIER rule only
+    // matches [A-Z]; backtick-quote the lowercase argument names so they tokenize here.
+    LanceSqlExtensionsParser parser =
+        createParser(
+            "ALTER TABLE CATALOG.TBL OPTIMIZE INDEX MY_IDX WITH (`retrain` = TRUE, `num_indices_to_merge` = 2)");
+    OptimizeIndex plan = (OptimizeIndex) astBuilder.visitSingleStatement(parser.singleStatement());
+
+    assertEquals("MY_IDX", plan.indexName().get());
+    assertEquals(2, plan.args().size());
+    assertEquals("retrain", plan.args().apply(0).name());
+    assertEquals(true, plan.args().apply(0).value());
+    assertEquals("num_indices_to_merge", plan.args().apply(1).name());
+    assertEquals(2L, plan.args().apply(1).value());
   }
 
   @Test
