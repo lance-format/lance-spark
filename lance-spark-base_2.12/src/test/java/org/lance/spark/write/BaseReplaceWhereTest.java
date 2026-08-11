@@ -153,6 +153,23 @@ public abstract class BaseReplaceWhereTest {
     op.check(Arrays.asList(Row.of(1, "2026-08-01", 100), Row.of(5, "2026-08-09", 500)));
   }
 
+  /**
+   * A predicate may itself contain {@code AS} (e.g. inside a {@code CAST}); the command must split
+   * on the top-level {@code AS} separator, not the first {@code AS} token.
+   */
+  @Test
+  public void testReplacePredicateWithCast() {
+    TableOperator op = new TableOperator(spark, catalogName);
+    op.create();
+
+    op.insert(Arrays.asList(Row.of(1, "2026-08-01", 100), Row.of(2, "2026-08-02", 200)));
+
+    op.replace(
+        "CAST(dt AS STRING) = '2026-08-01'", "SELECT 3 AS id, '2026-08-01' AS dt, 300 AS value");
+
+    op.check(Arrays.asList(Row.of(2, "2026-08-02", 200), Row.of(3, "2026-08-01", 300)));
+  }
+
   /** The replacement is a single atomic commit: exactly one new table version is produced. */
   @Test
   public void testReplaceIsSingleAtomicCommit() {

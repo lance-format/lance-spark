@@ -84,14 +84,13 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
   override def visitReplaceWhere(ctx: LanceSqlExtensionsParser.ReplaceWhereContext)
       : ReplaceWhere = {
     val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
-    // Recover the predicate and query as raw source text by character interval. The Lance grammar
-    // captures them as opaque token runs, so slicing the original stream is what preserves
-    // operators and spacing. The query is then parsed by Spark's own parser (delegate); the
-    // predicate is left as text and handed to Lance at execution time.
-    val predicate = originalText(ctx.predicate)
-    val queryText = originalText(ctx.query)
-    val query = delegate.parsePlan(queryText)
-    ReplaceWhere(table, predicate, query)
+    // Recover the raw text following WHERE by character interval (the grammar captures it as an
+    // opaque token run, so slicing the original stream preserves operators, quoting, and spacing),
+    // then split it at the first top-level AS into predicate and query. The query is parsed by
+    // Spark's own parser (delegate); the predicate is handed to Lance at execution time.
+    val parts = ParserUtils.splitReplaceBody(originalText(ctx.body))
+    val query = delegate.parsePlan(parts(1))
+    ReplaceWhere(table, parts(0), query)
   }
 
   private def originalText(ctx: ParserRuleContext): String = {

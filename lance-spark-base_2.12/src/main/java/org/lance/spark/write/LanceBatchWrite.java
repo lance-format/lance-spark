@@ -41,6 +41,7 @@ import org.apache.spark.sql.connector.write.PhysicalWriteInfo;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
+import org.roaringbitmap.RoaringBitmap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -252,13 +253,17 @@ public class LanceBatchWrite implements BatchWrite {
    */
   private static Operation buildReplaceOperation(
       Dataset ds, String predicate, List<FragmentMetadata> newFragments) {
-    Map<Integer, List<Integer>> rowIndexesByFragment = matchingRowIndexesByFragment(ds, predicate);
+    Map<Integer, RoaringBitmap> deletionsByFragment = matchingDeletionsByFragment(ds, predicate);
 
     List<Long> removedFragmentIds = new ArrayList<>();
     List<FragmentMetadata> updatedFragments = new ArrayList<>();
-    for (Map.Entry<Integer, List<Integer>> entry : rowIndexesByFragment.entrySet()) {
+    for (Map.Entry<Integer, RoaringBitmap> entry : deletionsByFragment.entrySet()) {
       int fragmentId = entry.getKey();
-      FragmentMetadata updated = ds.getFragment(fragmentId).deleteRows(entry.getValue());
+      // Materialize the row indexes for a single fragment at a time; the aggregate deletion state
+      // stays compressed as RoaringBitmaps so driver memory does not grow with total matched rows.
+      List<Integer> rowIndexes = new ArrayList<>(entry.getValue().getCardinality());
+      entry.getValue().forEach((org.roaringbitmap.IntConsumer) rowIndexes::add);
+      FragmentMetadata updated = ds.getFragment(fragmentId).deleteRows(rowIndexes);
       if (updated == null) {
         // All rows in the fragment matched the predicate; drop the whole fragment.
         removedFragmentIds.add((long) fragmentId);
@@ -275,13 +280,14 @@ public class LanceBatchWrite implements BatchWrite {
   }
 
   /**
-   * Scans the dataset for rows matching {@code predicate} and groups their physical row indexes by
-   * fragment id, decoding the 64-bit {@code _rowaddr} (fragment id in the high 32 bits, row index
-   * in the low 32 bits). Returns an empty map when no existing row matches.
+   * Scans the dataset for rows matching {@code predicate} and collects their physical row indexes
+   * per fragment as {@link RoaringBitmap}s, decoding the 64-bit {@code _rowaddr} (fragment id in
+   * the high 32 bits, row index in the low 32 bits). A compressed bitmap per fragment keeps driver
+   * memory bounded regardless of how many rows match. Returns an empty map when no row matches.
    */
-  private static Map<Integer, List<Integer>> matchingRowIndexesByFragment(
+  private static Map<Integer, RoaringBitmap> matchingDeletionsByFragment(
       Dataset ds, String predicate) {
-    Map<Integer, List<Integer>> rowIndexesByFragment = new java.util.HashMap<>();
+    Map<Integer, RoaringBitmap> deletionsByFragment = new java.util.HashMap<>();
     ScanOptions scanOptions =
         new ScanOptions.Builder()
             .columns(java.util.Collections.emptyList())
@@ -295,15 +301,15 @@ public class LanceBatchWrite implements BatchWrite {
         FieldVector rowAddrVector = batch.getVector(LanceConstant.ROW_ADDRESS);
         for (int i = 0; i < batch.getRowCount(); i++) {
           long rowAddress = ((Number) rowAddrVector.getObject(i)).longValue();
-          rowIndexesByFragment
-              .computeIfAbsent(extractFragmentId(rowAddress), k -> new ArrayList<>())
+          deletionsByFragment
+              .computeIfAbsent(extractFragmentId(rowAddress), k -> new RoaringBitmap())
               .add(extractRowIndex(rowAddress));
         }
       }
     } catch (Exception e) {
       throw new RuntimeException("Failed to scan rows for REPLACE ... WHERE " + predicate, e);
     }
-    return rowIndexesByFragment;
+    return deletionsByFragment;
   }
 
   @Override

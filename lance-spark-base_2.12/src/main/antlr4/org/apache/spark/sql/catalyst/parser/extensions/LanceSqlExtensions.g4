@@ -43,20 +43,16 @@ statement
     | OPTIMIZE multipartIdentifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')?        #optimize
     | VACUUM multipartIdentifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')?          #vacuum
     | ALTER TABLE multipartIdentifier SET UNENFORCED PRIMARY KEY '(' columnList ')'             #setUnenforcedPrimaryKey
-    | REPLACE multipartIdentifier WHERE predicate=predicateText AS query=queryText             #replaceWhere
+    | REPLACE multipartIdentifier WHERE body=replaceBody                                       #replaceWhere
     ;
 
-// The predicate (between WHERE and AS) and the query (after AS) are captured verbatim from the
-// original SQL text and re-parsed with Spark's own parser, so the Lance grammar itself does not
-// need to model SQL expressions or SELECT statements. The predicate runs up to the first AS
-// keyword (its separator); the query is everything after AS, so it may itself contain AS (e.g.
-// column aliases). Both are recovered by character interval in the AST builder, which preserves
-// operators and whitespace regardless of how individual characters tokenized.
-predicateText
-    : (~AS)+
-    ;
-
-queryText
+// Everything after WHERE (the predicate, the AS separator, and the query) is captured verbatim as
+// one raw region and re-parsed with Spark's own parser, so the Lance grammar itself does not need
+// to model SQL expressions or SELECT statements. The AST builder splits this text at the first
+// top-level `AS` (honoring parentheses, string literals, and comments), which lets predicates
+// contain `AS` themselves (e.g. `CAST(x AS STRING)`) and lets the query contain column aliases.
+// Recovering by character interval preserves operators and whitespace regardless of tokenization.
+replaceBody
     : .+
     ;
 
