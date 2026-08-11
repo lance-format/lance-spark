@@ -99,6 +99,14 @@ public class LanceSparkWriteOptions implements Serializable {
   /** Use this version to open the dataset and apply write if set. */
   private final Long version;
 
+  /**
+   * Row filter for a {@code REPLACE ... WHERE ...} command, or null for ordinary writes. When set,
+   * the batch commit deletes existing rows matching this predicate and appends the new fragments in
+   * a single atomic {@code Update}. Deliberately excluded from {@link #toWriteParams} so it is
+   * never forwarded to the native library as a storage option.
+   */
+  private final String replaceWhere;
+
   private LanceSparkWriteOptions(Builder builder) {
     this.datasetUri = builder.datasetUri;
     this.writeMode = builder.writeMode;
@@ -117,6 +125,7 @@ public class LanceSparkWriteOptions implements Serializable {
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
     this.version = builder.version;
+    this.replaceWhere = builder.replaceWhere;
   }
 
   /** Creates a new builder for LanceSparkWriteOptions. */
@@ -217,6 +226,11 @@ public class LanceSparkWriteOptions implements Serializable {
     return version;
   }
 
+  /** Returns the {@code REPLACE ... WHERE ...} row filter, or null for an ordinary write. */
+  public String getReplaceWhere() {
+    return replaceWhere;
+  }
+
   /** Returns a builder pre-populated with all fields from this instance. */
   public Builder toBuilder() {
     return builder()
@@ -236,7 +250,8 @@ public class LanceSparkWriteOptions implements Serializable {
         .storageOptions(storageOptions)
         .namespace(namespace)
         .tableId(tableId)
-        .version(version);
+        .version(version)
+        .replaceWhere(replaceWhere);
   }
 
   /** Returns a copy of these options with version set to the given version. */
@@ -328,7 +343,8 @@ public class LanceSparkWriteOptions implements Serializable {
         && Objects.equals(blobPackFileSizeThreshold, that.blobPackFileSizeThreshold)
         && Objects.equals(storageOptions, that.storageOptions)
         && Objects.equals(tableId, that.tableId)
-        && Objects.equals(version, that.version);
+        && Objects.equals(version, that.version)
+        && Objects.equals(replaceWhere, that.replaceWhere);
   }
 
   @Override
@@ -349,7 +365,8 @@ public class LanceSparkWriteOptions implements Serializable {
         blobPackFileSizeThreshold,
         storageOptions,
         tableId,
-        version);
+        version,
+        replaceWhere);
   }
 
   /** Builder for creating LanceSparkWriteOptions instances. */
@@ -371,6 +388,7 @@ public class LanceSparkWriteOptions implements Serializable {
     private LanceNamespace namespace;
     private List<String> tableId;
     private Long version;
+    private String replaceWhere;
 
     private Builder() {}
 
@@ -464,6 +482,12 @@ public class LanceSparkWriteOptions implements Serializable {
       return this;
     }
 
+    /** Sets the {@code REPLACE ... WHERE ...} row filter; null for an ordinary write. */
+    public Builder replaceWhere(String replaceWhere) {
+      this.replaceWhere = replaceWhere;
+      return this;
+    }
+
     /**
      * Parses options from a map, extracting write-specific settings.
      *
@@ -472,6 +496,12 @@ public class LanceSparkWriteOptions implements Serializable {
      */
     public Builder fromOptions(Map<String, String> options) {
       this.storageOptions = new HashMap<>(options);
+      // Internal REPLACE ... WHERE filter: promote to the typed field and strip it from the
+      // storage options so it is never forwarded to the native library.
+      if (options.containsKey(LanceConstant.REPLACE_WHERE_KEY)) {
+        this.replaceWhere = options.get(LanceConstant.REPLACE_WHERE_KEY);
+        this.storageOptions.remove(LanceConstant.REPLACE_WHERE_KEY);
+      }
       if (options.containsKey(CONFIG_WRITE_MODE)) {
         this.writeMode = WriteMode.valueOf(options.get(CONFIG_WRITE_MODE).toUpperCase());
       }

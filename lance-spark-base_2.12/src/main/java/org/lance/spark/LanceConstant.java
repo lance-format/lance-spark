@@ -36,6 +36,14 @@ public class LanceConstant {
   public static final String UPDATE_COLUMNS_KEY = "update_columns";
 
   /**
+   * Internal write option carrying the row filter for a {@code REPLACE ... WHERE ... AS ...}
+   * command. When present, the batch write commits a single atomic {@code Update} that deletes the
+   * existing rows matching this predicate and appends the newly written fragments, instead of a
+   * plain append. Set on the driver by {@code ReplaceWhereExec}; not a user-facing option.
+   */
+  public static final String REPLACE_WHERE_KEY = "__lance_replace_where";
+
+  /**
    * Internal write option carrying the encoded blob source credential/open contexts for an INSERT
    * whose query reads blob columns. Set on the driver by {@code LanceBlobSourceContextRule} and
    * consumed by {@code LanceDataset.newWriteBuilder}; not a user-facing option.

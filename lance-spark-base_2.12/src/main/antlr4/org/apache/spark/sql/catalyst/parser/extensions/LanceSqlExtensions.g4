@@ -43,6 +43,21 @@ statement
     | OPTIMIZE multipartIdentifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')?        #optimize
     | VACUUM multipartIdentifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')?          #vacuum
     | ALTER TABLE multipartIdentifier SET UNENFORCED PRIMARY KEY '(' columnList ')'             #setUnenforcedPrimaryKey
+    | REPLACE multipartIdentifier WHERE predicate=predicateText AS query=queryText             #replaceWhere
+    ;
+
+// The predicate (between WHERE and AS) and the query (after AS) are captured verbatim from the
+// original SQL text and re-parsed with Spark's own parser, so the Lance grammar itself does not
+// need to model SQL expressions or SELECT statements. The predicate runs up to the first AS
+// keyword (its separator); the query is everything after AS, so it may itself contain AS (e.g.
+// column aliases). Both are recovered by character interval in the AST builder, which preserves
+// operators and whitespace regardless of how individual characters tokenized.
+predicateText
+    : (~AS)+
+    ;
+
+queryText
+    : .+
     ;
 
 multipartIdentifier
@@ -113,6 +128,7 @@ NOT: 'NOT';
 OF: 'OF';
 OPTIMIZE: 'OPTIMIZE';
 PRIMARY: 'PRIMARY';
+REPLACE: 'REPLACE';
 SET: 'SET';
 SHOW: 'SHOW';
 TABLE: 'TABLE';
@@ -123,6 +139,7 @@ UPDATE: 'UPDATE';
 USING: 'USING';
 VACUUM: 'VACUUM';
 VERSION: 'VERSION';
+WHERE: 'WHERE';
 WITH: 'WITH';
 
 TRUE: 'TRUE';
@@ -171,5 +188,17 @@ fragment DIGIT
 
 fragment LETTER
     : [A-Z]
+    ;
+
+WS
+    : [ \t\r\n]+ -> skip
+    ;
+
+// Catch-all so any character not matched by a specific token above (SQL operators like '>', '<',
+// '*', etc.) still produces a token instead of a silently-dropped lexer error. This lets the raw
+// predicate/query regions of REPLACE tokenize completely; their text is recovered by character
+// interval, so the specific token kind does not matter.
+ANY
+    : .
     ;
 
