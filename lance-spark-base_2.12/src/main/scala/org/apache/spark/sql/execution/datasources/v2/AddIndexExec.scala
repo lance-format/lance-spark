@@ -31,6 +31,7 @@ import org.lance.{CommitBuilder, Dataset, Transaction}
 import org.lance.index.{Index, IndexOptions, IndexParams, IndexType}
 import org.lance.index.scalar.{BTreeIndexParams, ScalarIndexParams}
 import org.lance.operation.{CreateIndex => AddIndexOperation}
+import org.lance.schema.{LanceField, LanceSchema}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceRuntime, LanceSparkReadOptions}
 import org.lance.spark.arrow.LanceArrowWriter
 import org.lance.spark.utils.{CloseableUtil, FieldPathUtils, Utils}
@@ -93,10 +94,7 @@ case class AddIndexExec(
       val ds = Utils.openDatasetBuilder(readOptions).build()
       try {
         val canonical = columns.map { column =>
-          val field = scalarSegmentIndexType match {
-            case Some(_) => FieldPathUtils.resolveField(ds.getLanceSchema, column)
-            case None => FieldPathUtils.resolveLeafField(ds.getLanceSchema, column)
-          }
+          val field = IndexUtils.resolveIndexField(ds.getLanceSchema, indexType, column)
           FieldPathUtils.pathByFieldId(ds.getLanceSchema, field.getId)
         }
         (
@@ -592,6 +590,14 @@ object IndexUtils extends Logging {
     IndexType.RTREE,
     IndexType.INVERTED)
 
+  // Field-shape requirements are independent of the distributed execution path. These index
+  // types reject container fields in Lance Core, so validate them before launching Spark tasks.
+  private val leafFieldIndexTypes: Set[IndexType] = Set(
+    IndexType.BTREE,
+    IndexType.BITMAP,
+    IndexType.NGRAM,
+    IndexType.BLOOM_FILTER)
+
   // ScalarIndexParams uses Lance Core's scalar plugin names, which are a separate contract from
   // both Spark SQL method names and the Java IndexType enum names. Keep the mapping explicit instead
   // of deriving it from either naming convention.
@@ -609,6 +615,17 @@ object IndexUtils extends Logging {
     methodToIndexTypes
       .get(method.toLowerCase(Locale.ROOT))
       .filter(scalarSegmentIndexTypes.contains)
+
+  def resolveIndexField(
+      schema: LanceSchema,
+      indexType: IndexType,
+      column: String): LanceField = {
+    if (leafFieldIndexTypes.contains(indexType)) {
+      FieldPathUtils.resolveLeafField(schema, column)
+    } else {
+      FieldPathUtils.resolveField(schema, column)
+    }
+  }
 
   /**
    * Extracts the `train` option from named arguments, defaulting to `true`.

@@ -44,6 +44,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.nio.file.FileSystems;
@@ -1001,18 +1002,21 @@ public abstract class BaseAddIndexTest {
     checkIndex("test_index_btree_fragment");
   }
 
-  @Test
-  public void testCreateBTreeIndexOnNestedFieldsUsesLeafFieldIds() {
+  @ParameterizedTest(name = "{0}")
+  @ValueSource(strings = {"fragment", "range"})
+  public void testCreateBTreeIndexOnNestedFieldsUsesLeafFieldIds(String buildMode) {
     prepareNestedDataset();
 
     spark.sql(
         String.format(
-            "alter table %s create index idx_left_value using btree (left_payload.value)",
-            fullTable));
+            "alter table %s create index idx_left_value using btree (left_payload.value) "
+                + "with (build_mode='%s')",
+            fullTable, buildMode));
     spark.sql(
         String.format(
-            "alter table %s create index idx_right_value using btree (right_payload.value)",
-            fullTable));
+            "alter table %s create index idx_right_value using btree (right_payload.value) "
+                + "with (build_mode='%s')",
+            fullTable, buildMode));
 
     org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
     try {
@@ -1030,6 +1034,35 @@ public abstract class BaseAddIndexTest {
     } finally {
       lanceDataset.close();
     }
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("leafOnlyIndexMethods")
+  public void testLeafOnlyIndexesRejectContainerFields(
+      String caseName, String method, String options) {
+    prepareNestedDataset();
+
+    Exception failure =
+        Assertions.assertThrows(
+            Exception.class,
+            () ->
+                spark.sql(
+                    String.format(
+                        "alter table %s create index idx_parent using %s (left_payload) %s",
+                        fullTable, method, options)));
+
+    Assertions.assertTrue(
+        hasMessageInCauseChain(failure, "Index column must be a leaf field, got: left_payload"),
+        "Expected a leaf-field validation error for " + caseName + ", got: " + failure);
+  }
+
+  private static Stream<Arguments> leafOnlyIndexMethods() {
+    return Stream.of(
+        Arguments.of("btree-fragment", "btree", "with (build_mode='fragment')"),
+        Arguments.of("btree-range", "btree", "with (build_mode='range')"),
+        Arguments.of("bitmap", "bitmap", ""),
+        Arguments.of("ngram", "ngram", ""),
+        Arguments.of("bloomfilter", "bloomfilter", ""));
   }
 
   @Test
