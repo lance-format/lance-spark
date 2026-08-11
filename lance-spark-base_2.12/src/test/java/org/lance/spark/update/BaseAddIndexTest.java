@@ -798,7 +798,8 @@ public abstract class BaseAddIndexTest {
 
     Assertions.assertEquals("idx_btree_seg", result.collectAsList().get(0).getString(1));
 
-    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    org.lance.Dataset lanceDataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build();
     try {
       int fragmentCount = lanceDataset.getFragments().size();
       int expectedSegmentCount = Math.min(fragmentCount, 3);
