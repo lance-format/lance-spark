@@ -81,7 +81,13 @@ pipeline. Enable it with:
 --conf spark.lance.otel.enabled=true
 ```
 
-or set `LANCE_SPARK_OTEL_ENABLED=true` in each JVM environment.
+You can also set the JVM system property
+`-Dspark.lance.otel.enabled=true`, or set
+`LANCE_SPARK_OTEL_ENABLED=true` in each JVM environment. When multiple sources
+are set, Spark configuration takes precedence over the JVM system property,
+which takes precedence over the environment variable. Values must be `true` or
+`false` (case-insensitive); invalid values disable the bridge and produce a
+warning.
 
 The bridge uses the OpenTelemetry `GlobalOpenTelemetry` meter provider, so
 configure your exporter, resource, and reader with the standard OpenTelemetry

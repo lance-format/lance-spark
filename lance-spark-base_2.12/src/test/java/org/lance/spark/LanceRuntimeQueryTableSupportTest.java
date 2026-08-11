@@ -65,6 +65,21 @@ class LanceRuntimeQueryTableSupportTest {
     }
   }
 
+  @Test
+  void openTelemetryConfigurationUsesDocumentedPrecedence() {
+    assertTrue(LanceRuntime.resolveOpenTelemetryEnabled("true", "false", "false"));
+    assertFalse(LanceRuntime.resolveOpenTelemetryEnabled("false", "true", "true"));
+    assertTrue(LanceRuntime.resolveOpenTelemetryEnabled(null, "true", "false"));
+    assertTrue(LanceRuntime.resolveOpenTelemetryEnabled(null, null, "true"));
+    assertFalse(LanceRuntime.resolveOpenTelemetryEnabled(null, null, null));
+  }
+
+  @Test
+  void openTelemetryConfigurationRejectsInvalidValues() {
+    assertTrue(LanceRuntime.resolveOpenTelemetryEnabled(" TRUE ", null, null));
+    assertFalse(LanceRuntime.resolveOpenTelemetryEnabled("yes", "true", "true"));
+  }
+
   /** Stands in for catalog-only namespaces such as Glue, which never implement queryTable. */
   public static class CatalogOnlyNamespace implements LanceNamespace {
     public CatalogOnlyNamespace() {}

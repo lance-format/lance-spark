@@ -117,8 +117,9 @@ public abstract class BaseSparkConnectorReadTest {
           LanceMetrics.catalog().stream()
               .anyMatch(desc -> OBJECT_STORE_REQUEST_DURATION.equals(desc.getName())),
           "expected Spark read path to register Lance OpenTelemetry metrics");
+      assertTrue(LanceRuntime.enableOpenTelemetry());
     } finally {
-      LanceMetrics.close();
+      TestUtils.clearOpenTelemetry();
       if (previous == null) {
         System.clearProperty(LanceRuntime.SPARK_CONF_OPEN_TELEMETRY_ENABLED);
       } else {

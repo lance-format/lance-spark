@@ -18,6 +18,8 @@ import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.QueryTableRequest;
 import org.lance.otel.LanceMetrics;
 
+import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.api.metrics.MeterProvider;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.spark.SparkEnv;
@@ -28,6 +30,7 @@ import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -91,6 +94,17 @@ public final class LanceRuntime {
 
   /** Cached {@code queryTable} support per namespace impl alias or class name. */
   private static final Map<String, Boolean> QUERY_TABLE_SUPPORT = new ConcurrentHashMap<>();
+
+  /** Invalid OpenTelemetry values already reported in this JVM. */
+  private static final Set<String> REPORTED_INVALID_OPEN_TELEMETRY_VALUES =
+      ConcurrentHashMap.newKeySet();
+
+  /** Process-local OpenTelemetry bridge initialization state. */
+  private static volatile OpenTelemetryInitialization OPEN_TELEMETRY_INITIALIZATION =
+      OpenTelemetryInitialization.NOT_ATTEMPTED;
+
+  /** OpenTelemetry provider used by the current bridge instruments. */
+  private static volatile MeterProvider OPEN_TELEMETRY_PROVIDER;
 
   private LanceRuntime() {}
 
@@ -224,27 +238,88 @@ public final class LanceRuntime {
       return false;
     }
 
-    boolean instrumented = LanceMetrics.instrument();
-    if (!instrumented) {
-      LOG.warn(
-          "Lance OpenTelemetry metrics were enabled, but the native metrics recorder could not be"
-              + " installed. Another Rust metrics recorder may already be installed in this JVM.");
+    MeterProvider meterProvider = GlobalOpenTelemetry.get().getMeterProvider();
+    OpenTelemetryInitialization initialization = OPEN_TELEMETRY_INITIALIZATION;
+    if (initialization == OpenTelemetryInitialization.FAILED) {
+      return false;
     }
-    return instrumented;
+    if (initialization == OpenTelemetryInitialization.INSTALLED
+        && OPEN_TELEMETRY_PROVIDER == meterProvider) {
+      return true;
+    }
+
+    synchronized (LanceRuntime.class) {
+      initialization = OPEN_TELEMETRY_INITIALIZATION;
+      if (initialization == OpenTelemetryInitialization.FAILED) {
+        return false;
+      }
+      if (initialization == OpenTelemetryInitialization.INSTALLED
+          && OPEN_TELEMETRY_PROVIDER == meterProvider) {
+        return true;
+      }
+
+      boolean instrumented = LanceMetrics.instrument(meterProvider);
+      if (instrumented) {
+        OPEN_TELEMETRY_PROVIDER = meterProvider;
+        OPEN_TELEMETRY_INITIALIZATION = OpenTelemetryInitialization.INSTALLED;
+      } else {
+        OPEN_TELEMETRY_INITIALIZATION = OpenTelemetryInitialization.FAILED;
+        LOG.warn(
+            "Lance OpenTelemetry metrics were enabled, but the native metrics recorder could not"
+                + " be installed. Another Rust metrics recorder may already be installed in this"
+                + " JVM.");
+      }
+      return instrumented;
+    }
   }
 
   static boolean isOpenTelemetryEnabled() {
-    String configured = System.getProperty(SPARK_CONF_OPEN_TELEMETRY_ENABLED);
-    if (configured == null || configured.isEmpty()) {
-      SparkEnv sparkEnv = SparkEnv.get();
-      if (sparkEnv != null) {
-        configured = sparkEnv.conf().get(SPARK_CONF_OPEN_TELEMETRY_ENABLED, null);
-      }
+    SparkEnv sparkEnv = SparkEnv.get();
+    String sparkConfigured =
+        sparkEnv == null ? null : sparkEnv.conf().get(SPARK_CONF_OPEN_TELEMETRY_ENABLED, null);
+    return resolveOpenTelemetryEnabled(
+        sparkConfigured,
+        System.getProperty(SPARK_CONF_OPEN_TELEMETRY_ENABLED),
+        System.getenv(ENV_OPEN_TELEMETRY_ENABLED));
+  }
+
+  static boolean resolveOpenTelemetryEnabled(
+      String sparkConfigured, String systemConfigured, String environmentConfigured) {
+    if (hasText(sparkConfigured)) {
+      return parseOpenTelemetryEnabled(sparkConfigured, "Spark configuration");
     }
-    if (configured == null || configured.isEmpty()) {
-      configured = System.getenv(ENV_OPEN_TELEMETRY_ENABLED);
+    if (hasText(systemConfigured)) {
+      return parseOpenTelemetryEnabled(systemConfigured, "JVM system property");
     }
-    return Boolean.parseBoolean(configured);
+    if (hasText(environmentConfigured)) {
+      return parseOpenTelemetryEnabled(environmentConfigured, "environment variable");
+    }
+    return false;
+  }
+
+  private static boolean parseOpenTelemetryEnabled(String configured, String source) {
+    String normalized = configured.trim();
+    if ("true".equalsIgnoreCase(normalized)) {
+      return true;
+    }
+    if ("false".equalsIgnoreCase(normalized)) {
+      return false;
+    }
+
+    String reportedValue = source + '\0' + configured;
+    if (REPORTED_INVALID_OPEN_TELEMETRY_VALUES.add(reportedValue)) {
+      LOG.warn(
+          "Invalid boolean value '{}' for {} from {}; expected 'true' or 'false'. OpenTelemetry"
+              + " metrics will remain disabled.",
+          configured,
+          SPARK_CONF_OPEN_TELEMETRY_ENABLED,
+          source);
+    }
+    return false;
+  }
+
+  private static boolean hasText(String value) {
+    return value != null && !value.trim().isEmpty();
   }
 
   private static Session createSession() {
@@ -324,6 +399,21 @@ public final class LanceRuntime {
       }
       CATALOG_SESSIONS.clear();
     }
+  }
+
+  static void clearOpenTelemetry() {
+    synchronized (LanceRuntime.class) {
+      LanceMetrics.close();
+      OPEN_TELEMETRY_PROVIDER = null;
+      OPEN_TELEMETRY_INITIALIZATION = OpenTelemetryInitialization.NOT_ATTEMPTED;
+      REPORTED_INVALID_OPEN_TELEMETRY_VALUES.clear();
+    }
+  }
+
+  private enum OpenTelemetryInitialization {
+    NOT_ATTEMPTED,
+    INSTALLED,
+    FAILED
   }
 
   /**
