@@ -100,10 +100,7 @@ case class AddIndexExec(
         }
         (
           ds.getFragments.asScala
-            .map(fragment =>
-              FragmentWorkload(
-                Integer.valueOf(fragment.getId),
-                fragment.metadata().getNumRows))
+            .map(fragment => FragmentWorkload(fragment.getId, fragment.metadata().getNumRows))
             .toList,
           canonical)
       } finally {
