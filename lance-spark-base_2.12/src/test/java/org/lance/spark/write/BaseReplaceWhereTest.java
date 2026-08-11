@@ -170,6 +170,24 @@ public abstract class BaseReplaceWhereTest {
     op.check(Arrays.asList(Row.of(2, "2026-08-02", 200), Row.of(3, "2026-08-01", 300)));
   }
 
+  /**
+   * A nested block comment containing {@code AS} must not be treated as the command separator; the
+   * split honors nested {@code /* ... *&#47;} the way Spark's parser does.
+   */
+  @Test
+  public void testReplacePredicateWithNestedBlockComment() {
+    TableOperator op = new TableOperator(spark, catalogName);
+    op.create();
+
+    op.insert(Arrays.asList(Row.of(1, "2026-08-01", 100), Row.of(2, "2026-08-02", 200)));
+
+    op.replace(
+        "dt = '2026-08-01' /* outer /* inner */ AS still-comment */",
+        "SELECT 3 AS id, '2026-08-01' AS dt, 300 AS value");
+
+    op.check(Arrays.asList(Row.of(2, "2026-08-02", 200), Row.of(3, "2026-08-01", 300)));
+  }
+
   /** The replacement is a single atomic commit: exactly one new table version is produced. */
   @Test
   public void testReplaceIsSingleAtomicCommit() {

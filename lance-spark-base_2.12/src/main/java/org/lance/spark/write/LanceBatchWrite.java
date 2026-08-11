@@ -15,6 +15,7 @@ package org.lance.spark.write;
 
 import org.lance.CommitBuilder;
 import org.lance.Dataset;
+import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.Transaction;
 import org.lance.ipc.LanceScanner;
@@ -259,13 +260,22 @@ public class LanceBatchWrite implements BatchWrite {
     List<FragmentMetadata> updatedFragments = new ArrayList<>();
     for (Map.Entry<Integer, RoaringBitmap> entry : deletionsByFragment.entrySet()) {
       int fragmentId = entry.getKey();
-      // Materialize the row indexes for a single fragment at a time; the aggregate deletion state
-      // stays compressed as RoaringBitmaps so driver memory does not grow with total matched rows.
-      List<Integer> rowIndexes = new ArrayList<>(entry.getValue().getCardinality());
-      entry.getValue().forEach((org.roaringbitmap.IntConsumer) rowIndexes::add);
-      FragmentMetadata updated = ds.getFragment(fragmentId).deleteRows(rowIndexes);
+      Fragment fragment = ds.getFragment(fragmentId);
+      RoaringBitmap matched = entry.getValue();
+      // Fast path: when every live row in the fragment matches, drop the fragment outright without
+      // materializing any per-row list. This covers the common partition-overwrite case (a whole
+      // partition living in its own fragment) and keeps driver memory independent of fragment size.
+      if (matched.getCardinality() == fragment.metadata().getNumRows()) {
+        removedFragmentIds.add((long) fragmentId);
+        continue;
+      }
+      // Partial match: the native deleteRows takes a List<Integer>, so the surviving indexes for
+      // this one fragment are materialized here. This list is bounded by a single fragment's row
+      // count, not by the total matched row count across the table.
+      List<Integer> rowIndexes = new ArrayList<>(matched.getCardinality());
+      matched.forEach((org.roaringbitmap.IntConsumer) rowIndexes::add);
+      FragmentMetadata updated = fragment.deleteRows(rowIndexes);
       if (updated == null) {
-        // All rows in the fragment matched the predicate; drop the whole fragment.
         removedFragmentIds.add((long) fragmentId);
       } else {
         updatedFragments.add(updated);

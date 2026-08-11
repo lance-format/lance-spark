@@ -137,12 +137,23 @@ public final class ParserUtils {
   }
 
   private static int skipBlockComment(String s, int start) {
+    // Spark supports nested block comments, so track depth: an inner `*/` closes only the inner
+    // comment, and an `AS` remains commented out until the outermost comment closes.
     int i = start + 2;
     int n = s.length();
-    while (i + 1 < n && !(s.charAt(i) == '*' && s.charAt(i + 1) == '/')) {
-      i++;
+    int depth = 1;
+    while (i + 1 < n && depth > 0) {
+      if (s.charAt(i) == '/' && s.charAt(i + 1) == '*') {
+        depth++;
+        i += 2;
+      } else if (s.charAt(i) == '*' && s.charAt(i + 1) == '/') {
+        depth--;
+        i += 2;
+      } else {
+        i++;
+      }
     }
-    return Math.min(i + 2, n);
+    return depth == 0 ? i : n;
   }
 
   /**
