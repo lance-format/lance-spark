@@ -27,12 +27,30 @@ import org.apache.spark.sql.types.DataTypes;
 import java.math.BigDecimal;
 import java.sql.Date;
 import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
+import java.time.temporal.ChronoField;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 public class FilterPushDown {
+  /**
+   * Renders a Spark {@code TimestampType} (micros-since-epoch UTC) as a {@code uuuu-MM-dd HH:mm:ss}
+   * literal in UTC. Fractional seconds are emitted only when non-zero. Pinned to {@link
+   * ZoneOffset#UTC} and {@link Locale#ROOT} so the pushed literal is independent of the driver
+   * JVM's default time zone and locale.
+   */
+  private static final DateTimeFormatter UTC_TIMESTAMP_FORMATTER =
+      new DateTimeFormatterBuilder()
+          .appendPattern("uuuu-MM-dd HH:mm:ss")
+          .appendFraction(ChronoField.NANO_OF_SECOND, 0, 9, true)
+          .toFormatter(Locale.ROOT);
+
   /**
    * Create SQL 'where clause' from Spark V2 predicates.
    *
@@ -203,9 +221,13 @@ public class FilterPushDown {
     }
     if (literal.dataType() == DataTypes.TimestampType && value instanceof Long) {
       long micros = (Long) value;
-      java.time.Instant instant =
-          java.time.Instant.ofEpochSecond(micros / 1_000_000, (micros % 1_000_000) * 1_000);
-      return "timestamp '" + Timestamp.from(instant) + "'";
+      Instant instant =
+          Instant.ofEpochSecond(
+              Math.floorDiv(micros, 1_000_000L), Math.floorMod(micros, 1_000_000L) * 1_000L);
+      // Spark TimestampType is micros-since-epoch UTC. Render the UTC wall clock explicitly:
+      // java.sql.Timestamp.toString() renders in the JVM default zone, which would shift the
+      // pushed literal on non-UTC drivers and silently drop or include the wrong rows.
+      return "timestamp '" + UTC_TIMESTAMP_FORMATTER.format(instant.atOffset(ZoneOffset.UTC)) + "'";
     }
     if (value instanceof Date) {
       return "date '" + value.toString().replace("'", "''") + "'";

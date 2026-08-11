@@ -16,6 +16,7 @@ package org.apache.spark.sql.execution.datasources.v2
 import org.apache.spark.sql.catalyst.plans.logical.LanceNamedArgument
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.Test
+import org.lance.index.IndexType
 
 /**
  * Unit tests for [[IndexUtils]] helper methods.
@@ -153,24 +154,54 @@ class IndexUtilsTest {
 
   @Test
   def buildIndexType_btreeCaseInsensitive(): Unit = {
-    import org.lance.index.IndexType
     assertEquals(IndexType.BTREE, IndexUtils.buildIndexType("btree"))
     assertEquals(IndexType.BTREE, IndexUtils.buildIndexType("BTREE"))
     assertEquals(IndexType.BTREE, IndexUtils.buildIndexType("BTree"))
   }
 
   @Test
-  def buildIndexType_ftsReturnsInverted(): Unit = {
-    import org.lance.index.IndexType
+  def buildIndexType_ftsAndInvertedReturnInverted(): Unit = {
     assertEquals(IndexType.INVERTED, IndexUtils.buildIndexType("fts"))
     assertEquals(IndexType.INVERTED, IndexUtils.buildIndexType("FTS"))
+    assertEquals(IndexType.INVERTED, IndexUtils.buildIndexType("inverted"))
+    assertEquals(IndexType.INVERTED, IndexUtils.buildIndexType("INVERTED"))
   }
 
   @Test
-  def buildIndexType_zonemapCaseInsensitive(): Unit = {
-    import org.lance.index.IndexType
-    assertEquals(IndexType.ZONEMAP, IndexUtils.buildIndexType("zonemap"))
-    assertEquals(IndexType.ZONEMAP, IndexUtils.buildIndexType("ZONEMAP"))
+  def buildScalarIndexParamType_ftsAndInvertedReturnInverted(): Unit = {
+    assertEquals("inverted", IndexUtils.buildScalarIndexParamType("fts"))
+    assertEquals("inverted", IndexUtils.buildScalarIndexParamType("inverted"))
+  }
+
+  @Test
+  def scalarSegmentIndexType_mapsAllSupportedMethods(): Unit = {
+    val expected = Seq(
+      ("zonemap", IndexType.ZONEMAP, "zonemap"),
+      ("bitmap", IndexType.BITMAP, "bitmap"),
+      ("label_list", IndexType.LABEL_LIST, "labellist"),
+      ("ngram", IndexType.NGRAM, "ngram"),
+      ("bloomfilter", IndexType.BLOOM_FILTER, "bloomfilter"),
+      ("rtree", IndexType.RTREE, "rtree"),
+      ("fts", IndexType.INVERTED, "inverted"),
+      ("inverted", IndexType.INVERTED, "inverted"))
+
+    expected.foreach { case (method, indexType, coreParamType) =>
+      Seq(method, method.toUpperCase).foreach { spelling =>
+        assertEquals(indexType, IndexUtils.scalarSegmentIndexType(spelling).get)
+        assertEquals(indexType, IndexUtils.buildIndexType(spelling))
+        assertEquals(coreParamType, IndexUtils.buildScalarIndexParamType(spelling))
+      }
+    }
+  }
+
+  @Test
+  def scalarSegmentIndexType_rejectsAliases(): Unit = {
+    Seq("labellist", "bloom_filter", "r_tree").foreach { alias =>
+      assertTrue(IndexUtils.scalarSegmentIndexType(alias).isEmpty)
+      assertThrows(
+        classOf[UnsupportedOperationException],
+        () => IndexUtils.buildIndexType(alias))
+    }
   }
 
   @Test
@@ -178,5 +209,27 @@ class IndexUtilsTest {
     assertThrows(
       classOf[UnsupportedOperationException],
       () => IndexUtils.buildIndexType("ivf_pq"))
+  }
+
+  @Test
+  def batchFragments_respectsNumSegmentsAndDefaults(): Unit = {
+    val ids = (0 until 4).map(java.lang.Integer.valueOf).toList
+
+    assertEquals(Seq(2, 2), IndexUtils.batchFragments(ids, Some(2), 4).map(_.size))
+    assertEquals(4, IndexUtils.batchFragments(ids, Some(10), 4).size)
+    assertEquals(4, IndexUtils.batchFragments(ids, None, 8).size)
+    assertEquals(2, IndexUtils.batchFragments(ids, None, 2).size)
+    assertEquals(Seq.empty, IndexUtils.batchFragments(Nil, None, 4))
+  }
+
+  @Test
+  def batchFragments_coversAllFragmentsExactlyOnce(): Unit = {
+    val ids = (0 until 7).map(java.lang.Integer.valueOf).toList
+    val batches = IndexUtils.batchFragments(ids, Some(3), 4)
+
+    assertEquals(Seq(2, 2, 3), batches.map(_.size))
+    assertEquals(ids, batches.flatten)
+    assertEquals(ids.size, batches.flatten.distinct.size)
+    assertTrue(batches.forall(_.nonEmpty))
   }
 }

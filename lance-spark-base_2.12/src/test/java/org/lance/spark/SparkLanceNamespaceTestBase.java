@@ -14,6 +14,9 @@
 package org.lance.spark;
 
 import org.lance.Version;
+import org.lance.spark.function.LanceMatchFunction;
+import org.lance.spark.function.LanceMultiMatchFunction;
+import org.lance.spark.function.LancePhraseFunction;
 
 import org.apache.spark.sql.AnalysisException;
 import org.apache.spark.sql.Dataset;
@@ -27,6 +30,7 @@ import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.SupportsNamespaces;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.catalog.TableChange;
+import org.apache.spark.sql.connector.catalog.functions.UnboundFunction;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -41,6 +45,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -699,6 +704,88 @@ public abstract class SparkLanceNamespaceTestBase {
   }
 
   @Test
+  public void testListFunctionsContainsLanceMatch() throws Exception {
+    FunctionCatalog functionCatalog = (FunctionCatalog) catalog;
+    String[] namespace = new String[] {};
+    Identifier[] identifiers = functionCatalog.listFunctions(namespace);
+
+    boolean found = false;
+    for (Identifier id : identifiers) {
+      if (LanceMatchFunction.NAME.equalsIgnoreCase(id.name())) {
+        assertNotNull(id.namespace());
+        assertArrayEquals(namespace, id.namespace());
+        found = true;
+        break;
+      }
+    }
+    assertTrue(found, "listFunctions() must include an identifier for " + LanceMatchFunction.NAME);
+  }
+
+  @Test
+  public void testListFunctionsContainsLanceMatchPhrase() throws Exception {
+    FunctionCatalog functionCatalog = (FunctionCatalog) catalog;
+    String[] namespace = new String[] {};
+    Identifier[] identifiers = functionCatalog.listFunctions(namespace);
+
+    boolean found = false;
+    for (Identifier id : identifiers) {
+      if (LancePhraseFunction.NAME.equalsIgnoreCase(id.name())) {
+        assertNotNull(id.namespace());
+        assertArrayEquals(namespace, id.namespace());
+        found = true;
+        break;
+      }
+    }
+    assertTrue(found, "listFunctions() must include an identifier for " + LancePhraseFunction.NAME);
+  }
+
+  @Test
+  public void testLoadFunctionLanceMatch() throws Exception {
+    FunctionCatalog functionCatalog = (FunctionCatalog) catalog;
+    Identifier ident = Identifier.of(new String[] {}, LanceMatchFunction.NAME);
+    UnboundFunction fn = functionCatalog.loadFunction(ident);
+    assertNotNull(fn, "loadFunction() must return non-null for " + LanceMatchFunction.NAME);
+    assertEquals(LanceMatchFunction.NAME, fn.name());
+  }
+
+  @Test
+  public void testLoadFunctionLanceMatchPhrase() throws Exception {
+    FunctionCatalog functionCatalog = (FunctionCatalog) catalog;
+    Identifier ident = Identifier.of(new String[] {}, LancePhraseFunction.NAME);
+    UnboundFunction fn = functionCatalog.loadFunction(ident);
+    assertNotNull(fn, "loadFunction() must return non-null for " + LancePhraseFunction.NAME);
+    assertEquals(LancePhraseFunction.NAME, fn.name());
+  }
+
+  @Test
+  public void testListFunctionsContainsLanceMultiMatch() throws Exception {
+    FunctionCatalog functionCatalog = (FunctionCatalog) catalog;
+    String[] namespace = new String[] {};
+    Identifier[] identifiers = functionCatalog.listFunctions(namespace);
+
+    boolean found = false;
+    for (Identifier id : identifiers) {
+      if (LanceMultiMatchFunction.NAME.equalsIgnoreCase(id.name())) {
+        assertNotNull(id.namespace());
+        assertArrayEquals(namespace, id.namespace());
+        found = true;
+        break;
+      }
+    }
+    assertTrue(
+        found, "listFunctions() must include an identifier for " + LanceMultiMatchFunction.NAME);
+  }
+
+  @Test
+  public void testLoadFunctionLanceMultiMatch() throws Exception {
+    FunctionCatalog functionCatalog = (FunctionCatalog) catalog;
+    Identifier ident = Identifier.of(new String[] {}, LanceMultiMatchFunction.NAME);
+    UnboundFunction fn = functionCatalog.loadFunction(ident);
+    assertNotNull(fn, "loadFunction() must return non-null for " + LanceMultiMatchFunction.NAME);
+    assertEquals(LanceMultiMatchFunction.NAME, fn.name());
+  }
+
+  @Test
   public void testTableExistsReturnsFalseForNonExistentTable() {
     // This exercises the loadTable path used by Spark 4.0+ internally
     // when calling spark.catalog.tableExists()
@@ -1108,7 +1195,7 @@ public abstract class SparkLanceNamespaceTestBase {
   public void testListFunctionsAtRootAreLoadable() throws Exception {
     FunctionCatalog functions = (FunctionCatalog) catalog;
     Identifier[] rootFunctions = functions.listFunctions(new String[0]);
-    assertEquals(2, rootFunctions.length);
+    assertEquals(5, rootFunctions.length);
     for (Identifier function : rootFunctions) {
       assertNotNull(functions.loadFunction(function));
     }

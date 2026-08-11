@@ -40,6 +40,26 @@ final class TestPredicates {
     return new Predicate("=", new Expression[] {FieldReference.apply(column), literalOf(value)});
   }
 
+  /**
+   * Builds an equality predicate whose literal is a raw {@code TimestampType} value carrying {@code
+   * micros}-since-epoch UTC, exactly as Spark hands timestamps to V2 pushdown. Unlike {@link
+   * #eq(String, Object)} with a {@link Timestamp}, the value is not derived from the JVM default
+   * time zone, so it pins time-zone-independent rendering.
+   */
+  static Predicate eqTimestampMicros(String column, long micros) {
+    return cmpTimestampMicros("=", column, micros);
+  }
+
+  /**
+   * Like {@link #eqTimestampMicros(String, long)} but for any comparison operator ({@code "<"},
+   * {@code ">="}, ...), so range/non-equality pushdown of {@code TimestampType} literals can be
+   * exercised through the same raw {@code Long}-micros shape Spark produces.
+   */
+  static Predicate cmpTimestampMicros(String op, String column, long micros) {
+    LiteralValue<Long> lit = new LiteralValue<>(micros, DataTypes.TimestampType);
+    return new Predicate(op, new Expression[] {FieldReference.apply(column), lit});
+  }
+
   static Predicate lt(String column, Object value) {
     return new Predicate("<", new Expression[] {FieldReference.apply(column), literalOf(value)});
   }

@@ -52,6 +52,7 @@ The following features require the Lance Spark SQL extension to be enabled:
 - [VECTOR_SEARCH](operations/dql/vector-search.md) - Run vector similarity search through Lance namespace execution
 - [SEARCH](operations/dql/search.md) - Run full-text search through Lance namespace execution
 - [HYBRID_SEARCH](operations/dql/hybrid-search.md) - Combine vector and full-text search with reciprocal rank fusion
+- [Full-Text Search](operations/dql/fts.md) - `lance_match`, `lance_match_phrase`, and `lance_multi_match` SQL functions for querying FTS indexes
 - [ADD COLUMNS with backfill](operations/dml/add-columns.md) - Add new columns and backfill existing rows with data
 - [UPDATE COLUMNS with backfill](operations/dml/update-columns.md) - Update existing columns using data from a source
 - [OPTIMIZE](operations/ddl/optimize.md) - Compact table fragments for improved query performance
@@ -70,6 +71,29 @@ and namespace-specific options:
 | `spark.sql.catalog.{name}.single_level_ns`  | Boolean | ✗       | Enable single-level mode with virtual "default" namespace. Default: `false`. See [Note on Namespace Levels](#note-on-namespace-levels). |
 | `spark.sql.catalog.{name}.parent`           | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                             |
 | `spark.sql.catalog.{name}.parent_delimiter` | String | ✗        | Delimiter for parent prefix (default: `.`). See [Note on Namespace Levels](#note-on-namespace-levels).                           |
+
+## OpenTelemetry Metrics
+
+Lance Spark can bridge Lance's native Java metrics into the JVM OpenTelemetry
+pipeline. Enable it with:
+
+```shell
+--conf spark.lance.otel.enabled=true
+```
+
+You can also set the JVM system property
+`-Dspark.lance.otel.enabled=true`, or set
+`LANCE_SPARK_OTEL_ENABLED=true` in each JVM environment. When multiple sources
+are set, Spark configuration takes precedence over the JVM system property,
+which takes precedence over the environment variable. Values must be `true` or
+`false` (case-insensitive); invalid values disable the bridge and produce a
+warning.
+
+The bridge uses the OpenTelemetry `GlobalOpenTelemetry` meter provider, so
+configure your exporter, resource, and reader with the standard OpenTelemetry
+Java SDK settings. Spark driver and executor JVMs are independent processes;
+set the Spark conf or environment variable for every process that should emit
+Lance metrics.
 
 ## Example Namespace Implementations
 

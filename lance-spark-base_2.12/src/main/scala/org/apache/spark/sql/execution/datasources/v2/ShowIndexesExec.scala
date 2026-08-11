@@ -24,6 +24,13 @@ import org.lance.spark.utils.{FieldPathUtils, Utils}
 
 import scala.collection.JavaConverters._
 
+object ShowIndexesExec {
+  private val SystemIndexNames = Set("__lance_frag_reuse", "__lance_mem_wal")
+
+  private def isSystemIndex(indexName: String): Boolean =
+    indexName != null && SystemIndexNames.exists(_.equalsIgnoreCase(indexName))
+}
+
 /**
  * Physical execution of SHOW INDEXES for Lance datasets.
  *
@@ -46,11 +53,16 @@ case class ShowIndexesExec(
 
     val dataset = Utils.openDatasetBuilder(readOptions).build()
     try {
-      val indexes = dataset.describeIndices().asScala.toSeq
+      val indexes = dataset.getIndexes.asScala.toSeq
+        .filterNot(idx => ShowIndexesExec.isSystemIndex(idx.name()))
+        .groupBy(_.name())
+        .toSeq
+        .sortBy(_._1)
+        .map(_._2.head)
       val lanceSchema = dataset.getLanceSchema()
 
       indexes.map { idx =>
-        val fieldIds = idx.getFieldIds
+        val fieldIds = idx.fields()
         val fieldNamesArray =
           if (fieldIds == null) {
             null
@@ -63,7 +75,7 @@ case class ShowIndexesExec(
             new GenericArrayData(names.toArray[AnyRef])
           }
 
-        val name = idx.getName
+        val name = idx.name()
         val stats = dataset.getIndexStatistics(name)
         val indexTypeValue = stats.get("index_type")
         val indexTypeUtf8 =

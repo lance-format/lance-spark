@@ -16,7 +16,7 @@ package org.apache.spark.sql.catalyst.parser.extensions
 import org.antlr.v4.runtime.ParserRuleContext
 import org.apache.spark.sql.catalyst.analysis.{UnresolvedIdentifier, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.parser.{ParseException, ParserInterface}
-import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, LanceCreateBranch, LanceDropBranch, LanceDropIndex, LanceNamedArgument, LanceShowBranches, LogicalPlan, Optimize, SetUnenforcedPrimaryKey, ShowIndexes, UpdateColumnsBackfill, Vacuum}
+import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, LanceCreateBranch, LanceCreateTag, LanceDropBranch, LanceDropIndex, LanceDropTag, LanceNamedArgument, LanceShowBranches, LanceShowTags, LogicalPlan, Optimize, SetUnenforcedPrimaryKey, ShowIndexes, UpdateColumnsBackfill, Vacuum}
 import org.lance.spark.utils.{FieldPathUtils, ParserUtils}
 
 import scala.jdk.CollectionConverters._
@@ -179,6 +179,60 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
       : LanceShowBranches = {
     val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
     LanceShowBranches(table)
+  }
+
+  override def visitCreateTagRefMain(ctx: LanceSqlExtensionsParser.CreateTagRefMainContext)
+      : LanceCreateTag = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val tagName = cleanIdentifier(ctx.tagName.getText)
+    val ifNotExists = ctx.EXISTS() != null
+    if (ctx.refMainVersion == null) {
+      LanceCreateTag(table, tagName, org.lance.Ref.ofMain(), ifNotExists)
+    } else {
+      LanceCreateTag(
+        table,
+        tagName,
+        org.lance.Ref.ofMain(_parseVersion(ctx, ctx.refMainVersion.getText)),
+        ifNotExists)
+    }
+  }
+
+  override def visitCreateTagRefBranch(
+      ctx: LanceSqlExtensionsParser.CreateTagRefBranchContext): LanceCreateTag = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val tagName = cleanIdentifier(ctx.tagName.getText)
+    val refBranchName = cleanIdentifier(ctx.refBranchName.getText)
+    val ifNotExists = ctx.EXISTS() != null
+    if (ctx.refBranchVersion == null) {
+      LanceCreateTag(table, tagName, org.lance.Ref.ofBranch(refBranchName), ifNotExists)
+    } else {
+      LanceCreateTag(
+        table,
+        tagName,
+        org.lance.Ref.ofBranch(refBranchName, _parseVersion(ctx, ctx.refBranchVersion.getText)),
+        ifNotExists)
+    }
+  }
+
+  override def visitCreateTagRefTag(ctx: LanceSqlExtensionsParser.CreateTagRefTagContext)
+      : LanceCreateTag = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val tagName = cleanIdentifier(ctx.tagName.getText)
+    val refTagName = cleanIdentifier(ctx.refTagName.getText)
+    val ifNotExists = ctx.EXISTS() != null
+    LanceCreateTag(table, tagName, org.lance.Ref.ofTag(refTagName), ifNotExists)
+  }
+
+  override def visitDropTag(ctx: LanceSqlExtensionsParser.DropTagContext): LanceDropTag = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val tagName = cleanIdentifier(ctx.tagName.getText)
+    val ifExists = ctx.EXISTS() != null
+    LanceDropTag(table, tagName, ifExists)
+  }
+
+  override def visitShowTags(ctx: LanceSqlExtensionsParser.ShowTagsContext): LanceShowTags = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    LanceShowTags(table)
   }
 
   override def visitSetUnenforcedPrimaryKey(

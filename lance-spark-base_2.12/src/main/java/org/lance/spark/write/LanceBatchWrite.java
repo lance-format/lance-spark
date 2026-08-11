@@ -178,6 +178,12 @@ public class LanceBatchWrite implements BatchWrite {
       if (enableStableRowIds != null) {
         stagedCommit.setEnableStableRowIds(enableStableRowIds);
       }
+      // For a path-based staged create, StagedCommit only has the catalog's static storage
+      // options at this point. Merge in write-time and namespace-vended options now so
+      // StagedCommit.commit() uses them. Mirrors the non-staged merge below.
+      stagedCommit.mergeStorageOptions(
+          LanceRuntime.mergeStorageOptions(
+              writeOptions.getStorageOptions(), initialStorageOptions));
     } else {
       // For non-staged tables, commit immediately
       long version =

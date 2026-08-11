@@ -53,7 +53,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Set up Java
         uses: actions/setup-java@v5
         with:
@@ -68,7 +68,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Set up Java
         uses: actions/setup-java@v5
         with:
@@ -98,8 +98,10 @@ jobs:
             scala-version: "2.13"
           - spark-version: "4.1"
             scala-version: "2.13"
+          - spark-version: "4.2"
+            scala-version: "2.13"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Set up Java
         uses: actions/setup-java@v5
         with:
@@ -131,8 +133,10 @@ jobs:
             scala-version: "2.13"
           - spark-version: "4.1"
             scala-version: "2.13"
+          - spark-version: "4.2"
+            scala-version: "2.13"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Set up Java
         uses: actions/setup-java@v5
         with:

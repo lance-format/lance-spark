@@ -15,9 +15,11 @@ package org.lance.spark.read;
 
 import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
+import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.read.metric.LanceCustomMetrics;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
+import org.lance.spark.utils.FullTextQueryUtils;
 import org.lance.spark.utils.Optional;
 
 import org.apache.arrow.util.Preconditions;
@@ -306,6 +308,7 @@ public class LanceScan
    *   <li>Filters are present (unknown selectivity makes row count estimation unreliable)
    *   <li>TopN sort orders are present (all fragments needed for global sort)
    *   <li>Aggregation is pushed (e.g., COUNT(*) LIMIT — row counts don't apply)
+   *   <li>FTS query is active (needs all fragments to return complete matching results)
    *   <li>Fragment row counts are unavailable
    * </ul>
    *
@@ -319,6 +322,7 @@ public class LanceScan
         || whereConditions.isPresent()
         || topNSortOrders.isPresent()
         || pushedAggregation.isPresent()
+        || readOptions.getFullTextQuery() != null
         || fragmentRowCounts.isEmpty()) {
       return allSplits;
     }
@@ -434,6 +438,13 @@ public class LanceScan
     result = result.$plus(scala.Tuple2.apply("offset", offset.toString()));
     result = result.$plus(scala.Tuple2.apply("topNSortOrders", topNSortOrders.toString()));
     result = result.$plus(scala.Tuple2.apply("pushedAggregation", pushedAggregation.toString()));
+    if (readOptions.getFullTextQuery() != null) {
+      result =
+          result.$plus(
+              scala.Tuple2.apply(
+                  "fullTextQuery",
+                  FullTextQueryUtils.fullTextQueryToString(readOptions.getFullTextQuery())));
+    }
     return result;
   }
 
@@ -528,6 +539,7 @@ public class LanceScan
   private static class LanceReaderFactory implements PartitionReaderFactory {
     @Override
     public PartitionReader<InternalRow> createReader(InputPartition partition) {
+      LanceRuntime.enableOpenTelemetry();
       Preconditions.checkArgument(
           partition instanceof LanceInputPartition,
           "Unknown InputPartition type. Expecting LanceInputPartition");
@@ -536,6 +548,7 @@ public class LanceScan
 
     @Override
     public PartitionReader<ColumnarBatch> createColumnarReader(InputPartition partition) {
+      LanceRuntime.enableOpenTelemetry();
       Preconditions.checkArgument(
           partition instanceof LanceInputPartition,
           "Unknown InputPartition type. Expecting LanceInputPartition");

@@ -239,6 +239,8 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
 
     @Override
     public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
+      LanceRuntime.enableOpenTelemetry();
+
       return new AddColumnsWriter(
           writeOptions,
           schema,

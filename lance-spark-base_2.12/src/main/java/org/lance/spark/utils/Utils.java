@@ -122,6 +122,8 @@ public class Utils {
     }
 
     public Dataset build() {
+      LanceRuntime.enableOpenTelemetry();
+
       Map<String, String> base = storageOptions != null ? storageOptions : Collections.emptyMap();
       Map<String, String> merged = LanceRuntime.mergeStorageOptions(base, initialStorageOptions);
 

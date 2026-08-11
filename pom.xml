@@ -4,7 +4,7 @@
 
     <groupId>org.lance</groupId>
     <artifactId>lance-spark-root</artifactId>
-    <version>0.5.1</version>
+    <version>0.7.1</version>
     <packaging>pom</packaging>
 
     <name>${project.artifactId}</name>
@@ -50,15 +50,16 @@
     </distributionManagement>
 
     <properties>
-        <lance-spark.version>0.5.1</lance-spark.version>
-        <lance.version>8.0.0-beta.9</lance.version>
-        <lance-namespace.version>0.7.5</lance-namespace.version>
-        <lance-namespace-impl.version>0.3.0</lance-namespace-impl.version>
+        <lance-spark.version>0.7.1</lance-spark.version>
+        <lance.version>11.0.0-beta.3</lance.version>
+        <lance-namespace.version>0.8.6</lance-namespace.version>
+        <lance-namespace-impl.version>0.4.0</lance-namespace-impl.version>
 
         <arrow14.version>14.0.2</arrow14.version>
         <arrow15.version>15.0.2</arrow15.version>
         <arrow18.version>18.1.0</arrow18.version>
         <arrow183.version>18.3.0</arrow183.version>
+        <arrow19.version>19.0.0</arrow19.version>
         <!-- Default Arrow version (Spark 3.5); modules override as needed -->
         <arrow.version>${arrow15.version}</arrow.version>
 
@@ -68,12 +69,14 @@
         <spark35.version>3.5.5</spark35.version>
         <spark40.version>4.0.0</spark40.version>
         <spark41.version>4.1.1</spark41.version>
+        <spark42.version>4.2.0</spark42.version>
         <spark.version>${spark35.version}</spark.version>
 
         <spark34.compat.version>3.4</spark34.compat.version>
         <spark35.compat.version>3.5</spark35.compat.version>
         <spark40.compat.version>4.0</spark40.compat.version>
         <spark41.compat.version>4.1</spark41.compat.version>
+        <spark42.compat.version>4.2</spark42.compat.version>
         <spark.compat.version>${spark35.compat.version}</spark.compat.version>
 
         <scala212.version>2.12.20</scala212.version>
@@ -106,6 +109,7 @@
             */
         </spotless.license.header>
 
+        <opentelemetry.version>1.64.0</opentelemetry.version>
         <junit.version>5.10.1</junit.version>
         <scalatest.version>3.2.10</scalatest.version>
 
@@ -143,6 +147,8 @@
         <module>lance-spark-bundle-4.0_2.13</module>
         <module>lance-spark-4.1_2.13</module>
         <module>lance-spark-bundle-4.1_2.13</module>
+        <module>lance-spark-4.2_2.13</module>
+        <module>lance-spark-bundle-4.2_2.13</module>
     </modules>
 
     <dependencyManagement>
@@ -213,6 +219,11 @@
                     <artifactId>slf4j-api</artifactId>
                 </exclusion>
             </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-api</artifactId>
+            <version>${opentelemetry.version}</version>
         </dependency>
         <dependency>
             <groupId>org.lance</groupId>

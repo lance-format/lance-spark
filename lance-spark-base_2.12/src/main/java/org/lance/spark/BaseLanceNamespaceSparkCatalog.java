@@ -39,6 +39,9 @@ import org.lance.operation.UpdateConfig;
 import org.lance.operation.UpdateMap;
 import org.lance.spark.function.LanceBucketFunction;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
+import org.lance.spark.function.LanceMatchFunction;
+import org.lance.spark.function.LanceMultiMatchFunction;
+import org.lance.spark.function.LancePhraseFunction;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.Utils;
@@ -286,6 +289,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
     }
     return new Identifier[] {
       Identifier.of(new String[0], LanceFragmentIdWithDefaultFunction.NAME),
+      Identifier.of(new String[0], LanceMatchFunction.NAME),
+      Identifier.of(new String[0], LancePhraseFunction.NAME),
+      Identifier.of(new String[0], LanceMultiMatchFunction.NAME),
       Identifier.of(new String[0], LanceBucketFunction.NAME)
     };
   }
@@ -297,6 +303,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
     }
     if (LanceFragmentIdWithDefaultFunction.NAME.equalsIgnoreCase(ident.name())) {
       return new LanceFragmentIdWithDefaultFunction();
+    }
+    if (LanceMatchFunction.NAME.equalsIgnoreCase(ident.name())) {
+      return new LanceMatchFunction();
+    }
+    if (LancePhraseFunction.NAME.equalsIgnoreCase(ident.name())) {
+      return new LancePhraseFunction();
+    }
+    if (LanceMultiMatchFunction.NAME.equalsIgnoreCase(ident.name())) {
+      return new LanceMultiMatchFunction();
     }
     if (LanceBucketFunction.NAME.equalsIgnoreCase(ident.name())) {
       return new LanceBucketFunction();

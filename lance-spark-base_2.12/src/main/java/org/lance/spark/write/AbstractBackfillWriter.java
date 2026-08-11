@@ -113,7 +113,7 @@ public abstract class AbstractBackfillWriter implements DataWriter<InternalRow> 
     }
   }
 
-  private void flushFragment(int fragmentId, FragmentBuffer buffer) {
+  private void flushFragment(Dataset dataset, int fragmentId, FragmentBuffer buffer) {
     try {
       buffer.writer.finish();
       BufferAllocator allocator = LanceRuntime.allocator();
@@ -122,13 +122,8 @@ public abstract class AbstractBackfillWriter implements DataWriter<InternalRow> 
           ArrowReader reader = new SingleBatchArrowReader(allocator, buffer.data)) {
         Data.exportArrayStream(allocator, reader, stream);
 
-        try (Dataset dataset =
-            Utils.openDatasetBuilder(writeOptions)
-                .initialStorageOptions(initialStorageOptions)
-                .build()) {
-          Fragment fragment = new Fragment(dataset, fragmentId);
-          processFragment(fragment, stream);
-        }
+        Fragment fragment = new Fragment(dataset, fragmentId);
+        processFragment(fragment, stream);
       } catch (Exception e) {
         throw new RuntimeException("Cannot read arrow stream.", e);
       }
@@ -148,8 +143,13 @@ public abstract class AbstractBackfillWriter implements DataWriter<InternalRow> 
 
   @Override
   public WriterCommitMessage commit() {
-    for (Map.Entry<Integer, FragmentBuffer> entry : buffers.entrySet()) {
-      flushFragment(entry.getKey(), entry.getValue());
+    try (Dataset dataset =
+        Utils.openDatasetBuilder(writeOptions)
+            .initialStorageOptions(initialStorageOptions)
+            .build()) {
+      for (Map.Entry<Integer, FragmentBuffer> entry : buffers.entrySet()) {
+        flushFragment(dataset, entry.getKey(), entry.getValue());
+      }
     }
 
     return buildCommitMessage();

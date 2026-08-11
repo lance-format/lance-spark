@@ -315,6 +315,8 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
 
     @Override
     public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
+      LanceRuntime.enableOpenTelemetry();
+
       ShardingBatchKeyEvaluator shardingKeyEvaluator =
           shardingSpec == null
               ? null

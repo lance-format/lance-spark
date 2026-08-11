@@ -41,8 +41,13 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
       return true;
     }
     while (fragmentIndex < inputPartition.getLanceSplit().getFragments().size()) {
+      // Null-first so if create(...) below throws, the subsequent close() sees fragmentReader ==
+      // null and short-circuits, rather than re-closing the already-closed previous scanner and
+      // raising `ArrowArrayStream is already closed`.
       if (fragmentReader != null) {
-        fragmentReader.close();
+        LanceFragmentColumnarBatchScanner toClose = fragmentReader;
+        fragmentReader = null;
+        toClose.close();
       }
       fragmentReader =
           LanceFragmentColumnarBatchScanner.create(
@@ -93,17 +98,22 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
 
   @Override
   public void close() throws IOException {
-    if (fragmentReader != null) {
-      if (!currentScanStatsAdded) {
-        metricsTracker.addScanStats(fragmentReader.getScanStats());
-        currentScanStatsAdded = true;
-      }
-
-      try {
-        fragmentReader.close();
-      } catch (Exception e) {
-        throw new IOException(e);
-      }
+    if (fragmentReader == null) {
+      return;
+    }
+    if (!currentScanStatsAdded) {
+      metricsTracker.addScanStats(fragmentReader.getScanStats());
+      currentScanStatsAdded = true;
+    }
+    // Null-first so close() is idempotent (PartitionReader extends Closeable, whose contract
+    // requires it): a repeat call short-circuits rather than raising
+    // `ArrowArrayStream is already closed` from a second ArrowArrayStream.release().
+    LanceFragmentColumnarBatchScanner toClose = fragmentReader;
+    fragmentReader = null;
+    try {
+      toClose.close();
+    } catch (Exception e) {
+      throw new IOException(e);
     }
   }
 }

@@ -13,7 +13,9 @@
  */
 package org.lance.spark.read;
 
+import org.lance.otel.LanceMetrics;
 import org.lance.spark.LanceDataSource;
+import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 
@@ -40,6 +42,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 public abstract class BaseSparkConnectorReadTest {
+  private static final String OBJECT_STORE_REQUEST_DURATION =
+      "lance_object_store_request_duration_seconds";
   private static SparkSession spark;
   private static String dbPath;
   private static Dataset<Row> data;
@@ -92,6 +96,36 @@ public abstract class BaseSparkConnectorReadTest {
   @Test
   public void readAll() {
     validateData(data, TestUtils.TestTable1Config.expectedValues);
+  }
+
+  @Test
+  public void readWithOpenTelemetryEnabledRegistersLanceMetrics() {
+    String previous = System.getProperty(LanceRuntime.SPARK_CONF_OPEN_TELEMETRY_ENABLED);
+    try {
+      System.setProperty(LanceRuntime.SPARK_CONF_OPEN_TELEMETRY_ENABLED, "true");
+      Dataset<Row> df =
+          spark
+              .read()
+              .format(LanceDataSource.name)
+              .option(
+                  LanceSparkReadOptions.CONFIG_DATASET_URI,
+                  TestUtils.getDatasetUri(dbPath, TestUtils.TestTable1Config.datasetName))
+              .load();
+
+      assertEquals(TestUtils.TestTable1Config.expectedValues.size(), df.count());
+      assertTrue(
+          LanceMetrics.catalog().stream()
+              .anyMatch(desc -> OBJECT_STORE_REQUEST_DURATION.equals(desc.getName())),
+          "expected Spark read path to register Lance OpenTelemetry metrics");
+      assertTrue(LanceRuntime.enableOpenTelemetry());
+    } finally {
+      TestUtils.clearOpenTelemetry();
+      if (previous == null) {
+        System.clearProperty(LanceRuntime.SPARK_CONF_OPEN_TELEMETRY_ENABLED);
+      } else {
+        System.setProperty(LanceRuntime.SPARK_CONF_OPEN_TELEMETRY_ENABLED, previous);
+      }
+    }
   }
 
   @Test
