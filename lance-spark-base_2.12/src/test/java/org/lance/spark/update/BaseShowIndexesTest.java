@@ -57,7 +57,8 @@ public abstract class BaseShowIndexesTest {
     spark =
         SparkSession.builder()
             .appName("lance-show-indexes-test")
-            .master("local[10]")
+            .master("local[3]")
+            .config("spark.default.parallelism", "10")
             .config(
                 "spark.sql.catalog." + catalogName, "org.lance.spark.LanceNamespaceSparkCatalog")
             .config(
