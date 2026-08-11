@@ -128,9 +128,10 @@ public final class ParserUtils {
   }
 
   private static int skipLineComment(String s, int start) {
+    // A line comment ends at the next line terminator; Spark treats both \n and \r as terminators.
     int i = start + 2;
     int n = s.length();
-    while (i < n && s.charAt(i) != '\n') {
+    while (i < n && s.charAt(i) != '\n' && s.charAt(i) != '\r') {
       i++;
     }
     return i;

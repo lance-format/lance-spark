@@ -188,6 +188,20 @@ public abstract class BaseReplaceWhereTest {
     op.check(Arrays.asList(Row.of(2, "2026-08-02", 200), Row.of(3, "2026-08-01", 300)));
   }
 
+  /** A line comment in the predicate ends at a carriage return, matching Spark's parser. */
+  @Test
+  public void testReplacePredicateWithCarriageReturnLineComment() {
+    TableOperator op = new TableOperator(spark, catalogName);
+    op.create();
+
+    op.insert(Arrays.asList(Row.of(1, "2026-08-01", 100), Row.of(2, "2026-08-02", 200)));
+
+    op.replace(
+        "dt = '2026-08-01' -- AS ignored\r", "SELECT 3 AS id, '2026-08-01' AS dt, 300 AS value");
+
+    op.check(Arrays.asList(Row.of(2, "2026-08-02", 200), Row.of(3, "2026-08-01", 300)));
+  }
+
   /** The replacement is a single atomic commit: exactly one new table version is produced. */
   @Test
   public void testReplaceIsSingleAtomicCommit() {

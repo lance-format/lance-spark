@@ -265,7 +265,7 @@ public class LanceBatchWrite implements BatchWrite {
       // Fast path: when every live row in the fragment matches, drop the fragment outright without
       // materializing any per-row list. This covers the common partition-overwrite case (a whole
       // partition living in its own fragment) and keeps driver memory independent of fragment size.
-      if (matched.getCardinality() == fragment.metadata().getNumRows()) {
+      if (matched.getLongCardinality() == fragment.metadata().getNumRows()) {
         removedFragmentIds.add((long) fragmentId);
         continue;
       }
