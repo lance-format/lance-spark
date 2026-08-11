@@ -13,6 +13,7 @@
  */
 package org.lance.spark.update;
 
+import org.lance.Fragment;
 import org.lance.index.Index;
 import org.lance.index.IndexCriteria;
 import org.lance.index.IndexDescription;
@@ -55,6 +56,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -123,6 +125,27 @@ public abstract class BaseAddIndexTest {
                 .boxed()
                 .map(i -> String.format("(%d, 'text_%d')", i, i))
                 .collect(Collectors.joining(","))));
+  }
+
+  private void prepareUnevenFragmentDataset() throws Exception {
+    spark.sql(String.format("create table %s (id int, text string) using lance;", fullTable));
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.IntegerType, false),
+              DataTypes.createStructField("text", DataTypes.StringType, false)
+            });
+    int nextId = 0;
+    for (int rowCount : Arrays.asList(80, 50, 30, 20)) {
+      int startId = nextId;
+      List<Row> rows =
+          IntStream.range(startId, startId + rowCount)
+              .boxed()
+              .map(i -> RowFactory.create(i, String.format("text_%d", i)))
+              .collect(Collectors.toList());
+      spark.createDataFrame(rows, schema).coalesce(1).writeTo(fullTable).append();
+      nextId += rowCount;
+    }
   }
 
   private void prepareNestedDataset() {
@@ -379,6 +402,51 @@ public abstract class BaseAddIndexTest {
           "Expected committed segments to cover all fragments exactly once");
     } finally {
       lanceDataset.close();
+    }
+  }
+
+  @Test
+  public void testScalarSegmentBatchesBalanceByRowCount() throws Exception {
+    prepareUnevenFragmentDataset();
+
+    spark
+        .sql(
+            String.format(
+                "alter table %s create index balanced_segments using zonemap (id) with (num_segments = 2)",
+                fullTable))
+        .collectAsList();
+
+    try (org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build()) {
+      Map<Integer, Long> fragmentRows =
+          lanceDataset.getFragments().stream()
+              .collect(
+                  Collectors.toMap(Fragment::getId, fragment -> fragment.metadata().getNumRows()));
+      Assertions.assertEquals(
+          Arrays.asList(20L, 30L, 50L, 80L),
+          fragmentRows.values().stream().sorted().collect(Collectors.toList()),
+          "Expected four source fragments with intentionally uneven row counts");
+
+      List<Index> segments =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> "balanced_segments".equals(index.name()))
+              .collect(Collectors.toList());
+      Assertions.assertEquals(2, segments.size());
+
+      Set<Integer> coveredFragments = new HashSet<>();
+      List<Long> segmentWorkloads = new ArrayList<>();
+      for (Index segment : segments) {
+        List<Integer> segmentFragments = segment.fragments().orElse(Collections.emptyList());
+        long workload = segmentFragments.stream().mapToLong(fragmentRows::get).sum();
+        segmentWorkloads.add(workload);
+        coveredFragments.addAll(segmentFragments);
+      }
+      Collections.sort(segmentWorkloads);
+
+      Assertions.assertEquals(
+          Arrays.asList(80L, 100L),
+          segmentWorkloads,
+          "Expected row-count batching to avoid the 130/50 workload split produced by count batching");
+      Assertions.assertEquals(fragmentRows.keySet(), coveredFragments);
     }
   }
 

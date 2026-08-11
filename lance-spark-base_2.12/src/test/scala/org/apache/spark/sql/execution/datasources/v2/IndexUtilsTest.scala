@@ -26,6 +26,11 @@ import org.lance.index.IndexType
  */
 class IndexUtilsTest {
 
+  private def fragmentWorkloads(rows: Long*): List[FragmentWorkload] =
+    rows.zipWithIndex.map { case (rowCount, fragmentId) =>
+      FragmentWorkload(java.lang.Integer.valueOf(fragmentId), rowCount)
+    }.toList
+
   // ── extractTrain ──────────────────────────────────────────────────────────
 
   @Test
@@ -213,23 +218,43 @@ class IndexUtilsTest {
 
   @Test
   def batchFragments_respectsNumSegmentsAndDefaults(): Unit = {
-    val ids = (0 until 4).map(java.lang.Integer.valueOf).toList
+    val fragments = fragmentWorkloads(1, 1, 1, 1)
 
-    assertEquals(Seq(2, 2), IndexUtils.batchFragments(ids, Some(2), 4).map(_.size))
-    assertEquals(4, IndexUtils.batchFragments(ids, Some(10), 4).size)
-    assertEquals(4, IndexUtils.batchFragments(ids, None, 8).size)
-    assertEquals(2, IndexUtils.batchFragments(ids, None, 2).size)
+    assertEquals(Seq(2, 2), IndexUtils.batchFragments(fragments, Some(2), 4).map(_.size))
+    assertEquals(4, IndexUtils.batchFragments(fragments, Some(4), 4).size)
+    assertEquals(4, IndexUtils.batchFragments(fragments, Some(10), 4).size)
+    assertEquals(4, IndexUtils.batchFragments(fragments, None, 8).size)
+    assertEquals(2, IndexUtils.batchFragments(fragments, None, 2).size)
     assertEquals(Seq.empty, IndexUtils.batchFragments(Nil, None, 4))
   }
 
   @Test
-  def batchFragments_coversAllFragmentsExactlyOnce(): Unit = {
-    val ids = (0 until 7).map(java.lang.Integer.valueOf).toList
-    val batches = IndexUtils.batchFragments(ids, Some(3), 4)
+  def batchFragments_balancesRowsDeterministically(): Unit = {
+    val fragments = fragmentWorkloads(80, 50, 30, 20)
+    val expected = Seq(
+      List(java.lang.Integer.valueOf(0), java.lang.Integer.valueOf(3)),
+      List(java.lang.Integer.valueOf(1), java.lang.Integer.valueOf(2)))
 
-    assertEquals(Seq(2, 2, 3), batches.map(_.size))
-    assertEquals(ids, batches.flatten)
-    assertEquals(ids.size, batches.flatten.distinct.size)
-    assertTrue(batches.forall(_.nonEmpty))
+    assertEquals(expected, IndexUtils.batchFragments(fragments, Some(2), 4))
+    assertEquals(expected, IndexUtils.batchFragments(fragments.reverse, Some(2), 4))
+  }
+
+  @Test
+  def batchFragments_distributesZeroRowFragmentsAcrossSegments(): Unit = {
+    val fragments = fragmentWorkloads(0, 0, 0, 0).reverse
+
+    assertEquals(
+      Seq(
+        List(java.lang.Integer.valueOf(0), java.lang.Integer.valueOf(3)),
+        List(java.lang.Integer.valueOf(1)),
+        List(java.lang.Integer.valueOf(2))),
+      IndexUtils.batchFragments(fragments, Some(3), 4))
+  }
+
+  @Test
+  def batchFragments_rejectsWorkloadOverflow(): Unit = {
+    assertThrows(
+      classOf[ArithmeticException],
+      () => IndexUtils.batchFragments(fragmentWorkloads(Long.MaxValue, 1), Some(1), 1))
   }
 }
