@@ -111,7 +111,7 @@ case class LanceBlobV2CopyThroughRule() extends Rule[LogicalPlan] {
     case a: SubqueryAlias =>
       rewriteQuery(a.child, targetBlobColumns).map(rewritten => a.copy(child = rewritten))
     case v: View =>
-      rewriteQuery(v.child, targetBlobColumns).map(rewritten => v.withNewChildInternal(rewritten))
+      rewriteQuery(v.child, targetBlobColumns).map(rewritten => v.withNewChildren(Seq(rewritten)))
     // A bare table read (e.g. spark.table(...).writeTo(...).append()) has no projection to
     // rewrite. Synthesize the identity projection so the DataFrame API matches the SQL path.
     case LanceRelation(relation, _) =>
