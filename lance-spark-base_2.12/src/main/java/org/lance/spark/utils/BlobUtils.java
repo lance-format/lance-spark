@@ -189,6 +189,25 @@ public class BlobUtils {
     return changed ? new StructType(fields) : schema;
   }
 
+  /** Rewrites read-side blob v2 descriptor columns back to the binary write schema. */
+  public static StructType applyBlobV2WriteSchema(StructType schema) {
+    StructField[] fields = new StructField[schema.fields().length];
+    boolean changed = false;
+    for (int i = 0; i < schema.fields().length; i++) {
+      StructField field = schema.fields()[i];
+      if (!isBlobV2SparkField(field) || !(field.dataType() instanceof StructType)) {
+        fields[i] = field;
+        continue;
+      }
+
+      fields[i] =
+          new StructField(field.name(), DataTypes.BinaryType, field.nullable(), field.metadata());
+      changed = true;
+    }
+
+    return changed ? new StructType(fields) : schema;
+  }
+
   /**
    * True when {@code fileFormatVersion} is numeric {@code major[.minor]} of {@value
    * #MIN_BLOB_V2_FILE_FORMAT_VERSION} or newer.

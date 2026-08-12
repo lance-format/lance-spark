@@ -27,6 +27,51 @@ ALTER TABLE users ADD COLUMNS name_hash FROM tmp_view;
 
 No table rewrite, no data movement—just a new column that is instantly queryable.
 
+## Blob v2 columns
+
+To add a blob v2 column, store the target blob encoding property on the table and
+use a Lance file format version that supports blob v2 before running
+`ADD COLUMNS FROM`:
+
+```sql
+CREATE TABLE media (
+  id INT
+) USING lance
+TBLPROPERTIES (
+  'file_format_version' = '2.2'
+);
+
+INSERT INTO media VALUES (1), (2);
+
+ALTER TABLE media SET TBLPROPERTIES ('content.lance.encoding' = 'blob');
+
+CREATE TEMPORARY VIEW content_backfill AS
+SELECT _rowaddr, _fragid, image_bytes AS content
+FROM media_with_bytes;
+
+ALTER TABLE media ADD COLUMNS content FROM content_backfill;
+```
+
+The source expression for the new column should be `BINARY`. When adding a new
+column from an existing blob v2 Lance table, a direct column select also works:
+
+```sql
+CREATE TEMPORARY VIEW copied_content AS
+SELECT target._rowaddr, target._fragid, source.content AS content
+FROM media target
+JOIN source_media source ON target.id = source.id;
+
+ALTER TABLE media ADD COLUMNS content FROM copied_content;
+```
+
+For an existing table that was already created with `file_format_version = '2.2'`
+or newer, set the new column's blob property before adding the column:
+
+```sql
+ALTER TABLE media SET TBLPROPERTIES ('content.lance.encoding' = 'blob');
+ALTER TABLE media ADD COLUMNS content FROM content_backfill;
+```
+
 !!! note
     Because we use `_rowaddr` and `_fragid` to address the target dataset's rows for the new column's data, 
     the temporary view should contain `_rowaddr` and `_fragid`.

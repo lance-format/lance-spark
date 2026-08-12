@@ -2432,6 +2432,131 @@ class TestDMLAddColumn:
         assert result[1].total_compensation == 69000   # 60000 + 9000
         assert result[2].total_compensation == 84000   # 70000 + 14000
 
+    def test_add_blob_v2_column_from_binary_view(self, spark, test_table):
+        """Test ADD COLUMNS FROM can add a blob v2 column from BINARY values."""
+        spark.sql(f"""
+            CREATE TABLE {test_table} (
+                id INT,
+                name STRING
+            ) USING lance
+            TBLPROPERTIES (
+                'file_format_version' = '2.2'
+            )
+        """)
+        spark.sql(f"""
+            ALTER TABLE {test_table}
+            SET TBLPROPERTIES ('content.lance.encoding' = 'blob')
+        """)
+
+        spark.sql(f"""
+            INSERT INTO {test_table} VALUES
+            (1, 'Alice'),
+            (2, 'Bob')
+        """)
+
+        first_content = b"blob added from binary view"
+        second_content = b"second blob from binary view"
+        view = f"tmp_add_blob_v2_binary_{int(time.time() * 1000)}"
+        spark.sql(f"""
+            CREATE TEMPORARY VIEW {view} AS
+            SELECT _rowaddr, _fragid,
+                   CASE
+                     WHEN id = 1 THEN {_sql_binary_literal(first_content)}
+                     ELSE {_sql_binary_literal(second_content)}
+                   END AS content
+            FROM {test_table}
+        """)
+
+        spark.sql(f"ALTER TABLE {test_table} ADD COLUMNS content FROM {view}")
+
+        describe_rows = spark.sql(f"DESCRIBE {test_table}").collect()
+        content_field = next(row for row in describe_rows if row.col_name == "content")
+        content_type = content_field.data_type.lower()
+        assert "struct" in content_type
+        assert "blob_uri" in content_type
+
+        rows = spark.sql(f"""
+            SELECT id, content.size, content.kind
+            FROM {test_table}
+            ORDER BY id
+        """).collect()
+
+        assert rows[0].size == len(first_content)
+        assert rows[0].kind == 0
+        assert rows[1].size == len(second_content)
+        assert rows[1].kind == 0
+
+        if spark._lance_backend == "local":
+            lance = pytest.importorskip("lance", reason="lance-python not installed")
+            ds = lance.dataset(_table_location(spark, test_table))
+            assert (
+                ds.schema.field("content").metadata.get(b"ARROW:extension:name")
+                == b"lance.blob.v2"
+            )
+
+    def test_add_blob_v2_column_from_blob_v2_source(self, spark, test_table):
+        """Test ADD COLUMNS FROM can copy an existing blob v2 source column."""
+        source = f"default.add_blob_v2_source_{int(time.time() * 1000)}"
+        try:
+            spark.sql(f"""
+                CREATE TABLE {source} (
+                    id INT,
+                    content BINARY
+                ) USING lance
+                TBLPROPERTIES (
+                    'content.lance.encoding' = 'blob',
+                    'file_format_version' = '2.2'
+                )
+            """)
+            spark.sql(f"""
+                CREATE TABLE {test_table} (
+                    id INT
+                ) USING lance
+                TBLPROPERTIES (
+                    'file_format_version' = '2.2'
+                )
+            """)
+            spark.sql(f"""
+                ALTER TABLE {test_table}
+                SET TBLPROPERTIES ('copied.lance.encoding' = 'blob')
+            """)
+
+            first_content = b"copied blob one"
+            second_content = b"copied blob two"
+            spark.sql(f"""
+                INSERT INTO {source} VALUES
+                (1, {_sql_binary_literal(first_content)}),
+                (2, {_sql_binary_literal(second_content)})
+            """)
+            spark.sql(f"""
+                INSERT INTO {test_table} VALUES
+                (1),
+                (2)
+            """)
+
+            view = f"tmp_add_blob_v2_copy_{int(time.time() * 1000)}"
+            spark.sql(f"""
+                CREATE TEMPORARY VIEW {view} AS
+                SELECT t._rowaddr, t._fragid, s.content AS copied
+                FROM {test_table} t
+                JOIN {source} s ON t.id = s.id
+            """)
+
+            spark.sql(f"ALTER TABLE {test_table} ADD COLUMNS copied FROM {view}")
+
+            rows = spark.sql(f"""
+                SELECT id, copied.size, copied.kind
+                FROM {test_table}
+                ORDER BY id
+            """).collect()
+
+            assert rows[0].size == len(first_content)
+            assert rows[0].kind == 0
+            assert rows[1].size == len(second_content)
+            assert rows[1].kind == 0
+        finally:
+            spark.sql(f"DROP TABLE IF EXISTS {source}")
+
 
 class TestDMLUpdateColumn:
     """Test DML UPDATE COLUMNS FROM operations for updating existing columns via backfill."""

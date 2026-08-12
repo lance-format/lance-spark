@@ -138,6 +138,33 @@ public class BlobUtilsTest {
   }
 
   @Test
+  public void testBlobV2WriteSchemaRewrite() {
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              field("id", DataTypes.IntegerType), blobV2DescriptorField(),
+            });
+    StructType rewritten = BlobUtils.applyBlobV2WriteSchema(schema);
+    StructField payload = rewritten.apply("payload");
+    assertEquals(DataTypes.BinaryType, payload.dataType());
+    assertTrue(BlobUtils.isBlobV2SparkField(payload));
+  }
+
+  @Test
+  public void testBlobV2WriteSchemaPreservesBinaryAndV1Fields() {
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              blobV2Field(), blobV1Field("legacy"),
+            });
+    StructType rewritten = BlobUtils.applyBlobV2WriteSchema(schema);
+    assertEquals(DataTypes.BinaryType, rewritten.fields()[0].dataType());
+    assertTrue(BlobUtils.isBlobV2SparkField(rewritten.fields()[0]));
+    assertEquals(DataTypes.BinaryType, rewritten.fields()[1].dataType());
+    assertTrue(BlobUtils.isBlobSparkField(rewritten.fields()[1]));
+  }
+
+  @Test
   public void fileFormatSupportsBlobV2AcceptsTwoTwoAndNewer() {
     assertTrue(BlobUtils.fileFormatSupportsBlobV2("2.2"));
     assertTrue(BlobUtils.fileFormatSupportsBlobV2("2.10"));
@@ -174,11 +201,23 @@ public class BlobUtilsTest {
     return new StructField("payload", DataTypes.BinaryType, true, md);
   }
 
+  private static StructField blobV2DescriptorField() {
+    Metadata md =
+        new MetadataBuilder()
+            .putString(BlobUtils.ARROW_EXTENSION_NAME_KEY, BlobUtils.ARROW_EXTENSION_BLOB_V2)
+            .build();
+    return new StructField("payload", BlobUtils.BLOB_DESCRIPTOR_STRUCT, true, md);
+  }
+
   private static StructField blobV1Field() {
+    return blobV1Field("payload");
+  }
+
+  private static StructField blobV1Field(String name) {
     Metadata md =
         new MetadataBuilder()
             .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
             .build();
-    return new StructField("payload", DataTypes.BinaryType, true, md);
+    return new StructField(name, DataTypes.BinaryType, true, md);
   }
 }

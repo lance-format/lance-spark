@@ -18,6 +18,7 @@ import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, Project}
 import org.apache.spark.sql.connector.catalog._
 import org.lance.spark.{LanceConstant, LanceDataset}
+import org.lance.spark.utils.{BlobUtils, SchemaConverter}
 
 case class AddColumnsBackfillExec(
     catalog: TableCatalog,
@@ -55,10 +56,25 @@ case class AddColumnsBackfillExec(
       query
     }
 
+    val backfillSchema =
+      SchemaConverter.processSchemaWithProperties(
+        BlobUtils.applyBlobV2WriteSchema(actualQuery.schema),
+        originalTable.properties(),
+        originalTable.getFileFormatVersion)
+
+    if (BlobUtils.hasBlobV2Fields(backfillSchema)
+      && !BlobUtils.fileFormatSupportsBlobV2(originalTable.getFileFormatVersion)) {
+      throw new IllegalArgumentException(
+        s"Blob v2 ADD COLUMNS requires Lance file_format_version " +
+          s"${BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION} or newer. " +
+          s"Table '${ident.toString}' uses file_format_version " +
+          s"'${originalTable.getFileFormatVersion}'.")
+    }
+
     val relation = DataSourceV2Relation.create(
       new LanceDataset(
         originalTable.readOptions(),
-        actualQuery.schema,
+        backfillSchema,
         originalTable.getInitialStorageOptions,
         originalTable.getNamespaceImpl,
         originalTable.getNamespaceProperties,
