@@ -84,10 +84,7 @@ public abstract class BaseBlobV2PlanShapeTest extends AbstractBlobV2CopyTest {
             + fqTgt
             + " (id INT NOT NULL) USING lance "
             + "TBLPROPERTIES ('file_format_version' = '2.2')");
-    spark.sql(
-        "ALTER TABLE "
-            + fqTgt
-            + " SET TBLPROPERTIES ('copied.lance.encoding' = 'blob')");
+    spark.sql("ALTER TABLE " + fqTgt + " SET TBLPROPERTIES ('copied.lance.encoding' = 'blob')");
     spark.sql(
         "CREATE TEMPORARY VIEW "
             + view
@@ -97,12 +94,9 @@ public abstract class BaseBlobV2PlanShapeTest extends AbstractBlobV2CopyTest {
             + fqSrc
             + " s ON t.id = s.id");
     try {
-      LogicalPlan plan =
-          analyzePlan("ALTER TABLE " + fqTgt + " ADD COLUMNS copied FROM " + view);
+      LogicalPlan plan = analyzePlan("ALTER TABLE " + fqTgt + " ADD COLUMNS copied FROM " + view);
       assertEquals(
-          1,
-          countCopyRefs(plan),
-          "expected the blob view alias to be rewritten\nplan:\n" + plan);
+          1, countCopyRefs(plan), "expected the blob view alias to be rewritten\nplan:\n" + plan);
     } finally {
       spark.sql("DROP VIEW IF EXISTS " + view);
       spark.sql("DROP TABLE IF EXISTS " + fqSrc);

@@ -14,7 +14,7 @@
 package org.apache.spark.sql.catalyst.optimizer
 
 import org.apache.spark.sql.catalyst.analysis.{NamedRelation, ResolvedIdentifier}
-import org.apache.spark.sql.catalyst.expressions.{Alias, AttributeReference, Expression, ExprId, LanceBlobV2CopyRef, NamedExpression, SortOrder}
+import org.apache.spark.sql.catalyst.expressions.{Alias, AttributeReference, Cast, Expression, ExprId, LanceBlobV2CopyRef, NamedExpression, SortOrder}
 import org.apache.spark.sql.catalyst.optimizer.BlobPlanUtils.{LanceRelation, V2BlobWrite}
 import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, CreateTableAsSelect, GlobalLimit, LocalLimit, LogicalPlan, Offset, Project, ReplaceTableAsSelect, Sort, SubqueryAlias, View}
 import org.apache.spark.sql.catalyst.rules.Rule
@@ -241,9 +241,19 @@ case class LanceBlobV2CopyThroughRule() extends Rule[LogicalPlan] {
     sourceColumnId(e).filter(id =>
       admittedColumn(id) && targetBlobColumns.forall(_.contains(e.name)))
 
-  private def sourceColumnId(e: NamedExpression): Option[ExprId] = e match {
-    case a: AttributeReference => Some(a.exprId)
-    case Alias(a: AttributeReference, _) => Some(a.exprId)
+  private def sourceColumnId(e: NamedExpression): Option[ExprId] =
+    directSourceAttribute(e).map(_.exprId)
+
+  private def directSourceAttribute(e: NamedExpression): Option[AttributeReference] = e match {
+    case a: AttributeReference => Some(a)
+    case Alias(a: AttributeReference, _) => Some(a)
+    // Spark normalizes view output with Alias(Cast(attribute)) even when the cast does not change
+    // the type. It is still a direct reference and is safe to copy through.
+    case Alias(c: Cast, _) =>
+      c.child match {
+        case a: AttributeReference if a.dataType == c.dataType => Some(a)
+        case _ => None
+      }
     case _ => None
   }
 
@@ -254,6 +264,7 @@ case class LanceBlobV2CopyThroughRule() extends Rule[LogicalPlan] {
     if (admittedSourceId(e, bindingById.contains, targetBlobColumns).isEmpty) {
       return e
     }
+    val source = directSourceAttribute(e).get
     e match {
       case a: AttributeReference =>
         copyRefAlias(
@@ -264,15 +275,15 @@ case class LanceBlobV2CopyThroughRule() extends Rule[LogicalPlan] {
           a.metadata,
           bindingById(a.exprId).rowAddress,
           bindingById(a.exprId).datasetUri)
-      case alias @ Alias(a: AttributeReference, name) =>
+      case alias: Alias =>
         copyRefAlias(
-          a,
-          name,
+          source,
+          alias.name,
           alias.exprId,
           alias.qualifier,
-          a.metadata,
-          bindingById(a.exprId).rowAddress,
-          bindingById(a.exprId).datasetUri)
+          source.metadata,
+          bindingById(source.exprId).rowAddress,
+          bindingById(source.exprId).datasetUri)
       case other => other
     }
   }
