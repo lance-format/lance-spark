@@ -401,7 +401,8 @@ public class LanceDataset
           initialStorageOptions,
           namespaceImpl,
           namespaceProperties,
-          readOptions.getTableId());
+          readOptions.getTableId(),
+          blobSourceContexts);
     }
 
     List<String> updateColumns =
@@ -418,7 +419,8 @@ public class LanceDataset
           initialStorageOptions,
           namespaceImpl,
           namespaceProperties,
-          readOptions.getTableId());
+          readOptions.getTableId(),
+          blobSourceContexts);
     }
 
     SparkWrite.SparkWriteBuilder builder =

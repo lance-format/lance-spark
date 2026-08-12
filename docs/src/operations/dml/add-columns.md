@@ -45,9 +45,15 @@ INSERT INTO media VALUES (1), (2);
 
 ALTER TABLE media SET TBLPROPERTIES ('content.lance.encoding' = 'blob');
 
+CREATE TEMPORARY VIEW media_with_bytes AS
+SELECT 1 AS id, X'68656C6C6F' AS image_bytes
+UNION ALL
+SELECT 2 AS id, X'776F726C64' AS image_bytes;
+
 CREATE TEMPORARY VIEW content_backfill AS
 SELECT _rowaddr, _fragid, image_bytes AS content
-FROM media_with_bytes;
+FROM media
+JOIN media_with_bytes USING (id);
 
 ALTER TABLE media ADD COLUMNS content FROM content_backfill;
 ```

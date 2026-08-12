@@ -23,6 +23,7 @@ import org.lance.operation.Update;
 import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.c.ArrowArrayStream;
@@ -72,6 +73,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
 
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
+  private final Map<String, BlobSourceContext> blobSourceContexts;
 
   public UpdateColumnsBackfillBatchWrite(
       StructType schema,
@@ -80,7 +82,8 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
-      List<String> tableId) {
+      List<String> tableId,
+      Map<String, BlobSourceContext> blobSourceContexts) {
     this.schema = schema;
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
       this.writeOptions = writeOptions.withVersion(ds.version());
@@ -92,6 +95,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
+    this.blobSourceContexts = blobSourceContexts;
   }
 
   @Override
@@ -103,7 +107,8 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
-        tableId);
+        tableId,
+        blobSourceContexts);
   }
 
   @Override
@@ -180,7 +185,8 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
         Map<String, String> initialStorageOptions,
         String namespaceImpl,
         Map<String, String> namespaceProperties,
-        List<String> tableId) {
+        List<String> tableId,
+        Map<String, BlobSourceContext> blobSourceContexts) {
       super(
           writeOptions,
           schema,
@@ -188,7 +194,8 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
           initialStorageOptions,
           namespaceImpl,
           namespaceProperties,
-          tableId);
+          tableId,
+          blobSourceContexts);
     }
 
     @Override
@@ -224,6 +231,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
 
     private final Map<String, String> namespaceProperties;
     private final List<String> tableId;
+    private final Map<String, BlobSourceContext> blobSourceContexts;
 
     protected UpdateColumnsWriterFactory(
         StructType schema,
@@ -232,7 +240,8 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
         Map<String, String> initialStorageOptions,
         String namespaceImpl,
         Map<String, String> namespaceProperties,
-        List<String> tableId) {
+        List<String> tableId,
+        Map<String, BlobSourceContext> blobSourceContexts) {
       // Everything passed to writer factory should be serializable
       this.schema = schema;
       this.writeOptions = writeOptions;
@@ -241,6 +250,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
       this.namespaceImpl = namespaceImpl;
       this.namespaceProperties = namespaceProperties;
       this.tableId = tableId;
+      this.blobSourceContexts = blobSourceContexts;
     }
 
     @Override
@@ -254,7 +264,8 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
           initialStorageOptions,
           namespaceImpl,
           namespaceProperties,
-          tableId);
+          tableId,
+          blobSourceContexts);
     }
   }
 

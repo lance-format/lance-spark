@@ -18,6 +18,8 @@ import org.lance.Fragment;
 import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.utils.BlobReferenceResolver;
+import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.c.ArrowArrayStream;
@@ -54,6 +56,7 @@ public abstract class AbstractBackfillWriter implements DataWriter<InternalRow> 
   private final String namespaceImpl;
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
+  private final BlobReferenceResolver blobResolver;
 
   private static class FragmentBuffer {
     final VectorSchemaRoot data;
@@ -72,7 +75,8 @@ public abstract class AbstractBackfillWriter implements DataWriter<InternalRow> 
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
-      List<String> tableId) {
+      List<String> tableId,
+      Map<String, BlobSourceContext> blobSourceContexts) {
     this.writeOptions = writeOptions;
     this.schema = schema;
     this.fragmentIdField = schema.fieldIndex(LanceDataset.FRAGMENT_ID_COLUMN.name());
@@ -80,6 +84,7 @@ public abstract class AbstractBackfillWriter implements DataWriter<InternalRow> 
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
+    this.blobResolver = new BlobReferenceResolver(blobSourceContexts);
 
     StructType ws = new StructType();
     for (org.apache.spark.sql.types.StructField f : schema.fields()) {
@@ -104,7 +109,8 @@ public abstract class AbstractBackfillWriter implements DataWriter<InternalRow> 
                   VectorSchemaRoot.create(
                       LanceArrowUtils.toArrowSchema(writerSchema, "UTC", false), allocator);
               org.lance.spark.arrow.LanceArrowWriter writer =
-                  org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(data, writerSchema);
+                  org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(
+                      data, writerSchema, blobResolver);
               return new FragmentBuffer(data, writer);
             });
 
@@ -160,8 +166,12 @@ public abstract class AbstractBackfillWriter implements DataWriter<InternalRow> 
 
   @Override
   public void close() throws IOException {
-    for (FragmentBuffer buffer : buffers.values()) {
-      buffer.data.close();
+    try {
+      for (FragmentBuffer buffer : buffers.values()) {
+        buffer.data.close();
+      }
+    } finally {
+      blobResolver.close();
     }
     buffers.clear();
   }

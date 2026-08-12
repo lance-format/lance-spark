@@ -15,6 +15,7 @@ package org.lance.spark.write;
 
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.utils.BlobSourceContext;
 
 import org.apache.spark.sql.connector.distributions.Distribution;
 import org.apache.spark.sql.connector.distributions.Distributions;
@@ -48,6 +49,7 @@ public class AddColumnsBackfillWrite implements Write, RequiresDistributionAndOr
 
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
+  private final Map<String, BlobSourceContext> blobSourceContexts;
 
   AddColumnsBackfillWrite(
       StructType schema,
@@ -56,7 +58,8 @@ public class AddColumnsBackfillWrite implements Write, RequiresDistributionAndOr
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
-      List<String> tableId) {
+      List<String> tableId,
+      Map<String, BlobSourceContext> blobSourceContexts) {
     this.schema = schema;
     this.writeOptions = writeOptions;
     this.newColumns = newColumns;
@@ -64,6 +67,7 @@ public class AddColumnsBackfillWrite implements Write, RequiresDistributionAndOr
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
+    this.blobSourceContexts = blobSourceContexts;
   }
 
   @Override
@@ -75,7 +79,8 @@ public class AddColumnsBackfillWrite implements Write, RequiresDistributionAndOr
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
-        tableId);
+        tableId,
+        blobSourceContexts);
   }
 
   @Override
@@ -111,6 +116,7 @@ public class AddColumnsBackfillWrite implements Write, RequiresDistributionAndOr
 
     private final Map<String, String> namespaceProperties;
     private final List<String> tableId;
+    private final Map<String, BlobSourceContext> blobSourceContexts;
 
     public AddColumnsWriteBuilder(
         StructType schema,
@@ -119,7 +125,8 @@ public class AddColumnsBackfillWrite implements Write, RequiresDistributionAndOr
         Map<String, String> initialStorageOptions,
         String namespaceImpl,
         Map<String, String> namespaceProperties,
-        List<String> tableId) {
+        List<String> tableId,
+        Map<String, BlobSourceContext> blobSourceContexts) {
       this.schema = schema;
       this.writeOptions = writeOptions;
       this.newColumns = newColumns;
@@ -127,6 +134,7 @@ public class AddColumnsBackfillWrite implements Write, RequiresDistributionAndOr
       this.namespaceImpl = namespaceImpl;
       this.namespaceProperties = namespaceProperties;
       this.tableId = tableId;
+      this.blobSourceContexts = blobSourceContexts;
     }
 
     @Override
@@ -138,7 +146,8 @@ public class AddColumnsBackfillWrite implements Write, RequiresDistributionAndOr
           initialStorageOptions,
           namespaceImpl,
           namespaceProperties,
-          tableId);
+          tableId,
+          blobSourceContexts);
     }
   }
 }
