@@ -16,7 +16,7 @@ package org.apache.spark.sql.catalyst.optimizer
 import org.apache.spark.sql.catalyst.analysis.{NamedRelation, ResolvedIdentifier}
 import org.apache.spark.sql.catalyst.expressions.{Alias, AttributeReference, Expression, ExprId, LanceBlobV2CopyRef, NamedExpression, SortOrder}
 import org.apache.spark.sql.catalyst.optimizer.BlobPlanUtils.{LanceRelation, V2BlobWrite}
-import org.apache.spark.sql.catalyst.plans.logical.{CreateTableAsSelect, GlobalLimit, LocalLimit, LogicalPlan, Offset, Project, ReplaceTableAsSelect, Sort, SubqueryAlias}
+import org.apache.spark.sql.catalyst.plans.logical.{CreateTableAsSelect, GlobalLimit, LocalLimit, LogicalPlan, Offset, Project, ReplaceTableAsSelect, Sort, SubqueryAlias, View}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.util._
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
@@ -110,6 +110,8 @@ case class LanceBlobV2CopyThroughRule() extends Rule[LogicalPlan] {
       rewriteQuery(o.child, targetBlobColumns).map(rewritten => o.copy(child = rewritten))
     case a: SubqueryAlias =>
       rewriteQuery(a.child, targetBlobColumns).map(rewritten => a.copy(child = rewritten))
+    case v: View =>
+      rewriteQuery(v.child, targetBlobColumns).map(rewritten => v.withNewChildInternal(rewritten))
     // A bare table read (e.g. spark.table(...).writeTo(...).append()) has no projection to
     // rewrite. Synthesize the identity projection so the DataFrame API matches the SQL path.
     case LanceRelation(relation, _) =>
