@@ -16,13 +16,14 @@ package org.apache.spark.sql.catalyst.optimizer
 import org.apache.spark.sql.catalyst.analysis.{NamedRelation, ResolvedIdentifier}
 import org.apache.spark.sql.catalyst.expressions.{Alias, AttributeReference, Expression, ExprId, LanceBlobV2CopyRef, NamedExpression, SortOrder}
 import org.apache.spark.sql.catalyst.optimizer.BlobPlanUtils.{LanceRelation, V2BlobWrite}
-import org.apache.spark.sql.catalyst.plans.logical.{CreateTableAsSelect, GlobalLimit, LocalLimit, LogicalPlan, Offset, Project, ReplaceTableAsSelect, Sort, SubqueryAlias, View}
+import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, CreateTableAsSelect, GlobalLimit, LocalLimit, LogicalPlan, Offset, Project, ReplaceTableAsSelect, Sort, SubqueryAlias, View}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.util._
+import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.types.Metadata
-import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceConstant}
-import org.lance.spark.utils.BlobUtils
+import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceConstant, LanceDataset}
+import org.lance.spark.utils.{BlobUtils, SchemaConverter}
 
 /**
  * Rewrites direct blob v2 reads in Lance writes into [[LanceBlobV2CopyRef]] tokens so writes see
@@ -48,6 +49,14 @@ case class LanceBlobV2CopyThroughRule() extends Rule[LogicalPlan] {
       }
     case command @ V2BlobWrite(write) if write.query.resolved =>
       rewriteForExistingTarget(write.table, write.query).map(write.withQuery).getOrElse(command)
+    case a @ AddColumnsBackfill(
+          ResolvedIdentifier(catalog: TableCatalog, ident),
+          columnNames,
+          source) if source.resolved =>
+      targetBlobV2Columns(catalog, ident, columnNames, source)
+        .flatMap(names => rewriteGuarded(source, Some(names)))
+        .map(rewritten => a.copy(source = rewritten))
+        .getOrElse(a)
   }
 
   private def rewriteGuarded(
@@ -88,6 +97,26 @@ case class LanceBlobV2CopyThroughRule() extends Rule[LogicalPlan] {
     case LanceRelation(_, ds) =>
       val names =
         ds.schema().fields.collect { case f if BlobUtils.isBlobV2SparkField(f) => f.name }.toSet
+      if (names.isEmpty) None else Some(names)
+    case _ => None
+  }
+
+  private def targetBlobV2Columns(
+      catalog: TableCatalog,
+      ident: Identifier,
+      columnNames: Seq[String],
+      source: LogicalPlan): Option[Set[String]] = catalog.loadTable(ident) match {
+    case ds: LanceDataset =>
+      val requestedColumns = columnNames.toSet
+      val writeSchema = SchemaConverter.processSchemaWithProperties(
+        BlobUtils.applyBlobV2WriteSchema(source.schema),
+        ds.properties(),
+        ds.getFileFormatVersion)
+      val names =
+        writeSchema.fields.collect {
+          case f if requestedColumns.contains(f.name) && BlobUtils.isBlobV2SparkField(f) =>
+            f.name
+        }.toSet
       if (names.isEmpty) None else Some(names)
     case _ => None
   }
