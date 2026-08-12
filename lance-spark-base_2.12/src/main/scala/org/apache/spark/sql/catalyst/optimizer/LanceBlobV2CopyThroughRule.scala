@@ -232,3 +232,11 @@ case class LanceBlobV2CopyThroughRule() extends Rule[LogicalPlan] {
     case _ => false
   }
 }
+
+object LanceBlobV2CopyThroughRule {
+
+  private[sql] def rewriteForTargetBlobColumns(
+      query: LogicalPlan,
+      targetBlobColumns: Set[String]): Option[LogicalPlan] =
+    LanceBlobV2CopyThroughRule().rewriteGuarded(query, Some(targetBlobColumns))
+}

@@ -15,6 +15,8 @@ package org.apache.spark.sql.execution.datasources.v2
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Attribute
+import org.apache.spark.sql.catalyst.optimizer.LanceBlobSourceContextRule
+import org.apache.spark.sql.catalyst.optimizer.LanceBlobV2CopyThroughRule
 import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, Project}
 import org.apache.spark.sql.connector.catalog._
 import org.lance.spark.{LanceConstant, LanceDataset}
@@ -83,11 +85,25 @@ case class AddColumnsBackfillExec(
       Some(catalog),
       Some(ident))
 
+    val blobColumns =
+      backfillSchema.fields.collect { case f if BlobUtils.isBlobV2SparkField(f) => f.name }.toSet
+    val rewrittenQuery =
+      if (blobColumns.nonEmpty) {
+        LanceBlobV2CopyThroughRule
+          .rewriteForTargetBlobColumns(actualQuery, blobColumns)
+          .getOrElse(actualQuery)
+      } else {
+        actualQuery
+      }
+    val writeOptions = LanceBlobSourceContextRule.annotateWriteOptions(
+      actualQuery,
+      Map(LanceConstant.BACKFILL_COLUMNS_KEY -> columnNames.mkString(",")))
+
     val append =
       AppendData.byPosition(
         relation,
-        actualQuery,
-        Map(LanceConstant.BACKFILL_COLUMNS_KEY -> columnNames.mkString(",")))
+        rewrittenQuery,
+        writeOptions)
     val qe = session.sessionState.executePlan(append)
     qe.assertCommandExecuted()
 
