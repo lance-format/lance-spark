@@ -25,6 +25,8 @@ import org.apache.spark.sql.types.Metadata
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceConstant, LanceDataset}
 import org.lance.spark.utils.{BlobUtils, SchemaConverter}
 
+import scala.collection.mutable
+
 /**
  * Rewrites direct blob v2 reads in Lance writes into [[LanceBlobV2CopyRef]] tokens so writes see
  * BINARY instead of descriptor structs.
@@ -164,13 +166,7 @@ case class LanceBlobV2CopyThroughRule() extends Rule[LogicalPlan] {
       return None
     }
     val datasetByRelation = lanceRelations.toMap
-    val blobColumns: Map[ExprId, DataSourceV2Relation] = lanceRelations.flatMap {
-      case (relation, _) =>
-        relation.output.collect {
-          case a: AttributeReference if BlobUtils.isBlobV2SparkMetadata(a.metadata) =>
-            a.exprId -> relation
-        }
-    }.toMap
+    val blobColumns = blobColumnBindings(child, lanceRelations.map(_._1))
     val rewrittenIds =
       projectList.flatMap(e => admittedSourceId(e, blobColumns.contains, targetBlobColumns)).toSet
     if (rewrittenIds.isEmpty) {
@@ -198,6 +194,42 @@ case class LanceBlobV2CopyThroughRule() extends Rule[LogicalPlan] {
     val newProjectList =
       projectList.map(e => rewriteProjection(e, bindingById, targetBlobColumns))
     Some(Project(newProjectList, newChild))
+  }
+
+  /**
+   * Tracks direct blob references through simple projection aliases.
+   *
+   * A resolved temporary view is wrapped in an outer identity Project. Its output attribute keeps
+   * the ExprId of the alias inside the view, not the ExprId of the underlying Lance column. Carry
+   * the source relation binding through those aliases so the outer write projection can still be
+   * rewritten without admitting transformed descriptor expressions.
+   */
+  private def blobColumnBindings(
+      child: LogicalPlan,
+      lanceRelations: Seq[DataSourceV2Relation]): Map[ExprId, DataSourceV2Relation] = {
+    val bindings = mutable.Map.empty[ExprId, DataSourceV2Relation]
+    lanceRelations.foreach { relation =>
+      relation.output.foreach {
+        case a: AttributeReference if BlobUtils.isBlobV2SparkMetadata(a.metadata) =>
+          bindings.put(a.exprId, relation)
+        case _ =>
+      }
+    }
+
+    val projections = child.collect { case p: Project => p.projectList }.flatten
+    var changed = true
+    while (changed) {
+      changed = false
+      projections.foreach { expression =>
+        if (!bindings.contains(expression.exprId)) {
+          sourceColumnId(expression).flatMap(bindings.get).foreach { relation =>
+            bindings.put(expression.exprId, relation)
+            changed = true
+          }
+        }
+      }
+    }
+    bindings.toMap
   }
 
   private case class SourceBlobBinding(rowAddress: Expression, datasetUri: String)
