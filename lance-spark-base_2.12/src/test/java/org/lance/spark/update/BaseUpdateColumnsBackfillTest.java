@@ -329,9 +329,10 @@ public abstract class BaseUpdateColumnsBackfillTest {
   }
 
   /**
-   * UPDATE COLUMNS FROM on a stable-row-id table must preserve {@code _row_created_at_version} and
-   * advance {@code _row_last_updated_at_version} for rewritten rows. The connector passes matched
-   * physical row offsets on commit so Lance can partially refresh last-updated metadata (see
+   * UPDATE COLUMNS FROM on a stable-row-id table must preserve {@code _row_created_at_version} for
+   * every row, advance {@code _row_last_updated_at_version} only for the matched row, and leave
+   * unmatched rows' last-updated version unchanged. The connector passes matched physical row
+   * offsets on commit so Lance can partially refresh last-updated metadata (see
    * lance-format/lance#6734 and the Java {@code Update.updatedFragmentOffsets} API).
    */
   @Test
@@ -346,9 +347,10 @@ public abstract class BaseUpdateColumnsBackfillTest {
                     fullTable))
             .collectAsList();
 
+    // Only update id=2; id=1 and id=3 are unmatched and must not have their last-updated advanced.
     spark.sql(
         String.format(
-            "CREATE TEMPORARY VIEW tmp_view_cdf AS SELECT _rowaddr, _fragid, value * 100 AS value FROM %s",
+            "CREATE TEMPORARY VIEW tmp_view_cdf AS SELECT _rowaddr, _fragid, value * 100 AS value FROM %s WHERE id = 2",
             fullTable));
     spark.sql(String.format("ALTER TABLE %s UPDATE COLUMNS value FROM tmp_view_cdf", fullTable));
 
@@ -364,14 +366,22 @@ public abstract class BaseUpdateColumnsBackfillTest {
     for (int i = 0; i < before.size(); i++) {
       Row b = before.get(i);
       Row a = after.get(i);
-      assertEquals(b.getInt(0), a.getInt(0));
+      int id = b.getInt(0);
+      assertEquals(id, a.getInt(0));
       assertEquals(
           b.getLong(1),
           a.getLong(1),
-          "_row_created_at_version must be unchanged for id=" + b.getInt(0));
-      assertTrue(
-          a.getLong(2) > b.getLong(2),
-          "_row_last_updated_at_version must advance after UPDATE COLUMNS for id=" + b.getInt(0));
+          "_row_created_at_version must be unchanged for id=" + id);
+      if (id == 2) {
+        assertTrue(
+            a.getLong(2) > b.getLong(2),
+            "_row_last_updated_at_version must advance for matched id=" + id);
+      } else {
+        assertEquals(
+            b.getLong(2),
+            a.getLong(2),
+            "_row_last_updated_at_version must not change for unmatched id=" + id);
+      }
     }
   }
 
