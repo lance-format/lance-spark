@@ -25,8 +25,6 @@ import org.lance.spark.utils.Utils;
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
-import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.write.DataWriter;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
@@ -34,13 +32,15 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 
 import java.io.IOException;
-import java.util.HashMap;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
 
 /**
- * Abstract base class for backfill writers that buffer rows per fragment and then process each
- * fragment's data via a Lance fragment operation (merge or update).
+ * Abstract base class for backfill writers that stream rows for each fragment through bounded Arrow
+ * record batches and process the stream via a Lance fragment operation (merge or update).
  *
  * <p>Subclasses implement {@link #processFragment} to perform the specific operation and {@link
  * #buildCommitMessage} to construct the appropriate commit message.
@@ -50,21 +50,26 @@ public abstract class AbstractBackfillWriter implements DataWriter<InternalRow> 
   private final StructType schema;
   private final int fragmentIdField;
   private final StructType writerSchema;
-  private final Map<Integer, FragmentBuffer> buffers = new HashMap<>();
+  private final int[] writerInputOrdinals;
 
   private final Map<String, String> initialStorageOptions;
   private final String namespaceImpl;
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
   private final BlobReferenceResolver blobResolver;
+  private Dataset dataset;
+  private FragmentStream currentStream;
+  private Integer lastCompletedFragmentId;
 
-  private static class FragmentBuffer {
-    final VectorSchemaRoot data;
-    final org.lance.spark.arrow.LanceArrowWriter writer;
+  private static class FragmentStream {
+    final int fragmentId;
+    final SemaphoreArrowBatchWriteBuffer buffer;
+    final FutureTask<Void> task;
 
-    FragmentBuffer(VectorSchemaRoot data, org.lance.spark.arrow.LanceArrowWriter writer) {
-      this.data = data;
-      this.writer = writer;
+    FragmentStream(int fragmentId, SemaphoreArrowBatchWriteBuffer buffer, FutureTask<Void> task) {
+      this.fragmentId = fragmentId;
+      this.buffer = buffer;
+      this.task = task;
     }
   }
 
@@ -94,47 +99,79 @@ public abstract class AbstractBackfillWriter implements DataWriter<InternalRow> 
       }
     }
     this.writerSchema = ws;
+    this.writerInputOrdinals =
+        Arrays.stream(writerSchema.fields())
+            .mapToInt(field -> schema.fieldIndex(field.name()))
+            .toArray();
   }
 
   @Override
   public void write(InternalRow record) throws IOException {
     int fragId = record.getInt(fragmentIdField);
-
-    FragmentBuffer buffer =
-        buffers.computeIfAbsent(
-            fragId,
-            id -> {
-              BufferAllocator allocator = LanceRuntime.allocator();
-              VectorSchemaRoot data =
-                  VectorSchemaRoot.create(
-                      LanceArrowUtils.toArrowSchema(writerSchema, "UTC", false), allocator);
-              org.lance.spark.arrow.LanceArrowWriter writer =
-                  org.lance.spark.arrow.LanceArrowWriter$.MODULE$.create(
-                      data, writerSchema, blobResolver);
-              return new FragmentBuffer(data, writer);
-            });
-
-    for (int i = 0; i < writerSchema.fields().length; i++) {
-      buffer.writer.field(i).write(record, schema.fieldIndex(writerSchema.fields()[i].name()));
+    if (currentStream == null || currentStream.fragmentId != fragId) {
+      finishCurrentFragment();
+      if (lastCompletedFragmentId != null && fragId <= lastCompletedFragmentId) {
+        throw new IOException(
+            "Backfill rows must be ordered by "
+                + LanceDataset.FRAGMENT_ID_COLUMN.name()
+                + "; saw fragment "
+                + fragId
+                + " after fragment "
+                + lastCompletedFragmentId);
+      }
+      currentStream = startFragment(fragId);
     }
+    currentStream.buffer.write(record);
   }
 
-  private void flushFragment(Dataset dataset, int fragmentId, FragmentBuffer buffer) {
+  private FragmentStream startFragment(int fragmentId) {
+    if (dataset == null) {
+      dataset =
+          Utils.openDatasetBuilder(writeOptions)
+              .initialStorageOptions(initialStorageOptions)
+              .build();
+    }
+    BufferAllocator allocator = LanceRuntime.allocator();
+    SemaphoreArrowBatchWriteBuffer buffer =
+        new SemaphoreArrowBatchWriteBuffer(
+            allocator,
+            LanceArrowUtils.toArrowSchema(writerSchema, "UTC", false),
+            writerSchema,
+            writeOptions.getBatchSize(),
+            writeOptions.getMaxBatchBytes(),
+            blobResolver,
+            writerInputOrdinals);
+    FutureTask<Void> task =
+        buffer.createTrackedTask(
+            () -> {
+              try (ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator)) {
+                Data.exportArrayStream(allocator, buffer, stream);
+                processFragment(new Fragment(dataset, fragmentId), stream);
+              }
+              return null;
+            });
+    Thread thread = new Thread(task, "lance-backfill-fragment-" + fragmentId);
+    thread.start();
+    return new FragmentStream(fragmentId, buffer, task);
+  }
+
+  private void finishCurrentFragment() throws IOException {
+    if (currentStream == null) {
+      return;
+    }
+    FragmentStream stream = currentStream;
+    currentStream = null;
+    stream.buffer.setFinished();
     try {
-      buffer.writer.finish();
-      BufferAllocator allocator = LanceRuntime.allocator();
-
-      try (ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator);
-          ArrowReader reader = new SingleBatchArrowReader(allocator, buffer.data)) {
-        Data.exportArrayStream(allocator, reader, stream);
-
-        Fragment fragment = new Fragment(dataset, fragmentId);
-        processFragment(fragment, stream);
-      } catch (Exception e) {
-        throw new RuntimeException("Cannot read arrow stream.", e);
-      }
+      stream.task.get();
+      lastCompletedFragmentId = stream.fragmentId;
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new IOException("Interrupted while backfilling fragment " + stream.fragmentId, e);
+    } catch (ExecutionException e) {
+      throw new IOException("Failed to backfill fragment " + stream.fragmentId, e.getCause());
     } finally {
-      buffer.data.close();
+      stream.buffer.close();
     }
   }
 
@@ -148,31 +185,35 @@ public abstract class AbstractBackfillWriter implements DataWriter<InternalRow> 
   protected abstract WriterCommitMessage buildCommitMessage();
 
   @Override
-  public WriterCommitMessage commit() {
-    try (Dataset dataset =
-        Utils.openDatasetBuilder(writeOptions)
-            .initialStorageOptions(initialStorageOptions)
-            .build()) {
-      for (Map.Entry<Integer, FragmentBuffer> entry : buffers.entrySet()) {
-        flushFragment(dataset, entry.getKey(), entry.getValue());
-      }
-    }
-
+  public WriterCommitMessage commit() throws IOException {
+    finishCurrentFragment();
+    closeDataset();
     return buildCommitMessage();
   }
 
   @Override
-  public void abort() {}
+  public void abort() throws IOException {
+    finishCurrentFragment();
+    closeDataset();
+  }
 
   @Override
   public void close() throws IOException {
     try {
-      for (FragmentBuffer buffer : buffers.values()) {
-        buffer.data.close();
-      }
+      finishCurrentFragment();
     } finally {
-      blobResolver.close();
+      try {
+        closeDataset();
+      } finally {
+        blobResolver.close();
+      }
     }
-    buffers.clear();
+  }
+
+  private void closeDataset() {
+    if (dataset != null) {
+      dataset.close();
+      dataset = null;
+    }
   }
 }

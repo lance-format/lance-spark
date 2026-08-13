@@ -97,6 +97,32 @@ public abstract class BaseBlobV2PlanShapeTest extends AbstractBlobV2CopyTest {
       LogicalPlan plan = analyzePlan("ALTER TABLE " + fqTgt + " ADD COLUMNS copied FROM " + view);
       assertEquals(
           1, countCopyRefs(plan), "expected the blob view alias to be rewritten\nplan:\n" + plan);
+      assertEquals(
+          Collections.singletonList("data"),
+          BlobPlanProbe.copyRefSourceColumnNames(plan),
+          "the copy reference must retain the physical source column across aliases\nplan:\n"
+              + plan);
+    } finally {
+      spark.sql("DROP VIEW IF EXISTS " + view);
+      spark.sql("DROP TABLE IF EXISTS " + fqSrc);
+      spark.sql("DROP TABLE IF EXISTS " + fqTgt);
+    }
+  }
+
+  @Test
+  public void nestedDistinctView_noCopyRef() throws Exception {
+    String src = "v2_plan_distinct_view_src_" + System.currentTimeMillis();
+    String tgt = "v2_plan_distinct_view_tgt_" + System.currentTimeMillis();
+    String view = "v2_plan_distinct_view_" + System.currentTimeMillis();
+    String fqSrc = fq(src);
+    String fqTgt = fq(tgt);
+    createV2BlobSource(fqSrc, row(1, deterministicBlob(172, 16)));
+    createV2BlobTable(fqTgt);
+    spark.sql("CREATE TEMPORARY VIEW " + view + " AS SELECT DISTINCT id, data FROM " + fqSrc);
+    try {
+      LogicalPlan plan = analyzePlan("INSERT INTO " + fqTgt + " SELECT id, data FROM " + view);
+      assertEquals(
+          0, countCopyRefs(plan), "provenance must stop at DISTINCT inside a view\nplan:\n" + plan);
     } finally {
       spark.sql("DROP VIEW IF EXISTS " + view);
       spark.sql("DROP TABLE IF EXISTS " + fqSrc);

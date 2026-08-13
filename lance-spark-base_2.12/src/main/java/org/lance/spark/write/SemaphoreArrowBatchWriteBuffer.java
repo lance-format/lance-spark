@@ -83,6 +83,9 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
   /** Resolves blob references during writes; null when blob resolution is not needed. */
   private final BlobReferenceResolver resolver;
 
+  /** Optional source-row ordinals for streams that omit routing-only input columns. */
+  private final int[] inputOrdinals;
+
   public SemaphoreArrowBatchWriteBuffer(
       BufferAllocator allocator,
       Schema schema,
@@ -90,6 +93,17 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
       int batchSize,
       long maxBatchBytes,
       BlobReferenceResolver resolver) {
+    this(allocator, schema, sparkSchema, batchSize, maxBatchBytes, resolver, null);
+  }
+
+  SemaphoreArrowBatchWriteBuffer(
+      BufferAllocator allocator,
+      Schema schema,
+      StructType sparkSchema,
+      int batchSize,
+      long maxBatchBytes,
+      BlobReferenceResolver resolver,
+      int[] inputOrdinals) {
     // Pass a child allocator to ArrowReader so VectorSchemaRoot allocation is tracked
     super(allocator.newChildAllocator("semaphore-buffer", 0, Long.MAX_VALUE));
     Preconditions.checkNotNull(schema);
@@ -100,6 +114,7 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
     this.batchSize = batchSize;
     this.maxBatchBytes = maxBatchBytes;
     this.resolver = resolver;
+    this.inputOrdinals = inputOrdinals;
     // Start with count = batchSize so the writer blocks on canWrite.await() until the
     // reader's prepareLoadNextBatch() initializes arrowWriter and resets count to 0.
     this.count = batchSize;
@@ -185,7 +200,11 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
         checkForError();
       }
 
-      arrowWriter.write(row);
+      if (inputOrdinals == null) {
+        arrowWriter.write(row);
+      } else {
+        arrowWriter.write(row, inputOrdinals);
+      }
       // Add bytes buffered outside the vectors (unresolved blob references resolve to far larger
       // bytes on finish); without this the guard would size the ~200-byte references and let the
       // batch grow until resolution OOMs the executor.

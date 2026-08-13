@@ -170,6 +170,18 @@ class LanceArrowWriter(root: VectorSchemaRoot, fields: Array[LanceArrowFieldWrit
     }
   }
 
+  /** Writes fields from selected input ordinals, used when a stream omits routing columns. */
+  def write(row: InternalRow, inputOrdinals: Array[Int]): Unit = {
+    require(
+      inputOrdinals.length == fields.length,
+      s"Expected ${fields.length} input ordinals, got ${inputOrdinals.length}")
+    var i = 0
+    while (i < fields.length) {
+      fields(i).write(row, inputOrdinals(i))
+      i += 1
+    }
+  }
+
   def finish(): Unit = {
     fields.foreach(_.finish())
     root.setRowCount(fields(0).count)
@@ -520,6 +532,8 @@ private[arrow] class BlobV2StructWriter(
       i += 1
     }
   }
+
+  override def estimatedBufferedBytes: Long = dataWriter.estimatedBufferedBytes
 
   override def reset(): Unit = {
     super.reset()

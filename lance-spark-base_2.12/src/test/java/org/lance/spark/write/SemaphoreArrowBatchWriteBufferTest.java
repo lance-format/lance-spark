@@ -15,11 +15,13 @@ package org.lance.spark.write;
 
 import org.lance.spark.utils.BlobReference;
 import org.lance.spark.utils.BlobReferenceResolver;
+import org.lance.spark.utils.BlobUtils;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.VectorUnloader;
+import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.ipc.message.ArrowRecordBatch;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
@@ -27,8 +29,11 @@ import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
 import org.apache.spark.unsafe.types.UTF8String;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -295,18 +300,16 @@ public class SemaphoreArrowBatchWriteBufferTest {
   }
 
   private Schema createBlobSchema() {
-    Field field =
-        new Field(
-            "blob",
-            FieldType.nullable(
-                org.apache.arrow.vector.types.Types.MinorType.LARGEVARBINARY.getType()),
-            null);
-    return new Schema(Collections.singletonList(field));
+    return LanceArrowUtils.toArrowSchema(createBlobSparkSchema(), "UTC", false);
   }
 
   private StructType createBlobSparkSchema() {
+    Metadata metadata =
+        new MetadataBuilder()
+            .putString(BlobUtils.ARROW_EXTENSION_NAME_KEY, BlobUtils.ARROW_EXTENSION_BLOB_V2)
+            .build();
     return new StructType(
-        new StructField[] {DataTypes.createStructField("blob", DataTypes.BinaryType, true)});
+        new StructField[] {new StructField("blob", DataTypes.BinaryType, true, metadata)});
   }
 
   /** Resolver that fabricates {@code size} bytes per reference — no source dataset needed. */
@@ -363,9 +366,10 @@ public class SemaphoreArrowBatchWriteBufferTest {
             while (writeBuffer.loadNextBatch()) {
               VectorSchemaRoot root = writeBuffer.getVectorSchemaRoot();
               int rowCount = root.getRowCount();
+              StructVector blobVector = (StructVector) root.getVector("blob");
               for (int i = 0; i < rowCount; i++) {
                 // Each placeholder reference must have resolved to a full-size blob in the vector.
-                byte[] resolved = (byte[]) root.getVector("blob").getObject(i);
+                byte[] resolved = (byte[]) blobVector.getChild("data").getObject(i);
                 assertEquals(blobSize, resolved.length);
               }
               rowsRead.addAndGet(rowCount);

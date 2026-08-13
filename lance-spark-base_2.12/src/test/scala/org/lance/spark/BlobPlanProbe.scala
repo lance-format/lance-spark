@@ -32,6 +32,12 @@ object BlobPlanProbe {
     names
   }
 
+  def copyRefSourceColumnNames(plan: LogicalPlan): java.util.List[String] = {
+    val names = new java.util.ArrayList[String]()
+    allExpressions(plan).flatMap(copyRefsInExpr).foreach(ref => names.add(ref.columnName))
+    names
+  }
+
   /** The dataset version each encoded blob source context would resolve against; null = latest. */
   def blobSourceContextVersions(plan: LogicalPlan): java.util.Map[String, java.lang.Long] = {
     val versions = new java.util.HashMap[String, java.lang.Long]()

@@ -16,7 +16,7 @@ package org.apache.spark.sql.catalyst.optimizer
 import org.apache.spark.sql.catalyst.analysis.{NamedRelation, ResolvedIdentifier}
 import org.apache.spark.sql.catalyst.expressions.{Alias, AttributeReference, Cast, Expression, ExprId, LanceBlobV2CopyRef, NamedExpression, SortOrder}
 import org.apache.spark.sql.catalyst.optimizer.BlobPlanUtils.{LanceRelation, V2BlobWrite}
-import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, CreateTableAsSelect, GlobalLimit, LocalLimit, LogicalPlan, Offset, Project, ReplaceTableAsSelect, Sort, SubqueryAlias, View}
+import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, CreateTableAsSelect, Filter, GlobalLimit, Join, LocalLimit, LogicalPlan, Offset, Project, Repartition, RepartitionByExpression, ReplaceTableAsSelect, Sample, Sort, SubqueryAlias, View, Window}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.util._
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
@@ -24,8 +24,6 @@ import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.types.Metadata
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceConstant, LanceDataset}
 import org.lance.spark.utils.{BlobUtils, SchemaConverter}
-
-import scala.collection.mutable
 
 /**
  * Rewrites direct blob v2 reads in Lance writes into [[LanceBlobV2CopyRef]] tokens so writes see
@@ -161,20 +159,14 @@ case class LanceBlobV2CopyThroughRule() extends Rule[LogicalPlan] {
       project: Project,
       targetBlobColumns: Option[Set[String]]): Option[LogicalPlan] = {
     val Project(projectList, child) = project
-    val lanceRelations = child.collect { case LanceRelation(relation, ds) => relation -> ds }
-    if (lanceRelations.isEmpty) {
-      return None
-    }
-    val datasetByRelation = lanceRelations.toMap
-    val blobColumns = blobColumnBindings(child, lanceRelations.map(_._1))
+    val blobColumns = blobColumnBindings(child)
     val rewrittenIds =
       projectList.flatMap(e => admittedSourceId(e, blobColumns.contains, targetBlobColumns)).toSet
     if (rewrittenIds.isEmpty) {
       return None
     }
-    val contributingRelations =
-      rewrittenIds.map(blobColumns).toSeq.distinct
-    val bindingByRelation: Map[DataSourceV2Relation, SourceBlobBinding] =
+    val contributingRelations = rewrittenIds.map(id => blobColumns(id).relation).toSeq.distinct
+    val bindingByRelation: Map[DataSourceV2Relation, SourceRelationBinding] =
       contributingRelations.map { relation =>
         // markAsAllowAnyAccess lets AddMetadataColumns thread _rowaddr through nested SELECTs.
         val rowAddress = relation.metadataOutput
@@ -183,11 +175,19 @@ case class LanceBlobV2CopyThroughRule() extends Rule[LogicalPlan] {
           .getOrElse(throw new IllegalStateException(
             s"blob v2 copy-through requires the '${LanceConstant.ROW_ADDRESS}' metadata column " +
               s"on '${relation.table.name()}', but the Lance relation did not expose it"))
-        val datasetUri = datasetByRelation(relation).readOptions().getDatasetUri
-        relation -> SourceBlobBinding(rowAddress, datasetUri)
+        val datasetUri = rewrittenIds.iterator
+          .map(blobColumns)
+          .find(_.relation == relation)
+          .map(_.datasetUri)
+          .get
+        relation -> SourceRelationBinding(rowAddress, datasetUri)
       }.toMap
     val bindingById: Map[ExprId, SourceBlobBinding] =
-      rewrittenIds.map(id => id -> bindingByRelation(blobColumns(id))).toMap
+      rewrittenIds.map { id =>
+        val column = blobColumns(id)
+        val relation = bindingByRelation(column.relation)
+        id -> SourceBlobBinding(relation.rowAddress, relation.datasetUri, column.sourceColumnName)
+      }.toMap
     val newChild = child.resolveOperatorsDown {
       case r: DataSourceV2Relation if bindingByRelation.contains(r) => r.withMetadataColumns()
     }
@@ -197,42 +197,68 @@ case class LanceBlobV2CopyThroughRule() extends Rule[LogicalPlan] {
   }
 
   /**
-   * Tracks direct blob references through simple projection aliases.
+   * Tracks direct blob references through validated pass-through ancestry.
    *
    * A resolved temporary view is wrapped in an outer identity Project. Its output attribute keeps
    * the ExprId of the alias inside the view, not the ExprId of the underlying Lance column. Carry
-   * the source relation binding through those aliases so the outer write projection can still be
-   * rewritten without admitting transformed descriptor expressions.
+   * the source relation and physical column name through those aliases so the outer write
+   * projection can still be rewritten without admitting transformed descriptor expressions.
+   * Operators that collapse or combine row identity (for example DISTINCT, aggregate, or UNION)
+   * deliberately fall through to the empty binding below.
    */
-  private def blobColumnBindings(
-      child: LogicalPlan,
-      lanceRelations: Seq[DataSourceV2Relation]): Map[ExprId, DataSourceV2Relation] = {
-    val bindings = mutable.Map.empty[ExprId, DataSourceV2Relation]
-    lanceRelations.foreach { relation =>
-      relation.output.foreach {
+  private def blobColumnBindings(plan: LogicalPlan): Map[ExprId, BlobColumnBinding] = plan match {
+    case LanceRelation(relation, ds) =>
+      relation.output.collect {
         case a: AttributeReference if BlobUtils.isBlobV2SparkMetadata(a.metadata) =>
-          bindings.put(a.exprId, relation)
-        case _ =>
+          a.exprId -> BlobColumnBinding(relation, ds.readOptions().getDatasetUri, a.name)
+      }.toMap
+    case p: Project =>
+      val childBindings = blobColumnBindings(p.child)
+      p.projectList.flatMap { expression =>
+        directSourceAttribute(expression)
+          .flatMap(source => childBindings.get(source.exprId))
+          .map(expression.exprId -> _)
+      }.toMap
+    case s: Sort =>
+      val childBindings = blobColumnBindings(s.child)
+      if (s.order.exists(_.references.exists(a => childBindings.contains(a.exprId)))) {
+        Map.empty
+      } else {
+        retainOutputBindings(s, childBindings)
       }
-    }
-
-    val projections = child.collect { case p: Project => p.projectList }.flatten
-    var changed = true
-    while (changed) {
-      changed = false
-      projections.foreach { expression =>
-        if (!bindings.contains(expression.exprId)) {
-          sourceColumnId(expression).flatMap(bindings.get).foreach { relation =>
-            bindings.put(expression.exprId, relation)
-            changed = true
-          }
-        }
-      }
-    }
-    bindings.toMap
+    case f: Filter => retainOutputBindings(f, blobColumnBindings(f.child))
+    case l: GlobalLimit => retainOutputBindings(l, blobColumnBindings(l.child))
+    case l: LocalLimit => retainOutputBindings(l, blobColumnBindings(l.child))
+    case o: Offset => retainOutputBindings(o, blobColumnBindings(o.child))
+    case a: SubqueryAlias => retainOutputBindings(a, blobColumnBindings(a.child))
+    case v: View => retainOutputBindings(v, blobColumnBindings(v.child))
+    case s: Sample => retainOutputBindings(s, blobColumnBindings(s.child))
+    case r: Repartition => retainOutputBindings(r, blobColumnBindings(r.child))
+    case r: RepartitionByExpression => retainOutputBindings(r, blobColumnBindings(r.child))
+    case w: Window => retainOutputBindings(w, blobColumnBindings(w.child))
+    case j: Join =>
+      retainOutputBindings(j, blobColumnBindings(j.left) ++ blobColumnBindings(j.right))
+    case _ => Map.empty
   }
 
-  private case class SourceBlobBinding(rowAddress: Expression, datasetUri: String)
+  private def retainOutputBindings(
+      plan: LogicalPlan,
+      childBindings: Map[ExprId, BlobColumnBinding]): Map[ExprId, BlobColumnBinding] =
+    plan.output.flatMap { output =>
+      childBindings.get(output.exprId).map(output.exprId -> _)
+    }.toMap
+
+  private case class BlobColumnBinding(
+      relation: DataSourceV2Relation,
+      datasetUri: String,
+      sourceColumnName: String)
+
+  private case class SourceRelationBinding(rowAddress: Expression, datasetUri: String)
+
+  private case class SourceBlobBinding(
+      rowAddress: Expression,
+      datasetUri: String,
+      sourceColumnName: String)
 
   private def admittedSourceId(
       e: NamedExpression,
@@ -274,7 +300,8 @@ case class LanceBlobV2CopyThroughRule() extends Rule[LogicalPlan] {
           a.qualifier,
           a.metadata,
           bindingById(a.exprId).rowAddress,
-          bindingById(a.exprId).datasetUri)
+          bindingById(a.exprId).datasetUri,
+          bindingById(a.exprId).sourceColumnName)
       case alias: Alias =>
         copyRefAlias(
           source,
@@ -283,7 +310,8 @@ case class LanceBlobV2CopyThroughRule() extends Rule[LogicalPlan] {
           alias.qualifier,
           source.metadata,
           bindingById(source.exprId).rowAddress,
-          bindingById(source.exprId).datasetUri)
+          bindingById(source.exprId).datasetUri,
+          bindingById(source.exprId).sourceColumnName)
       case other => other
     }
   }
@@ -295,8 +323,9 @@ case class LanceBlobV2CopyThroughRule() extends Rule[LogicalPlan] {
       qualifier: Seq[String],
       metadata: Metadata,
       rowAddress: Expression,
-      datasetUri: String): Alias =
-    Alias(LanceBlobV2CopyRef(source, rowAddress, datasetUri, source.name), outputName)(
+      datasetUri: String,
+      sourceColumnName: String): Alias =
+    Alias(LanceBlobV2CopyRef(source, rowAddress, datasetUri, sourceColumnName), outputName)(
       exprId = exprId,
       qualifier = qualifier,
       explicitMetadata = Some(metadata))

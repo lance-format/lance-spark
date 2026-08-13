@@ -127,6 +127,64 @@ public abstract class BaseBlobV2CopyTest extends AbstractBlobV2CopyTest {
   }
 
   @Test
+  public void insertSelectThroughRenamedAlias_copiesBlobBytes() throws Exception {
+    String src = "v2_e2e_alias_src_" + System.currentTimeMillis();
+    String tgt = "v2_e2e_alias_tgt_" + System.currentTimeMillis();
+    String fqSrc = fq(src);
+    String fqTgt = fq(tgt);
+    byte[][] blobs = {deterministicBlob(173, 64), deterministicBlob(174, 4096)};
+    createV2BlobSource(fqSrc, row(1, blobs[0]), row(2, blobs[1]));
+    createV2BlobTable(fqTgt);
+    try {
+      spark.sql(
+          "INSERT INTO "
+              + fqTgt
+              + " SELECT id, copied AS data FROM "
+              + "(SELECT id, data AS copied FROM "
+              + fqSrc
+              + ") q");
+      assertTargetBlobBytes(datasetUriOf(tgt), rowAddressesOf(fqTgt), blobs);
+    } finally {
+      spark.sql("DROP TABLE IF EXISTS " + fqSrc);
+      spark.sql("DROP TABLE IF EXISTS " + fqTgt);
+    }
+  }
+
+  @Test
+  public void addColumnsFromRenamedBlobSource_copiesBlobBytes() throws Exception {
+    String src = "v2_e2e_add_alias_src_" + System.currentTimeMillis();
+    String tgt = "v2_e2e_add_alias_tgt_" + System.currentTimeMillis();
+    String view = "v2_e2e_add_alias_view_" + System.currentTimeMillis();
+    String fqSrc = fq(src);
+    String fqTgt = fq(tgt);
+    byte[][] blobs = {deterministicBlob(175, 64), deterministicBlob(176, 4096)};
+    createV2BlobSource(fqSrc, row(1, blobs[0]), row(2, blobs[1]));
+    spark.sql(
+        "CREATE TABLE "
+            + fqTgt
+            + " (id INT NOT NULL) USING lance "
+            + "TBLPROPERTIES ('file_format_version' = '2.2')");
+    spark.sql("INSERT INTO " + fqTgt + " VALUES (1), (2)");
+    spark.sql("ALTER TABLE " + fqTgt + " SET TBLPROPERTIES ('copied.lance.encoding' = 'blob')");
+    spark.sql(
+        "CREATE TEMPORARY VIEW "
+            + view
+            + " AS SELECT t._rowaddr, t._fragid, s.data AS copied FROM "
+            + fqTgt
+            + " t JOIN "
+            + fqSrc
+            + " s ON t.id = s.id");
+    try {
+      spark.sql("ALTER TABLE " + fqTgt + " ADD COLUMNS copied FROM " + view);
+      assertTargetBlobBytes(datasetUriOf(tgt), rowAddressesOf(fqTgt), "copied", blobs);
+    } finally {
+      spark.sql("DROP VIEW IF EXISTS " + view);
+      spark.sql("DROP TABLE IF EXISTS " + fqSrc);
+      spark.sql("DROP TABLE IF EXISTS " + fqTgt);
+    }
+  }
+
+  @Test
   public void ctas_copiesBlobBytes() throws Exception {
     String src = "v2_e2e_ctas_src_" + System.currentTimeMillis();
     String tgt = "v2_e2e_ctas_tgt_" + System.currentTimeMillis();
