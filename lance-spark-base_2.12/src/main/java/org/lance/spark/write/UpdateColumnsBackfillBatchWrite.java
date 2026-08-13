@@ -130,7 +130,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
             .findFirst()
             .orElse(new long[0]);
 
-    Map<Long, long[]> mergedUpdatedFragmentOffsets = new HashMap<>();
+    Map<Long, byte[]> mergedUpdatedFragmentOffsets = new HashMap<>();
     Arrays.stream(messages)
         .map(m -> (TaskCommit) m)
         .map(TaskCommit::getUpdatedFragmentOffsets)
@@ -180,7 +180,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
 
   public static class UpdateColumnsWriter extends AbstractBackfillWriter {
     private final List<FragmentMetadata> updatedFragments = new ArrayList<>();
-    private final Map<Long, long[]> updatedFragmentOffsets = new HashMap<>();
+    private final Map<Long, byte[]> updatedFragmentOffsets = new HashMap<>();
     private long[] fieldsModified;
 
     public UpdateColumnsWriter(
@@ -210,10 +210,9 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
               LanceDataset.ROW_ADDRESS_COLUMN.name());
       updatedFragments.add(result.getUpdatedFragment());
       fieldsModified = result.getFieldsModified();
-      long[] rowOffsets = result.getUpdatedRowOffsets();
-      if (rowOffsets != null && rowOffsets.length > 0) {
-        updatedFragmentOffsets.put(
-            (long) fragment.getId(), Arrays.copyOf(rowOffsets, rowOffsets.length));
+      byte[] rowOffsetBytes = result.getUpdatedRowOffsetBytes();
+      if (rowOffsetBytes != null && rowOffsetBytes.length > 0) {
+        updatedFragmentOffsets.put((long) fragment.getId(), rowOffsetBytes);
       }
     }
 
@@ -286,12 +285,12 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
   public static class TaskCommit implements WriterCommitMessage {
     private final List<FragmentMetadata> updatedFragments;
     private final long[] fieldsModified;
-    private final Map<Long, long[]> updatedFragmentOffsets;
+    private final Map<Long, byte[]> updatedFragmentOffsets;
 
     TaskCommit(
         List<FragmentMetadata> updatedFragments,
         long[] fieldsModified,
-        Map<Long, long[]> updatedFragmentOffsets) {
+        Map<Long, byte[]> updatedFragmentOffsets) {
       this.updatedFragments = updatedFragments;
       this.fieldsModified = fieldsModified;
       this.updatedFragmentOffsets =
@@ -306,7 +305,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
       return fieldsModified;
     }
 
-    Map<Long, long[]> getUpdatedFragmentOffsets() {
+    Map<Long, byte[]> getUpdatedFragmentOffsets() {
       return updatedFragmentOffsets;
     }
   }
