@@ -368,10 +368,7 @@ public abstract class BaseUpdateColumnsBackfillTest {
       Row a = after.get(i);
       int id = b.getInt(0);
       assertEquals(id, a.getInt(0));
-      assertEquals(
-          b.getLong(1),
-          a.getLong(1),
-          "_row_created_at_version must be unchanged for id=" + id);
+      assertEquals(b.getLong(1), a.getLong(1), "_row_created_at_version must be unchanged for id=" + id);
       if (id == 2) {
         assertTrue(
             a.getLong(2) > b.getLong(2),
