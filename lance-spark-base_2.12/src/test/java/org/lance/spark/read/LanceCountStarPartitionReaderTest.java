@@ -13,20 +13,29 @@
  */
 package org.lance.spark.read;
 
+import org.lance.namespace.LanceNamespace;
 import org.lance.spark.LanceRuntime;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 import org.lance.spark.utils.Optional;
 
+import org.apache.arrow.memory.BufferAllocator;
 import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
 import org.apache.spark.sql.connector.expressions.aggregate.CountStar;
+import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class LanceCountStarPartitionReaderTest {
@@ -81,5 +90,72 @@ public class LanceCountStarPartitionReaderTest {
             + memBeforeClose
             + ", after close: "
             + memAfterClose);
+  }
+
+  @Test
+  public void testComputeCountRebuildsNamespaceWhenCredentialRefreshEnabled() {
+    RecordingNamespace.INITIALIZE_CALLS.set(0);
+    LanceSparkReadOptions readOptions =
+        LanceSparkReadOptions.builder()
+            .datasetUri("file:///tmp/__lance_count_star_namespace_test__")
+            .tableId(Collections.singletonList("table"))
+            .build();
+    LanceCountStarPartitionReader reader =
+        new LanceCountStarPartitionReader(newPartition(readOptions));
+
+    assertThrows(RuntimeException.class, reader::get);
+    assertTrue(readOptions.getNamespace() != null, "credential refresh must attach a namespace");
+    assertEquals(1, RecordingNamespace.INITIALIZE_CALLS.get());
+  }
+
+  @Test
+  public void testComputeCountSkipsNamespaceRebuildWhenCredentialRefreshDisabled() {
+    RecordingNamespace.INITIALIZE_CALLS.set(0);
+    LanceSparkReadOptions readOptions =
+        LanceSparkReadOptions.builder()
+            .datasetUri("file:///tmp/__lance_count_star_namespace_test__")
+            .tableId(Collections.singletonList("table"))
+            .executorCredentialRefresh(false)
+            .build();
+    LanceCountStarPartitionReader reader =
+        new LanceCountStarPartitionReader(newPartition(readOptions));
+
+    assertThrows(RuntimeException.class, reader::get);
+    assertNull(readOptions.getNamespace());
+    assertEquals(0, RecordingNamespace.INITIALIZE_CALLS.get());
+  }
+
+  private LanceInputPartition newPartition(LanceSparkReadOptions readOptions) {
+    return new LanceInputPartition(
+        new StructType(),
+        0,
+        new LanceSplit(Collections.emptyList()),
+        readOptions,
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        "test-credential-refresh",
+        null,
+        RecordingNamespace.class.getName(),
+        Collections.emptyMap(),
+        null);
+  }
+
+  public static class RecordingNamespace implements LanceNamespace {
+    static final AtomicInteger INITIALIZE_CALLS = new AtomicInteger();
+
+    public RecordingNamespace() {}
+
+    @Override
+    public void initialize(Map<String, String> properties, BufferAllocator allocator) {
+      INITIALIZE_CALLS.incrementAndGet();
+    }
+
+    @Override
+    public String namespaceId() {
+      return "recording";
+    }
   }
 }

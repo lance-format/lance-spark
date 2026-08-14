@@ -69,6 +69,19 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
     LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
     long totalCount = 0;
 
+    // Keep the count scan on the same executor credential-refresh path as ordinary fragment scans.
+    // When disabled, leave the namespace unset so executors open directly with the driver-vended
+    // storage options (important for Kerberized HMS catalogs).
+    if (inputPartition.getNamespaceImpl() != null && readOptions.isExecutorCredentialRefresh()) {
+      if (LanceRuntime.useNamespaceOnWorkers(inputPartition.getNamespaceImpl())) {
+        readOptions.setNamespace(
+            LanceRuntime.getOrCreateNamespace(
+                inputPartition.getNamespaceImpl(), inputPartition.getNamespaceProperties()));
+      } else {
+        readOptions.setNamespace(null);
+      }
+    }
+
     long dsOpenStart = System.nanoTime();
     try (Dataset dataset =
         Utils.openDatasetBuilder(readOptions)
