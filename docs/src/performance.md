@@ -217,6 +217,18 @@ Lance Spark implements two levels of caching:
     - All workers read the same version for snapshot isolation
     - Fragments are pre-loaded and cached per dataset
 
+### Cache Backend
+
+The index and metadata cache backend can be selected independently for each Spark catalog. For
+example:
+
+```bash
+--conf 'spark.sql.catalog.lance.index_cache_backend=moka://?capacity=8589934592' \
+--conf 'spark.sql.catalog.lance.metadata_cache_backend=moka://?capacity=2147483648'
+```
+
+See [Cache Backends](config.md#cache-backends) for backend registration, switching, and precedence.
+
 ### Index Cache Size
 
 Set via environment variable `LANCE_INDEX_CACHE_SIZE` (default: 6GB from Lance native).

@@ -317,6 +317,9 @@ public class LanceDataset
               .datasetUri(readOptions.getDatasetUri())
               .namespace(readOptions.getNamespace())
               .tableId(readOptions.getTableId())
+              .catalogName(readOptions.getCatalogName())
+              .indexCacheBackend(readOptions.getIndexCacheBackend())
+              .metadataCacheBackend(readOptions.getMetadataCacheBackend())
               .fromOptions(mergedOptions)
               .build();
     }
@@ -373,6 +376,9 @@ public class LanceDataset
             .datasetUri(readOptions.getDatasetUri())
             .namespace(readOptions.getNamespace())
             .tableId(readOptions.getTableId())
+            .catalogName(readOptions.getCatalogName())
+            .indexCacheBackend(readOptions.getIndexCacheBackend())
+            .metadataCacheBackend(readOptions.getMetadataCacheBackend())
             .fromOptions(mergedOptions);
     // Use table's file format version if not explicitly set in write options
     if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)

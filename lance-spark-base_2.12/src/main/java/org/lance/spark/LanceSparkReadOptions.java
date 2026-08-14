@@ -127,6 +127,11 @@ public class LanceSparkReadOptions implements Serializable {
   /** The catalog name for cache isolation when multiple catalogs are configured. */
   private final String catalogName;
 
+  /** Registered cache backend URIs for the process-local catalog session. */
+  private final String indexCacheBackend;
+
+  private final String metadataCacheBackend;
+
   /**
    * Whether executors should rebuild the namespace client for credential refresh. See {@link
    * #CONFIG_EXECUTOR_CREDENTIAL_REFRESH} for details.
@@ -151,6 +156,8 @@ public class LanceSparkReadOptions implements Serializable {
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
     this.catalogName = builder.catalogName;
+    this.indexCacheBackend = builder.indexCacheBackend;
+    this.metadataCacheBackend = builder.metadataCacheBackend;
     this.executorCredentialRefresh = builder.executorCredentialRefresh;
   }
 
@@ -286,6 +293,14 @@ public class LanceSparkReadOptions implements Serializable {
     return catalogName;
   }
 
+  public String getIndexCacheBackend() {
+    return indexCacheBackend;
+  }
+
+  public String getMetadataCacheBackend() {
+    return metadataCacheBackend;
+  }
+
   /**
    * Returns whether executors should rebuild the namespace client and route the dataset open
    * through the namespace path (for credential refresh). See {@link
@@ -332,6 +347,8 @@ public class LanceSparkReadOptions implements Serializable {
         .namespace(this.namespace)
         .tableId(this.tableId)
         .catalogName(this.catalogName)
+        .indexCacheBackend(this.indexCacheBackend)
+        .metadataCacheBackend(this.metadataCacheBackend)
         .executorCredentialRefresh(this.executorCredentialRefresh)
         .build();
   }
@@ -343,7 +360,7 @@ public class LanceSparkReadOptions implements Serializable {
    */
   public ReadOptions toReadOptions() {
     ReadOptions.Builder builder = new ReadOptions.Builder();
-    builder.setSession(LanceRuntime.session());
+    builder.setSession(LanceRuntime.session(catalogName, indexCacheBackend, metadataCacheBackend));
     if (blockSize != null) {
       builder.setBlockSize(blockSize);
     }
@@ -392,7 +409,9 @@ public class LanceSparkReadOptions implements Serializable {
         && Objects.equals(metadataCacheSize, that.metadataCacheSize)
         && Objects.equals(storageOptions, that.storageOptions)
         && Objects.equals(tableId, that.tableId)
-        && Objects.equals(catalogName, that.catalogName);
+        && Objects.equals(catalogName, that.catalogName)
+        && Objects.equals(indexCacheBackend, that.indexCacheBackend)
+        && Objects.equals(metadataCacheBackend, that.metadataCacheBackend);
   }
 
   @Override
@@ -411,6 +430,8 @@ public class LanceSparkReadOptions implements Serializable {
         storageOptions,
         tableId,
         catalogName,
+        indexCacheBackend,
+        metadataCacheBackend,
         executorCredentialRefresh);
   }
 
@@ -430,6 +451,8 @@ public class LanceSparkReadOptions implements Serializable {
     private LanceNamespace namespace;
     private List<String> tableId;
     private String catalogName;
+    private String indexCacheBackend;
+    private String metadataCacheBackend;
     private boolean executorCredentialRefresh = DEFAULT_EXECUTOR_CREDENTIAL_REFRESH;
 
     private Builder() {}
@@ -504,6 +527,16 @@ public class LanceSparkReadOptions implements Serializable {
       return this;
     }
 
+    public Builder indexCacheBackend(String indexCacheBackend) {
+      this.indexCacheBackend = indexCacheBackend;
+      return this;
+    }
+
+    public Builder metadataCacheBackend(String metadataCacheBackend) {
+      this.metadataCacheBackend = metadataCacheBackend;
+      return this;
+    }
+
     public Builder executorCredentialRefresh(boolean executorCredentialRefresh) {
       this.executorCredentialRefresh = executorCredentialRefresh;
       return this;
@@ -536,6 +569,8 @@ public class LanceSparkReadOptions implements Serializable {
       // Merge storage options: catalog options are defaults, current options override
       Map<String, String> merged = new HashMap<>(catalogConfig.getStorageOptions());
       merged.putAll(this.storageOptions);
+      this.indexCacheBackend = catalogConfig.getIndexCacheBackend();
+      this.metadataCacheBackend = catalogConfig.getMetadataCacheBackend();
       return fromOptions(merged);
     }
 

@@ -247,6 +247,52 @@ public class LanceSparkReadOptionsSerializationTest {
   }
 
   @Test
+  public void testCacheBackendConfigurationSurvivesSerialization()
+      throws IOException, ClassNotFoundException {
+    Map<String, String> catalogOpts = new HashMap<>();
+    catalogOpts.put("index_cache_backend", "moka://?capacity=1048576");
+    catalogOpts.put("metadata_cache_backend", "moka://?capacity=524288");
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder()
+            .datasetUri("s3://bucket/path")
+            .catalogName("cache-catalog")
+            .withCatalogDefaults(LanceSparkCatalogConfig.from(catalogOpts))
+            .build();
+
+    ByteArrayOutputStream output = new ByteArrayOutputStream();
+    try (ObjectOutputStream objectOutput = new ObjectOutputStream(output)) {
+      objectOutput.writeObject(options);
+    }
+
+    LanceSparkReadOptions deserialized;
+    try (ObjectInputStream objectInput =
+        new ObjectInputStream(new ByteArrayInputStream(output.toByteArray()))) {
+      deserialized = (LanceSparkReadOptions) objectInput.readObject();
+    }
+
+    Assertions.assertEquals("cache-catalog", deserialized.getCatalogName());
+    Assertions.assertEquals("moka://?capacity=1048576", deserialized.getIndexCacheBackend());
+    Assertions.assertEquals("moka://?capacity=524288", deserialized.getMetadataCacheBackend());
+  }
+
+  @Test
+  public void testWithVersionPreservesCacheBackendConfiguration() {
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder()
+            .datasetUri("s3://bucket/path")
+            .catalogName("cache-catalog")
+            .indexCacheBackend("moka://?capacity=1048576")
+            .metadataCacheBackend("moka://?capacity=524288")
+            .build();
+
+    LanceSparkReadOptions pinned = options.withVersion(7);
+
+    Assertions.assertEquals("cache-catalog", pinned.getCatalogName());
+    Assertions.assertEquals("moka://?capacity=1048576", pinned.getIndexCacheBackend());
+    Assertions.assertEquals("moka://?capacity=524288", pinned.getMetadataCacheBackend());
+  }
+
+  @Test
   public void testExecutorCredentialRefreshPreservedByWithVersion() {
     LanceSparkReadOptions options =
         LanceSparkReadOptions.builder()

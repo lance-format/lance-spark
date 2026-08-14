@@ -72,6 +72,8 @@ public class Utils {
     private final List<String> tableId;
     private final Map<String, String> storageOptions;
     private final String catalogName;
+    private final String indexCacheBackend;
+    private final String metadataCacheBackend;
     private final Long version;
     private final Integer blockSize;
     private final Integer indexCacheSize;
@@ -87,6 +89,8 @@ public class Utils {
       this.storageOptions = opts.getStorageOptions();
       this.version = opts.getVersion();
       this.catalogName = opts.getCatalogName();
+      this.indexCacheBackend = opts.getIndexCacheBackend();
+      this.metadataCacheBackend = opts.getMetadataCacheBackend();
       this.namespace = opts.getNamespace();
       this.tableId = opts.getTableId();
       this.blockSize = opts.getBlockSize();
@@ -99,7 +103,9 @@ public class Utils {
       this.storageOptions = opts.getStorageOptions();
       this.namespace = opts.getNamespace();
       this.tableId = opts.getTableId();
-      this.catalogName = null;
+      this.catalogName = opts.getCatalogName();
+      this.indexCacheBackend = opts.getIndexCacheBackend();
+      this.metadataCacheBackend = opts.getMetadataCacheBackend();
       this.version = opts.getVersion();
       this.blockSize = null;
       this.indexCacheSize = null;
@@ -131,7 +137,7 @@ public class Utils {
           new ReadOptions.Builder()
               .setStorageOptions(merged)
               .setSession(
-                  catalogName != null ? LanceRuntime.session(catalogName) : LanceRuntime.session());
+                  LanceRuntime.session(catalogName, indexCacheBackend, metadataCacheBackend));
       if (version != null) {
         roBuilder.setVersion(version);
       }

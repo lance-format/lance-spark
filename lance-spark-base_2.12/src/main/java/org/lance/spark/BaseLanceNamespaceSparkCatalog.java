@@ -209,6 +209,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     // Parse catalog configuration
     this.catalogConfig = LanceSparkCatalogConfig.from(this.storageOptions);
+    if (catalogConfig.getIndexCacheBackend() != null
+        || catalogConfig.getMetadataCacheBackend() != null) {
+      LanceRuntime.session(
+          name, catalogConfig.getIndexCacheBackend(), catalogConfig.getMetadataCacheBackend());
+    }
 
     // impl is optional - if not provided, catalog operates in path-based only mode
     if (!options.containsKey(CONFIG_IMPL)) {

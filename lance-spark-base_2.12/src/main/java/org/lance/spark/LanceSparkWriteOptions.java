@@ -99,6 +99,13 @@ public class LanceSparkWriteOptions implements Serializable {
   /** Use this version to open the dataset and apply write if set. */
   private final Long version;
 
+  /** Catalog and cache backend configuration for process-local session reuse. */
+  private final String catalogName;
+
+  private final String indexCacheBackend;
+
+  private final String metadataCacheBackend;
+
   private LanceSparkWriteOptions(Builder builder) {
     this.datasetUri = builder.datasetUri;
     this.writeMode = builder.writeMode;
@@ -117,6 +124,9 @@ public class LanceSparkWriteOptions implements Serializable {
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
     this.version = builder.version;
+    this.catalogName = builder.catalogName;
+    this.indexCacheBackend = builder.indexCacheBackend;
+    this.metadataCacheBackend = builder.metadataCacheBackend;
   }
 
   /** Creates a new builder for LanceSparkWriteOptions. */
@@ -217,6 +227,18 @@ public class LanceSparkWriteOptions implements Serializable {
     return version;
   }
 
+  public String getCatalogName() {
+    return catalogName;
+  }
+
+  public String getIndexCacheBackend() {
+    return indexCacheBackend;
+  }
+
+  public String getMetadataCacheBackend() {
+    return metadataCacheBackend;
+  }
+
   /** Returns a builder pre-populated with all fields from this instance. */
   public Builder toBuilder() {
     return builder()
@@ -236,7 +258,10 @@ public class LanceSparkWriteOptions implements Serializable {
         .storageOptions(storageOptions)
         .namespace(namespace)
         .tableId(tableId)
-        .version(version);
+        .version(version)
+        .catalogName(catalogName)
+        .indexCacheBackend(indexCacheBackend)
+        .metadataCacheBackend(metadataCacheBackend);
   }
 
   /** Returns a copy of these options with version set to the given version. */
@@ -328,7 +353,10 @@ public class LanceSparkWriteOptions implements Serializable {
         && Objects.equals(blobPackFileSizeThreshold, that.blobPackFileSizeThreshold)
         && Objects.equals(storageOptions, that.storageOptions)
         && Objects.equals(tableId, that.tableId)
-        && Objects.equals(version, that.version);
+        && Objects.equals(version, that.version)
+        && Objects.equals(catalogName, that.catalogName)
+        && Objects.equals(indexCacheBackend, that.indexCacheBackend)
+        && Objects.equals(metadataCacheBackend, that.metadataCacheBackend);
   }
 
   @Override
@@ -349,7 +377,10 @@ public class LanceSparkWriteOptions implements Serializable {
         blobPackFileSizeThreshold,
         storageOptions,
         tableId,
-        version);
+        version,
+        catalogName,
+        indexCacheBackend,
+        metadataCacheBackend);
   }
 
   /** Builder for creating LanceSparkWriteOptions instances. */
@@ -371,6 +402,9 @@ public class LanceSparkWriteOptions implements Serializable {
     private LanceNamespace namespace;
     private List<String> tableId;
     private Long version;
+    private String catalogName;
+    private String indexCacheBackend;
+    private String metadataCacheBackend;
 
     private Builder() {}
 
@@ -464,6 +498,21 @@ public class LanceSparkWriteOptions implements Serializable {
       return this;
     }
 
+    public Builder catalogName(String catalogName) {
+      this.catalogName = catalogName;
+      return this;
+    }
+
+    public Builder indexCacheBackend(String indexCacheBackend) {
+      this.indexCacheBackend = indexCacheBackend;
+      return this;
+    }
+
+    public Builder metadataCacheBackend(String metadataCacheBackend) {
+      this.metadataCacheBackend = metadataCacheBackend;
+      return this;
+    }
+
     /**
      * Parses options from a map, extracting write-specific settings.
      *
@@ -538,6 +587,8 @@ public class LanceSparkWriteOptions implements Serializable {
       // Merge storage options: catalog options are defaults, current options override
       Map<String, String> merged = new HashMap<>(catalogConfig.getStorageOptions());
       merged.putAll(this.storageOptions);
+      this.indexCacheBackend = catalogConfig.getIndexCacheBackend();
+      this.metadataCacheBackend = catalogConfig.getMetadataCacheBackend();
       return fromOptions(merged);
     }
 

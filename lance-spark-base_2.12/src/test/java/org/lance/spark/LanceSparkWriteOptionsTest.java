@@ -68,10 +68,19 @@ public class LanceSparkWriteOptionsTest {
 
   @Test
   public void withVersionCopiesOptions() {
-    LanceSparkWriteOptions base = LanceSparkWriteOptions.from(TEMP_URL);
+    LanceSparkWriteOptions base =
+        LanceSparkWriteOptions.builder()
+            .datasetUri(TEMP_URL)
+            .catalogName("cache-catalog")
+            .indexCacheBackend("moka://?capacity=1048576")
+            .metadataCacheBackend("moka://?capacity=524288")
+            .build();
     LanceSparkWriteOptions pinned = base.withVersion(3L);
     assertEquals(3L, pinned.getVersion());
     assertNull(base.getVersion());
+    assertEquals("cache-catalog", pinned.getCatalogName());
+    assertEquals("moka://?capacity=1048576", pinned.getIndexCacheBackend());
+    assertEquals("moka://?capacity=524288", pinned.getMetadataCacheBackend());
   }
 
   @Test
@@ -181,6 +190,26 @@ public class LanceSparkWriteOptionsTest {
     // Catalog keys are carried into storage options as well as typed fields.
     assertEquals("512", writeOptions.getStorageOptions().get("batch_size"));
     assertEquals("8192", writeOptions.getStorageOptions().get("blob_pack_file_size_threshold"));
+  }
+
+  @Test
+  public void testWithCatalogDefaultsCopiesCacheBackends() {
+    final Map<String, String> catalogOptions = new HashMap<>();
+    catalogOptions.put("index_cache_backend", "moka://?capacity=1048576");
+    catalogOptions.put("metadata_cache_backend", "moka://?capacity=524288");
+
+    final LanceSparkWriteOptions writeOptions =
+        LanceSparkWriteOptions.builder()
+            .datasetUri(TEMP_URL)
+            .catalogName("cache-catalog")
+            .withCatalogDefaults(LanceSparkCatalogConfig.from(catalogOptions))
+            .build();
+
+    assertEquals("cache-catalog", writeOptions.getCatalogName());
+    assertEquals("moka://?capacity=1048576", writeOptions.getIndexCacheBackend());
+    assertEquals("moka://?capacity=524288", writeOptions.getMetadataCacheBackend());
+    assertFalse(writeOptions.getStorageOptions().containsKey("index_cache_backend"));
+    assertFalse(writeOptions.getStorageOptions().containsKey("metadata_cache_backend"));
   }
 
   @Test

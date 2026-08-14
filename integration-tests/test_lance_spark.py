@@ -1839,6 +1839,17 @@ class TestDQLSearchTableFunctions:
 class TestDQLSelect:
     """Test DQL SELECT operations."""
 
+    def test_cache_backend_catalog_session_reads_written_table(self, spark, test_table):
+        """Verify catalog cache backends are used by a real Spark write/read path."""
+        spark.sql(f"CREATE TABLE {test_table} (id INT, value STRING)")
+        spark.createDataFrame([(1, "one"), (2, "two")], ["id", "value"]) \
+            .writeTo(test_table).append()
+
+        jvm = spark._jvm
+        runtime_session = jvm.org.lance.spark.LanceRuntime.session(LANCE_CATALOG)
+        assert not runtime_session.isClosed()
+        assert spark.sql(f"SELECT id FROM {test_table} ORDER BY id").collect() == [(1,), (2,)]
+
     def test_select_all(self, spark):
         """Test SELECT * query."""
         spark.sql("""
