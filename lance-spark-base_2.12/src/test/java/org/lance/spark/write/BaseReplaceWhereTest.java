@@ -154,6 +154,35 @@ public abstract class BaseReplaceWhereTest {
   }
 
   /**
+   * REPLACE must be correct on a fragment that already carries a deletion vector. The full-fragment
+   * drop compares matched live rows against the fragment's live row count ({@code getNumRows()} =
+   * physical − deletions), and a filtered scan enumerates only live rows, so a REPLACE that matches
+   * all remaining live rows of a partially-deleted fragment drops it cleanly rather than
+   * mis-counting against the physical total.
+   */
+  @Test
+  public void testReplaceFragmentWithPreExistingDeletions() {
+    TableOperator op = new TableOperator(spark, catalogName);
+    op.create();
+
+    // Single fragment for dt=2026-08-01 with three rows, plus another partition.
+    op.insert(
+        Arrays.asList(
+            Row.of(1, "2026-08-01", 100),
+            Row.of(2, "2026-08-01", 200),
+            Row.of(3, "2026-08-01", 300)));
+    op.insert(Arrays.asList(Row.of(9, "2026-08-02", 900)));
+
+    // Delete one row from the first fragment, leaving a pre-existing deletion vector.
+    op.delete("id = 2");
+
+    // REPLACE now matches all *remaining live* rows of that fragment (ids 1 and 3).
+    op.replace("dt = '2026-08-01'", "SELECT 5 AS id, '2026-08-01' AS dt, 500 AS value");
+
+    op.check(Arrays.asList(Row.of(5, "2026-08-01", 500), Row.of(9, "2026-08-02", 900)));
+  }
+
+  /**
    * A predicate may itself contain {@code AS} (e.g. inside a {@code CAST}); the command must split
    * on the top-level {@code AS} separator, not the first {@code AS} token.
    */
@@ -248,6 +277,10 @@ public abstract class BaseReplaceWhereTest {
 
     void replace(String predicate, String query) {
       spark.sql(String.format("REPLACE %s WHERE %s AS %s", fullName(), predicate, query));
+    }
+
+    void delete(String predicate) {
+      spark.sql(String.format("DELETE FROM %s WHERE %s", fullName(), predicate));
     }
 
     long latestVersion() {
