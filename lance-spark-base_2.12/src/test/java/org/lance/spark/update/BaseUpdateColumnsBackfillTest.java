@@ -338,8 +338,8 @@ public abstract class BaseUpdateColumnsBackfillTest {
    * <p>This test pins down current behavior so a future change to make UPDATE COLUMNS CDF-aware
    * shows up as a deliberate test update rather than a silent regression.
    *
-   * <p>Tracking fix: https://github.com/lance-format/lance/issues/6734 — once that lands,
-   * flip the {@code _row_last_updated_at_version} assertion below from {@code assertEquals} to a
+   * <p>Tracking fix: https://github.com/lance-format/lance/issues/6734 — once that lands, flip the
+   * {@code _row_last_updated_at_version} assertion below from {@code assertEquals} to a
    * strict-greater check (mirroring the ADD COLUMNS version test).
    */
   @Test
