@@ -47,6 +47,39 @@ class LanceRuntimeQueryTableSupportTest {
     assertFalse(LanceRuntime.supportsQueryTable("org.lance.namespace.DoesNotExist"));
   }
 
+  @Test
+  void openTelemetryCanBeEnabledBySystemProperty() {
+    String previous = System.getProperty(LanceRuntime.SPARK_CONF_OPEN_TELEMETRY_ENABLED);
+    try {
+      System.setProperty(LanceRuntime.SPARK_CONF_OPEN_TELEMETRY_ENABLED, "false");
+      assertFalse(LanceRuntime.isOpenTelemetryEnabled());
+
+      System.setProperty(LanceRuntime.SPARK_CONF_OPEN_TELEMETRY_ENABLED, "true");
+      assertTrue(LanceRuntime.isOpenTelemetryEnabled());
+    } finally {
+      if (previous == null) {
+        System.clearProperty(LanceRuntime.SPARK_CONF_OPEN_TELEMETRY_ENABLED);
+      } else {
+        System.setProperty(LanceRuntime.SPARK_CONF_OPEN_TELEMETRY_ENABLED, previous);
+      }
+    }
+  }
+
+  @Test
+  void openTelemetryConfigurationUsesDocumentedPrecedence() {
+    assertTrue(LanceRuntime.resolveOpenTelemetryEnabled("true", "false", "false"));
+    assertFalse(LanceRuntime.resolveOpenTelemetryEnabled("false", "true", "true"));
+    assertTrue(LanceRuntime.resolveOpenTelemetryEnabled(null, "true", "false"));
+    assertTrue(LanceRuntime.resolveOpenTelemetryEnabled(null, null, "true"));
+    assertFalse(LanceRuntime.resolveOpenTelemetryEnabled(null, null, null));
+  }
+
+  @Test
+  void openTelemetryConfigurationRejectsInvalidValues() {
+    assertTrue(LanceRuntime.resolveOpenTelemetryEnabled(" TRUE ", null, null));
+    assertFalse(LanceRuntime.resolveOpenTelemetryEnabled("yes", "true", "true"));
+  }
+
   /** Stands in for catalog-only namespaces such as Glue, which never implement queryTable. */
   public static class CatalogOnlyNamespace implements LanceNamespace {
     public CatalogOnlyNamespace() {}

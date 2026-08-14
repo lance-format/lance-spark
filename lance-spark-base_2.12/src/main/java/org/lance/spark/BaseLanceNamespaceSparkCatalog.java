@@ -1125,6 +1125,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         StagedCommitOptions.of(
             merged,
             catalogConfig.isEnableStableRowIds(properties),
+            fileFormatVersion,
             namespace,
             tableIdList,
             managedVersioning);
@@ -1161,7 +1162,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     final StagedCommitOptions commitOptions =
         StagedCommitOptions.pathBased(
-            catalogConfig.getStorageOptions(), catalogConfig.isEnableStableRowIds(properties));
+            catalogConfig.getStorageOptions(),
+            catalogConfig.isEnableStableRowIds(properties),
+            fileFormatVersion);
     StagedCommit stagedCommit = StagedCommit.forNewTable(arrowSchema, datasetUri, commitOptions);
     stagedCommit.setShardingSpec(shardingSpec);
     return createStagedDataset(
@@ -1201,19 +1204,20 @@ public abstract class BaseLanceNamespaceSparkCatalog
     Dataset ds = Utils.openDatasetBuilder(resolved.readOptions).build();
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
+    // Use specified file format version, or fall back to existing table's version
+    if (fileFormatVersion == null) {
+      fileFormatVersion = ds.getLanceFileFormatVersion();
+    }
     final StagedCommitOptions commitOptions =
         StagedCommitOptions.of(
             merged,
             catalogConfig.isEnableStableRowIds(properties),
+            fileFormatVersion,
             namespace,
             resolved.tableIdList,
             managedVersioning);
     StagedCommit stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
     stagedCommit.setShardingSpec(shardingSpec);
-    // Use specified file format version, or fall back to existing table's version
-    if (fileFormatVersion == null) {
-      fileFormatVersion = ds.getLanceFileFormatVersion();
-    }
     return createStagedDataset(
         resolved.readOptions,
         processedSchema,
@@ -1250,16 +1254,18 @@ public abstract class BaseLanceNamespaceSparkCatalog
       throw new NoSuchTableException(ident);
     }
 
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
-    final StagedCommitOptions commitOptions =
-        StagedCommitOptions.pathBased(
-            catalogConfig.getStorageOptions(), catalogConfig.isEnableStableRowIds(properties));
-    StagedCommit stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
-    stagedCommit.setShardingSpec(shardingSpec);
     // Use specified file format version, or fall back to existing table's version
     if (fileFormatVersion == null) {
       fileFormatVersion = ds.getLanceFileFormatVersion();
     }
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
+    final StagedCommitOptions commitOptions =
+        StagedCommitOptions.pathBased(
+            catalogConfig.getStorageOptions(),
+            catalogConfig.isEnableStableRowIds(properties),
+            fileFormatVersion);
+    StagedCommit stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
+    stagedCommit.setShardingSpec(shardingSpec);
     return createStagedDataset(
         readOptions,
         processedSchema,
@@ -1333,24 +1339,32 @@ public abstract class BaseLanceNamespaceSparkCatalog
             name);
 
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
-    // Use specified file format version, or fall back to existing table's version
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
-    final StagedCommitOptions commitOptions =
-        StagedCommitOptions.of(
-            merged,
-            catalogConfig.isEnableStableRowIds(properties),
-            namespace,
-            tableIdList,
-            managedVersioning);
     StagedCommit stagedCommit;
     if (exists) {
       Dataset ds = Utils.openDatasetBuilder(readOptions).build();
-      stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
       if (fileFormatVersion == null) {
         fileFormatVersion = ds.getLanceFileFormatVersion();
       }
+      final StagedCommitOptions commitOptions =
+          StagedCommitOptions.of(
+              merged,
+              catalogConfig.isEnableStableRowIds(properties),
+              fileFormatVersion,
+              namespace,
+              tableIdList,
+              managedVersioning);
+      stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
     } else {
+      final StagedCommitOptions commitOptions =
+          StagedCommitOptions.of(
+              merged,
+              catalogConfig.isEnableStableRowIds(properties),
+              fileFormatVersion,
+              namespace,
+              tableIdList,
+              managedVersioning);
       stagedCommit = StagedCommit.forNewTable(arrowSchema, location, commitOptions);
     }
     stagedCommit.setShardingSpec(shardingSpec);
@@ -1384,18 +1398,24 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     boolean exists = tableExistsAtPath(ident);
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
-    final StagedCommitOptions commitOptions =
-        StagedCommitOptions.pathBased(
-            catalogConfig.getStorageOptions(), catalogConfig.isEnableStableRowIds(properties));
     StagedCommit stagedCommit;
-    // Use specified file format version, or fall back to existing table's version
     if (exists) {
       Dataset ds = Utils.openDatasetBuilder(readOptions).build();
-      stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
       if (fileFormatVersion == null) {
         fileFormatVersion = ds.getLanceFileFormatVersion();
       }
+      final StagedCommitOptions commitOptions =
+          StagedCommitOptions.pathBased(
+              catalogConfig.getStorageOptions(),
+              catalogConfig.isEnableStableRowIds(properties),
+              fileFormatVersion);
+      stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
     } else {
+      final StagedCommitOptions commitOptions =
+          StagedCommitOptions.pathBased(
+              catalogConfig.getStorageOptions(),
+              catalogConfig.isEnableStableRowIds(properties),
+              fileFormatVersion);
       stagedCommit = StagedCommit.forNewTable(arrowSchema, datasetUri, commitOptions);
     }
     stagedCommit.setShardingSpec(shardingSpec);

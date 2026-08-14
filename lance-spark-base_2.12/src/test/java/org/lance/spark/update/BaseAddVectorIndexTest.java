@@ -436,7 +436,7 @@ public abstract class BaseAddVectorIndexTest {
                             fullTable))
                     .collect());
     Assertions.assertTrue(
-        rootCauseMessage(ex).contains("supports a single column only"),
+        rootCauseMessage(ex).contains("support a single column only"),
         "got: " + rootCauseMessage(ex));
   }
 

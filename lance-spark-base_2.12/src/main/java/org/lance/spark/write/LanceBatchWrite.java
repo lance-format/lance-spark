@@ -178,6 +178,10 @@ public class LanceBatchWrite implements BatchWrite {
       if (enableStableRowIds != null) {
         stagedCommit.setEnableStableRowIds(enableStableRowIds);
       }
+      String fileFormatVersion = writeOptions.getFileFormatVersion();
+      if (fileFormatVersion != null) {
+        stagedCommit.setFileFormatVersion(fileFormatVersion);
+      }
       // For a path-based staged create, StagedCommit only has the catalog's static storage
       // options at this point. Merge in write-time and namespace-vended options now so
       // StagedCommit.commit() uses them. Mirrors the non-staged merge below.
@@ -202,6 +206,10 @@ public class LanceBatchWrite implements BatchWrite {
                 .writeParams(
                     LanceRuntime.mergeStorageOptions(
                         writeOptions.getStorageOptions(), initialStorageOptions));
+        String fileFormatVersion = writeOptions.getFileFormatVersion();
+        if (fileFormatVersion != null) {
+          commitBuilder.storageFormat(fileFormatVersion);
+        }
         // When enableStableRowIds is null (user didn't pass the option),
         // lance-core auto-inherits the flag from the existing manifest.
         // Appending to a table with stable row IDs works without

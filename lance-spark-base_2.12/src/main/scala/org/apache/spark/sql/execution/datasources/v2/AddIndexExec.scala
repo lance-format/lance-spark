@@ -18,6 +18,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode
 import org.apache.arrow.c.{ArrowArrayStream, Data}
 import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.arrow.vector.ipc.ArrowReader
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
 import org.apache.spark.sql.catalyst.plans.logical.{AddIndexOutputType, LanceNamedArgument}
@@ -29,6 +30,7 @@ import org.apache.spark.unsafe.types.UTF8String
 import org.lance.Dataset
 import org.lance.index.{Index, IndexOptions, IndexParams, IndexType}
 import org.lance.index.scalar.{BTreeIndexParams, ScalarIndexParams}
+import org.lance.schema.{LanceField, LanceSchema}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceRuntime, LanceSparkReadOptions}
 import org.lance.spark.arrow.LanceArrowWriter
 import org.lance.spark.utils.{CloseableUtil, FieldPathUtils, Utils}
@@ -50,10 +52,10 @@ private case class AddIndexTableSnapshot(
  *
  * <p>Index creation behaviour is controlled by the WITH clause options:
  * <ul>
- * <li><b>BTREE</b>: uses a range-based approach that redistributes and sorts data across
- *   partitions, creates indexes for each range in parallel, and merges them into a global
- *   index structure. Supports {@code build_mode='range'} (default) and
- *   {@code build_mode='fragment'}.
+ * <li><b>BTREE</b>: uses the logical segment commit path in {@code build_mode='fragment'}
+ *   (default). In {@code build_mode='range'}, Spark redistributes and sorts data across
+ *   partitions, creates indexes for each partition in parallel, and commits the resulting
+ *   segment set.
  * <li><b>ZONEMAP / BITMAP / LABEL_LIST / NGRAM / BLOOMFILTER / RTREE / FTS / INVERTED</b>:
  *   build uncommitted index segments in parallel across fragment batches and commit the logical
  *   index on the driver.
@@ -83,7 +85,7 @@ case class AddIndexExec(
     method: String,
     columns: Seq[String],
     args: Seq[LanceNamedArgument]) extends LeafV2CommandExec
-  with org.apache.spark.internal.Logging {
+  with Logging {
 
   override def output: Seq[Attribute] = AddIndexOutputType.SCHEMA
 
@@ -115,6 +117,14 @@ case class AddIndexExec(
     }
 
     val numSegmentsOpt = args.find(_.name == "num_segments")
+    // BTREE range-mode preprocesses data through Spark and does not fan out
+    // into per-fragment segments, so num_segments has no meaning there. Rejected up front
+    // with a specific message so the user knows to switch to build_mode='fragment' — the
+    // generic "not supported for BTREE" message below would be misleading.
+    if (numSegmentsOpt.isDefined && btreeBuildMode.contains("range")) {
+      throw new IllegalArgumentException(
+        "num_segments is only supported for BTREE indexes with build_mode='fragment'")
+    }
     if (numSegmentsOpt.isDefined && !IndexUtils.useLogicalSegmentCommit(indexType)) {
       throw new IllegalArgumentException(
         s"num_segments is not supported for ${indexType.name()} indexes")
@@ -168,27 +178,25 @@ case class AddIndexExec(
       }
 
     // Resolve canonical columns + fragment ids + (optional) vector plan against a pinned
-    // dataset version. Absorbs the upstream #740 change to use resolveField for scalar-segment
-    // methods so container fields (label_list / rtree) resolve, while other methods keep the
-    // existing resolveLeafField semantics.
+    // dataset version. Uses IndexUtils.resolveIndexField so leaf-only methods
+    // (BTREE / BITMAP / NGRAM / BLOOM_FILTER) validate against Lance Core's
+    // container-field rejection, while container-tolerant methods (LABEL_LIST / RTREE / IVF_*
+    // etc.) resolve directly.
     val snapshot: AddIndexTableSnapshot = {
       val ds = IndexUtils.openDataset(baseReadOptions, initialStorageOpts, nsImpl, nsProps, tableId)
       try {
         val canonical = columns.map { column =>
-          val field = scalarSegmentIndexType match {
-            case Some(_) => FieldPathUtils.resolveField(ds.getLanceSchema, column)
-            case None => FieldPathUtils.resolveLeafField(ds.getLanceSchema, column)
-          }
+          val field = IndexUtils.resolveIndexField(ds.getLanceSchema, indexType, column)
           FieldPathUtils.pathByFieldId(ds.getLanceSchema, field.getId)
         }
         // Single-column check: no index type currently supports more than one column.
         // Centralising here avoids per-type checks scattered further down (ZONEMAP, IVF, FTS).
         // The range-based BTree path re-validates on its own args-derived list; that separate
-        // check stays local to that job.
+        // check stays local to that job. Wording matches BaseAddIndexTest's substring assertion
+        // (see testIndexesRejectMultipleColumns).
         if (canonical.size != 1) {
           throw new UnsupportedOperationException(
-            s"$indexType supports a single column only " +
-              s"(got ${canonical.size}: ${canonical.mkString(", ")})")
+            s"${indexType.name()} indexes currently support a single column only")
         }
         val vectorPlan = if (IndexUtils.isIvfIndexType(indexType)) {
           val arrowSchema = ds.getLanceSchema.asArrowSchema()
@@ -255,13 +263,30 @@ case class AddIndexExec(
       }
     }
 
-    // Logical segment commit path: scalar-segment methods (ZONEMAP / BITMAP / LABEL_LIST /
-    // NGRAM / BLOOM_FILTER / RTREE) go through ScalarSegmentIndexJob; IVF_* goes through
-    // VectorIndexJob.
+    // Range-mode BTree preprocesses data through Spark's shuffle and does not go through
+    // the logical-segment fan-out. Runs before the useLogicalSegmentCommit dispatch below
+    // so BTREE-range never reaches ScalarSegmentIndexJob.
+    if (btreeBuildMode.contains("range")) {
+      val segments = new RangeBasedBTreeIndexJob(
+        this.copy(columns = canonicalColumns),
+        readOptions,
+        fragmentIds.size,
+        nsImpl,
+        nsProps,
+        tableId,
+        initialStorageOpts).run()
+      commitIndexSegments(readOptions, canonicalColumns.head, segments)
+      return Seq(new GenericInternalRow(Array[Any](
+        fragmentIds.size.toLong,
+        UTF8String.fromString(indexName))))
+    }
+
+    // Logical segment commit path: scalar-segment methods (BTREE fragment-mode / ZONEMAP /
+    // BITMAP / LABEL_LIST / NGRAM / BLOOM_FILTER / RTREE / INVERTED) go through
+    // ScalarSegmentIndexJob; IVF_* goes through VectorIndexJob.
     if (IndexUtils.useLogicalSegmentCommit(indexType)) {
       val segments: Seq[Index] = indexType match {
         case scalar if scalarSegmentIndexType.isDefined =>
-          val _ = scalar
           val scalarSegmentJob = new ScalarSegmentIndexJob(
             this.copy(columns = canonicalColumns),
             readOptions,
@@ -294,42 +319,6 @@ case class AddIndexExec(
         case other =>
           throw new IllegalStateException(s"Unexpected logical-segment type: $other")
       }
-      // Atomic add+remove via Lance core; see commitIndexSegments
-      // Atomic add+remove via Lance core; see commitIndexSegments
-      commitIndexSegments(readOptions, canonicalColumns.head, segments)
-      return Seq(new GenericInternalRow(Array[Any](
-        fragmentIds.size.toLong,
-        UTF8String.fromString(indexName))))
-    }
-
-    // BTree uses the Lance segment-commit path. Each worker builds an
-    // uncommitted, per-fragment segment whose UUID is generated by Lance: a
-    // caller-supplied index_uuid is rejected for distributed BTree builds, and
-    // the driver-side mergeIndexMetadata path is no longer supported for BTree.
-    // Both fragment mode (Lance sorts each fragment) and range mode (Spark
-    // pre-sorts each fragment's data) produce segments with disjoint fragment
-    // coverage, so they can be committed as a single logical index directly.
-    if (indexType == IndexType.BTREE) {
-      val segments: Seq[Index] =
-        if (btreeBuildMode.contains("range")) {
-          new RangeBasedBTreeIndexJob(
-            this.copy(columns = canonicalColumns),
-            readOptions,
-            fragmentIds.size,
-            nsImpl,
-            nsProps,
-            tableId,
-            initialStorageOpts).run()
-        } else {
-          new BTreeFragmentIndexJob(
-            this.copy(columns = canonicalColumns),
-            readOptions,
-            fragmentIds,
-            nsImpl,
-            nsProps,
-            tableId,
-            initialStorageOpts).run()
-        }
       commitIndexSegments(readOptions, canonicalColumns.head, segments)
       return Seq(new GenericInternalRow(Array[Any](
         fragmentIds.size.toLong,
@@ -402,111 +391,6 @@ case class AddIndexExec(
     }
   }
 
-}
-
-/**
- * A job implementation for creating a distributed BTree index, one uncommitted segment per
- * fragment. Segment UUIDs are generated by Lance (not the caller) and returned in the index
- * metadata; the driver commits the collected segments as a single logical index.
- *
- * @param addIndexExec       The AddIndexExec instance that initiated this job
- * @param readOptions        Configuration options for reading the Lance dataset
- * @param fragmentIds        List of fragment IDs to process
- * @param nsImpl             Optional namespace implementation class for credential vending
- * @param nsProps            Optional namespace properties for credential vending
- * @param tableId            Optional table identifier for credential vending
- * @param initialStorageOpts Optional initial storage options for the dataset
- */
-class BTreeFragmentIndexJob(
-    addIndexExec: AddIndexExec,
-    readOptions: LanceSparkReadOptions,
-    fragmentIds: List[Integer],
-    nsImpl: Option[String],
-    nsProps: Option[Map[String, String]],
-    tableId: Option[List[String]],
-    initialStorageOpts: Option[Map[String, String]]) extends Serializable {
-
-  def run(): Seq[Index] = {
-    val encodedReadOptions = encode(readOptions)
-    val columns = addIndexExec.columns.toList
-    val argsJson = IndexUtils.toJson(addIndexExec.args)
-
-    val tasks = fragmentIds.map { fid =>
-      BTreeFragmentSegmentTask(
-        encodedReadOptions,
-        columns,
-        addIndexExec.method,
-        argsJson,
-        fid,
-        nsImpl,
-        nsProps,
-        tableId,
-        initialStorageOpts)
-    }
-
-    addIndexExec.session.sparkContext
-      .parallelize(tasks, tasks.size)
-      .map(t => t.execute())
-      .collect()
-      .map(decode[Index])
-      .toSeq
-  }
-}
-
-/**
- * A task to build an uncommitted BTree index segment for a single fragment.
- *
- * @param encodedReadOptions    Configuration for Lance dataset access, serialized
- * @param columns               column names to index
- * @param method                Indexing method to use ("btree")
- * @param argsJson              JSON string containing index parameters
- * @param fragmentId            ID of the fragment to create the segment on
- * @param namespaceImpl         Implementation class for namespace operations
- * @param namespaceProperties   Properties of the namespace
- * @param tableId               Identifier for the table within the namespace
- * @param initialStorageOptions Initial storage configuration options
- */
-case class BTreeFragmentSegmentTask(
-    encodedReadOptions: String,
-    columns: List[String],
-    method: String,
-    argsJson: String,
-    fragmentId: Integer,
-    namespaceImpl: Option[String],
-    namespaceProperties: Option[Map[String, String]],
-    tableId: Option[List[String]],
-    initialStorageOptions: Option[Map[String, String]]) extends Serializable {
-
-  def execute(): String = {
-    val readOptions = decode[LanceSparkReadOptions](encodedReadOptions)
-    val params = IndexParams.builder()
-      .setScalarIndexParams(ScalarIndexParams.create(
-        IndexUtils.buildScalarIndexParamType(method),
-        argsJson))
-      .build()
-
-    // No index name or UUID: Lance generates the segment UUID, and the logical
-    // index name is assigned when the segments are committed on the driver.
-    val indexOptions = IndexOptions
-      .builder(java.util.Arrays.asList(columns: _*), IndexType.BTREE, params)
-      .replace(false)
-      .withFragmentIds(Collections.singletonList(fragmentId))
-      .build()
-
-    val dataset = Utils.openDatasetBuilder(readOptions)
-      .initialStorageOptions(initialStorageOptions.map(_.asJava).orNull)
-      .runtimeNamespace(
-        namespaceImpl.orNull,
-        namespaceProperties.map(_.asJava).orNull,
-        tableId.map(_.asJava).orNull)
-      .build()
-
-    try {
-      encode(dataset.createIndex(indexOptions))
-    } finally {
-      dataset.close()
-    }
-  }
 }
 
 /**
@@ -803,7 +687,7 @@ case class ScalarSegmentIndexTask(
 /**
  * Utility methods for working with index types.
  */
-object IndexUtils extends org.apache.spark.internal.Logging {
+object IndexUtils extends Logging {
 
   private val jsonMapper = new ObjectMapper()
 
@@ -827,9 +711,6 @@ object IndexUtils extends org.apache.spark.internal.Logging {
     IndexType.IVF_SQ,
     IndexType.IVF_HNSW_SQ)
 
-  // Method → IndexType. Includes the six scalar-segment methods brought in by upstream #740
-  // (zonemap / bitmap / label_list / ngram / bloomfilter / rtree) plus btree, fts, and the IVF
-  // family. Keyed on lower-cased method names to normalise case-insensitive callers.
   private val methodToIndexTypes: Map[String, IndexType] = Map(
     "btree" -> IndexType.BTREE,
     "zonemap" -> IndexType.ZONEMAP,
@@ -849,6 +730,7 @@ object IndexUtils extends org.apache.spark.internal.Logging {
   // Scalar-segment methods use the shared ScalarSegmentIndexJob path (uncommitted segments
   // built in parallel across fragment batches, then committed atomically on the driver).
   private val scalarSegmentIndexTypes: Set[IndexType] = Set(
+    IndexType.BTREE,
     IndexType.ZONEMAP,
     IndexType.BITMAP,
     IndexType.LABEL_LIST,
@@ -857,9 +739,17 @@ object IndexUtils extends org.apache.spark.internal.Logging {
     IndexType.RTREE,
     IndexType.INVERTED)
 
-  // ScalarIndexParams uses Lance Core's scalar plugin names, which are a separate contract
-  // from both Spark SQL method names and the Java IndexType enum names. Keep the mapping
-  // explicit instead of deriving it from either naming convention.
+  // Field-shape requirements are independent of the distributed execution path. These index
+  // types reject container fields in Lance Core, so validate them before launching Spark tasks.
+  private val leafFieldIndexTypes: Set[IndexType] = Set(
+    IndexType.BTREE,
+    IndexType.BITMAP,
+    IndexType.NGRAM,
+    IndexType.BLOOM_FILTER)
+
+  // ScalarIndexParams uses Lance Core's scalar plugin names, which are a separate contract from
+  // both Spark SQL method names and the Java IndexType enum names. Keep the mapping explicit instead
+  // of deriving it from either naming convention.
   private val scalarParamTypesByIndexType: Map[IndexType, String] = Map(
     IndexType.BTREE -> "btree",
     IndexType.ZONEMAP -> "zonemap",
@@ -896,6 +786,17 @@ object IndexUtils extends org.apache.spark.internal.Logging {
     methodToIndexTypes
       .get(method.toLowerCase(Locale.ROOT))
       .filter(scalarSegmentIndexTypes.contains)
+
+  def resolveIndexField(
+      schema: LanceSchema,
+      indexType: IndexType,
+      column: String): LanceField = {
+    if (leafFieldIndexTypes.contains(indexType)) {
+      FieldPathUtils.resolveLeafField(schema, column)
+    } else {
+      FieldPathUtils.resolveField(schema, column)
+    }
+  }
 
   /**
    * Extracts the `train` option from named arguments, defaulting to `true`.

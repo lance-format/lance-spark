@@ -53,6 +53,7 @@ public class StagedCommit {
   // The non-staged path (LanceBatchWrite) uses boxed Boolean because null means
   // "user didn't specify" and lets lance-core inherit the flag from the manifest.
   private boolean enableStableRowIds;
+  private String fileFormatVersion;
   private List<FragmentMetadata> fragments;
   private Schema schema;
   private ShardingSpec shardingSpec;
@@ -95,6 +96,7 @@ public class StagedCommit {
     this.storageOptions = new HashMap<>(options.getStorageOptions());
     this.isNewTable = datasetUri != null;
     this.enableStableRowIds = options.isEnableStableRowIds();
+    this.fileFormatVersion = options.getFileFormatVersion();
     this.namespace = options.getNamespace();
     this.tableId = options.getTableId();
     this.managedVersioning = options.isManagedVersioning();
@@ -110,6 +112,10 @@ public class StagedCommit {
 
   public void setEnableStableRowIds(boolean enableStableRowIds) {
     this.enableStableRowIds = enableStableRowIds;
+  }
+
+  public void setFileFormatVersion(String fileFormatVersion) {
+    this.fileFormatVersion = fileFormatVersion;
   }
 
   public void setShardingSpec(ShardingSpec shardingSpec) {
@@ -134,6 +140,11 @@ public class StagedCommit {
     return storageOptions;
   }
 
+  /** Returns the current file format version. Visible for testing. */
+  String getFileFormatVersion() {
+    return fileFormatVersion;
+  }
+
   /** Performs the actual commit using the stored dataset and fragments. */
   public void commit() {
     if (dataset.isEmpty()) {
@@ -149,6 +160,9 @@ public class StagedCommit {
         new CommitBuilder(datasetUri, LanceRuntime.allocator()).writeParams(storageOptions);
     if (enableStableRowIds) {
       builder.useStableRowIds(true);
+    }
+    if (fileFormatVersion != null) {
+      builder.storageFormat(fileFormatVersion);
     }
     applyManagedVersioning(builder);
     try (Transaction txn = new Transaction.Builder().operation(operation).build();
@@ -167,6 +181,9 @@ public class StagedCommit {
     final CommitBuilder builder =
         new CommitBuilder(uri, LanceRuntime.allocator()).writeParams(storageOptions);
     builder.useStableRowIds(enableStableRowIds);
+    if (fileFormatVersion != null) {
+      builder.storageFormat(fileFormatVersion);
+    }
     applyManagedVersioning(builder);
     try (Dataset committed = commitOperation(builder, version, operation)) {
       SparkLanceShardingUtils.initializeMemWal(committed, shardingSpec);

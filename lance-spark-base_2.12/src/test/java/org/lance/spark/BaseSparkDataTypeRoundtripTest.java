@@ -56,7 +56,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * E2E safety net. Each test writes a small DataFrame through the Lance data source and reads it
  * back, asserting value equality including the null case.
  *
- * <p>Tests for known Lance-core gaps are {@code @Disabled} with a pointer to the upstream source.
+ * <p>Tests for known Lance-core gaps are {@code @Disabled} with a pointer to the source.
  * Remove the annotation to verify a future fix.
  */
 public abstract class BaseSparkDataTypeRoundtripTest {

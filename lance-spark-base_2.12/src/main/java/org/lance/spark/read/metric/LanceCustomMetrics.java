@@ -28,7 +28,7 @@ import org.apache.spark.sql.connector.metric.CustomSumMetric;
  *   <li>Sizes use {@code *Bytes} suffix (reserved for future use).
  * </ul>
  *
- * <p>Future metrics gated on upstream {@code lance-jni} surface (not implementable in pure Java
+ * <p>Future metrics gated on the {@code lance-jni} surface (not implementable in pure Java
  * today): {@code numFragmentsPruned}, {@code bytesRead}, {@code numIndexLookups}, {@code
  * ioWaitTimeNs}, {@code decodeTimeNs}.
  */

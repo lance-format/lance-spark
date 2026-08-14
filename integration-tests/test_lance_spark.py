@@ -1307,7 +1307,7 @@ class TestDDLVectorIndex:
                 WITH (num_partitions=4, num_sub_vectors=4)
             """).collect()
 
-        assert "supports a single column only" in str(excinfo.value)
+        assert "support a single column only" in str(excinfo.value)
 
     def test_create_ivf_index_on_empty_table_rejects(self, spark):
         """Empty tables reject IVF_* CREATE INDEX with a clear error."""

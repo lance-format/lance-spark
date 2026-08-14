@@ -149,14 +149,18 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
 
       // Commit merge operation using CommitBuilder
       Merge merge = Merge.builder().fragments(fragments).schema(arrowSchema).build();
+      CommitBuilder commitBuilder =
+          new CommitBuilder(dataset)
+              .writeParams(
+                  LanceRuntime.mergeStorageOptions(
+                      writeOptions.getStorageOptions(), initialStorageOptions));
+      String fileFormatVersion = writeOptions.getFileFormatVersion();
+      if (fileFormatVersion != null) {
+        commitBuilder.storageFormat(fileFormatVersion);
+      }
       try (Transaction txn =
               new Transaction.Builder().readVersion(version).operation(merge).build();
-          Dataset committed =
-              new CommitBuilder(dataset)
-                  .writeParams(
-                      LanceRuntime.mergeStorageOptions(
-                          writeOptions.getStorageOptions(), initialStorageOptions))
-                  .execute(txn)) {
+          Dataset committed = commitBuilder.execute(txn)) {
         // auto-close txn and committed dataset
       }
     }
@@ -239,6 +243,8 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
 
     @Override
     public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
+      LanceRuntime.enableOpenTelemetry();
+
       return new AddColumnsWriter(
           writeOptions,
           schema,

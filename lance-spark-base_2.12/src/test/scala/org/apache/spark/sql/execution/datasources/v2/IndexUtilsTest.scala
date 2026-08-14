@@ -187,7 +187,7 @@ class IndexUtilsTest {
     assertEquals("inverted", IndexUtils.buildScalarIndexParamType("inverted"))
   }
 
-  // From upstream #740: exercises every scalar-segment method's mapping to IndexType
+  // Exercises every scalar-segment method's mapping to IndexType
   // AND the core scalar-plugin param-type name (which uses "labellist" / "bloomfilter"
   // spellings that don't match either the SQL method names or the enum names).
   @Test
@@ -241,6 +241,7 @@ class IndexUtilsTest {
   @Test
   def useLogicalSegmentCommitTrueForScalarSegmentAndSupportedIvf(): Unit = {
     Seq(
+      IndexType.BTREE,
       IndexType.ZONEMAP,
       IndexType.BITMAP,
       IndexType.LABEL_LIST,
@@ -261,9 +262,10 @@ class IndexUtilsTest {
 
   @Test
   def useLogicalSegmentCommitFalseForUnsupported(): Unit = {
-    assertFalse(IndexUtils.useLogicalSegmentCommit(IndexType.BTREE))
-    // IVF_HNSW_FLAT is unsupported in the first pass: lance-core Java
-    // VectorIndexParams.Builder.build() rejects HNSW without a PQ/SQ quantizer.
+    // BTREE now goes through the shared scalar-segment path — it is no longer
+    // an exception to logical-segment commit. Only IVF_HNSW_FLAT stays unsupported in the
+    // first pass: lance-core Java VectorIndexParams.Builder.build() rejects HNSW without a
+    // PQ/SQ quantizer.
     assertFalse(IndexUtils.useLogicalSegmentCommit(IndexType.IVF_HNSW_FLAT))
   }
 
