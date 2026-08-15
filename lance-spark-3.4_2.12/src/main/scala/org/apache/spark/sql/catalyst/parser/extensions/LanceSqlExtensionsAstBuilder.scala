@@ -14,9 +14,10 @@
 package org.apache.spark.sql.catalyst.parser.extensions
 
 import org.antlr.v4.runtime.ParserRuleContext
+import org.antlr.v4.runtime.misc.Interval
 import org.apache.spark.sql.catalyst.analysis.{UnresolvedIdentifier, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.parser.{ParseException, ParserInterface}
-import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, LanceCreateBranch, LanceCreateTag, LanceDropBranch, LanceDropIndex, LanceDropTag, LanceNamedArgument, LanceShowBranches, LanceShowTags, LogicalPlan, Optimize, SetUnenforcedPrimaryKey, ShowIndexes, UpdateColumnsBackfill, Vacuum}
+import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, LanceCreateBranch, LanceCreateTag, LanceDropBranch, LanceDropIndex, LanceDropTag, LanceNamedArgument, LanceShowBranches, LanceShowTags, LogicalPlan, Optimize, ReplaceWhere, SetUnenforcedPrimaryKey, ShowIndexes, UpdateColumnsBackfill, Vacuum}
 import org.lance.spark.utils.{FieldPathUtils, ParserUtils}
 
 import scala.collection.JavaConverters._
@@ -78,6 +79,23 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
       .toSeq
 
     Optimize(table, args)
+  }
+
+  override def visitReplaceWhere(ctx: LanceSqlExtensionsParser.ReplaceWhereContext)
+      : ReplaceWhere = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    // Recover the raw text following WHERE by character interval (the grammar captures it as an
+    // opaque token run, so slicing the original stream preserves operators, quoting, and spacing),
+    // then split it at the first top-level AS into predicate and query. The query is parsed by
+    // Spark's own parser (delegate); the predicate is handed to Lance at execution time.
+    val parts = ParserUtils.splitReplaceBody(originalText(ctx.body))
+    val query = delegate.parsePlan(parts(1))
+    ReplaceWhere(table, parts(0), query)
+  }
+
+  private def originalText(ctx: ParserRuleContext): String = {
+    val stream = ctx.getStart.getInputStream
+    stream.getText(Interval.of(ctx.getStart.getStartIndex, ctx.getStop.getStopIndex)).trim
   }
 
   override def visitVacuum(ctx: LanceSqlExtensionsParser.VacuumContext): Vacuum = {

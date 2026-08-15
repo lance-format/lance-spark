@@ -56,4 +56,126 @@ public final class ParserUtils {
     }
     return "`" + identifier + "`";
   }
+
+  /**
+   * Splits the raw body of a {@code REPLACE ... WHERE <predicate> AS <query>} command into its
+   * predicate and query at the first <em>top-level</em> {@code AS} keyword — one that is not nested
+   * inside parentheses, a string/backtick literal, or a comment. This lets the predicate itself
+   * contain {@code AS} (e.g. {@code CAST(dt AS STRING)}) and lets the query contain column aliases.
+   *
+   * @param body the source text following {@code WHERE}, e.g. {@code "dt = '1' AS SELECT ..."}
+   * @return a two-element array {@code [predicate, query]}, both trimmed
+   * @throws IllegalArgumentException if no top-level {@code AS} separator is found
+   */
+  public static String[] splitReplaceBody(String body) {
+    int depth = 0;
+    int i = 0;
+    int n = body.length();
+    while (i < n) {
+      char c = body.charAt(i);
+      if (c == '\'' || c == '"' || c == '`') {
+        i = skipQuoted(body, i, c);
+        continue;
+      }
+      if (c == '-' && i + 1 < n && body.charAt(i + 1) == '-') {
+        i = skipLineComment(body, i);
+        continue;
+      }
+      if (c == '/' && i + 1 < n && body.charAt(i + 1) == '*') {
+        i = skipBlockComment(body, i);
+        continue;
+      }
+      if (c == '(') {
+        depth++;
+      } else if (c == ')') {
+        depth--;
+      } else if (depth == 0 && isAsKeywordAt(body, i)) {
+        String predicate = body.substring(0, i).trim();
+        String query = body.substring(i + 2).trim();
+        if (predicate.isEmpty() || query.isEmpty()) {
+          throw new IllegalArgumentException(
+              "REPLACE ... WHERE requires a non-empty predicate and query around AS: " + body);
+        }
+        return new String[] {predicate, query};
+      }
+      i++;
+    }
+    throw new IllegalArgumentException(
+        "REPLACE ... WHERE requires an AS separator between the predicate and query: " + body);
+  }
+
+  /** Returns the index just past the closing quote for the literal starting at {@code start}. */
+  private static int skipQuoted(String s, int start, char quote) {
+    int i = start + 1;
+    int n = s.length();
+    while (i < n) {
+      char c = s.charAt(i);
+      if (c == '\\' && quote != '`') {
+        i += 2; // escaped char in a '...'/"..." literal
+        continue;
+      }
+      if (c == quote) {
+        // A doubled quote is an escaped quote, not a terminator.
+        if (i + 1 < n && s.charAt(i + 1) == quote) {
+          i += 2;
+          continue;
+        }
+        return i + 1;
+      }
+      i++;
+    }
+    return n;
+  }
+
+  private static int skipLineComment(String s, int start) {
+    // A line comment ends at the next line terminator; Spark treats both \n and \r as terminators.
+    int i = start + 2;
+    int n = s.length();
+    while (i < n && s.charAt(i) != '\n' && s.charAt(i) != '\r') {
+      i++;
+    }
+    return i;
+  }
+
+  private static int skipBlockComment(String s, int start) {
+    // Spark supports nested block comments, so track depth: an inner `*/` closes only the inner
+    // comment, and an `AS` remains commented out until the outermost comment closes.
+    int i = start + 2;
+    int n = s.length();
+    int depth = 1;
+    while (i + 1 < n && depth > 0) {
+      if (s.charAt(i) == '/' && s.charAt(i + 1) == '*') {
+        depth++;
+        i += 2;
+      } else if (s.charAt(i) == '*' && s.charAt(i + 1) == '/') {
+        depth--;
+        i += 2;
+      } else {
+        i++;
+      }
+    }
+    return depth == 0 ? i : n;
+  }
+
+  /**
+   * Whether a standalone {@code AS} keyword (word-bounded, case-insensitive) begins at {@code i}.
+   */
+  private static boolean isAsKeywordAt(String s, int i) {
+    int n = s.length();
+    if (i + 2 > n) {
+      return false;
+    }
+    char a = s.charAt(i);
+    char b = s.charAt(i + 1);
+    if (!((a == 'a' || a == 'A') && (b == 's' || b == 'S'))) {
+      return false;
+    }
+    boolean leftBoundary = i == 0 || !isWordChar(s.charAt(i - 1));
+    boolean rightBoundary = i + 2 == n || !isWordChar(s.charAt(i + 2));
+    return leftBoundary && rightBoundary;
+  }
+
+  private static boolean isWordChar(char c) {
+    return Character.isLetterOrDigit(c) || c == '_';
+  }
 }

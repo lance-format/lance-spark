@@ -72,6 +72,10 @@ case class LanceDataSourceV2Strategy(session: SparkSession) extends SparkStrateg
     case SetUnenforcedPrimaryKey(ResolvedIdentifier(catalog, ident), columns) =>
       SetUnenforcedPrimaryKeyExec(asTableCatalog(catalog), ident, columns) :: Nil
 
+    case ReplaceWhere(ResolvedIdentifier(catalog, ident), predicate, query)
+        if query.resolved =>
+      ReplaceWhereExec(asTableCatalog(catalog), ident, predicate, query) :: Nil
+
     case _ => Nil
   }
 
