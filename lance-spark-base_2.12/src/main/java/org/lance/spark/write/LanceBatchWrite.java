@@ -51,6 +51,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import static org.lance.spark.join.FragmentAwareJoinUtils.extractFragmentId;
@@ -206,7 +207,12 @@ public class LanceBatchWrite implements BatchWrite {
       try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
         Operation operation;
         if (writeOptions.getReplaceWhere() != null) {
-          operation = buildReplaceOperation(ds, writeOptions.getReplaceWhere(), fragments);
+          operation =
+              buildReplaceOperation(
+                  ds,
+                  writeOptions.getReplaceWhere(),
+                  writeOptions.getReplaceWhereEqualities(),
+                  fragments);
         } else if (isOverwrite) {
           operation = Overwrite.builder().fragments(fragments).schema(arrowSchema).build();
         } else {
@@ -253,11 +259,36 @@ public class LanceBatchWrite implements BatchWrite {
    * the predicate is removed outright.
    */
   private static Operation buildReplaceOperation(
-      Dataset ds, String predicate, List<FragmentMetadata> newFragments) {
-    Map<Integer, RoaringBitmap> deletionsByFragment = matchingDeletionsByFragment(ds, predicate);
-
+      Dataset ds, String predicate, String equalitiesJson, List<FragmentMetadata> newFragments) {
     List<Long> removedFragmentIds = new ArrayList<>();
     List<FragmentMetadata> updatedFragments = new ArrayList<>();
+
+    // Metadata-only fast path: for an equality predicate, use zonemap statistics to identify
+    // fragments whose every live row provably matches (each indexed equality column has all zones
+    // pinned to the required value), and drop them by id without reading any rows. Fragments that
+    // cannot be proven fully covered are handled by the exact scan below, so this only ever avoids
+    // work — it never changes which rows are replaced.
+    Set<Integer> fullyCoveredFragmentIds =
+        ReplaceCoverage.fullyCoveredFragmentIds(ds, equalitiesJson);
+    for (int fragmentId : fullyCoveredFragmentIds) {
+      removedFragmentIds.add((long) fragmentId);
+    }
+
+    // Scan only the fragments not already dropped by metadata, restricting the scan to their ids.
+    // When every fragment is proven covered, this list is empty and the scan is skipped entirely —
+    // the whole-partition case reads no data rows at all (O(#fragments), not O(rows)).
+    List<Integer> scanFragmentIds = new ArrayList<>();
+    for (Fragment fragment : ds.getFragments()) {
+      if (!fullyCoveredFragmentIds.contains(fragment.getId())) {
+        scanFragmentIds.add(fragment.getId());
+      }
+    }
+
+    Map<Integer, RoaringBitmap> deletionsByFragment =
+        scanFragmentIds.isEmpty()
+            ? java.util.Collections.emptyMap()
+            : matchingDeletionsByFragment(ds, predicate, scanFragmentIds);
+
     for (Map.Entry<Integer, RoaringBitmap> entry : deletionsByFragment.entrySet()) {
       int fragmentId = entry.getKey();
       Fragment fragment = ds.getFragment(fragmentId);
@@ -296,13 +327,14 @@ public class LanceBatchWrite implements BatchWrite {
    * memory bounded regardless of how many rows match. Returns an empty map when no row matches.
    */
   private static Map<Integer, RoaringBitmap> matchingDeletionsByFragment(
-      Dataset ds, String predicate) {
+      Dataset ds, String predicate, List<Integer> scanFragmentIds) {
     Map<Integer, RoaringBitmap> deletionsByFragment = new java.util.HashMap<>();
     ScanOptions scanOptions =
         new ScanOptions.Builder()
             .columns(java.util.Collections.emptyList())
             .withRowAddress(true)
             .filter(predicate)
+            .fragmentIds(scanFragmentIds)
             .build();
     try (LanceScanner scanner = ds.newScan(scanOptions);
         ArrowReader reader = scanner.scanBatches()) {

@@ -51,3 +51,10 @@ REPLACE <table> WHERE <predicate> AS <query>
 - When a fragment contains both matching and non-matching rows, only the matching rows are removed
   (via a deletion vector); the rest are preserved. A fragment whose rows all match is dropped
   outright.
+- **Performance:** for an equality predicate (a conjunction of `column = value`) on columns that
+  have a zonemap index, `REPLACE` uses the zonemap to drop fully-covered fragments by id without
+  scanning their rows — so replacing a partition that occupies its own fragments is metadata-only.
+  A predicate with no zonemap, or any non-equality shape (ranges, `OR`, functions), still works but
+  falls back to scanning the affected fragments to find the rows to delete. Multiple single-column
+  zonemaps combine for a multi-column predicate (e.g. a zonemap on `dt` and one on `hr` for
+  `WHERE dt = ... AND hr = ...`).

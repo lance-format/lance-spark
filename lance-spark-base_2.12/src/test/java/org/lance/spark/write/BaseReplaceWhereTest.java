@@ -231,6 +231,74 @@ public abstract class BaseReplaceWhereTest {
     op.check(Arrays.asList(Row.of(2, "2026-08-02", 200), Row.of(3, "2026-08-01", 300)));
   }
 
+  /**
+   * With a zonemap index on the predicate column, a partition that occupies its own fragment is
+   * dropped via the metadata-only fast path (no row scan). This asserts the result is identical to
+   * the scan-based path — the optimization must not change which rows are replaced.
+   */
+  @Test
+  public void testReplaceWithZonemapCoveredPartition() {
+    TableOperator op = new TableOperator(spark, catalogName);
+    op.create();
+    op.createZonemap("dt");
+
+    // One INSERT per dt → one fragment per dt, so dt=2026-08-01's fragment is fully covered.
+    op.insert(Arrays.asList(Row.of(1, "2026-08-01", 100), Row.of(2, "2026-08-01", 200)));
+    op.insert(Arrays.asList(Row.of(3, "2026-08-02", 300)));
+
+    op.replace("dt = '2026-08-01'", "SELECT 10 AS id, '2026-08-01' AS dt, 999 AS value");
+
+    op.check(Arrays.asList(Row.of(3, "2026-08-02", 300), Row.of(10, "2026-08-01", 999)));
+  }
+
+  /**
+   * Multi-column equality with zonemaps on both columns: only fragments pinned to BOTH values are
+   * dropped by metadata, and the result matches the exact semantics.
+   */
+  @Test
+  public void testReplaceWithZonemapMultiColumn() {
+    TableOperator op = new TableOperator(spark, catalogName);
+    op.create();
+    op.createZonemap("dt");
+    op.createZonemap("value");
+
+    // Each INSERT is its own fragment; only the first is (dt=2026-08-01, value=100).
+    op.insert(Arrays.asList(Row.of(1, "2026-08-01", 100)));
+    op.insert(Arrays.asList(Row.of(2, "2026-08-01", 200)));
+    op.insert(Arrays.asList(Row.of(3, "2026-08-02", 100)));
+
+    op.replace(
+        "dt = '2026-08-01' AND value = 100", "SELECT 9 AS id, '2026-08-01' AS dt, 100 AS value");
+
+    op.check(
+        Arrays.asList(
+            Row.of(2, "2026-08-01", 200),
+            Row.of(3, "2026-08-02", 100),
+            Row.of(9, "2026-08-01", 100)));
+  }
+
+  /**
+   * A non-equality predicate (range) is not eligible for the metadata fast path and must fall back
+   * to the exact scan, still producing the correct result even with a zonemap present.
+   */
+  @Test
+  public void testReplaceRangePredicateFallsBack() {
+    TableOperator op = new TableOperator(spark, catalogName);
+    op.create();
+    op.createZonemap("value");
+
+    op.insert(Arrays.asList(Row.of(1, "2026-08-01", 100), Row.of(2, "2026-08-01", 200)));
+    op.insert(Arrays.asList(Row.of(3, "2026-08-02", 300)));
+
+    op.replace("value >= 300", "SELECT 7 AS id, '2026-08-02' AS dt, 700 AS value");
+
+    op.check(
+        Arrays.asList(
+            Row.of(1, "2026-08-01", 100),
+            Row.of(2, "2026-08-01", 200),
+            Row.of(7, "2026-08-02", 700)));
+  }
+
   /** The replacement is a single atomic commit: exactly one new table version is produced. */
   @Test
   public void testReplaceIsSingleAtomicCommit() {
@@ -281,6 +349,12 @@ public abstract class BaseReplaceWhereTest {
 
     void delete(String predicate) {
       spark.sql(String.format("DELETE FROM %s WHERE %s", fullName(), predicate));
+    }
+
+    void createZonemap(String column) {
+      spark.sql(
+          String.format(
+              "ALTER TABLE %s CREATE INDEX %s_zm USING zonemap (%s)", fullName(), column, column));
     }
 
     long latestVersion() {

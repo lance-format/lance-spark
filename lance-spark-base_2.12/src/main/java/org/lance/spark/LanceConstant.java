@@ -44,6 +44,15 @@ public class LanceConstant {
   public static final String REPLACE_WHERE_KEY = "__lance_replace_where";
 
   /**
+   * Internal write option carrying the JSON-encoded equality terms of a {@code REPLACE ... WHERE}
+   * predicate (a pure conjunction of {@code column = literal}), when the predicate has that shape.
+   * The commit uses these terms plus zonemap statistics to drop fully-covered fragments by id
+   * without scanning their rows; when absent, commit falls back to the exact scan-based deletion.
+   * Set on the driver by {@code ReplaceWhereExec}; not a user-facing option.
+   */
+  public static final String REPLACE_WHERE_EQUALITY_KEY = "__lance_replace_where_equality";
+
+  /**
    * Internal write option carrying the encoded blob source credential/open contexts for an INSERT
    * whose query reads blob columns. Set on the driver by {@code LanceBlobSourceContextRule} and
    * consumed by {@code LanceDataset.newWriteBuilder}; not a user-facing option.

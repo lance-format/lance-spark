@@ -107,6 +107,13 @@ public class LanceSparkWriteOptions implements Serializable {
    */
   private final String replaceWhere;
 
+  /**
+   * JSON-encoded equality terms of a {@code REPLACE ... WHERE} predicate, or null. When present,
+   * the commit may drop fully-covered fragments via zonemap statistics without scanning them. Like
+   * {@link #replaceWhere}, excluded from {@link #toWriteParams}.
+   */
+  private final String replaceWhereEqualities;
+
   private LanceSparkWriteOptions(Builder builder) {
     this.datasetUri = builder.datasetUri;
     this.writeMode = builder.writeMode;
@@ -126,6 +133,7 @@ public class LanceSparkWriteOptions implements Serializable {
     this.tableId = builder.tableId;
     this.version = builder.version;
     this.replaceWhere = builder.replaceWhere;
+    this.replaceWhereEqualities = builder.replaceWhereEqualities;
   }
 
   /** Creates a new builder for LanceSparkWriteOptions. */
@@ -231,6 +239,13 @@ public class LanceSparkWriteOptions implements Serializable {
     return replaceWhere;
   }
 
+  /**
+   * Returns the JSON-encoded equality terms of the REPLACE predicate, or null if not applicable.
+   */
+  public String getReplaceWhereEqualities() {
+    return replaceWhereEqualities;
+  }
+
   /** Returns a builder pre-populated with all fields from this instance. */
   public Builder toBuilder() {
     return builder()
@@ -251,7 +266,8 @@ public class LanceSparkWriteOptions implements Serializable {
         .namespace(namespace)
         .tableId(tableId)
         .version(version)
-        .replaceWhere(replaceWhere);
+        .replaceWhere(replaceWhere)
+        .replaceWhereEqualities(replaceWhereEqualities);
   }
 
   /** Returns a copy of these options with version set to the given version. */
@@ -344,7 +360,8 @@ public class LanceSparkWriteOptions implements Serializable {
         && Objects.equals(storageOptions, that.storageOptions)
         && Objects.equals(tableId, that.tableId)
         && Objects.equals(version, that.version)
-        && Objects.equals(replaceWhere, that.replaceWhere);
+        && Objects.equals(replaceWhere, that.replaceWhere)
+        && Objects.equals(replaceWhereEqualities, that.replaceWhereEqualities);
   }
 
   @Override
@@ -366,7 +383,8 @@ public class LanceSparkWriteOptions implements Serializable {
         storageOptions,
         tableId,
         version,
-        replaceWhere);
+        replaceWhere,
+        replaceWhereEqualities);
   }
 
   /** Builder for creating LanceSparkWriteOptions instances. */
@@ -389,6 +407,7 @@ public class LanceSparkWriteOptions implements Serializable {
     private List<String> tableId;
     private Long version;
     private String replaceWhere;
+    private String replaceWhereEqualities;
 
     private Builder() {}
 
@@ -488,6 +507,12 @@ public class LanceSparkWriteOptions implements Serializable {
       return this;
     }
 
+    /** Sets the JSON-encoded equality terms of the REPLACE predicate; null when not applicable. */
+    public Builder replaceWhereEqualities(String replaceWhereEqualities) {
+      this.replaceWhereEqualities = replaceWhereEqualities;
+      return this;
+    }
+
     /**
      * Parses options from a map, extracting write-specific settings.
      *
@@ -501,6 +526,10 @@ public class LanceSparkWriteOptions implements Serializable {
       if (options.containsKey(LanceConstant.REPLACE_WHERE_KEY)) {
         this.replaceWhere = options.get(LanceConstant.REPLACE_WHERE_KEY);
         this.storageOptions.remove(LanceConstant.REPLACE_WHERE_KEY);
+      }
+      if (options.containsKey(LanceConstant.REPLACE_WHERE_EQUALITY_KEY)) {
+        this.replaceWhereEqualities = options.get(LanceConstant.REPLACE_WHERE_EQUALITY_KEY);
+        this.storageOptions.remove(LanceConstant.REPLACE_WHERE_EQUALITY_KEY);
       }
       if (options.containsKey(CONFIG_WRITE_MODE)) {
         this.writeMode = WriteMode.valueOf(options.get(CONFIG_WRITE_MODE).toUpperCase());

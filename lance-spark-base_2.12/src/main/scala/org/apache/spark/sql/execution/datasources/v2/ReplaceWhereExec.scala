@@ -14,10 +14,14 @@
 package org.apache.spark.sql.execution.datasources.v2
 
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.Attribute
+import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
+import org.apache.spark.sql.catalyst.expressions.{And, Attribute, EqualTo, Expression, Literal}
 import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan}
 import org.apache.spark.sql.connector.catalog._
+import org.apache.spark.sql.types.{ByteType, IntegerType, LongType, ShortType, StringType}
 import org.lance.spark.{LanceConstant, LanceDataset}
+
+import scala.collection.mutable.ArrayBuffer
 
 /**
  * Physical plan for `REPLACE <table> WHERE <predicate> AS <query>`.
@@ -60,11 +64,88 @@ case class ReplaceWhereExec(
       Some(catalog),
       Some(ident))
 
-    val append =
-      AppendData.byPosition(relation, query, Map(LanceConstant.REPLACE_WHERE_KEY -> predicate))
+    val options = Map(LanceConstant.REPLACE_WHERE_KEY -> predicate) ++
+      equalityTermsJson(predicate).map(LanceConstant.REPLACE_WHERE_EQUALITY_KEY -> _)
+
+    val append = AppendData.byPosition(relation, query, options)
     val qe = session.sessionState.executePlan(append)
     qe.assertCommandExecuted()
 
     Nil
+  }
+
+  /**
+   * If the predicate is a pure conjunction of `column = literal` equality terms on string or
+   * integral columns, returns their JSON encoding for the metadata-only fragment-drop fast path at
+   * commit time. Returns `None` for any other predicate shape (ranges, OR, functions, other types),
+   * in which case commit falls back to the exact scan-based deletion — so this only ever enables an
+   * optimization, never changes which rows are replaced.
+   */
+  private def equalityTermsJson(predicate: String): Option[String] = {
+    val parsed =
+      try {
+        session.sessionState.sqlParser.parseExpression(predicate)
+      } catch {
+        case _: Throwable => return None
+      }
+
+    val terms = ArrayBuffer.empty[(String, String)]
+    if (!collectEqualities(parsed, terms)) {
+      return None
+    }
+    // A column appearing twice with different required values can never match; let the scan path
+    // handle that (it will simply find no rows). Only emit when each column maps to one value.
+    val byColumn = terms.groupBy(_._1)
+    if (terms.isEmpty || byColumn.exists(_._2.map(_._2).distinct.size > 1)) {
+      return None
+    }
+    val json =
+      byColumn
+        .map { case (col, pairs) => (col, pairs.head._2) }
+        .map { case (col, value) => s"""{"column":${quote(col)},"value":${quote(value)}}""" }
+        .mkString("[", ",", "]")
+    Some(json)
+  }
+
+  /**
+   * Walks a conjunction, collecting `column = literal` pairs into `out`. Returns false (disabling
+   * the fast path) as soon as any node is not an AND or a supported equality on a simple column
+   * reference and string/integral literal.
+   */
+  private def collectEqualities(expr: Expression, out: ArrayBuffer[(String, String)]): Boolean =
+    expr match {
+      case And(left, right) => collectEqualities(left, out) && collectEqualities(right, out)
+      case EqualTo(col, lit: Literal) if columnName(col).isDefined && lit.value != null =>
+        supportedLiteral(lit) match {
+          case Some(value) =>
+            out += ((columnName(col).get, value))
+            true
+          case None => false
+        }
+      case EqualTo(lit: Literal, col) if columnName(col).isDefined && lit.value != null =>
+        supportedLiteral(lit) match {
+          case Some(value) =>
+            out += ((columnName(col).get, value))
+            true
+          case None => false
+        }
+      case _ => false
+    }
+
+  private def columnName(expr: Expression): Option[String] = expr match {
+    case u: UnresolvedAttribute if u.nameParts.size == 1 => Some(u.nameParts.head)
+    case _ => None
+  }
+
+  /** Canonical string form for a literal the zonemap comparison can reproduce, else None. */
+  private def supportedLiteral(lit: Literal): Option[String] = lit.dataType match {
+    case StringType => Some(lit.value.toString)
+    case ByteType | ShortType | IntegerType | LongType => Some(lit.value.toString)
+    case _ => None
+  }
+
+  private def quote(s: String): String = {
+    val escaped = s.replace("\\", "\\\\").replace("\"", "\\\"")
+    "\"" + escaped + "\""
   }
 }
