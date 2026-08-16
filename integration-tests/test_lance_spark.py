@@ -2115,6 +2115,33 @@ class TestDMLInsert:
 
         assert spark.read.format("lance").load(str(tmp_path)).count() == 0
 
+    def test_append_empty_dataframe_to_existing_path_is_noop(self, spark, tmp_path):
+        """Empty DataFrame append to an existing Lance path must be a noop (not raise).
+
+        Regression guard for the immediate-append path: ``empty_df.write.format('lance')
+        .mode('append').save(path)`` against an existing Lance table must route through
+        ``LanceBatchWrite.commit()`` (immediate-commit path, ``stagedCommit == null``),
+        hit the empty-append guard, and return without raising. Seed rows must remain
+        unchanged.
+        """
+        from pyspark.sql.types import StructType, StructField, IntegerType
+
+        schema = StructType([StructField("id", IntegerType())])
+
+        # Step 1: Seed an existing Lance path with 3 rows.
+        rows = spark.createDataFrame([(1,), (2,), (3,)], schema)
+        rows.write.format("lance").save(str(tmp_path))
+        assert spark.read.format("lance").load(str(tmp_path)).count() == 3
+
+        # Step 2: empty append to the existing path — this exercises
+        # LanceBatchWrite.commit() with stagedCommit == null and !isOverwrite,
+        # hitting the new guard.
+        empty_df = spark.createDataFrame([], schema)
+        empty_df.write.format("lance").mode("append").save(str(tmp_path))
+
+        # Step 3: existing rows remain unchanged.
+        assert spark.read.format("lance").load(str(tmp_path)).count() == 3
+
 
 @requires_update_or_merge
 class TestDMLUpdate:
