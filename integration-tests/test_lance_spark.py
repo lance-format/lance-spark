@@ -2075,6 +2075,27 @@ class TestDMLInsert:
         count = spark.table("default.test_table").count()
         assert count == 4
 
+    def test_write_empty_dataframe_is_noop(self, spark, tmp_path):
+        """Empty DataFrame writes should succeed as a noop rather than raise.
+
+        Repro for empty upstream in a Spark pipeline: a filter/aggregate that
+        produces zero rows followed by ``df.write.format('lance').save(...)``
+        used to fail with ``IllegalArgumentException: fragments cannot be null
+        or empty``. Per Spark sink contract, the write should succeed silently
+        (no table is created when there is no data to commit).
+        """
+        from pyspark.sql.types import StructType, StructField, IntegerType, StringType
+
+        schema = StructType(
+            [StructField("id", IntegerType()), StructField("name", StringType())]
+        )
+        empty_df = spark.createDataFrame([], schema)
+
+        # Empty df must not raise; this exercises LanceBatchWrite.commit
+        # directly via the v1 DataFrameWriter API path. No table should be
+        # created because there is nothing to commit.
+        empty_df.write.format("lance").save(str(tmp_path))
+
 
 @requires_update_or_merge
 class TestDMLUpdate:

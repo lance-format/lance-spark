@@ -51,6 +51,76 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 public class LanceBatchWriteTest {
   @TempDir static Path tempDir;
 
+  /**
+   * Empty DataFrame writes should be a noop on the immediate-commit path: when a Spark DataFrame
+   * pipeline produces zero rows, {@code df.write.format("lance").save(uri)} used to fail with
+   * {@code IllegalArgumentException: fragments cannot be null or empty}. Per the Spark sink
+   * contract, the write should succeed silently.
+   */
+  @Test
+  public void testCommitEmptyFragmentsIsNoop(TestInfo testInfo) throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
+      Schema schema = new Schema(Collections.singletonList(field));
+      Dataset.create(allocator, datasetUri, schema, new WriteParams.Builder().build()).close();
+
+      LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
+      StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
+      LanceBatchWrite lanceBatchWrite =
+          new LanceBatchWrite(
+              sparkSchema,
+              writeOptions,
+              false,
+              null, // initialStorageOptions
+              null, // namespaceImpl
+              null, // namespaceProperties
+              null, // tableId
+              false, // managedVersioning
+              null); // stagedCommit (null -> immediate-commit path)
+      lanceBatchWrite.commit(new WriterCommitMessage[0]);
+    }
+  }
+
+  /**
+   * Empty DataFrame writes go through the staged path: {@link LanceBatchWrite#commit} should
+   * populate the {@link StagedCommit} without raising, and the subsequent {@link
+   * StagedCommit#commit()} should succeed at creating an empty table (path-based staged create).
+   */
+  @Test
+  public void testCommitEmptyFragmentsStagedIsNoop(TestInfo testInfo) throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+
+    Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
+    Schema schema = new Schema(Collections.singletonList(field));
+    StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
+    LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
+
+    StagedCommit stagedCommit =
+        StagedCommit.forNewTable(
+            schema, datasetUri, StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
+
+    LanceBatchWrite batchWrite =
+        new LanceBatchWrite(
+            sparkSchema,
+            writeOptions,
+            false,
+            null, // initialStorageOptions
+            null, // namespaceImpl
+            null, // namespaceProperties
+            null, // tableId
+            false, // managedVersioning
+            stagedCommit);
+
+    batchWrite.commit(new WriterCommitMessage[0]);
+    stagedCommit.commit();
+    try (Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+      assertEquals(0, dataset.countRows());
+    }
+  }
+
   @Test
   public void testLanceDataWriter(TestInfo testInfo) throws Exception {
     String datasetName = testInfo.getTestMethod().get().getName();
