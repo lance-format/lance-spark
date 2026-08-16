@@ -121,6 +121,59 @@ public class LanceBatchWriteTest {
     }
   }
 
+  /**
+   * Empty overwrite on a populated table must still go through {@code Overwrite.builder()} so the
+   * table is truncated (rows removed) and the pinned-version transaction is recorded. Guards
+   * against over-broad short-circuits that would leave stale rows in place.
+   */
+  @Test
+  public void testCommitEmptyOverwriteTruncatesTable(TestInfo testInfo) throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
+      Schema schema = new Schema(Collections.singletonList(field));
+      StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
+      LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
+
+      // Seed the table with 10 rows via the standard writeRows helper.
+      Dataset.create(allocator, datasetUri, schema, new WriteParams.Builder().build()).close();
+      LanceBatchWrite seedWriter =
+          new LanceBatchWrite(
+              sparkSchema,
+              writeOptions,
+              false,
+              null, // initialStorageOptions
+              null, // namespaceImpl
+              null, // namespaceProperties
+              null, // tableId
+              false, // managedVersioning
+              null); // stagedCommit (null -> immediate-commit path)
+      seedWriter.commit(new WriterCommitMessage[] {writeRows(seedWriter, sparkSchema, 10, 0)});
+      try (Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+        assertEquals(10, dataset.countRows());
+      }
+
+      // Empty overwrite must go through Overwrite.builder() and clear the rows.
+      LanceBatchWrite overwriteWriter =
+          new LanceBatchWrite(
+              sparkSchema,
+              writeOptions,
+              true, // overwrite=true
+              null, // initialStorageOptions
+              null, // namespaceImpl
+              null, // namespaceProperties
+              null, // tableId
+              false, // managedVersioning
+              null); // stagedCommit (null -> immediate-commit path)
+      overwriteWriter.commit(new WriterCommitMessage[0]);
+
+      try (Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+        assertEquals(0, dataset.countRows());
+      }
+    }
+  }
+
   @Test
   public void testLanceDataWriter(TestInfo testInfo) throws Exception {
     String datasetName = testInfo.getTestMethod().get().getName();

@@ -2096,6 +2096,25 @@ class TestDMLInsert:
         # created because there is nothing to commit.
         empty_df.write.format("lance").save(str(tmp_path))
 
+    def test_write_empty_dataframe_overwrite_clears_table(self, spark, tmp_path):
+        """Empty DataFrame overwrite on a populated table must truncate (not raise, not no-op).
+
+        Regression guard for the immediate-commit path: an empty overwrite still goes through
+        Overwrite.builder() so the table is truncated and the pinned-version transaction is
+        recorded, matching what mode("overwrite").save(...) expects.
+        """
+        from pyspark.sql.types import StructType, StructField, IntegerType
+
+        schema = StructType([StructField("id", IntegerType())])
+        rows = spark.createDataFrame([(1,), (2,), (3,)], schema)
+        rows.write.format("lance").save(str(tmp_path))
+        assert spark.read.format("lance").load(str(tmp_path)).count() == 3
+
+        empty_df = spark.createDataFrame([], schema)
+        empty_df.write.format("lance").mode("overwrite").save(str(tmp_path))
+
+        assert spark.read.format("lance").load(str(tmp_path)).count() == 0
+
 
 @requires_update_or_merge
 class TestDMLUpdate:
