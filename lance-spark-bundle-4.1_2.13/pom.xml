@@ -53,7 +53,7 @@
                             <overWriteReleases>false</overWriteReleases>
                             <overWriteSnapshots>false</overWriteSnapshots>
                             <overWriteIfNewer>true</overWriteIfNewer>
-                            <includeArtifactIds>lance-core,lance-namespace-core,lance-namespace-apache-client,lance-spark-base_${scala.compat.version},lance-spark-${spark41.compat.version}_${scala.compat.version},arrow-c-data,jar-jni,opentelemetry-api,opentelemetry-context,arrow-dataset</includeArtifactIds>
+                            <includeArtifactIds>lance-core,lance-namespace-core,lance-namespace-apache-client,lance-spark-base_${scala.compat.version},lance-spark-${spark41.compat.version}_${scala.compat.version},arrow-c-data,jar-jni,opentelemetry-api,opentelemetry-context</includeArtifactIds>
                         </configuration>
                     </execution>
                     <execution>
@@ -91,6 +91,7 @@
                             <artifactSet>
                                 <excludes>
                                     <exclude>io.netty:*</exclude>
+                                    <exclude>org.apache.arrow:arrow-dataset</exclude>
                                 </excludes>
                             </artifactSet>
                             <transformers>
