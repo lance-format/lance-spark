@@ -37,16 +37,16 @@ public class LanceSparkWriteOptionsTest {
   private final String TEMP_URL = "file:///tmp/test";
 
   @Test
-  public void versionIsNullByDefault() {
+  public void refIsNullByDefault() {
     LanceSparkWriteOptions opts = LanceSparkWriteOptions.from(TEMP_URL);
-    assertNull(opts.getVersion());
+    assertNull(opts.getRef());
   }
 
   @Test
-  public void builderSetsVersion() {
+  public void builderSetsRef() {
     LanceSparkWriteOptions opts =
-        LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).version(7L).build();
-    assertEquals(7L, opts.getVersion());
+        LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).ref(LanceRef.ofMain(7L)).build();
+    assertEquals(7L, opts.getRef().getVersionNumber().get());
   }
 
   @Test
@@ -67,7 +67,7 @@ public class LanceSparkWriteOptionsTest {
   }
 
   @Test
-  public void withVersionCopiesOptions() {
+  public void withRefCopiesOptions() {
     LanceSparkWriteOptions base =
         LanceSparkWriteOptions.builder()
             .datasetUri(TEMP_URL)
@@ -75,9 +75,9 @@ public class LanceSparkWriteOptionsTest {
             .indexCacheBackend("moka://?capacity=1048576")
             .metadataCacheBackend("moka://?capacity=524288")
             .build();
-    LanceSparkWriteOptions pinned = base.withVersion(3L);
-    assertEquals(3L, pinned.getVersion());
-    assertNull(base.getVersion());
+    LanceSparkWriteOptions pinned = base.withRef(LanceRef.ofMain(3L));
+    assertEquals(3L, pinned.getRef().getVersionNumber().get());
+    assertNull(base.getRef());
     assertEquals("cache-catalog", pinned.getCatalogName());
     assertEquals("moka://?capacity=1048576", pinned.getIndexCacheBackend());
     assertEquals("moka://?capacity=524288", pinned.getMetadataCacheBackend());
@@ -352,7 +352,7 @@ public class LanceSparkWriteOptionsTest {
             .datasetUri(TEMP_URL)
             .fromOptions(options)
             .blobPackFileSizeThreshold(8192L)
-            .version(7L)
+            .ref(LanceRef.ofMain(7L))
             .namespace(stubNamespace)
             .build()
             .toBuilder()
@@ -375,7 +375,7 @@ public class LanceSparkWriteOptionsTest {
     assertEquals(256, copy.getBatchSize());
     assertEquals(4096L, copy.getMaxBatchBytes());
     assertEquals(Long.valueOf(8192L), copy.getBlobPackFileSizeThreshold());
-    assertEquals(7L, copy.getVersion());
+    assertEquals(7L, copy.getRef().getVersionNumber().get());
     assertNull(
         copy.getNamespace(),
         "namespace is transient: the non-null stub set above must not survive serialization");

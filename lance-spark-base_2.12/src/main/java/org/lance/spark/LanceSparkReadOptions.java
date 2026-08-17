@@ -47,7 +47,7 @@ import java.util.Objects;
  * }</pre>
  */
 public class LanceSparkReadOptions implements Serializable {
-  private static final long serialVersionUID = 3L;
+  private static final long serialVersionUID = 4L;
 
   public static final String CONFIG_DATASET_URI = "path";
   public static final String CONFIG_PUSH_DOWN_FILTERS = "pushDownFilters";
@@ -109,7 +109,7 @@ public class LanceSparkReadOptions implements Serializable {
   private final String datasetName;
   private final boolean pushDownFilters;
   private final Integer blockSize;
-  private final Long version;
+  private final LanceRef ref;
   private final Integer indexCacheSize;
   private final Integer metadataCacheSize;
   private final int batchSize;
@@ -145,7 +145,7 @@ public class LanceSparkReadOptions implements Serializable {
     this.datasetName = paths[1];
     this.pushDownFilters = builder.pushDownFilters;
     this.blockSize = builder.blockSize;
-    this.version = builder.version;
+    this.ref = builder.ref;
     this.indexCacheSize = builder.indexCacheSize;
     this.metadataCacheSize = builder.metadataCacheSize;
     this.batchSize = builder.batchSize;
@@ -249,8 +249,8 @@ public class LanceSparkReadOptions implements Serializable {
     return blockSize;
   }
 
-  public Long getVersion() {
-    return version;
+  public LanceRef getRef() {
+    return ref;
   }
 
   public Integer getIndexCacheSize() {
@@ -324,19 +324,19 @@ public class LanceSparkReadOptions implements Serializable {
   }
 
   /**
-   * Creates a copy of this options with a different version.
+   * Creates a copy of these options with a different reference.
    *
-   * <p>This is used to pin the version during scan planning for snapshot isolation.
+   * <p>This is used to pin the resolved reference during scan planning for snapshot isolation.
    *
-   * @param newVersion the version to use
-   * @return a new LanceSparkReadOptions with the specified version
+   * @param newRef the reference to use
+   * @return new read options with the specified reference
    */
-  public LanceSparkReadOptions withVersion(long newVersion) {
+  public LanceSparkReadOptions withRef(LanceRef newRef) {
     return builder()
         .datasetUri(this.datasetUri)
         .pushDownFilters(this.pushDownFilters)
         .blockSize(this.blockSize)
-        .version(newVersion)
+        .ref(newRef)
         .indexCacheSize(this.indexCacheSize)
         .metadataCacheSize(this.metadataCacheSize)
         .batchSize(this.batchSize)
@@ -364,8 +364,8 @@ public class LanceSparkReadOptions implements Serializable {
     if (blockSize != null) {
       builder.setBlockSize(blockSize);
     }
-    if (version != null) {
-      builder.setVersion(version);
+    if (ref != null) {
+      ref.getVersionNumber().ifPresent(builder::setVersion);
     }
     if (indexCacheSize != null) {
       builder.setIndexCacheSize(indexCacheSize);
@@ -404,7 +404,14 @@ public class LanceSparkReadOptions implements Serializable {
         && FullTextQueryUtils.equals(fullTextQuery, that.fullTextQuery)
         && Objects.equals(datasetUri, that.datasetUri)
         && Objects.equals(blockSize, that.blockSize)
-        && Objects.equals(version, that.version)
+        && Objects.equals(
+            ref == null ? null : ref.getVersionNumber(),
+            that.ref == null ? null : that.ref.getVersionNumber())
+        && Objects.equals(
+            ref == null ? null : ref.getBranchName(),
+            that.ref == null ? null : that.ref.getBranchName())
+        && Objects.equals(
+            ref == null ? null : ref.getTagName(), that.ref == null ? null : that.ref.getTagName())
         && Objects.equals(indexCacheSize, that.indexCacheSize)
         && Objects.equals(metadataCacheSize, that.metadataCacheSize)
         && Objects.equals(storageOptions, that.storageOptions)
@@ -420,7 +427,9 @@ public class LanceSparkReadOptions implements Serializable {
         datasetUri,
         pushDownFilters,
         blockSize,
-        version,
+        ref == null ? null : ref.getVersionNumber(),
+        ref == null ? null : ref.getBranchName(),
+        ref == null ? null : ref.getTagName(),
         indexCacheSize,
         metadataCacheSize,
         batchSize,
@@ -441,7 +450,7 @@ public class LanceSparkReadOptions implements Serializable {
     private boolean pushDownFilters = DEFAULT_PUSH_DOWN_FILTERS;
     private Integer blockSize;
     private FullTextQuery fullTextQuery;
-    private Long version;
+    private LanceRef ref;
     private Integer indexCacheSize;
     private Integer metadataCacheSize;
     private int batchSize = DEFAULT_BATCH_SIZE;
@@ -477,8 +486,8 @@ public class LanceSparkReadOptions implements Serializable {
       return this;
     }
 
-    public Builder version(Long version) {
-      this.version = version;
+    public Builder ref(LanceRef ref) {
+      this.ref = ref;
       return this;
     }
 
@@ -590,7 +599,7 @@ public class LanceSparkReadOptions implements Serializable {
         this.blockSize = Integer.parseInt(opts.get(CONFIG_BLOCK_SIZE));
       }
       if (opts.containsKey(CONFIG_VERSION)) {
-        this.version = Long.parseLong(opts.get(CONFIG_VERSION));
+        this.ref = LanceRef.ofMain(Long.parseLong(opts.get(CONFIG_VERSION)));
       }
       if (opts.containsKey(CONFIG_INDEX_CACHE_SIZE)) {
         this.indexCacheSize = Integer.parseInt(opts.get(CONFIG_INDEX_CACHE_SIZE));

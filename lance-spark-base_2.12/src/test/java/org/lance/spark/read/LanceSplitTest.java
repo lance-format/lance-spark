@@ -78,7 +78,7 @@ public class LanceSplitTest {
 
   /**
    * Contract test: the long-typed resolved version returned by {@link LanceSplit#planScan(Dataset)}
-   * must round-trip through {@link org.lance.spark.LanceSparkReadOptions#withVersion(long)} without
+   * must round-trip through {@link org.lance.spark.LanceSparkReadOptions} as a LanceRef without
    * truncation. This guards against silently casting to {@code int}, which would corrupt the
    * snapshot-isolation guarantee for long-lived high-write-frequency datasets.
    */
@@ -88,7 +88,11 @@ public class LanceSplitTest {
     long resolved = result.getResolvedVersion();
     assertEquals(
         resolved,
-        TestUtils.TestTable1Config.readOptions.withVersion(resolved).getVersion().longValue());
+        TestUtils.TestTable1Config.readOptions
+            .withRef(org.lance.spark.LanceRef.ofMain(resolved))
+            .getRef()
+            .getVersionNumber()
+            .get());
   }
 
   @SuppressWarnings("deprecation")

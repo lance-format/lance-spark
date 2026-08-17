@@ -25,6 +25,7 @@ import org.lance.memwal.ShardingSpec;
 import org.lance.schema.LanceField;
 import org.lance.schema.LanceSchema;
 import org.lance.spark.LanceConstant;
+import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.search.LanceSearchQuery;
@@ -269,7 +270,7 @@ public class LanceScanBuilder
       // long-lived high-write-frequency datasets do not silently truncate to a wrong version.
       LanceSplit.ScanPlanResult scanPlan = LanceSplit.planScan(dataset);
       LanceSparkReadOptions resolvedReadOptions =
-          readOptions.withVersion(scanPlan.getResolvedVersion());
+          readOptions.withRef(LanceRef.ofMain(scanPlan.getResolvedVersion()));
 
       Optional<String> whereCondition =
           FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);
@@ -336,7 +337,10 @@ public class LanceScanBuilder
             .topK(k)
             .offset(pushedOffset)
             .filter(whereCondition.isPresent() ? whereCondition.get() : null)
-            .version(readOptions.getVersion())
+            .version(
+                readOptions.getRef() == null || readOptions.getRef().getVersionNumber().isEmpty()
+                    ? null
+                    : readOptions.getRef().getVersionNumber().get())
             .withRowId(withRowId ? Boolean.TRUE : null)
             .build();
     return new LanceSearchScan(schema, query);

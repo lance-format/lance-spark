@@ -21,6 +21,7 @@ import org.lance.Transaction;
 import org.lance.fragment.FragmentUpdateResult;
 import org.lance.operation.Update;
 import org.lance.spark.LanceDataset;
+import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.utils.Utils;
@@ -83,9 +84,8 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
       List<String> tableId) {
     this.schema = schema;
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
-      this.writeOptions = writeOptions.withVersion(ds.version());
-      logger.debug(
-          "Resolved dataset version for UPDATE COLUMNS: {}", this.writeOptions.getVersion());
+      this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
+      logger.debug("Resolved dataset ref for UPDATE COLUMNS: {}", this.writeOptions.getRef());
     }
     this.updateColumns = updateColumns;
     this.initialStorageOptions = initialStorageOptions;
@@ -154,8 +154,10 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
               .build();
       long version =
           Objects.requireNonNull(
-              writeOptions.getVersion(),
-              "version must be set (resolved in UpdateColumnsBackfillBatchWrite constructor)");
+                  writeOptions.getRef(),
+                  "ref must be set (resolved in UpdateColumnsBackfillBatchWrite constructor)")
+              .getVersionNumber()
+              .get();
       CommitBuilder commitBuilder =
           new CommitBuilder(dataset)
               .writeParams(

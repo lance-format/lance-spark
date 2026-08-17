@@ -46,7 +46,7 @@ import java.util.Objects;
  * }</pre>
  */
 public class LanceSparkWriteOptions implements Serializable {
-  private static final long serialVersionUID = 1L;
+  private static final long serialVersionUID = 2L;
 
   public static final String CONFIG_DATASET_URI = "path";
   public static final String CONFIG_WRITE_MODE = "write_mode";
@@ -96,8 +96,8 @@ public class LanceSparkWriteOptions implements Serializable {
   /** The table identifier within the namespace, used for credential refresh. */
   private final List<String> tableId;
 
-  /** Use this version to open the dataset and apply write if set. */
-  private final Long version;
+  /** Use this reference to open the dataset and apply write if set. */
+  private final LanceRef ref;
 
   /** Catalog and cache backend configuration for process-local session reuse. */
   private final String catalogName;
@@ -123,7 +123,7 @@ public class LanceSparkWriteOptions implements Serializable {
     this.storageOptions = new HashMap<>(builder.storageOptions);
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
-    this.version = builder.version;
+    this.ref = builder.ref;
     this.catalogName = builder.catalogName;
     this.indexCacheBackend = builder.indexCacheBackend;
     this.metadataCacheBackend = builder.metadataCacheBackend;
@@ -223,8 +223,8 @@ public class LanceSparkWriteOptions implements Serializable {
     return tableId;
   }
 
-  public Long getVersion() {
-    return version;
+  public LanceRef getRef() {
+    return ref;
   }
 
   public String getCatalogName() {
@@ -258,15 +258,15 @@ public class LanceSparkWriteOptions implements Serializable {
         .storageOptions(storageOptions)
         .namespace(namespace)
         .tableId(tableId)
-        .version(version)
+        .ref(ref)
         .catalogName(catalogName)
         .indexCacheBackend(indexCacheBackend)
         .metadataCacheBackend(metadataCacheBackend);
   }
 
-  /** Returns a copy of these options with version set to the given version. */
-  public LanceSparkWriteOptions withVersion(long version) {
-    return toBuilder().version(version).build();
+  /** Returns a copy of these options with the given reference. */
+  public LanceSparkWriteOptions withRef(LanceRef ref) {
+    return toBuilder().ref(ref).build();
   }
 
   public boolean hasNamespace() {
@@ -353,7 +353,14 @@ public class LanceSparkWriteOptions implements Serializable {
         && Objects.equals(blobPackFileSizeThreshold, that.blobPackFileSizeThreshold)
         && Objects.equals(storageOptions, that.storageOptions)
         && Objects.equals(tableId, that.tableId)
-        && Objects.equals(version, that.version)
+        && Objects.equals(
+            ref == null ? null : ref.getVersionNumber(),
+            that.ref == null ? null : that.ref.getVersionNumber())
+        && Objects.equals(
+            ref == null ? null : ref.getBranchName(),
+            that.ref == null ? null : that.ref.getBranchName())
+        && Objects.equals(
+            ref == null ? null : ref.getTagName(), that.ref == null ? null : that.ref.getTagName())
         && Objects.equals(catalogName, that.catalogName)
         && Objects.equals(indexCacheBackend, that.indexCacheBackend)
         && Objects.equals(metadataCacheBackend, that.metadataCacheBackend);
@@ -377,7 +384,9 @@ public class LanceSparkWriteOptions implements Serializable {
         blobPackFileSizeThreshold,
         storageOptions,
         tableId,
-        version,
+        ref == null ? null : ref.getVersionNumber(),
+        ref == null ? null : ref.getBranchName(),
+        ref == null ? null : ref.getTagName(),
         catalogName,
         indexCacheBackend,
         metadataCacheBackend);
@@ -401,7 +410,7 @@ public class LanceSparkWriteOptions implements Serializable {
     private Map<String, String> storageOptions = new HashMap<>();
     private LanceNamespace namespace;
     private List<String> tableId;
-    private Long version;
+    private LanceRef ref;
     private String catalogName;
     private String indexCacheBackend;
     private String metadataCacheBackend;
@@ -492,9 +501,9 @@ public class LanceSparkWriteOptions implements Serializable {
       return this;
     }
 
-    /** Pin opens to this dataset manifest version. */
-    public Builder version(Long version) {
-      this.version = version;
+    /** Pin opens to this dataset reference. */
+    public Builder ref(LanceRef ref) {
+      this.ref = ref;
       return this;
     }
 

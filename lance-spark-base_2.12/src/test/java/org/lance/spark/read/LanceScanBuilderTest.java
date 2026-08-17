@@ -13,6 +13,7 @@
  */
 package org.lance.spark.read;
 
+import org.lance.spark.LanceRef;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 import org.lance.spark.utils.BlobUtils;
@@ -348,9 +349,9 @@ public class LanceScanBuilderTest {
     org.apache.spark.sql.connector.read.InputPartition[] partitions = scan.planInputPartitions();
     assertTrue(partitions.length > 0);
     LanceInputPartition first = (LanceInputPartition) partitions[0];
-    Long pinned = first.getReadOptions().getVersion();
+    LanceRef pinned = first.getReadOptions().getRef();
     assertNotNull(pinned, "build() must pin the resolved version onto readOptions");
-    assertTrue(pinned > 0);
+    assertTrue(pinned.getVersionNumber().get() > 0);
   }
 
   @Test

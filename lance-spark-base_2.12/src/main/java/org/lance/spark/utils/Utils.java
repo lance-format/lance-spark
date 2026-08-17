@@ -17,6 +17,7 @@ import org.lance.Dataset;
 import org.lance.ReadOptions;
 import org.lance.Version;
 import org.lance.namespace.LanceNamespace;
+import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkCatalogConfig;
 import org.lance.spark.LanceSparkReadOptions;
@@ -74,7 +75,7 @@ public class Utils {
     private final String catalogName;
     private final String indexCacheBackend;
     private final String metadataCacheBackend;
-    private final Long version;
+    private final LanceRef ref;
     private final Integer blockSize;
     private final Integer indexCacheSize;
     private final Integer metadataCacheSize;
@@ -87,7 +88,7 @@ public class Utils {
     private OpenDatasetBuilder(LanceSparkReadOptions opts) {
       this.uri = opts.getDatasetUri();
       this.storageOptions = opts.getStorageOptions();
-      this.version = opts.getVersion();
+      this.ref = opts.getRef();
       this.catalogName = opts.getCatalogName();
       this.indexCacheBackend = opts.getIndexCacheBackend();
       this.metadataCacheBackend = opts.getMetadataCacheBackend();
@@ -106,7 +107,7 @@ public class Utils {
       this.catalogName = opts.getCatalogName();
       this.indexCacheBackend = opts.getIndexCacheBackend();
       this.metadataCacheBackend = opts.getMetadataCacheBackend();
-      this.version = opts.getVersion();
+      this.ref = opts.getRef();
       this.blockSize = null;
       this.indexCacheSize = null;
       this.metadataCacheSize = null;
@@ -138,8 +139,8 @@ public class Utils {
               .setStorageOptions(merged)
               .setSession(
                   LanceRuntime.session(catalogName, indexCacheBackend, metadataCacheBackend));
-      if (version != null) {
-        roBuilder.setVersion(version);
+      if (ref != null) {
+        ref.getVersionNumber().ifPresent(roBuilder::setVersion);
       }
       if (blockSize != null) {
         roBuilder.setBlockSize(blockSize);
@@ -205,7 +206,7 @@ public class Utils {
             .catalogName(catalogName);
 
     if (versionId.isPresent()) {
-      builder.version(versionId.get());
+      builder.ref(LanceRef.ofMain(versionId.get()));
     }
     if (tableId.isPresent()) {
       builder.tableId(tableId.get());

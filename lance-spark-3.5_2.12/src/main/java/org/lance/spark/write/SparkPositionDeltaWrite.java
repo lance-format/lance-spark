@@ -23,6 +23,7 @@ import org.lance.fragment.RowIdMeta;
 import org.lance.namespace.LanceNamespace;
 import org.lance.operation.Update;
 import org.lance.spark.LanceConstant;
+import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkCatalogConfig;
 import org.lance.spark.LanceSparkWriteOptions;
@@ -110,11 +111,11 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       Map<String, BlobSourceContext> blobSourceContexts) {
     this.sparkSchema = sparkSchema;
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
-      this.writeOptions = writeOptions.withVersion(ds.version());
+      this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
       this.hasStableRowIds = hasStableRowIds(ds, writeOptions);
       LOG.debug(
-          "Resolved dataset version for position delta write: {}, stableRowIds={}",
-          this.writeOptions.getVersion(),
+          "Resolved dataset ref for position delta write: {}, stableRowIds={}",
+          this.writeOptions.getRef(),
           this.hasStableRowIds);
     }
     this.initialStorageOptions = initialStorageOptions;
@@ -197,8 +198,10 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
       long version =
           Objects.requireNonNull(
-              writeOptions.getVersion(),
-              "version must be set (resolved in SparkPositionDeltaWrite constructor)");
+                  writeOptions.getRef(),
+                  "ref must be set (resolved in SparkPositionDeltaWrite constructor)")
+              .getVersionNumber()
+              .get();
       try (Dataset dataset = Utils.openDatasetBuilder(writeOptions).build()) {
         List<Map.Entry<Integer, FragmentMetadata>> deletionResults =
             aggregatedDeletions.entrySet().parallelStream()

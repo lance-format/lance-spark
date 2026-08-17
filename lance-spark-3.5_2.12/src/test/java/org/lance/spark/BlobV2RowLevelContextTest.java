@@ -55,7 +55,7 @@ public class BlobV2RowLevelContextTest extends AbstractBlobV2CopyTest {
 
       Map<String, BlobSourceContext> contexts = operation.blobSourceContexts();
       assertFalse(contexts.isEmpty());
-      contexts.values().forEach(context -> assertNotNull(context.getReadOptions().getVersion()));
+      contexts.values().forEach(context -> assertNotNull(context.getReadOptions().getRef()));
     } finally {
       spark.sql("DROP TABLE IF EXISTS " + fqSrc);
       spark.sql("DROP TABLE IF EXISTS " + fqTgt);

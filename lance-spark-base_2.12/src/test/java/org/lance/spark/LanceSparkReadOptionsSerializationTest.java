@@ -61,15 +61,15 @@ public class LanceSparkReadOptionsSerializationTest {
   }
 
   @Test
-  public void testWithVersionPropagatesFullTextQuery() {
+  public void testWithRefPropagatesFullTextQuery() {
     FullTextQuery fts = FullTextQuery.phrase("quick brown fox", "body", 1);
     LanceSparkReadOptions options =
         LanceSparkReadOptions.builder().datasetUri("s3://bucket/path").fullTextQuery(fts).build();
 
-    LanceSparkReadOptions versioned = options.withVersion(42);
+    LanceSparkReadOptions versioned = options.withRef(LanceRef.ofMain(42));
     Assertions.assertNotNull(
-        versioned.getFullTextQuery(), "fullTextQuery must not be dropped by withVersion()");
-    Assertions.assertEquals(42, versioned.getVersion());
+        versioned.getFullTextQuery(), "fullTextQuery must not be dropped by withRef()");
+    Assertions.assertEquals(42, versioned.getRef().getVersionNumber().get());
     Assertions.assertTrue(
         org.lance.spark.utils.FullTextQueryUtils.equals(
             options.getFullTextQuery(), versioned.getFullTextQuery()));
@@ -125,15 +125,15 @@ public class LanceSparkReadOptionsSerializationTest {
   }
 
   @Test
-  public void testWithVersionPropagatesMultiMatchQuery() {
+  public void testWithRefPropagatesMultiMatchQuery() {
     FullTextQuery fts = FullTextQuery.multiMatch("quick fox", Arrays.asList("title", "body"));
     LanceSparkReadOptions options =
         LanceSparkReadOptions.builder().datasetUri("s3://bucket/path").fullTextQuery(fts).build();
 
-    LanceSparkReadOptions versioned = options.withVersion(7);
+    LanceSparkReadOptions versioned = options.withRef(LanceRef.ofMain(7));
     Assertions.assertNotNull(
-        versioned.getFullTextQuery(), "fullTextQuery must not be dropped by withVersion()");
-    Assertions.assertEquals(7, versioned.getVersion());
+        versioned.getFullTextQuery(), "fullTextQuery must not be dropped by withRef()");
+    Assertions.assertEquals(7, versioned.getRef().getVersionNumber().get());
     Assertions.assertTrue(
         org.lance.spark.utils.FullTextQueryUtils.equals(
             options.getFullTextQuery(), versioned.getFullTextQuery()));
@@ -276,7 +276,7 @@ public class LanceSparkReadOptionsSerializationTest {
   }
 
   @Test
-  public void testWithVersionPreservesCacheBackendConfiguration() {
+  public void testWithRefPreservesCacheBackendConfiguration() {
     LanceSparkReadOptions options =
         LanceSparkReadOptions.builder()
             .datasetUri("s3://bucket/path")
@@ -285,7 +285,7 @@ public class LanceSparkReadOptionsSerializationTest {
             .metadataCacheBackend("moka://?capacity=524288")
             .build();
 
-    LanceSparkReadOptions pinned = options.withVersion(7);
+    LanceSparkReadOptions pinned = options.withRef(LanceRef.ofMain(7));
 
     Assertions.assertEquals("cache-catalog", pinned.getCatalogName());
     Assertions.assertEquals("moka://?capacity=1048576", pinned.getIndexCacheBackend());
@@ -293,17 +293,17 @@ public class LanceSparkReadOptionsSerializationTest {
   }
 
   @Test
-  public void testExecutorCredentialRefreshPreservedByWithVersion() {
+  public void testExecutorCredentialRefreshPreservedByWithRef() {
     LanceSparkReadOptions options =
         LanceSparkReadOptions.builder()
             .datasetUri("s3://bucket/path")
             .executorCredentialRefresh(false)
             .build();
 
-    LanceSparkReadOptions pinned = options.withVersion(7);
+    LanceSparkReadOptions pinned = options.withRef(LanceRef.ofMain(7));
     Assertions.assertFalse(
         pinned.isExecutorCredentialRefresh(),
-        "withVersion() must propagate the executor_credential_refresh flag");
+        "withRef() must propagate the executor_credential_refresh flag");
   }
 
   @Test
