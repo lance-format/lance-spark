@@ -30,6 +30,7 @@ import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -42,8 +43,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>Session cache sizes can be configured via environment variables:
  *
  * <ul>
- *   <li>{@code LANCE_INDEX_CACHE_SIZE} - Index cache size in bytes (default: 256MB)
- *   <li>{@code LANCE_METADATA_CACHE_SIZE} - Metadata cache size in bytes (default: 256MB)
+ *   <li>{@code LANCE_INDEX_CACHE_SIZE} - Index cache size in bytes
+ *   <li>{@code LANCE_METADATA_CACHE_SIZE} - Metadata cache size in bytes
+ *   <li>{@code LANCE_INDEX_CACHE_BACKEND} - Registered index cache backend URI
+ *   <li>{@code LANCE_METADATA_CACHE_BACKEND} - Registered metadata cache backend URI
  * </ul>
  *
  * <p>Usage:
@@ -66,6 +69,12 @@ public final class LanceRuntime {
   /** Environment variable for metadata cache size in bytes. */
   public static final String ENV_METADATA_CACHE_SIZE = "LANCE_METADATA_CACHE_SIZE";
 
+  /** Environment variable for the registered index cache backend URI. */
+  public static final String ENV_INDEX_CACHE_BACKEND = "LANCE_INDEX_CACHE_BACKEND";
+
+  /** Environment variable for the registered metadata cache backend URI. */
+  public static final String ENV_METADATA_CACHE_BACKEND = "LANCE_METADATA_CACHE_BACKEND";
+
   /** Spark configuration key that enables Lance OpenTelemetry metrics in each JVM. */
   public static final String SPARK_CONF_OPEN_TELEMETRY_ENABLED = "spark.lance.otel.enabled";
 
@@ -82,7 +91,7 @@ public final class LanceRuntime {
   private static volatile BufferAllocator GLOBAL_ALLOCATOR;
 
   /** Per-catalog sessions for cache isolation (lazy initialized). */
-  private static final Map<String, Session> CATALOG_SESSIONS = new ConcurrentHashMap<>();
+  private static final Map<String, CatalogSession> CATALOG_SESSIONS = new ConcurrentHashMap<>();
 
   /** External namespace implementation aliases used by Spark catalog configuration. */
   private static final Map<String, String> EXTERNAL_NAMESPACE_IMPLS =
@@ -222,7 +231,91 @@ public final class LanceRuntime {
    */
   public static Session session(String catalogName) {
     String key = catalogName != null ? catalogName : DEFAULT_CATALOG;
-    return CATALOG_SESSIONS.computeIfAbsent(key, k -> createSession());
+    return CATALOG_SESSIONS.computeIfAbsent(
+            key, k -> CatalogSession.managed(createSessionConfiguration(null, null)))
+        .session;
+  }
+
+  /**
+   * Returns the session for a catalog with registered cache backends selected by URI.
+   *
+   * <p>The first call for a catalog creates its process-local session. Later calls must request the
+   * same backend configuration. Cache backends cannot be changed after the session has been used;
+   * use a different catalog or restart the JVM to switch an existing catalog.
+   *
+   * <p>Catalog backend URIs take precedence over the corresponding environment backend and cache
+   * size settings. A {@code null} URI falls back to {@link #ENV_INDEX_CACHE_BACKEND} or {@link
+   * #ENV_METADATA_CACHE_BACKEND}, then to the legacy cache size environment variable.
+   *
+   * @param catalogName the catalog name for cache isolation
+   * @param indexCacheBackendUri index cache backend URI, or null for the environment/default
+   * @param metadataCacheBackendUri metadata cache backend URI, or null for the environment/default
+   * @return the session for the specified catalog
+   */
+  public static Session session(
+      String catalogName, String indexCacheBackendUri, String metadataCacheBackendUri) {
+    validateOptionalBackendUri(indexCacheBackendUri, "indexCacheBackendUri");
+    validateOptionalBackendUri(metadataCacheBackendUri, "metadataCacheBackendUri");
+    if (!hasText(indexCacheBackendUri) && !hasText(metadataCacheBackendUri)) {
+      return session(catalogName);
+    }
+
+    String key = catalogName != null ? catalogName : DEFAULT_CATALOG;
+    SessionConfiguration requested =
+        createSessionConfiguration(indexCacheBackendUri, metadataCacheBackendUri);
+    return CATALOG_SESSIONS.compute(
+            key,
+            (ignored, current) -> {
+              if (current == null) {
+                return CatalogSession.managed(requested);
+              }
+              if (!requested.equals(current.configuration)) {
+                throw new IllegalStateException(
+                    "Lance session for catalog '"
+                        + key
+                        + "' is already initialized with a different cache configuration");
+              }
+              return current;
+            })
+        .session;
+  }
+
+  /**
+   * Registers a Java SDK session for a Spark catalog.
+   *
+   * <p>Use this when the session was built programmatically, for example with structured {@code
+   * CacheBackendConfig} instances. Registration must happen before the catalog is first used in
+   * each driver or executor JVM. Ownership transfers to {@code LanceRuntime}; callers must not
+   * close the session after registration.
+   *
+   * @param catalogName the catalog that should use the session
+   * @param session the open Java SDK session to register
+   */
+  public static void registerSession(String catalogName, Session session) {
+    Objects.requireNonNull(session, "session must not be null");
+    if (session.isClosed()) {
+      throw new IllegalArgumentException("session must be open");
+    }
+
+    String key = catalogName != null ? catalogName : DEFAULT_CATALOG;
+    CATALOG_SESSIONS.compute(
+        key,
+        (ignored, current) -> {
+          if (current == null) {
+            return CatalogSession.registered(session);
+          }
+          if (current.session.isSameAs(session)) {
+            return current;
+          }
+          throw new IllegalStateException(
+              "Lance session for catalog '" + key + "' is already initialized");
+        });
+  }
+
+  private static void validateOptionalBackendUri(String backendUri, String name) {
+    if (backendUri != null && !hasText(backendUri)) {
+      throw new IllegalArgumentException(name + " must not be blank");
+    }
   }
 
   /**
@@ -322,20 +415,44 @@ public final class LanceRuntime {
     return value != null && !value.trim().isEmpty();
   }
 
-  private static Session createSession() {
+  private static SessionConfiguration createSessionConfiguration(
+      String indexCacheBackendUri, String metadataCacheBackendUri) {
+    String indexBackend =
+        firstNonBlank(indexCacheBackendUri, System.getenv(ENV_INDEX_CACHE_BACKEND));
+    String metadataBackend =
+        firstNonBlank(metadataCacheBackendUri, System.getenv(ENV_METADATA_CACHE_BACKEND));
+    Long indexCacheSize = indexBackend == null ? getEnvLong(ENV_INDEX_CACHE_SIZE) : null;
+    Long metadataCacheSize = metadataBackend == null ? getEnvLong(ENV_METADATA_CACHE_SIZE) : null;
+    return new SessionConfiguration(
+        indexBackend, metadataBackend, indexCacheSize, metadataCacheSize);
+  }
+
+  private static Session createSession(SessionConfiguration configuration) {
     Session.Builder builder = Session.builder();
 
-    Long indexCacheSize = getEnvLong(ENV_INDEX_CACHE_SIZE);
-    if (indexCacheSize != null) {
-      builder.indexCacheSizeBytes(indexCacheSize);
+    if (configuration.indexCacheBackendUri != null) {
+      builder.indexCacheBackend(configuration.indexCacheBackendUri);
+    } else if (configuration.indexCacheSize != null) {
+      builder.indexCacheSizeBytes(configuration.indexCacheSize);
     }
 
-    Long metadataCacheSize = getEnvLong(ENV_METADATA_CACHE_SIZE);
-    if (metadataCacheSize != null) {
-      builder.metadataCacheSizeBytes(metadataCacheSize);
+    if (configuration.metadataCacheBackendUri != null) {
+      builder.metadataCacheBackend(configuration.metadataCacheBackendUri);
+    } else if (configuration.metadataCacheSize != null) {
+      builder.metadataCacheSizeBytes(configuration.metadataCacheSize);
     }
 
     return builder.build();
+  }
+
+  private static String firstNonBlank(String primary, String fallback) {
+    if (hasText(primary)) {
+      return primary.trim();
+    }
+    if (hasText(fallback)) {
+      return fallback.trim();
+    }
+    return null;
   }
 
   /**
@@ -394,8 +511,8 @@ public final class LanceRuntime {
    */
   static void clearGlobalSession() {
     synchronized (LanceRuntime.class) {
-      for (Session session : CATALOG_SESSIONS.values()) {
-        session.close();
+      for (CatalogSession catalogSession : CATALOG_SESSIONS.values()) {
+        catalogSession.session.close();
       }
       CATALOG_SESSIONS.clear();
     }
@@ -414,6 +531,63 @@ public final class LanceRuntime {
     NOT_ATTEMPTED,
     INSTALLED,
     FAILED
+  }
+
+  private static final class CatalogSession {
+    private final Session session;
+    private final SessionConfiguration configuration;
+
+    private CatalogSession(Session session, SessionConfiguration configuration) {
+      this.session = session;
+      this.configuration = configuration;
+    }
+
+    private static CatalogSession managed(SessionConfiguration configuration) {
+      return new CatalogSession(createSession(configuration), configuration);
+    }
+
+    private static CatalogSession registered(Session session) {
+      return new CatalogSession(session, null);
+    }
+  }
+
+  private static final class SessionConfiguration {
+    private final String indexCacheBackendUri;
+    private final String metadataCacheBackendUri;
+    private final Long indexCacheSize;
+    private final Long metadataCacheSize;
+
+    private SessionConfiguration(
+        String indexCacheBackendUri,
+        String metadataCacheBackendUri,
+        Long indexCacheSize,
+        Long metadataCacheSize) {
+      this.indexCacheBackendUri = indexCacheBackendUri;
+      this.metadataCacheBackendUri = metadataCacheBackendUri;
+      this.indexCacheSize = indexCacheSize;
+      this.metadataCacheSize = metadataCacheSize;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      if (this == other) {
+        return true;
+      }
+      if (!(other instanceof SessionConfiguration)) {
+        return false;
+      }
+      SessionConfiguration that = (SessionConfiguration) other;
+      return Objects.equals(indexCacheBackendUri, that.indexCacheBackendUri)
+          && Objects.equals(metadataCacheBackendUri, that.metadataCacheBackendUri)
+          && Objects.equals(indexCacheSize, that.indexCacheSize)
+          && Objects.equals(metadataCacheSize, that.metadataCacheSize);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(
+          indexCacheBackendUri, metadataCacheBackendUri, indexCacheSize, metadataCacheSize);
+    }
   }
 
   /**

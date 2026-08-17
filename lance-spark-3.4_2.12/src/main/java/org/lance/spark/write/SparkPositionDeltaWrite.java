@@ -207,6 +207,10 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
                 .writeParams(
                     LanceRuntime.mergeStorageOptions(
                         writeOptions.getStorageOptions(), initialStorageOptions));
+        String fileFormatVersion = writeOptions.getFileFormatVersion();
+        if (fileFormatVersion != null) {
+          commitBuilder.storageFormat(fileFormatVersion);
+        }
         if (dataset.hasStableRowIds()
             || Boolean.TRUE.equals(writeOptions.getEnableStableRowIds())) {
           commitBuilder.useStableRowIds(true);

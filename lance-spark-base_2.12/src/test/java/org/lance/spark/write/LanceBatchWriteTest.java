@@ -45,6 +45,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class LanceBatchWriteTest {
@@ -155,7 +156,7 @@ public class LanceBatchWriteTest {
     // StagedCommit starts with no storage options, as for a path-based staged create.
     StagedCommit stagedCommit =
         StagedCommit.forNewTable(
-            schema, datasetUri, StagedCommitOptions.pathBased(Collections.emptyMap(), false));
+            schema, datasetUri, StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
 
     // initialStorageOptions represents namespace-vended credentials, passed to LanceBatchWrite
     // independently of how stagedCommit was constructed.
@@ -207,7 +208,7 @@ public class LanceBatchWriteTest {
 
     StagedCommit stagedCommit =
         StagedCommit.forNewTable(
-            schema, datasetUri, StagedCommitOptions.pathBased(Collections.emptyMap(), false));
+            schema, datasetUri, StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
 
     LanceBatchWrite batchWrite =
         new LanceBatchWrite(
@@ -227,6 +228,106 @@ public class LanceBatchWriteTest {
     assertEquals("fresh-namespace-key", stagedCommit.getStorageOptions().get("access_key_id"));
     // ...but a write-time-only key (absent from initialStorageOptions) must still come through.
     assertEquals("us-west-2", stagedCommit.getStorageOptions().get("region"));
+  }
+
+  /**
+   * When a write-time option sets {@code file_format_version} (e.g. via {@code
+   * DataFrameWriterV2.option("file_format_version", "2.2")}), the staged commit must use that
+   * version even if none was set at stage time.
+   */
+  @Test
+  public void testCommitStagedPropagatesWriteTimeFileFormatVersion(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+
+    Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
+    Schema schema = new Schema(Collections.singletonList(field));
+    StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
+
+    // Stage-time: no file format version set (simulates stageCreate without table property)
+    StagedCommit stagedCommit =
+        StagedCommit.forNewTable(
+            schema, datasetUri, StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
+    assertNull(stagedCommit.getFileFormatVersion());
+
+    // Write-time: user set file_format_version via DataFrameWriterV2.option(...)
+    LanceSparkWriteOptions writeOptions =
+        LanceSparkWriteOptions.from(datasetUri).toBuilder().fileFormatVersion("2.1").build();
+
+    LanceBatchWrite batchWrite =
+        new LanceBatchWrite(
+            sparkSchema, writeOptions, false, null, null, null, null, false, stagedCommit);
+
+    batchWrite.commit(new WriterCommitMessage[0]);
+
+    assertEquals("2.1", stagedCommit.getFileFormatVersion());
+  }
+
+  /**
+   * Write-time {@code file_format_version} takes precedence over the stage-time value. This covers
+   * the case where the catalog resolved a default at stage time but the user explicitly overrides
+   * it at write time.
+   */
+  @Test
+  public void testCommitStagedWriteTimeFileFormatVersionTakesPrecedence(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+
+    Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
+    Schema schema = new Schema(Collections.singletonList(field));
+    StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
+
+    // Stage-time: catalog resolved file format version "2.0"
+    StagedCommit stagedCommit =
+        StagedCommit.forNewTable(
+            schema,
+            datasetUri,
+            StagedCommitOptions.pathBased(Collections.emptyMap(), false, "2.0"));
+    assertEquals("2.0", stagedCommit.getFileFormatVersion());
+
+    // Write-time: user explicitly overrides to "2.2"
+    LanceSparkWriteOptions writeOptions =
+        LanceSparkWriteOptions.from(datasetUri).toBuilder().fileFormatVersion("2.2").build();
+
+    LanceBatchWrite batchWrite =
+        new LanceBatchWrite(
+            sparkSchema, writeOptions, false, null, null, null, null, false, stagedCommit);
+
+    batchWrite.commit(new WriterCommitMessage[0]);
+
+    assertEquals("2.2", stagedCommit.getFileFormatVersion());
+  }
+
+  /**
+   * When write options have no {@code file_format_version}, the stage-time value must be preserved.
+   * Null write-time must not overwrite a stage-time resolution.
+   */
+  @Test
+  public void testCommitStagedPreservesStageTimeVersionWhenWriteTimeIsNull(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+
+    Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
+    Schema schema = new Schema(Collections.singletonList(field));
+    StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
+
+    // Stage-time: version set from table properties
+    StagedCommit stagedCommit =
+        StagedCommit.forNewTable(
+            schema,
+            datasetUri,
+            StagedCommitOptions.pathBased(Collections.emptyMap(), false, "2.1"));
+
+    // Write-time: no file_format_version option
+    LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
+
+    LanceBatchWrite batchWrite =
+        new LanceBatchWrite(
+            sparkSchema, writeOptions, false, null, null, null, null, false, stagedCommit);
+
+    batchWrite.commit(new WriterCommitMessage[0]);
+
+    assertEquals("2.1", stagedCommit.getFileFormatVersion());
   }
 
   private static WriterCommitMessage writeRows(

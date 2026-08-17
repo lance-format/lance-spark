@@ -165,14 +165,18 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
           Objects.requireNonNull(
               writeOptions.getVersion(),
               "version must be set (resolved in UpdateColumnsBackfillBatchWrite constructor)");
+      CommitBuilder commitBuilder =
+          new CommitBuilder(dataset)
+              .writeParams(
+                  LanceRuntime.mergeStorageOptions(
+                      writeOptions.getStorageOptions(), initialStorageOptions));
+      String fileFormatVersion = writeOptions.getFileFormatVersion();
+      if (fileFormatVersion != null) {
+        commitBuilder.storageFormat(fileFormatVersion);
+      }
       try (Transaction txn =
               new Transaction.Builder().readVersion(version).operation(update).build();
-          Dataset committed =
-              new CommitBuilder(dataset)
-                  .writeParams(
-                      LanceRuntime.mergeStorageOptions(
-                          writeOptions.getStorageOptions(), initialStorageOptions))
-                  .execute(txn)) {
+          Dataset committed = commitBuilder.execute(txn)) {
         // auto-close txn and committed dataset
       }
     }
