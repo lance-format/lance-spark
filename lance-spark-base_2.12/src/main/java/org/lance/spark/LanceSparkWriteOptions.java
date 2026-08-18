@@ -353,14 +353,7 @@ public class LanceSparkWriteOptions implements Serializable {
         && Objects.equals(blobPackFileSizeThreshold, that.blobPackFileSizeThreshold)
         && Objects.equals(storageOptions, that.storageOptions)
         && Objects.equals(tableId, that.tableId)
-        && Objects.equals(
-            ref == null ? null : ref.getVersionNumber(),
-            that.ref == null ? null : that.ref.getVersionNumber())
-        && Objects.equals(
-            ref == null ? null : ref.getBranchName(),
-            that.ref == null ? null : that.ref.getBranchName())
-        && Objects.equals(
-            ref == null ? null : ref.getTagName(), that.ref == null ? null : that.ref.getTagName())
+        && Objects.equals(ref, that.ref)
         && Objects.equals(catalogName, that.catalogName)
         && Objects.equals(indexCacheBackend, that.indexCacheBackend)
         && Objects.equals(metadataCacheBackend, that.metadataCacheBackend);
@@ -384,9 +377,7 @@ public class LanceSparkWriteOptions implements Serializable {
         blobPackFileSizeThreshold,
         storageOptions,
         tableId,
-        ref == null ? null : ref.getVersionNumber(),
-        ref == null ? null : ref.getBranchName(),
-        ref == null ? null : ref.getTagName(),
+        ref,
         catalogName,
         indexCacheBackend,
         metadataCacheBackend);

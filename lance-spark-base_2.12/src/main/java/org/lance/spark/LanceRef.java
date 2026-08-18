@@ -18,9 +18,10 @@ import org.lance.spark.utils.Optional;
 import com.google.common.base.Preconditions;
 
 import java.io.Serializable;
+import java.util.Objects;
 
 public class LanceRef implements Serializable {
-  private static final long serialVersionUID = 1L;
+  private static final long serialVersionUID = 7967911672598737764L;
 
   private final Optional<Long> versionNumber;
   private final Optional<String> branchName;
@@ -70,6 +71,25 @@ public class LanceRef implements Serializable {
   public static LanceRef ofTag(String tagName) {
     Preconditions.checkArgument(tagName != null && !tagName.isEmpty(), "tagName must not be empty");
     return new LanceRef(Optional.empty(), Optional.empty(), Optional.of(tagName));
+  }
+
+  @Override
+  public boolean equals(Object o) {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    LanceRef lanceRef = (LanceRef) o;
+    return Objects.equals(versionNumber, lanceRef.versionNumber)
+        && Objects.equals(branchName, lanceRef.branchName)
+        && Objects.equals(tagName, lanceRef.tagName);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(versionNumber, branchName, tagName);
   }
 
   @Override

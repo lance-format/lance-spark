@@ -404,14 +404,7 @@ public class LanceSparkReadOptions implements Serializable {
         && FullTextQueryUtils.equals(fullTextQuery, that.fullTextQuery)
         && Objects.equals(datasetUri, that.datasetUri)
         && Objects.equals(blockSize, that.blockSize)
-        && Objects.equals(
-            ref == null ? null : ref.getVersionNumber(),
-            that.ref == null ? null : that.ref.getVersionNumber())
-        && Objects.equals(
-            ref == null ? null : ref.getBranchName(),
-            that.ref == null ? null : that.ref.getBranchName())
-        && Objects.equals(
-            ref == null ? null : ref.getTagName(), that.ref == null ? null : that.ref.getTagName())
+        && Objects.equals(ref, that.ref)
         && Objects.equals(indexCacheSize, that.indexCacheSize)
         && Objects.equals(metadataCacheSize, that.metadataCacheSize)
         && Objects.equals(storageOptions, that.storageOptions)
@@ -427,9 +420,7 @@ public class LanceSparkReadOptions implements Serializable {
         datasetUri,
         pushDownFilters,
         blockSize,
-        ref == null ? null : ref.getVersionNumber(),
-        ref == null ? null : ref.getBranchName(),
-        ref == null ? null : ref.getTagName(),
+        ref,
         indexCacheSize,
         metadataCacheSize,
         batchSize,
