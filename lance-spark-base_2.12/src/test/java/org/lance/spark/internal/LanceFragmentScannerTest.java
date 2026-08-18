@@ -14,9 +14,13 @@
 package org.lance.spark.internal;
 
 import org.lance.namespace.LanceNamespace;
+import org.lance.namespace.model.DescribeTableRequest;
+import org.lance.namespace.model.DescribeTableResponse;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.TestUtils;
 import org.lance.spark.read.LanceInputPartition;
+import org.lance.spark.read.LanceSplit;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Optional;
 
@@ -25,6 +29,7 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.InvocationTargetException;
@@ -40,6 +45,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class LanceFragmentScannerTest {
+
+  @AfterEach
+  public void clearExecutorNamespaceCache() {
+    ExecutorNamespaceCache.clear();
+  }
 
   private List<String> callGetColumnNames(StructType schema)
       throws NoSuchMethodException, InvocationTargetException, IllegalAccessException {
@@ -239,6 +249,7 @@ public class LanceFragmentScannerTest {
   @Test
   public void testCreateSkipsNamespaceRebuildWhenExecutorCredentialRefreshDisabled() {
     RecordingNamespace.INITIALIZE_CALLS.set(0);
+    RecordingNamespace.DESCRIBE_CALLS.set(0);
 
     LanceSparkReadOptions readOptions =
         LanceSparkReadOptions.builder()
@@ -275,6 +286,75 @@ public class LanceFragmentScannerTest {
   }
 
   @Test
+  public void testFragmentScansReuseExecutorNamespaceAndTableDescription() throws Exception {
+    ExecutorNamespaceCache.clear();
+    RecordingNamespace.INITIALIZE_CALLS.set(0);
+    RecordingNamespace.DESCRIBE_CALLS.set(0);
+    RecordingNamespace.location = TestUtils.TestTable1Config.datasetUri;
+
+    LanceInputPartition partition = createNamespacePartition("namespace-cache-test");
+
+    try (LanceFragmentScanner ignored = LanceFragmentScanner.create(0, partition)) {
+      // Opening the first fragment initializes the namespace and describes the table.
+    }
+    assertEquals(1, RecordingNamespace.INITIALIZE_CALLS.get());
+    assertEquals(1, RecordingNamespace.DESCRIBE_CALLS.get());
+
+    try (LanceFragmentScanner ignored = LanceFragmentScanner.create(1, partition)) {
+      // Opening another fragment must reuse the namespace metadata within the executor JVM.
+    }
+
+    assertEquals(1, RecordingNamespace.INITIALIZE_CALLS.get());
+    assertEquals(1, RecordingNamespace.DESCRIBE_CALLS.get());
+  }
+
+  @Test
+  public void testDifferentScansDoNotReuseTableDescription() throws Exception {
+    RecordingNamespace.INITIALIZE_CALLS.set(0);
+    RecordingNamespace.DESCRIBE_CALLS.set(0);
+    RecordingNamespace.location = TestUtils.TestTable1Config.datasetUri;
+
+    try (LanceFragmentScanner ignored =
+        LanceFragmentScanner.create(0, createNamespacePartition("scan-a"))) {
+      // First scan resolves its own table description.
+    }
+    assertEquals(1, RecordingNamespace.INITIALIZE_CALLS.get());
+    assertEquals(1, RecordingNamespace.DESCRIBE_CALLS.get());
+
+    try (LanceFragmentScanner ignored =
+        LanceFragmentScanner.create(1, createNamespacePartition("scan-b"))) {
+      // A later scan must not reuse the first scan's location or credentials.
+    }
+
+    assertEquals(2, RecordingNamespace.INITIALIZE_CALLS.get());
+    assertEquals(2, RecordingNamespace.DESCRIBE_CALLS.get());
+  }
+
+  private static LanceInputPartition createNamespacePartition(String scanId) {
+    LanceSparkReadOptions readOptions =
+        LanceSparkReadOptions.builder()
+            .datasetUri(RecordingNamespace.location)
+            .tableId(Collections.singletonList("test_dataset1"))
+            .version(6L)
+            .build();
+    return new LanceInputPartition(
+        TestUtils.TestTable1Config.schema,
+        0,
+        new LanceSplit(Arrays.asList(0, 1)),
+        readOptions,
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        scanId,
+        Collections.emptyMap(),
+        RecordingNamespace.class.getName(),
+        Collections.emptyMap(),
+        null);
+  }
+
+  @Test
   public void getBlobColumnNamesIncludesBlobV2ReadColumns() throws Exception {
     Method method =
         LanceFragmentScanner.class.getDeclaredMethod("getBlobColumnNames", StructType.class);
@@ -306,6 +386,8 @@ public class LanceFragmentScannerTest {
    */
   public static class RecordingNamespace implements LanceNamespace {
     static final AtomicInteger INITIALIZE_CALLS = new AtomicInteger();
+    static final AtomicInteger DESCRIBE_CALLS = new AtomicInteger();
+    static volatile String location;
 
     public RecordingNamespace() {}
 
@@ -317,6 +399,12 @@ public class LanceFragmentScannerTest {
     @Override
     public String namespaceId() {
       return "recording";
+    }
+
+    @Override
+    public DescribeTableResponse describeTable(DescribeTableRequest request) {
+      DESCRIBE_CALLS.incrementAndGet();
+      return new DescribeTableResponse().location(location);
     }
   }
 }

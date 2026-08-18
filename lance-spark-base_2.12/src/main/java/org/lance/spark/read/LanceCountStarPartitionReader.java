@@ -18,6 +18,7 @@ import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.internal.ExecutorNamespaceCache;
 import org.lance.spark.read.metric.LanceReadMetricsTracker;
 import org.lance.spark.utils.Utils;
 import org.lance.spark.vectorized.LanceArrowColumnVector;
@@ -65,58 +66,78 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
   private long computeCount() {
     // This reader is only used when there are filters (metadata-based count uses LocalScan)
     LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
+    ExecutorNamespaceCache.Lease namespaceLease = null;
     long totalCount = 0;
 
-    long dsOpenStart = System.nanoTime();
-    try (Dataset dataset =
-        Utils.openDatasetBuilder(readOptions)
-            .initialStorageOptions(inputPartition.getInitialStorageOptions())
-            .build()) {
-      metricsTracker.addDatasetOpenTimeNs(System.nanoTime() - dsOpenStart);
-
-      List<Integer> fragmentIds = inputPartition.getLanceSplit().getFragments();
-      if (fragmentIds.isEmpty()) {
-        return 0;
-      }
-      metricsTracker.addNumFragmentsScanned(fragmentIds.size());
-
-      ScanOptions.Builder scanOptionsBuilder = new ScanOptions.Builder();
-      scanOptionsBuilder.useScalarIndex(readOptions.isUseScalarIndex());
-      if (inputPartition.getWhereCondition().isPresent()) {
-        scanOptionsBuilder.filter(inputPartition.getWhereCondition().get());
-      }
-      scanOptionsBuilder.withRowId(true);
-      scanOptionsBuilder.columns(Lists.newArrayList());
-      scanOptionsBuilder.fragmentIds(fragmentIds);
-
-      // Collect scan stats
-      scanOptionsBuilder.collectStats(true);
-
-      long scanCreateStart = System.nanoTime();
-      try (LanceScanner scanner = dataset.newScan(scanOptionsBuilder.build())) {
-        metricsTracker.addScannerCreateTimeNs(System.nanoTime() - scanCreateStart);
-        try (ArrowReader reader = scanner.scanBatches()) {
-          while (true) {
-            long batchStart = System.nanoTime();
-            boolean hasNext = reader.loadNextBatch();
-            long batchTimeNs = System.nanoTime() - batchStart;
-            if (!hasNext) {
-              break;
-            }
-            metricsTracker.addBatchLoadTimeNs(batchTimeNs);
-            long rowCount = reader.getVectorSchemaRoot().getRowCount();
-            totalCount += rowCount;
-            metricsTracker.addNumBatchesLoaded(1);
-            metricsTracker.addNumRowsScanned(rowCount);
-          }
+    try {
+      if (inputPartition.getNamespaceImpl() != null && readOptions.isExecutorCredentialRefresh()) {
+        if (LanceRuntime.useNamespaceOnWorkers(inputPartition.getNamespaceImpl())) {
+          namespaceLease =
+              ExecutorNamespaceCache.acquire(
+                  inputPartition.getNamespaceImpl(),
+                  inputPartition.getNamespaceProperties(),
+                  inputPartition.getScanId());
+          readOptions.setNamespace(namespaceLease.namespace());
+        } else {
+          readOptions.setNamespace(null);
         }
-        metricsTracker.addScanStats(scanner.getStats());
-      } catch (Exception e) {
-        throw new RuntimeException("Failed to scan fragment " + fragmentIds, e);
+      }
+
+      long dsOpenStart = System.nanoTime();
+      try (Dataset dataset =
+          Utils.openDatasetBuilder(readOptions)
+              .initialStorageOptions(inputPartition.getInitialStorageOptions())
+              .build()) {
+        metricsTracker.addDatasetOpenTimeNs(System.nanoTime() - dsOpenStart);
+
+        List<Integer> fragmentIds = inputPartition.getLanceSplit().getFragments();
+        if (fragmentIds.isEmpty()) {
+          return 0;
+        }
+        metricsTracker.addNumFragmentsScanned(fragmentIds.size());
+
+        ScanOptions.Builder scanOptionsBuilder = new ScanOptions.Builder();
+        scanOptionsBuilder.useScalarIndex(readOptions.isUseScalarIndex());
+        if (inputPartition.getWhereCondition().isPresent()) {
+          scanOptionsBuilder.filter(inputPartition.getWhereCondition().get());
+        }
+        scanOptionsBuilder.withRowId(true);
+        scanOptionsBuilder.columns(Lists.newArrayList());
+        scanOptionsBuilder.fragmentIds(fragmentIds);
+
+        // Collect scan stats
+        scanOptionsBuilder.collectStats(true);
+
+        long scanCreateStart = System.nanoTime();
+        try (LanceScanner scanner = dataset.newScan(scanOptionsBuilder.build())) {
+          metricsTracker.addScannerCreateTimeNs(System.nanoTime() - scanCreateStart);
+          try (ArrowReader reader = scanner.scanBatches()) {
+            while (true) {
+              long batchStart = System.nanoTime();
+              boolean hasNext = reader.loadNextBatch();
+              long batchTimeNs = System.nanoTime() - batchStart;
+              if (!hasNext) {
+                break;
+              }
+              metricsTracker.addBatchLoadTimeNs(batchTimeNs);
+              long rowCount = reader.getVectorSchemaRoot().getRowCount();
+              totalCount += rowCount;
+              metricsTracker.addNumBatchesLoaded(1);
+              metricsTracker.addNumRowsScanned(rowCount);
+            }
+          }
+          metricsTracker.addScanStats(scanner.getStats());
+        } catch (Exception e) {
+          throw new RuntimeException("Failed to scan fragment " + fragmentIds, e);
+        }
+      }
+
+      return totalCount;
+    } finally {
+      if (namespaceLease != null) {
+        namespaceLease.close();
       }
     }
-
-    return totalCount;
   }
 
   private ColumnarBatch createCountResultBatch(long count, StructType resultSchema) {
