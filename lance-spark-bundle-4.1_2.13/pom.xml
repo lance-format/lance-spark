@@ -53,7 +53,7 @@
                             <overWriteReleases>false</overWriteReleases>
                             <overWriteSnapshots>false</overWriteSnapshots>
                             <overWriteIfNewer>true</overWriteIfNewer>
-                            <includeArtifactIds>lance-core,lance-namespace-core,lance-namespace-apache-client,lance-spark-base_${scala.compat.version},lance-spark-${spark41.compat.version}_${scala.compat.version},arrow-c-data,jar-jni,opentelemetry-api,opentelemetry-context</includeArtifactIds>
+                            <includeArtifactIds>lance-core,lance-namespace-core,lance-namespace-apache-client,lance-spark-base_${scala.compat.version},lance-spark-${spark41.compat.version}_${scala.compat.version},arrow-c-data,jar-jni,opentelemetry-api,opentelemetry-context,arrow-dataset</includeArtifactIds>
                         </configuration>
                     </execution>
                     <execution>
@@ -91,7 +91,6 @@
                             <artifactSet>
                                 <excludes>
                                     <exclude>io.netty:*</exclude>
-                                    <exclude>org.apache.arrow:arrow-dataset</exclude>
                                 </excludes>
                             </artifactSet>
                             <transformers>
@@ -107,6 +106,25 @@
                                         <exclude>META-INF/*.SF</exclude>
                                         <exclude>META-INF/*.DSA</exclude>
                                         <exclude>META-INF/*.RSA</exclude>
+                                    </excludes>
+                                </filter>
+                                <!--
+                                  Strip only the unused Arrow Dataset JNI native (~50-77 MB per
+                                  platform) while KEEPING the arrow-dataset Java API classes.
+                                  lance-core's org.lance.ipc.LanceScanner implements
+                                  org.apache.arrow.dataset.scanner.Scanner, so removing the whole
+                                  artifact would break class loading on the Spark read path
+                                  (NoClassDefFoundError). Runtime native interop goes through the
+                                  Arrow C Data Interface (arrow-c-data), not this native.
+                                  Native paths differ across Arrow versions: arrow 15 packages them
+                                  at the jar root (x86_64/, aarch_64/); arrow 18+ under
+                                  arrow_dataset_jni/. Both are matched below.
+                                -->
+                                <filter>
+                                    <artifact>org.apache.arrow:arrow-dataset</artifact>
+                                    <excludes>
+                                        <exclude>**/*arrow_dataset_jni*</exclude>
+                                        <exclude>arrow_dataset_jni/**</exclude>
                                     </excludes>
                                 </filter>
                             </filters>
