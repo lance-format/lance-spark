@@ -97,6 +97,16 @@ public abstract class BaseTagDQLTest {
   }
 
   @Test
+  public void testQueryNonexistentTagThrowsException() {
+    spark.sql(String.format("create table %s (id int, text string) using lance", fullTable));
+    insertRange(0, 5);
+
+    String query = String.format("select * from %s version as of 'nonexistent_tag'", fullTable);
+
+    Assertions.assertThrows(Exception.class, () -> spark.sql(query).collectAsList());
+  }
+
+  @Test
   public void testTagTableUsesTagReferenceAndIsReadOnly() throws Exception {
     DatasetVersions versions = prepareDatasetWithHistory();
     TableCatalog catalog =

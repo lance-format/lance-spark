@@ -266,9 +266,8 @@ public class LanceScanBuilder
       // the resolved version onto the read options shipped to workers, providing snapshot
       // isolation across all tasks of this query. The version is kept as a long end-to-end so
       // long-lived high-write-frequency datasets do not silently truncate to a wrong version.
-      LanceSplit.ScanPlanResult scanPlan = LanceSplit.planScan(dataset);
-      LanceSparkReadOptions resolvedReadOptions =
-          readOptions.withRef(LanceRef.ofMain(scanPlan.getResolvedVersion()));
+      LanceSplit.ScanPlanResult scanPlan = LanceSplit.planScan(dataset, readOptions);
+      LanceSparkReadOptions resolvedReadOptions = readOptions.withRef(scanPlan.getRef());
 
       Optional<String> whereCondition =
           FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);
