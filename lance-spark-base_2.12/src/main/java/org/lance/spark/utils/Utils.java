@@ -134,30 +134,44 @@ public class Utils {
       Map<String, String> base = storageOptions != null ? storageOptions : Collections.emptyMap();
       Map<String, String> merged = LanceRuntime.mergeStorageOptions(base, initialStorageOptions);
 
-      ReadOptions.Builder roBuilder =
+      ReadOptions.Builder builder =
           new ReadOptions.Builder()
               .setStorageOptions(merged)
               .setSession(
                   LanceRuntime.session(catalogName, indexCacheBackend, metadataCacheBackend));
-      if (ref != null) {
-        ref.getVersionNumber().ifPresent(roBuilder::setVersion);
+      if (ref != null && ref.getVersionNumber().isPresent()) {
+        builder.setVersion(ref.getVersionNumber().get());
       }
       if (blockSize != null) {
-        roBuilder.setBlockSize(blockSize);
+        builder.setBlockSize(blockSize);
       }
       if (indexCacheSize != null) {
-        roBuilder.setIndexCacheSize(indexCacheSize);
+        builder.setIndexCacheSize(indexCacheSize);
       }
       if (metadataCacheSize != null) {
-        roBuilder.setMetadataCacheSize(metadataCacheSize);
+        builder.setMetadataCacheSize(metadataCacheSize);
       }
 
+      Dataset dataset = open(builder.build());
+
+      if (ref != null && ref.getTagName().isPresent()) {
+        Dataset baseDataset = dataset;
+        try {
+          dataset = baseDataset.checkoutTag(ref.getTagName().get());
+        } finally {
+          baseDataset.close();
+        }
+      }
+      return dataset;
+    }
+
+    private Dataset open(ReadOptions readOptions) {
       if (namespace != null && tableId != null) {
         return Dataset.open()
             .allocator(LanceRuntime.allocator())
             .namespaceClient(namespace)
             .tableId(tableId)
-            .readOptions(roBuilder.build())
+            .readOptions(readOptions)
             .build();
       }
       if (runtimeNamespaceImpl != null) {
@@ -169,14 +183,14 @@ public class Utils {
               .allocator(LanceRuntime.allocator())
               .namespaceClient(runtimeNamespace)
               .tableId(effectiveTableId)
-              .readOptions(roBuilder.build())
+              .readOptions(readOptions)
               .build();
         }
       }
       return Dataset.open()
           .allocator(LanceRuntime.allocator())
           .uri(uri)
-          .readOptions(roBuilder.build())
+          .readOptions(readOptions)
           .build();
     }
   }

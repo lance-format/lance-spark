@@ -56,6 +56,9 @@ public class LanceDataset
 
   private static final Logger LOG = LoggerFactory.getLogger(LanceDataset.class);
 
+  private static final Set<TableCapability> READ_ONLY_CAPABILITIES =
+      ImmutableSet.of(TableCapability.BATCH_READ);
+
   private static final Set<TableCapability> CAPABILITIES =
       ImmutableSet.of(
           TableCapability.BATCH_READ, TableCapability.BATCH_WRITE, TableCapability.TRUNCATE);
@@ -321,6 +324,7 @@ public class LanceDataset
               .indexCacheBackend(readOptions.getIndexCacheBackend())
               .metadataCacheBackend(readOptions.getMetadataCacheBackend())
               .fromOptions(mergedOptions)
+              .ref(readOptions.getRef())
               .build();
     }
     return new LanceScanBuilder(
@@ -354,11 +358,26 @@ public class LanceDataset
 
   @Override
   public Set<TableCapability> capabilities() {
+    if (isTagReference()) {
+      return READ_ONLY_CAPABILITIES;
+    }
     return BlobUtils.hasBlobV2Fields(sparkSchema) ? CAPABILITIES_WITH_BLOB_V2 : CAPABILITIES;
+  }
+
+  protected void ensureWritable() {
+    if (isTagReference()) {
+      throw new UnsupportedOperationException(
+          "Writes are not supported for tag: " + readOptions.getRef().getTagName().get());
+    }
+  }
+
+  private boolean isTagReference() {
+    return readOptions.getRef() != null && readOptions.getRef().getTagName().isPresent();
   }
 
   @Override
   public WriteBuilder newWriteBuilder(LogicalWriteInfo logicalWriteInfo) {
+    ensureWritable();
     if (capabilities().contains(TableCapability.ACCEPT_ANY_SCHEMA)) {
       LanceWriteSchemaValidator.validate(sparkSchema, logicalWriteInfo.schema());
     }

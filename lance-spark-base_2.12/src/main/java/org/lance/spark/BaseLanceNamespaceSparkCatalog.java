@@ -1653,6 +1653,14 @@ public abstract class BaseLanceNamespaceSparkCatalog
     }
   }
 
+  private LanceRef parseVersionRef(String version) {
+    try {
+      return LanceRef.ofMain(Utils.parseVersion(version));
+    } catch (NumberFormatException e) {
+      return LanceRef.ofTag(version);
+    }
+  }
+
   private Table loadTableInternal(
       Identifier ident, Optional<Long> timestamp, Optional<String> version)
       throws NoSuchTableException {
@@ -1666,31 +1674,21 @@ public abstract class BaseLanceNamespaceSparkCatalog
     DescribeTableResponse describeResponse = resolved.describeResponse;
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
 
-    Optional<Long> versionId = Optional.empty();
+    Optional<LanceRef> ref = Optional.empty();
     if (timestamp.isPresent()) {
       try (Dataset dataset = Utils.openDatasetBuilder(resolved.readOptions).build()) {
-        versionId = Optional.of(Utils.findVersion(dataset.listVersions(), timestamp.get()));
+        ref =
+            Optional.of(
+                LanceRef.ofMain(Utils.findVersion(dataset.listVersions(), timestamp.get())));
       } catch (TableNotFoundException e) {
         throw new NoSuchTableException(ident);
       }
     } else if (version.isPresent()) {
-      versionId = Optional.of(Utils.parseVersion(version.get()));
+      ref = Optional.of(parseVersionRef(version.get()));
     }
 
-    // If time travel requested, rebuild readOptions with the resolved version
-    LanceSparkReadOptions readOptions;
-    if (versionId.isPresent()) {
-      readOptions =
-          createReadOptions(
-              describeResponse.getLocation(),
-              catalogConfig,
-              versionId,
-              Optional.of(namespace),
-              Optional.of(resolved.tableIdList),
-              name);
-    } else {
-      readOptions = resolved.readOptions;
-    }
+    LanceSparkReadOptions readOptions =
+        ref.isPresent() ? resolved.readOptions.withRef(ref.get()) : resolved.readOptions;
 
     // Read schema, file format version, and config from the dataset
     String fileFormatVersion;
@@ -1749,28 +1747,24 @@ public abstract class BaseLanceNamespaceSparkCatalog
       throws NoSuchTableException {
     String datasetUri = getDatasetUri(ident);
 
-    Optional<Long> versionId = Optional.empty();
+    LanceSparkReadOptions baseReadOptions =
+        createReadOptions(
+            datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
+    Optional<LanceRef> ref = Optional.empty();
     if (version.isPresent()) {
-      versionId = Optional.of(Utils.parseVersion(version.get()));
+      ref = Optional.of(parseVersionRef(version.get()));
     } else if (timestamp.isPresent()) {
-      LanceSparkReadOptions readOptions =
-          createReadOptions(
-              datasetUri,
-              catalogConfig,
-              Optional.empty(),
-              Optional.empty(),
-              Optional.empty(),
-              name);
-      try (Dataset dataset = Utils.openDatasetBuilder(readOptions).build()) {
-        versionId = Optional.of(Utils.findVersion(dataset.listVersions(), timestamp.get()));
+      try (Dataset dataset = Utils.openDatasetBuilder(baseReadOptions).build()) {
+        ref =
+            Optional.of(
+                LanceRef.ofMain(Utils.findVersion(dataset.listVersions(), timestamp.get())));
       } catch (IllegalArgumentException e) {
         throw new NoSuchTableException(ident);
       }
     }
 
     LanceSparkReadOptions readOptions =
-        createReadOptions(
-            datasetUri, catalogConfig, versionId, Optional.empty(), Optional.empty(), name);
+        ref.isPresent() ? baseReadOptions.withRef(ref.get()) : baseReadOptions;
 
     // Read schema, file format version, and config from the dataset
     String fileFormatVersion;
