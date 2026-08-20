@@ -176,9 +176,7 @@ public class LanceScanBuilder
       // partition). A full-text query without a namespace, or against a catalog-only namespace such
       // as Glue that does not implement queryTable, falls through to the local per-fragment scan
       // below. COUNT(*) is excluded because countTableRows has no full-text field.
-      if (readOptions.getFullTextQuery() != null
-          && LanceRuntime.supportsQueryTable(namespaceImpl)
-          && !pushedAggregation.isPresent()) {
+      if (shouldNamespaceFtsScan()) {
         return buildNamespaceFtsScan();
       }
 
@@ -296,6 +294,19 @@ public class LanceScanBuilder
     } finally {
       closeLazyDataset();
     }
+  }
+
+  boolean shouldNamespaceFtsScan() {
+    LanceRef ref = readOptions.getRef();
+    boolean hasTag = ref != null && ref.getTagName().isPresent();
+    if (hasTag) {
+      return false;
+    }
+
+    return readOptions.getFullTextQuery() != null
+        && LanceRuntime.supportsQueryTable(namespaceImpl)
+        && !pushedAggregation.isPresent()
+        && !hasTag;
   }
 
   /**

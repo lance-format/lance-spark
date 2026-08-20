@@ -13,6 +13,7 @@
  */
 package org.lance.spark.read;
 
+import org.lance.ipc.FullTextQuery;
 import org.lance.spark.LanceRef;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
@@ -352,6 +353,21 @@ public class LanceScanBuilderTest {
     LanceRef pinned = first.getReadOptions().getRef();
     assertNotNull(pinned, "build() must pin the resolved version onto readOptions");
     assertTrue(pinned.getVersionNumber().get() > 0);
+  }
+
+  @Test
+  public void testTagFullTextQueryDoesNotUseNamespaceScan() {
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder()
+            .datasetUri(TestUtils.TestTable1Config.datasetUri)
+            .ref(LanceRef.ofTag("stable"))
+            .fullTextQuery(FullTextQuery.match("hello", "b"))
+            .build();
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            TEST_SCHEMA, options, Collections.emptyMap(), "dir", Collections.emptyMap());
+
+    assertFalse(builder.shouldNamespaceFtsScan());
   }
 
   @Test
