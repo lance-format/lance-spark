@@ -2702,6 +2702,49 @@ class TestDQLTimeTravel:
         assert len(result) == 1
         assert result[0].id == 1
 
+    def test_tag_as_of_excludes_data_inserted_after_tag_creation(self, spark):
+        """Test that a tag remains on its snapshot after the main table advances."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING
+            )
+        """)
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (1, 'before_tag_1'),
+            (2, 'before_tag_2')
+        """)
+        spark.sql("ALTER TABLE default.test_table CREATE TAG stable")
+
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (3, 'after_tag_1'),
+            (4, 'after_tag_2')
+        """)
+
+        tagged = spark.sql("""
+            SELECT id, name
+            FROM default.test_table VERSION AS OF 'stable'
+            ORDER BY id
+        """).collect()
+        current = spark.sql("""
+            SELECT id, name
+            FROM default.test_table
+            ORDER BY id
+        """).collect()
+
+        assert [(row.id, row.name) for row in tagged] == [
+            (1, "before_tag_1"),
+            (2, "before_tag_2"),
+        ]
+        assert [(row.id, row.name) for row in current] == [
+            (1, "before_tag_1"),
+            (2, "before_tag_2"),
+            (3, "after_tag_1"),
+            (4, "after_tag_2"),
+        ]
+
     @requires_update_or_merge
     def test_version_as_of_after_update(self, spark):
         """Test VERSION AS OF returns data before an update."""
