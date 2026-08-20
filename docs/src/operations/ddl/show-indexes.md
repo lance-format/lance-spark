@@ -7,7 +7,7 @@ List all indexes defined on a Lance table.
 
 ## Overview
 
-The `SHOW INDEXES` command returns one row for each index on a Lance table. The information is retrieved using the `Dataset.describeIndices` method, and the output columns align with the attributes of `org.lance.index.IndexDescription`, excluding the per-segment metadata list.
+The `SHOW INDEXES` command returns one row for each logical index on a Lance table. It groups the raw segment metadata returned by `Dataset.getIndexes()` to calculate segment count and total size, while the existing type and coverage fields continue to come from `Dataset.getIndexStatistics(name)`.
 
 This command is useful for inspecting existing indexes, verifying index creation, and understanding the high-level properties of each index.
 
@@ -45,15 +45,17 @@ You can also use the `IN` keyword or the singular `INDEX` spelling:
 
 The `SHOW INDEXES` command returns the following columns:
 
-| Column                  | Type          | Description                                                        |
-|-------------------------|---------------|--------------------------------------------------------------------|
-| `name`                  | string        | Logical name of the index.                                         |
-| `fields`                | array<string> | List of column names included in the index.                        |
-| `index_type`            | string        | Human-readable index type (for example `btree`).                   |
-| `num_indexed_fragments` | long          | Number of fragments fully or partially covered by the index.       |
-| `num_indexed_rows`      | long          | Approximate number of rows covered by the index.                   |
-| `num_unindexed_fragments` | long        | Number of fragments that are not yet indexed.                      |
-| `num_unindexed_rows`    | long          | Approximate number of rows that are not yet covered by the index.  |
+| Column                    | Type          | Description                                                          |
+|---------------------------|---------------|----------------------------------------------------------------------|
+| `name`                    | string        | Logical name of the index.                                           |
+| `fields`                  | array<string> | List of column names included in the index.                          |
+| `index_type`              | string        | Human-readable index type (for example `btree`).                     |
+| `segment_count`           | long          | Number of physical segments in the logical index.                    |
+| `total_size_bytes`        | long          | Sum of all segment file sizes, or `NULL` if any size is unavailable. |
+| `num_indexed_fragments`   | long          | Number of fragments fully or partially covered by the index.         |
+| `num_indexed_rows`        | long          | Approximate number of rows covered by the index.                     |
+| `num_unindexed_fragments` | long          | Number of fragments that are not yet indexed.                        |
+| `num_unindexed_rows`      | long          | Approximate number of rows that are not yet covered by the index.    |
 
 ## Notes
 

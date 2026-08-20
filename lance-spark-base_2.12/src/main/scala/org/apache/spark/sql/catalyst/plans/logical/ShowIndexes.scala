@@ -44,6 +44,8 @@ object ShowIndexesOutputType {
         DataTypes.createArrayType(DataTypes.StringType, true),
         nullable = true),
       StructField("index_type", DataTypes.StringType, nullable = true),
+      StructField("segment_count", DataTypes.LongType, nullable = false),
+      StructField("total_size_bytes", DataTypes.LongType, nullable = true),
       StructField("num_indexed_fragments", DataTypes.LongType, nullable = true),
       StructField("num_indexed_rows", DataTypes.LongType, nullable = true),
       StructField("num_unindexed_fragments", DataTypes.LongType, nullable = true),
