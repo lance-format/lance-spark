@@ -48,11 +48,7 @@ case class VacuumExec(
   }
 
   override protected def run(): Seq[InternalRow] = {
-    val lanceDataset = catalog.loadTable(ident) match {
-      case lanceDataset: LanceDataset => lanceDataset
-      case _ =>
-        throw new UnsupportedOperationException("Vacuum only supports LanceDataset")
-    }
+    val lanceDataset = LanceDataset.requireWritable(catalog.loadTable(ident), "Vacuum")
 
     val policy = buildPolicy()
     val readOptions = lanceDataset.readOptions()

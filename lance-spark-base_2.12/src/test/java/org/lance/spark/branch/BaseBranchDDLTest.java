@@ -43,6 +43,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 /** Base tests for BRANCH DDL commands. */
 public abstract class BaseBranchDDLTest {
@@ -661,6 +662,63 @@ public abstract class BaseBranchDDLTest {
                 .save(tableDir));
     Assertions.assertEquals(10, spark.table(fullTable).count());
     Assertions.assertEquals(10, spark.table(fullTable + ".branch_audit").count());
+  }
+
+  @Test
+  public void testBranchIdentifierRejectsCreateIndexAndVacuum() throws Exception {
+    prepareDatasetWithHistory();
+    spark.sql(String.format("alter table %s create branch audit", fullTable));
+
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    Identifier branchIdentifier =
+        Identifier.of(new String[] {"default", tableName}, "branch_audit");
+    long branchVersionBefore =
+        ((LanceDataset) catalog.loadTable(branchIdentifier))
+            .readOptions()
+            .getRef()
+            .getVersionNumber()
+            .get();
+    long fileCountBefore = datasetFileCount();
+
+    Exception createIndex =
+        Assertions.assertThrows(
+            Exception.class,
+            () ->
+                spark
+                    .sql(
+                        "alter table "
+                            + fullTable
+                            + ".branch_audit create index id_idx using zonemap (id) "
+                            + "with (train=false)")
+                    .collectAsList());
+    Assertions.assertTrue(exceptionChainMessages(createIndex).contains("Writes are not supported"));
+
+    Exception vacuum =
+        Assertions.assertThrows(
+            Exception.class,
+            () ->
+                spark
+                    .sql("vacuum " + fullTable + ".branch_audit with (before_version=1000000)")
+                    .collectAsList());
+    Assertions.assertTrue(exceptionChainMessages(vacuum).contains("Writes are not supported"));
+
+    long branchVersionAfter =
+        ((LanceDataset) catalog.loadTable(branchIdentifier))
+            .readOptions()
+            .getRef()
+            .getVersionNumber()
+            .get();
+    Assertions.assertEquals(branchVersionBefore, branchVersionAfter);
+    Assertions.assertEquals(fileCountBefore, datasetFileCount());
+    Assertions.assertEquals(10, spark.table(fullTable).count());
+    Assertions.assertEquals(10, spark.table(fullTable + ".branch_audit").count());
+  }
+
+  private long datasetFileCount() throws IOException {
+    try (Stream<Path> files = Files.walk(FileSystems.getDefault().getPath(tableDir))) {
+      return files.filter(Files::isRegularFile).count();
+    }
   }
 
   private static String exceptionChainMessages(Throwable throwable) {

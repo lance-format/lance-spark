@@ -282,7 +282,7 @@ Read the current head of a named branch. Do not set `branch` and `version` on th
 
 If a table named `users.branch_audit` already exists, Spark reads that table. Otherwise the last
 segment is a branch on the parent table. Do not add `VERSION AS OF` or `TIMESTAMP AS OF`. Branch
-identifiers are read-only.
+identifiers are read-only; mutating commands are rejected.
 
 `.option("branch").table(...)` applies the branch at scan time. Spark still analyzes with the table
 schema. Use `table.branch_name` when the branch schema differs from the table.

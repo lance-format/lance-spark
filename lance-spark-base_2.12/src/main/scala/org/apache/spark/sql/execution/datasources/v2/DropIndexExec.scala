@@ -35,11 +35,7 @@ case class LanceDropIndexExec(
   override def output: Seq[Attribute] = LanceDropIndexOutputType.SCHEMA
 
   override protected def run(): Seq[InternalRow] = {
-    val lanceDataset = catalog.loadTable(ident) match {
-      case ds: LanceDataset => ds
-      case _ =>
-        throw new UnsupportedOperationException("DropIndex only supports LanceDataset")
-    }
+    val lanceDataset = LanceDataset.requireWritable(catalog.loadTable(ident), "DropIndex")
 
     val readOptions = lanceDataset.readOptions()
 

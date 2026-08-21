@@ -32,6 +32,7 @@ import org.apache.spark.sql.connector.catalog.StagedTable;
 import org.apache.spark.sql.connector.catalog.SupportsMetadataColumns;
 import org.apache.spark.sql.connector.catalog.SupportsRead;
 import org.apache.spark.sql.connector.catalog.SupportsWrite;
+import org.apache.spark.sql.connector.catalog.Table;
 import org.apache.spark.sql.connector.catalog.TableCapability;
 import org.apache.spark.sql.connector.read.ScanBuilder;
 import org.apache.spark.sql.connector.write.LogicalWriteInfo;
@@ -405,6 +406,15 @@ public class LanceDataset
       return READ_ONLY_CAPABILITIES;
     }
     return BlobUtils.hasBlobV2Fields(sparkSchema) ? CAPABILITIES_WITH_BLOB_V2 : CAPABILITIES;
+  }
+
+  public static LanceDataset requireWritable(Table table, String command) {
+    if (!(table instanceof LanceDataset)) {
+      throw new UnsupportedOperationException(command + " only supports LanceDataset");
+    }
+    LanceDataset dataset = (LanceDataset) table;
+    dataset.ensureWritable();
+    return dataset;
   }
 
   protected void ensureWritable() {
