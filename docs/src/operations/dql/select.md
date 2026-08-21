@@ -230,6 +230,12 @@ Use `VERSION AS OF` with a quoted tag name to query the snapshot referenced by a
     spark.sql("SELECT * FROM users VERSION AS OF 'release_candidate'").show();
     ```
 
+!!! note
+    Tags whose names consist entirely of integer digits cannot be queried. Numeric values are
+    interpreted as table versions, even when quoted. For example, both `VERSION AS OF 123` and
+    `VERSION AS OF '123'` query table version 123 rather than a tag named `123`. Use a tag name that
+    contains at least one non-digit character.
+
 Tag queries are read-only. `UPDATE`, `DELETE`, `INSERT`, `MERGE INTO`, `ADD COLUMNS`, and
 `UPDATE COLUMNS` operations cannot target a tagged snapshot.
 

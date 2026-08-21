@@ -99,12 +99,16 @@ public class LanceSplit implements Serializable {
       fragmentRowCounts.put(id, fragment.metadata().getNumRows());
     }
 
+    LanceRef plannedRef;
+
     LanceRef ref = readOptions.getRef();
-    if (ref == null || (ref.getTagName().isEmpty() && ref.getBranchName().isEmpty())) {
-      ref = LanceRef.ofMain(dataset.getVersion().getId());
+    if (ref != null && ref.getBranchName().isPresent()) {
+      plannedRef = LanceRef.ofBranch(ref.getBranchName().get(), dataset.getVersion().getId());
+    } else {
+      plannedRef = LanceRef.ofMain(dataset.getVersion().getId());
     }
 
-    return new ScanPlanResult(splits, ref, fragmentRowCounts);
+    return new ScanPlanResult(splits, plannedRef, fragmentRowCounts);
   }
 
   /**
