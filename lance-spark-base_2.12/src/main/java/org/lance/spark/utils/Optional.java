@@ -80,8 +80,4 @@ public class Optional<T> implements Serializable {
     Optional<?> other = (Optional<?>) obj;
     return Objects.equals(value, other.value);
   }
-
-  public boolean gett() {
-    return false;
-  }
 }

@@ -97,6 +97,27 @@ public abstract class BaseTagDQLTest {
   }
 
   @Test
+  public void testQueryTagCreatedFromBranchAfterMainAdvances() {
+    spark.sql(String.format("create table %s (id int, text string) using lance", fullTable));
+    insertRange(0, 5);
+
+    String branch = "source_branch";
+    String tag = "branch_snapshot";
+    spark.sql(String.format("alter table %s create branch %s", fullTable, branch));
+    spark.sql(
+        String.format("alter table %s create tag %s as of branch %s", fullTable, tag, branch));
+
+    insertRange(5, 10);
+
+    String taggedTable = String.format("%s version as of '%s'", fullTable, tag);
+    Assertions.assertEquals(5, spark.sql("select * from " + taggedTable).count());
+    Assertions.assertEquals(
+        0, spark.sql("select * from " + taggedTable + " where id >= 5").count());
+    Assertions.assertEquals(10, spark.table(fullTable).count());
+    Assertions.assertEquals(5, spark.sql("select * from " + fullTable + " where id >= 5").count());
+  }
+
+  @Test
   public void testQueryNonexistentTagThrowsException() {
     spark.sql(String.format("create table %s (id int, text string) using lance", fullTable));
     insertRange(0, 5);

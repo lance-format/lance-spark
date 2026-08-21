@@ -15,6 +15,7 @@ package org.lance.spark.utils;
 
 import org.lance.Dataset;
 import org.lance.ReadOptions;
+import org.lance.Ref;
 import org.lance.Version;
 import org.lance.namespace.LanceNamespace;
 import org.lance.spark.LanceRef;
@@ -129,6 +130,30 @@ public class Utils {
     }
 
     public Dataset build() {
+      if (ref != null && (ref.getTagName().isPresent() || ref.getBranchName().isPresent())) {
+        // Open specific tag or branch/version
+        Dataset main = openMain(null);
+        try {
+          if (ref.getTagName().isPresent()) {
+            return main.checkout(Ref.ofTag(ref.getTagName().get()));
+          } else {
+            return ref.getVersionNumber().isPresent()
+                ? main.checkout(
+                    Ref.ofBranch(ref.getBranchName().get(), ref.getVersionNumber().get()))
+                : main.checkout(Ref.ofBranch(ref.getBranchName().get()));
+          }
+        } finally {
+          main.close();
+        }
+      } else {
+        return openMain(
+            ref != null && ref.getVersionNumber().isPresent()
+                ? ref.getVersionNumber().get()
+                : null);
+      }
+    }
+
+    private Dataset openMain(Long version) {
       LanceRuntime.enableOpenTelemetry();
 
       Map<String, String> base = storageOptions != null ? storageOptions : Collections.emptyMap();
@@ -139,8 +164,8 @@ public class Utils {
               .setStorageOptions(merged)
               .setSession(
                   LanceRuntime.session(catalogName, indexCacheBackend, metadataCacheBackend));
-      if (ref != null && ref.getVersionNumber().isPresent()) {
-        builder.setVersion(ref.getVersionNumber().get());
+      if (version != null) {
+        builder.setVersion(version);
       }
       if (blockSize != null) {
         builder.setBlockSize(blockSize);
@@ -152,17 +177,7 @@ public class Utils {
         builder.setMetadataCacheSize(metadataCacheSize);
       }
 
-      Dataset dataset = open(builder.build());
-
-      if (ref != null && ref.getTagName().isPresent()) {
-        Dataset baseDataset = dataset;
-        try {
-          dataset = baseDataset.checkoutTag(ref.getTagName().get());
-        } finally {
-          baseDataset.close();
-        }
-      }
-      return dataset;
+      return open(builder.build());
     }
 
     private Dataset open(ReadOptions readOptions) {
