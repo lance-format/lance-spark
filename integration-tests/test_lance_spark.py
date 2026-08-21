@@ -2805,7 +2805,7 @@ class TestDQLTimeTravel:
 
 
 class TestDQLBranchRead:
-    def test_branch_reference_matches_iceberg_read_surfaces(self, spark):
+    def test_branch_identifier_matches_option_and_path(self, spark):
         spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
         spark.sql(
             "INSERT INTO default.test_table VALUES (1, 'a'), (2, 'b')"
@@ -2879,6 +2879,8 @@ class TestDQLBranchRead:
         assert spark.table("default.test_table.branch_audit").count() == 1
 
     def test_existing_table_wins_over_branch_identifier(self, spark):
+        if getattr(spark, "_lance_backend", None) == "glue":
+            pytest.skip("Glue table identifiers are database.table")
         spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
         spark.sql("INSERT INTO default.test_table VALUES (1, 'branch_row')")
         spark.sql("ALTER TABLE default.test_table CREATE BRANCH audit")

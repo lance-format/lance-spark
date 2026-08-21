@@ -616,18 +616,27 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Identifier ident, Optional<Long> timestamp, Optional<String> version)
       throws NoSuchTableException {
     Optional<LanceRef> branch = branchSelector(ident);
-    try {
+    if (!branch.isPresent()) {
       return loadTableInternal(ident, timestamp, version, Optional.empty());
+    }
+
+    try {
+      ResolvedTable literal = resolveLiteralTable(ident);
+      return loadResolvedTable(ident, literal, timestamp, version, Optional.empty());
     } catch (NoSuchTableException e) {
-      if (!branch.isPresent()) {
-        throw e;
-      }
       return loadBranchSelector(ident, timestamp, version, branch.get());
+    }
+  }
+
+  private ResolvedTable resolveLiteralTable(Identifier ident) throws NoSuchTableException {
+    try {
+      return resolveIdentifier(ident);
     } catch (LanceNamespaceException e) {
-      if (!branch.isPresent() || e.getErrorCode() != ErrorCode.NAMESPACE_NOT_FOUND) {
-        throw e;
+      ErrorCode code = e.getErrorCode();
+      if (code == ErrorCode.NAMESPACE_NOT_FOUND || code == ErrorCode.INVALID_INPUT) {
+        throw new NoSuchTableException(ident);
       }
-      return loadBranchSelector(ident, timestamp, version, branch.get());
+      throw e;
     }
   }
 
@@ -642,7 +651,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
   }
 
   private static Optional<LanceRef> branchSelector(Identifier ident) {
-    if (ident.namespace().length == 0) {
+    if (ident.namespace().length == 0 || isPathBasedIdentifier(ident)) {
       return Optional.empty();
     }
     Matcher matcher = BRANCH_SUFFIX.matcher(ident.name());
@@ -1719,7 +1728,16 @@ public abstract class BaseLanceNamespaceSparkCatalog
       return loadTableFromPath(ident, timestamp, version, branchRef);
     }
 
-    ResolvedTable resolved = resolveIdentifier(ident);
+    return loadResolvedTable(ident, resolveIdentifier(ident), timestamp, version, branchRef);
+  }
+
+  private Table loadResolvedTable(
+      Identifier ident,
+      ResolvedTable resolved,
+      Optional<Long> timestamp,
+      Optional<String> version,
+      Optional<LanceRef> branchRef)
+      throws NoSuchTableException {
     DescribeTableResponse describeResponse = resolved.describeResponse;
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
 
