@@ -16,7 +16,9 @@ package org.lance.spark;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class LanceRefTest {
 
@@ -31,6 +33,23 @@ public class LanceRefTest {
     assertNotEquals(LanceRef.ofMain(7), LanceRef.ofMain(8));
     assertNotEquals(LanceRef.ofBranch("dev"), LanceRef.ofBranch("prod"));
     assertNotEquals(LanceRef.ofTag("release"), LanceRef.ofTag("latest"));
+  }
+
+  @Test
+  public void testRefKind() {
+    assertTrue(LanceRef.ofMain().isMain());
+    assertFalse(LanceRef.ofMain().isBranch());
+    assertTrue(LanceRef.ofBranch("dev").isBranch());
+    assertFalse(LanceRef.ofBranch("dev").isMain());
+    assertTrue(LanceRef.ofTag("release").isTag());
+    assertTrue(LanceRef.ofBranch("dev").isBranchOrTag());
+    assertTrue(LanceRef.ofTag("release").isBranchOrTag());
+    assertFalse(LanceRef.ofMain().isBranchOrTag());
+    assertEquals("branch audit", LanceRef.ofBranch("audit").toString());
+    assertEquals("branch audit version 2", LanceRef.ofBranch("audit", 2).toString());
+    assertEquals("tag release", LanceRef.ofTag("release").toString());
+    assertEquals("version 7", LanceRef.ofMain(7).toString());
+    assertEquals("main", LanceRef.ofMain().toString());
   }
 
   @Test

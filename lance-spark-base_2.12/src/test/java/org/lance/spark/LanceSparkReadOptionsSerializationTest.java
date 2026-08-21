@@ -76,6 +76,30 @@ public class LanceSparkReadOptionsSerializationTest {
   }
 
   @Test
+  public void testFromOptionsParsesBranch() {
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.from(
+            Collections.singletonMap(LanceSparkReadOptions.CONFIG_BRANCH, "audit"),
+            "s3://bucket/path");
+
+    Assertions.assertEquals(LanceRef.ofBranch("audit"), options.getRef());
+  }
+
+  @Test
+  public void testFromOptionsRejectsBranchAndVersion() {
+    Map<String, String> options = new HashMap<>();
+    options.put(LanceSparkReadOptions.CONFIG_BRANCH, "audit");
+    options.put(LanceSparkReadOptions.CONFIG_VERSION, "2");
+
+    IllegalArgumentException exception =
+        Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> LanceSparkReadOptions.from(options, "s3://bucket/path"));
+    Assertions.assertTrue(exception.getMessage().contains("branch"));
+    Assertions.assertTrue(exception.getMessage().contains("version"));
+  }
+
+  @Test
   public void testFromOptionsParsesFtsSubtype() {
     FullTextQuery original = FullTextQuery.phrase("hello world", "body", 0);
     String json = org.lance.spark.utils.FullTextQueryUtils.fullTextQueryToString(original);

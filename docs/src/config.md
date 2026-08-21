@@ -579,6 +579,17 @@ The parent configuration effectively "anchors" your Spark catalog at a specific 
 hierarchy, making the extra levels transparent to Spark users while maintaining compatibility with the underlying
 namespace implementation.
 
+## Branch Read Option
+
+Set `branch` to read the current head of a named branch. Do not set `version` on the same read.
+
+```python
+df = spark.read \
+    .format("lance") \
+    .option("branch", "audit") \
+    .load("/path/to/dataset.lance")
+```
+
 ## Memory Configuration
 
 Lance Spark uses Arrow for data transfer between native code and Spark, and maintains caches for improved performance.

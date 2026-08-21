@@ -371,6 +371,21 @@ public class LanceScanBuilderTest {
   }
 
   @Test
+  public void testBranchFullTextQueryDoesNotUseNamespaceScan() {
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder()
+            .datasetUri(TestUtils.TestTable1Config.datasetUri)
+            .ref(LanceRef.ofBranch("audit"))
+            .fullTextQuery(FullTextQuery.match("hello", "b"))
+            .build();
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            TEST_SCHEMA, options, Collections.emptyMap(), "dir", Collections.emptyMap());
+
+    assertFalse(builder.shouldNamespaceFtsScan());
+  }
+
+  @Test
   public void testBuildWithCountStarReturnsLocalScan() {
     LanceScanBuilder builder = createBuilder();
     Aggregation countStar =

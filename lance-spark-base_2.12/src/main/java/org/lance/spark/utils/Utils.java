@@ -16,6 +16,7 @@ package org.lance.spark.utils;
 import org.lance.Dataset;
 import org.lance.ReadOptions;
 import org.lance.Ref;
+import org.lance.Tag;
 import org.lance.Version;
 import org.lance.namespace.LanceNamespace;
 import org.lance.spark.LanceRef;
@@ -33,6 +34,28 @@ public class Utils {
 
   public static long parseVersion(String version) {
     return Long.parseUnsignedLong(version);
+  }
+
+  // Tag names and branch heads move. Store the opened version, and the branch if a tag points at
+  // one.
+  public static LanceRef pinOpenedRef(Dataset dataset, LanceRef requested) {
+    long version = dataset.getVersion().getId();
+    if (requested != null && requested.isTag()) {
+      String tagName = requested.getTagName().get();
+      for (Tag tag : dataset.tags().list()) {
+        if (tag.getName().equals(tagName)) {
+          if (tag.getBranch().isPresent()) {
+            return LanceRef.ofBranch(tag.getBranch().get(), version);
+          }
+          return LanceRef.ofMain(version);
+        }
+      }
+      throw new RuntimeException("Tag not found: " + tagName);
+    }
+    if (requested != null && requested.isBranch()) {
+      return LanceRef.ofBranch(requested.getBranchName().get(), version);
+    }
+    return LanceRef.ofMain(version);
   }
 
   public static long findVersion(List<Version> versions, long timestamp) {

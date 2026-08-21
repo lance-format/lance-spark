@@ -297,15 +297,13 @@ public class LanceScanBuilder
 
   boolean shouldNamespaceFtsScan() {
     LanceRef ref = readOptions.getRef();
-    boolean hasTag = ref != null && ref.getTagName().isPresent();
-    if (hasTag) {
+    if (ref != null && ref.isBranchOrTag()) {
       return false;
     }
 
     return readOptions.getFullTextQuery() != null
         && LanceRuntime.supportsQueryTable(namespaceImpl)
-        && !pushedAggregation.isPresent()
-        && !hasTag;
+        && !pushedAggregation.isPresent();
   }
 
   /**

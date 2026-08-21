@@ -2804,6 +2804,101 @@ class TestDQLTimeTravel:
         assert len(result) == 3
 
 
+class TestDQLBranchRead:
+    def test_branch_reference_matches_iceberg_read_surfaces(self, spark):
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql(
+            "INSERT INTO default.test_table VALUES (1, 'a'), (2, 'b')"
+        )
+        expected = [(1, "a"), (2, "b")]
+        spark.sql(
+            "ALTER TABLE default.test_table CREATE BRANCH test_branch"
+        )
+        spark.sql(
+            "INSERT INTO default.test_table VALUES (3, 'c'), (4, 'd')"
+        )
+
+        identifier = spark.sql(
+            "SELECT * FROM default.test_table.branch_test_branch ORDER BY id"
+        ).collect()
+        option_table = (
+            spark.read.option("branch", "test_branch")
+            .table("default.test_table")
+            .orderBy("id")
+            .collect()
+        )
+        option_path = (
+            spark.read.format("lance")
+            .option("branch", "test_branch")
+            .load(_table_location(spark, "default.test_table"))
+            .orderBy("id")
+            .collect()
+        )
+        main = spark.sql(
+            "SELECT * FROM default.test_table ORDER BY id"
+        ).collect()
+
+        assert [(row.id, row.name) for row in identifier] == expected
+        assert [(row.id, row.name) for row in option_table] == expected
+        assert [(row.id, row.name) for row in option_path] == expected
+        assert [(row.id, row.name) for row in main] == expected + [(3, "c"), (4, "d")]
+
+    def test_branch_identifier_rejects_as_of_and_conflicting_options(self, spark):
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'main')")
+        spark.sql("ALTER TABLE default.test_table CREATE BRANCH audit")
+
+        with pytest.raises(Exception, match="Cannot combine"):
+            spark.sql(
+                "SELECT * FROM default.test_table.branch_audit VERSION AS OF 1"
+            ).collect()
+        with pytest.raises(Exception, match="Cannot combine"):
+            spark.sql(
+                "SELECT * FROM default.test_table.branch_audit TIMESTAMP AS OF now()"
+            ).collect()
+        with pytest.raises(Exception):
+            spark.read.option("branch", "audit").option("version", "1").table(
+                "default.test_table"
+            ).collect()
+        with pytest.raises(Exception, match="no_such_branch"):
+            spark.read.option("branch", "no_such_branch").table(
+                "default.test_table"
+            ).collect()
+
+    def test_branch_identifier_is_read_only(self, spark):
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'main')")
+        spark.sql("ALTER TABLE default.test_table CREATE BRANCH audit")
+
+        with pytest.raises(Exception):
+            spark.sql(
+                "INSERT INTO default.test_table.branch_audit VALUES (2, 'branch')"
+            ).collect()
+
+        assert spark.table("default.test_table").count() == 1
+        assert spark.table("default.test_table.branch_audit").count() == 1
+
+    def test_existing_table_wins_over_branch_identifier(self, spark):
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'branch_row')")
+        spark.sql("ALTER TABLE default.test_table CREATE BRANCH audit")
+        spark.sql(
+            "CREATE TABLE default.test_table.branch_audit (id INT, name STRING)"
+        )
+        spark.sql(
+            "INSERT INTO default.test_table.branch_audit VALUES (99, 'literal')"
+        )
+
+        rows = spark.table("default.test_table.branch_audit").collect()
+        assert [(row.id, row.name) for row in rows] == [(99, "literal")]
+        assert [
+            row.id
+            for row in spark.read.option("branch", "audit")
+            .table("default.test_table")
+            .collect()
+        ] == [1]
+
+
 @requires_update_or_merge
 class TestDMLMergeDelete:
     """Test MERGE INTO with WHEN MATCHED THEN DELETE."""

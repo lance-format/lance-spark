@@ -29,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Tests for {@link LanceSparkWriteOptions}. */
@@ -47,6 +48,20 @@ public class LanceSparkWriteOptionsTest {
     LanceSparkWriteOptions opts =
         LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).ref(LanceRef.ofMain(7L)).build();
     assertEquals(7L, opts.getRef().getVersionNumber().get());
+  }
+
+  @Test
+  public void testWriteOptionsRejectBranch() {
+    Map<String, String> options = new HashMap<>();
+    options.put(LanceSparkReadOptions.CONFIG_BRANCH, "audit");
+
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(options).build());
+
+    assertTrue(exception.getMessage().contains("read-only"));
   }
 
   @Test

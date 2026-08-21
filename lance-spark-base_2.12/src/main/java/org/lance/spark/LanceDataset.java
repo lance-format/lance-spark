@@ -13,16 +13,19 @@
  */
 package org.lance.spark;
 
+import org.lance.Dataset;
 import org.lance.memwal.ShardingSpec;
 import org.lance.spark.read.LanceScanBuilder;
 import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.BlobUtils;
+import org.lance.spark.utils.Utils;
 import org.lance.spark.write.AddColumnsBackfillWrite;
 import org.lance.spark.write.LanceWriteSchemaValidator;
 import org.lance.spark.write.SparkWrite;
 import org.lance.spark.write.StagedCommit;
 import org.lance.spark.write.UpdateColumnsBackfillWrite;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
 import org.apache.spark.sql.connector.catalog.MetadataColumn;
 import org.apache.spark.sql.connector.catalog.StagedTable;
@@ -38,6 +41,7 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
+import org.apache.spark.sql.util.LanceArrowUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -309,31 +313,70 @@ public class LanceDataset
   }
 
   @Override
-  public ScanBuilder newScanBuilder(CaseInsensitiveStringMap caseInsensitiveStringMap) {
-    // Merge scan-time options with the existing read options
-    LanceSparkReadOptions scanOptions = readOptions;
-    if (!caseInsensitiveStringMap.isEmpty()) {
-      Map<String, String> mergedOptions = new HashMap<>(readOptions.getStorageOptions());
-      mergedOptions.putAll(caseInsensitiveStringMap.asCaseSensitiveMap());
-      scanOptions =
-          LanceSparkReadOptions.builder()
-              .datasetUri(readOptions.getDatasetUri())
-              .namespace(readOptions.getNamespace())
-              .tableId(readOptions.getTableId())
-              .catalogName(readOptions.getCatalogName())
-              .indexCacheBackend(readOptions.getIndexCacheBackend())
-              .metadataCacheBackend(readOptions.getMetadataCacheBackend())
-              .fromOptions(mergedOptions)
-              .ref(readOptions.getRef())
-              .build();
+  public ScanBuilder newScanBuilder(CaseInsensitiveStringMap scanMap) {
+    LanceSparkReadOptions scanOptions = mergeScanOptions(scanMap);
+    StructType scanSchema = sparkSchema;
+    LanceRef scanRef = scanOptions.getRef();
+    if (scanRef != null && scanRef.isBranch() && scanRef.getVersionNumber().isEmpty()) {
+      try (Dataset dataset =
+          Utils.openDatasetBuilder(scanOptions)
+              .initialStorageOptions(initialStorageOptions)
+              .runtimeNamespace(namespaceImpl, namespaceProperties, readOptions.getTableId())
+              .build()) {
+        scanOptions = scanOptions.withRef(Utils.pinOpenedRef(dataset, scanRef));
+        scanSchema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
+      }
     }
     return new LanceScanBuilder(
-        sparkSchema,
+        scanSchema,
         scanOptions,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
         shardingSpec);
+  }
+
+  private LanceSparkReadOptions mergeScanOptions(CaseInsensitiveStringMap scanMap) {
+    if (scanMap.isEmpty()) {
+      return readOptions;
+    }
+    LanceRef tableRef = readOptions.getRef();
+    boolean scanSetsBranchOrVersion =
+        scanMap.containsKey(LanceSparkReadOptions.CONFIG_VERSION)
+            || scanMap.containsKey(LanceSparkReadOptions.CONFIG_BRANCH);
+    Map<String, String> merged = new HashMap<>(readOptions.getStorageOptions());
+    // Stored options can still hold version/branch keys. Strip them so fromOptions cannot
+    // overwrite the table ref with a leftover key.
+    merged.remove(LanceSparkReadOptions.CONFIG_VERSION);
+    merged.remove(LanceSparkReadOptions.CONFIG_BRANCH);
+    merged.putAll(scanMap.asCaseSensitiveMap());
+    LanceSparkReadOptions scanOptions =
+        LanceSparkReadOptions.builder()
+            .datasetUri(readOptions.getDatasetUri())
+            .namespace(readOptions.getNamespace())
+            .tableId(readOptions.getTableId())
+            .catalogName(readOptions.getCatalogName())
+            .indexCacheBackend(readOptions.getIndexCacheBackend())
+            .metadataCacheBackend(readOptions.getMetadataCacheBackend())
+            .ref(tableRef)
+            .fromOptions(merged)
+            .build();
+    if (tableRef != null && scanSetsBranchOrVersion) {
+      LanceRef scanRef = scanOptions.getRef();
+      if (sameNamedBranch(tableRef, scanRef)) {
+        return scanOptions.withRef(tableRef);
+      }
+      Preconditions.checkArgument(
+          tableRef.equals(scanRef), "Cannot combine %s with %s", tableRef, scanRef);
+    }
+    return scanOptions;
+  }
+
+  private static boolean sameNamedBranch(LanceRef tableRef, LanceRef scanRef) {
+    return tableRef.isBranch()
+        && scanRef != null
+        && scanRef.isBranch()
+        && tableRef.getBranchName().equals(scanRef.getBranchName());
   }
 
   @Override
@@ -358,21 +401,21 @@ public class LanceDataset
 
   @Override
   public Set<TableCapability> capabilities() {
-    if (isTagReference()) {
+    if (isBranchOrTag()) {
       return READ_ONLY_CAPABILITIES;
     }
     return BlobUtils.hasBlobV2Fields(sparkSchema) ? CAPABILITIES_WITH_BLOB_V2 : CAPABILITIES;
   }
 
   protected void ensureWritable() {
-    if (isTagReference()) {
+    if (isBranchOrTag()) {
       throw new UnsupportedOperationException(
-          "Writes are not supported for tag: " + readOptions.getRef().getTagName().get());
+          "Writes are not supported for " + readOptions.getRef());
     }
   }
 
-  private boolean isTagReference() {
-    return readOptions.getRef() != null && readOptions.getRef().getTagName().isPresent();
+  private boolean isBranchOrTag() {
+    return readOptions.getRef() != null && readOptions.getRef().isBranchOrTag();
   }
 
   @Override

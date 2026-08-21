@@ -15,7 +15,6 @@ package org.lance.spark.read;
 
 import org.lance.Dataset;
 import org.lance.Fragment;
-import org.lance.Tag;
 import org.lance.spark.LanceRef;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Utils;
@@ -26,7 +25,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 public class LanceSplit implements Serializable {
   private static final long serialVersionUID = 2983749283749283749L;
@@ -101,31 +99,8 @@ public class LanceSplit implements Serializable {
       fragmentRowCounts.put(id, fragment.metadata().getNumRows());
     }
 
-    LanceRef plannedRef;
-
-    LanceRef ref = readOptions.getRef();
-    if (ref != null && ref.getBranchName().isPresent()) {
-      plannedRef = LanceRef.ofBranch(ref.getBranchName().get(), dataset.getVersion().getId());
-    } else if (ref != null && ref.getTagName().isPresent()) {
-      Optional<Tag> tag =
-          dataset.tags().list().stream()
-              .filter(t -> t.getName().equals(ref.getTagName().get()))
-              .findFirst();
-      if (tag.isEmpty()) {
-        throw new RuntimeException("No existed tag with name:" + ref.getTagName().get());
-      }
-
-      Optional<String> tagBranch = tag.get().getBranch();
-      if (tagBranch.isEmpty()) {
-        plannedRef = LanceRef.ofMain(dataset.getVersion().getId());
-      } else {
-        plannedRef = LanceRef.ofBranch(tagBranch.get(), dataset.version());
-      }
-    } else {
-      plannedRef = LanceRef.ofMain(dataset.getVersion().getId());
-    }
-
-    return new ScanPlanResult(splits, plannedRef, fragmentRowCounts);
+    LanceRef ref = Utils.pinOpenedRef(dataset, readOptions.getRef());
+    return new ScanPlanResult(splits, ref, fragmentRowCounts);
   }
 
   /**

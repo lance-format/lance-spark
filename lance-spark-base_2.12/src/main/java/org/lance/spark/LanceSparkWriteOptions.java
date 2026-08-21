@@ -520,6 +520,9 @@ public class LanceSparkWriteOptions implements Serializable {
      * @return this builder
      */
     public Builder fromOptions(Map<String, String> options) {
+      Preconditions.checkArgument(
+          !options.containsKey(LanceSparkReadOptions.CONFIG_BRANCH),
+          "The branch option is read-only");
       this.storageOptions = new HashMap<>(options);
       if (options.containsKey(CONFIG_WRITE_MODE)) {
         this.writeMode = WriteMode.valueOf(options.get(CONFIG_WRITE_MODE).toUpperCase());

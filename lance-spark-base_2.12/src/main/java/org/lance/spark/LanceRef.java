@@ -34,18 +34,6 @@ public class LanceRef implements Serializable {
     this.tagName = tagName;
   }
 
-  public Optional<Long> getVersionNumber() {
-    return versionNumber;
-  }
-
-  public Optional<String> getBranchName() {
-    return branchName;
-  }
-
-  public Optional<String> getTagName() {
-    return tagName;
-  }
-
   public static LanceRef ofMain(long versionNumber) {
     Preconditions.checkArgument(versionNumber > 0, "versionNumber must be greater than 0");
     return new LanceRef(Optional.of(versionNumber), Optional.empty(), Optional.empty());
@@ -73,6 +61,34 @@ public class LanceRef implements Serializable {
     return new LanceRef(Optional.empty(), Optional.empty(), Optional.of(tagName));
   }
 
+  public Optional<Long> getVersionNumber() {
+    return versionNumber;
+  }
+
+  public Optional<String> getBranchName() {
+    return branchName;
+  }
+
+  public Optional<String> getTagName() {
+    return tagName;
+  }
+
+  public boolean isMain() {
+    return branchName.isEmpty() && tagName.isEmpty();
+  }
+
+  public boolean isBranch() {
+    return branchName.isPresent();
+  }
+
+  public boolean isTag() {
+    return tagName.isPresent();
+  }
+
+  public boolean isBranchOrTag() {
+    return isBranch() || isTag();
+  }
+
   @Override
   public boolean equals(Object o) {
     if (this == o) {
@@ -94,13 +110,18 @@ public class LanceRef implements Serializable {
 
   @Override
   public String toString() {
-    return "LanceRef{"
-        + "versionNumber="
-        + (versionNumber.isPresent() ? versionNumber.get() : null)
-        + ", branchName="
-        + (branchName.isPresent() ? branchName.get() : null)
-        + ", tagName="
-        + (tagName.isPresent() ? tagName.get() : null)
-        + '}';
+    if (isTag()) {
+      return "tag " + tagName.get();
+    }
+    if (isBranch() && versionNumber.isPresent()) {
+      return "branch " + branchName.get() + " version " + versionNumber.get();
+    }
+    if (isBranch()) {
+      return "branch " + branchName.get();
+    }
+    if (versionNumber.isPresent()) {
+      return "version " + versionNumber.get();
+    }
+    return "main";
   }
 }
