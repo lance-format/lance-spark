@@ -35,6 +35,12 @@ import java.util.List;
  * match lance-spark's. Scan planning — column projection, filter pushdown, limit/offset, batch size
  * — is delegated to {@link LanceFragmentScanner}.
  *
+ * <p>{@link #export} rejects a partition with a pushed aggregation (e.g. {@code COUNT(*)}): its
+ * Spark output is the aggregate result produced by a dedicated reader ({@link
+ * org.lance.spark.read.LanceCountStarPartitionReader}), not the data rows this fragment scan
+ * returns. Filter, limit, offset, and top-N ordering, by contrast, are pushed faithfully into the
+ * native scan, so they are exportable.
+ *
  * <p>The exported stream carries the raw native scan schema, which for a projection of ordinary
  * data columns is exactly the rows and order the Spark columnar reader produces. Shapes that the
  * columnar reader fixes up on the JVM after import — the synthesized {@code _fragid} column, an
@@ -61,11 +67,12 @@ public final class LanceArrowStreamScanner {
    * @param fragmentId the Lance fragment to scan
    * @param inputPartition the planned partition (schema, filter, limit/offset, storage options)
    * @return an open Arrow C stream handle over the fragment scan
-   * @throws UnsupportedOperationException if the partition schema needs JVM-side post-processing
-   *     that this raw export cannot reproduce (see the class documentation)
+   * @throws UnsupportedOperationException if the partition needs execution this raw fragment scan
+   *     cannot reproduce — a pushed aggregation, or a schema that needs JVM-side post-processing
+   *     (see the class documentation)
    */
   public static LanceArrowStream export(int fragmentId, LanceInputPartition inputPartition) {
-    checkExportableSchema(inputPartition.getSchema());
+    checkExportablePartition(inputPartition);
     LanceFragmentScanner fragmentScanner = LanceFragmentScanner.create(fragmentId, inputPartition);
     // Allocate inside the cleanup scope: allocateNew can fail (e.g. a bounded allocator), and the
     // dataset + scanner opened by create() above must still be closed on that path.
@@ -92,15 +99,26 @@ public final class LanceArrowStreamScanner {
   }
 
   /**
-   * Rejects partition schemas whose Spark-visible output differs from the raw native scan schema.
+   * Rejects partitions whose Spark-visible output differs from the raw native fragment scan.
    *
-   * <p>{@link LanceFragmentScanner} drops these columns from the native projection (and {@link
-   * org.lance.spark.read.LanceFragmentColumnarBatchScanner} synthesizes/strips/reorders them after
-   * import), so exporting the native stream as-is would surface a schema that does not match the
-   * partition. Such partitions are not offloadable through this path; the caller must read them
-   * with the columnar scanner instead.
+   * <p>A pushed aggregation (e.g. {@code COUNT(*)}) is rejected first: {@link
+   * org.lance.spark.read.LanceScan} routes it to a dedicated reader that returns the aggregate
+   * result, but {@link LanceFragmentScanner} ignores {@code pushedAggregation} and scans data rows.
+   *
+   * <p>A schema is then rejected if it names columns {@link LanceFragmentScanner} drops from the
+   * native projection while {@link org.lance.spark.read.LanceFragmentColumnarBatchScanner}
+   * synthesizes/strips/reorders them after import, so exporting the native stream as-is would
+   * surface a schema that does not match the partition. Such partitions are not offloadable through
+   * this path; the caller must read them with the columnar / aggregate reader instead.
    */
-  private static void checkExportableSchema(StructType schema) {
+  private static void checkExportablePartition(LanceInputPartition inputPartition) {
+    if (inputPartition.getPushedAggregation().isPresent()) {
+      throw new UnsupportedOperationException(
+          "Arrow C stream export does not support pushed aggregation (e.g. COUNT(*)): the "
+              + "partition's Spark output is the aggregate result, but the native fragment scan "
+              + "returns data rows. Fall back to the aggregate reader for this partition.");
+    }
+    StructType schema = inputPartition.getSchema();
     if (schema.isEmpty()) {
       throw new UnsupportedOperationException(
           "Arrow C stream export requires a non-empty column projection: an empty projection makes "

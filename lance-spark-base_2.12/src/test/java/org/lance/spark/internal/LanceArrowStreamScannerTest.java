@@ -23,6 +23,10 @@ import org.lance.spark.utils.Optional;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowReader;
+import org.apache.spark.sql.connector.expressions.Expression;
+import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
+import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
+import org.apache.spark.sql.connector.expressions.aggregate.CountStar;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
@@ -115,6 +119,39 @@ public class LanceArrowStreamScannerTest {
         () ->
             LanceArrowStreamScanner.export(
                 0, partitionWithSchema(longSchema("x", LanceConstant.ROW_ID))));
+  }
+
+  /**
+   * A pushed {@code COUNT(*)} partition is served by a dedicated aggregate reader that returns a
+   * single {@code count} column; {@link LanceFragmentScanner} ignores {@code pushedAggregation} and
+   * scans data rows, so exporting it would produce the wrong output. It must be rejected even
+   * though its schema alone looks exportable.
+   */
+  @Test
+  public void exportRejectsPushedAggregation() {
+    Aggregation countStar =
+        new Aggregation(new AggregateFunc[] {new CountStar()}, new Expression[] {});
+    assertThrows(
+        UnsupportedOperationException.class,
+        () -> LanceArrowStreamScanner.export(0, partitionWithAggregation(countStar)));
+  }
+
+  private static LanceInputPartition partitionWithAggregation(Aggregation pushedAggregation) {
+    return new LanceInputPartition(
+        TestUtils.TestTable1Config.inputPartition.getSchema(),
+        0 /* partitionId */,
+        new LanceSplit(Arrays.asList(0, 1)),
+        TestUtils.TestTable1Config.readOptions,
+        Optional.empty() /* whereCondition */,
+        Optional.empty() /* limit */,
+        Optional.empty() /* offset */,
+        Optional.empty() /* topNSortOrders */,
+        Optional.of(pushedAggregation),
+        "gate-probe" /* scanId */,
+        null /* initialStorageOptions */,
+        null /* namespaceImpl */,
+        null /* namespaceProperties */,
+        null /* partitionKeyRow */);
   }
 
   private static StructType longSchema(String... names) {
