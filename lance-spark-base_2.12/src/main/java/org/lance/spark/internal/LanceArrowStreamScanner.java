@@ -13,14 +13,12 @@
  */
 package org.lance.spark.internal;
 
-import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.read.LanceInputPartition;
-import org.lance.spark.utils.BlobUtils;
 
 import org.apache.arrow.c.ArrowArrayStream;
+import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.spark.sql.types.StructField;
-import org.apache.spark.sql.types.StructType;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -41,13 +39,13 @@ import java.util.List;
  * returns. Filter, limit, offset, and top-N ordering, by contrast, are pushed faithfully into the
  * native scan, so they are exportable.
  *
- * <p>The exported stream carries the raw native scan schema, which for a projection of ordinary
- * data columns is exactly the rows and order the Spark columnar reader produces. Shapes that the
- * columnar reader fixes up on the JVM after import — the synthesized {@code _fragid} column, an
- * empty projection (which surfaces the internal {@code _rowid}), metadata columns ({@code _rowid} /
- * {@code _rowaddr} / row-version / {@code _score}), or blob columns — would export a schema that
- * does not match the partition, so {@link #export} rejects them with {@link
- * UnsupportedOperationException} and the caller must fall back to the columnar reader.
+ * <p>The export is zero-copy: it cannot re-project or reorder columns the way the Spark columnar
+ * reader does on the JVM after import. So {@link #export} verifies that the schema the native scan
+ * actually produces equals the declared partition schema (field names, in order) and rejects the
+ * partition otherwise. This covers columns the columnar reader reconciles after import — the
+ * synthesized {@code _fragid}, the {@code _score} a full-text query auto-projects, the {@code
+ * _rowaddr} added for blob columns, the {@code _rowid} an empty projection surfaces, and reordered
+ * row-version columns — none of which the raw stream can reproduce.
  *
  * <p>The Lance native core writes batches into the caller-owned stream on demand as the consumer
  * pulls them, so no Arrow data is materialized on the JVM heap on this path.
@@ -68,16 +66,17 @@ public final class LanceArrowStreamScanner {
    * @param inputPartition the planned partition (schema, filter, limit/offset, storage options)
    * @return an open Arrow C stream handle over the fragment scan
    * @throws UnsupportedOperationException if the partition needs execution this raw fragment scan
-   *     cannot reproduce — a pushed aggregation, or a schema that needs JVM-side post-processing
-   *     (see the class documentation)
+   *     cannot reproduce — a pushed aggregation, or a native scan schema that does not match the
+   *     declared partition schema (see the class documentation)
    */
   public static LanceArrowStream export(int fragmentId, LanceInputPartition inputPartition) {
-    checkExportablePartition(inputPartition);
+    checkNoPushedAggregation(inputPartition);
     LanceFragmentScanner fragmentScanner = LanceFragmentScanner.create(fragmentId, inputPartition);
-    // Allocate inside the cleanup scope: allocateNew can fail (e.g. a bounded allocator), and the
-    // dataset + scanner opened by create() above must still be closed on that path.
+    // Allocate inside the cleanup scope: the schema check and allocateNew can throw (a mismatch or
+    // e.g. a bounded allocator), and the dataset + scanner opened by create() must still be closed.
     ArrowArrayStream stream = null;
     try {
+      checkNativeSchemaMatchesPartition(fragmentScanner, inputPartition);
       stream = ArrowArrayStream.allocateNew(LanceRuntime.allocator());
       // The Lance native core populates the caller-owned stream directly from the planned scan, so
       // no Arrow batch is ever materialized on the JVM heap here — the consumer pulls batches over
@@ -99,52 +98,46 @@ public final class LanceArrowStreamScanner {
   }
 
   /**
-   * Rejects partitions whose Spark-visible output differs from the raw native fragment scan.
-   *
-   * <p>A pushed aggregation (e.g. {@code COUNT(*)}) is rejected first: {@link
-   * org.lance.spark.read.LanceScan} routes it to a dedicated reader that returns the aggregate
-   * result, but {@link LanceFragmentScanner} ignores {@code pushedAggregation} and scans data rows.
-   *
-   * <p>A schema is then rejected if it names columns {@link LanceFragmentScanner} drops from the
-   * native projection while {@link org.lance.spark.read.LanceFragmentColumnarBatchScanner}
-   * synthesizes/strips/reorders them after import, so exporting the native stream as-is would
-   * surface a schema that does not match the partition. Such partitions are not offloadable through
-   * this path; the caller must read them with the columnar / aggregate reader instead.
+   * Rejects a pushed aggregation (e.g. {@code COUNT(*)}) before the scan is planned. {@link
+   * org.lance.spark.read.LanceScan} routes such a partition to a dedicated reader that returns the
+   * aggregate result, but {@link LanceFragmentScanner} ignores {@code pushedAggregation} and scans
+   * data rows — and the aggregate partition's declared schema can equal the native data schema, so
+   * the schema check below cannot catch it.
    */
-  private static void checkExportablePartition(LanceInputPartition inputPartition) {
+  private static void checkNoPushedAggregation(LanceInputPartition inputPartition) {
     if (inputPartition.getPushedAggregation().isPresent()) {
       throw new UnsupportedOperationException(
           "Arrow C stream export does not support pushed aggregation (e.g. COUNT(*)): the "
               + "partition's Spark output is the aggregate result, but the native fragment scan "
               + "returns data rows. Fall back to the aggregate reader for this partition.");
     }
-    StructType schema = inputPartition.getSchema();
-    if (schema.isEmpty()) {
-      throw new UnsupportedOperationException(
-          "Arrow C stream export requires a non-empty column projection: an empty projection makes "
-              + "the native scan surface the internal _rowid column. Fall back to the columnar "
-              + "reader for this partition.");
+  }
+
+  /**
+   * Rejects a partition whose declared Spark schema differs from the schema the native scan
+   * actually produces. The columnar reader reconciles such differences on the JVM after import —
+   * synthesizing {@code _fragid}, dropping the {@code _score} a full-text query auto-projects,
+   * stripping the {@code _rowaddr} added for blobs, surfacing {@code _rowid} for an empty
+   * projection, reordering row-version columns — but this zero-copy export cannot, so any mismatch
+   * in field names or order must fall back to the columnar reader.
+   */
+  private static void checkNativeSchemaMatchesPartition(
+      LanceFragmentScanner fragmentScanner, LanceInputPartition inputPartition) {
+    List<String> declared = new ArrayList<>();
+    for (StructField field : inputPartition.getSchema().fields()) {
+      declared.add(field.name());
     }
-    List<String> unsupported = new ArrayList<>();
-    for (StructField field : schema.fields()) {
-      String name = field.name();
-      if (name.equals(LanceConstant.FRAGMENT_ID)
-          || name.equals(LanceConstant.ROW_ID)
-          || name.equals(LanceConstant.ROW_ADDRESS)
-          || name.equals(LanceConstant.ROW_CREATED_AT_VERSION)
-          || name.equals(LanceConstant.ROW_LAST_UPDATED_AT_VERSION)
-          || name.equals(LanceConstant.SCORE)
-          || name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)
-          || name.endsWith(LanceConstant.BLOB_SIZE_SUFFIX)
-          || BlobUtils.isBlobReadColumn(field)) {
-        unsupported.add(name);
-      }
+    List<String> nativeColumns = new ArrayList<>();
+    for (Field field : fragmentScanner.schema().getFields()) {
+      nativeColumns.add(field.getName());
     }
-    if (!unsupported.isEmpty()) {
+    if (!declared.equals(nativeColumns)) {
       throw new UnsupportedOperationException(
-          "Arrow C stream export does not support metadata or blob columns that the columnar "
-              + "reader synthesizes, strips, or reorders relative to the native scan: "
-              + unsupported
+          "Arrow C stream export requires the native scan schema to match the partition schema, "
+              + "which this zero-copy export cannot re-project or reorder. Declared "
+              + declared
+              + " but the native scan produced "
+              + nativeColumns
               + ". Fall back to the columnar reader for this partition.");
     }
   }

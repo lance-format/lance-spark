@@ -26,6 +26,7 @@ import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.vector.ipc.ArrowReader;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
@@ -197,6 +198,15 @@ public class LanceFragmentScanner implements AutoCloseable {
    */
   public void exportArrowStream(long streamAddress) throws IOException {
     scanner.exportArrowStream(streamAddress);
+  }
+
+  /**
+   * @return the Arrow schema the native scan produces, including any columns Lance auto-projects
+   *     that are not in the requested projection (e.g. {@code _rowid}, {@code _rowaddr}, or the
+   *     {@code _score} of a full-text query)
+   */
+  public Schema schema() {
+    return scanner.schema();
   }
 
   @Override

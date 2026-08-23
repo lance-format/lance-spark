@@ -96,9 +96,11 @@ public class LanceArrowStreamScannerTest {
   }
 
   /**
-   * Schemas whose Spark output differs from the raw native scan (synthesized {@code _fragid}, empty
-   * projection surfacing {@code _rowid}, or other stripped/reordered metadata columns) are rejected
-   * so the caller can fall back to the columnar reader instead of getting a wrong schema.
+   * When the native scan schema does not match the declared partition schema, export rejects the
+   * partition so the caller falls back to the columnar reader. A synthesized {@code _fragid} is not
+   * produced by the native scan (native returns fewer columns), while an empty projection makes the
+   * native scan surface {@code _rowid} (native returns an extra column — the same shape a full-text
+   * query's auto-projected {@code _score} takes).
    */
   @Test
   public void exportRejectsSchemasNeedingJvmPostProcessing() {
@@ -113,12 +115,6 @@ public class LanceArrowStreamScannerTest {
         () ->
             LanceArrowStreamScanner.export(
                 0, partitionWithSchema(new StructType(new StructField[0]))));
-
-    assertThrows(
-        UnsupportedOperationException.class,
-        () ->
-            LanceArrowStreamScanner.export(
-                0, partitionWithSchema(longSchema("x", LanceConstant.ROW_ID))));
   }
 
   /**
