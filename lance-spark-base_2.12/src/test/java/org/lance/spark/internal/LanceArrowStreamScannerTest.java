@@ -13,18 +13,27 @@
  */
 package org.lance.spark.internal;
 
+import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.TestUtils;
+import org.lance.spark.read.LanceInputPartition;
+import org.lance.spark.read.LanceSplit;
+import org.lance.spark.utils.Optional;
 
 import org.apache.arrow.c.Data;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowReader;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class LanceArrowStreamScannerTest {
 
@@ -67,5 +76,70 @@ public class LanceArrowStreamScannerTest {
       }
     }
     assertEquals(4, rowIndex);
+  }
+
+  /**
+   * A native consumer receives {@link LanceArrowStreamScanner.LanceArrowStream#streamAddress()} and
+   * may abandon or only partially consume the raw C stream. Closing the handle with no Java-side
+   * import must still run the stream's release callback and free the struct — under the
+   * leak-checking allocator, skipping either would surface an outstanding buffer.
+   */
+  @Test
+  public void closeReleasesStreamThatWasNeverImported() throws Exception {
+    LanceArrowStreamScanner.LanceArrowStream handle =
+        LanceArrowStreamScanner.export(0, TestUtils.TestTable1Config.inputPartition);
+    handle.close();
+  }
+
+  /**
+   * Schemas whose Spark output differs from the raw native scan (synthesized {@code _fragid}, empty
+   * projection surfacing {@code _rowid}, or other stripped/reordered metadata columns) are rejected
+   * so the caller can fall back to the columnar reader instead of getting a wrong schema.
+   */
+  @Test
+  public void exportRejectsSchemasNeedingJvmPostProcessing() {
+    assertThrows(
+        UnsupportedOperationException.class,
+        () ->
+            LanceArrowStreamScanner.export(
+                0, partitionWithSchema(longSchema("x", LanceConstant.FRAGMENT_ID))));
+
+    assertThrows(
+        UnsupportedOperationException.class,
+        () ->
+            LanceArrowStreamScanner.export(
+                0, partitionWithSchema(new StructType(new StructField[0]))));
+
+    assertThrows(
+        UnsupportedOperationException.class,
+        () ->
+            LanceArrowStreamScanner.export(
+                0, partitionWithSchema(longSchema("x", LanceConstant.ROW_ID))));
+  }
+
+  private static StructType longSchema(String... names) {
+    StructField[] fields = new StructField[names.length];
+    for (int i = 0; i < names.length; i++) {
+      fields[i] = DataTypes.createStructField(names[i], DataTypes.LongType, true);
+    }
+    return new StructType(fields);
+  }
+
+  private static LanceInputPartition partitionWithSchema(StructType schema) {
+    return new LanceInputPartition(
+        schema,
+        0 /* partitionId */,
+        new LanceSplit(Arrays.asList(0, 1)),
+        TestUtils.TestTable1Config.readOptions,
+        Optional.empty() /* whereCondition */,
+        Optional.empty() /* limit */,
+        Optional.empty() /* offset */,
+        Optional.empty() /* topNSortOrders */,
+        Optional.empty() /* pushedAggregation */,
+        "gate-probe" /* scanId */,
+        null /* initialStorageOptions */,
+        null /* namespaceImpl */,
+        null /* namespaceProperties */,
+        null /* partitionKeyRow */);
   }
 }

@@ -13,12 +13,18 @@
  */
 package org.lance.spark.internal;
 
+import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.read.LanceInputPartition;
+import org.lance.spark.utils.BlobUtils;
 
 import org.apache.arrow.c.ArrowArrayStream;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Exports a Lance fragment scan as an Arrow C Data Interface stream ({@link ArrowArrayStream}) for
@@ -26,9 +32,16 @@ import java.io.IOException;
  *
  * <p>Only the {@link ArrowArrayStream} C-struct address ({@link LanceArrowStream#streamAddress()})
  * crosses the JVM/native boundary, so the consumer's Arrow build and classloader do not need to
- * match lance-spark's. All scan planning — column projection, filter pushdown, limit/offset, row-id
- * / row-address, batch size — is delegated to {@link LanceFragmentScanner}, so this path produces
- * exactly the same rows in the same order as the Spark columnar reader.
+ * match lance-spark's. Scan planning — column projection, filter pushdown, limit/offset, batch size
+ * — is delegated to {@link LanceFragmentScanner}.
+ *
+ * <p>The exported stream carries the raw native scan schema, which for a projection of ordinary
+ * data columns is exactly the rows and order the Spark columnar reader produces. Shapes that the
+ * columnar reader fixes up on the JVM after import — the synthesized {@code _fragid} column, an
+ * empty projection (which surfaces the internal {@code _rowid}), metadata columns ({@code _rowid} /
+ * {@code _rowaddr} / row-version / {@code _score}), or blob columns — would export a schema that
+ * does not match the partition, so {@link #export} rejects them with {@link
+ * UnsupportedOperationException} and the caller must fall back to the columnar reader.
  *
  * <p>The Lance native core writes batches into the caller-owned stream on demand as the consumer
  * pulls them, so no Arrow data is materialized on the JVM heap on this path.
@@ -48,11 +61,17 @@ public final class LanceArrowStreamScanner {
    * @param fragmentId the Lance fragment to scan
    * @param inputPartition the planned partition (schema, filter, limit/offset, storage options)
    * @return an open Arrow C stream handle over the fragment scan
+   * @throws UnsupportedOperationException if the partition schema needs JVM-side post-processing
+   *     that this raw export cannot reproduce (see the class documentation)
    */
   public static LanceArrowStream export(int fragmentId, LanceInputPartition inputPartition) {
+    checkExportableSchema(inputPartition.getSchema());
     LanceFragmentScanner fragmentScanner = LanceFragmentScanner.create(fragmentId, inputPartition);
-    ArrowArrayStream stream = ArrowArrayStream.allocateNew(LanceRuntime.allocator());
+    // Allocate inside the cleanup scope: allocateNew can fail (e.g. a bounded allocator), and the
+    // dataset + scanner opened by create() above must still be closed on that path.
+    ArrowArrayStream stream = null;
     try {
+      stream = ArrowArrayStream.allocateNew(LanceRuntime.allocator());
       // The Lance native core populates the caller-owned stream directly from the planned scan, so
       // no Arrow batch is ever materialized on the JVM heap here — the consumer pulls batches over
       // the C Data Interface. The stream's release callback routes back to the native side, so
@@ -72,6 +91,46 @@ public final class LanceArrowStreamScanner {
     return new LanceArrowStream(stream, fragmentScanner);
   }
 
+  /**
+   * Rejects partition schemas whose Spark-visible output differs from the raw native scan schema.
+   *
+   * <p>{@link LanceFragmentScanner} drops these columns from the native projection (and {@link
+   * org.lance.spark.read.LanceFragmentColumnarBatchScanner} synthesizes/strips/reorders them after
+   * import), so exporting the native stream as-is would surface a schema that does not match the
+   * partition. Such partitions are not offloadable through this path; the caller must read them
+   * with the columnar scanner instead.
+   */
+  private static void checkExportableSchema(StructType schema) {
+    if (schema.isEmpty()) {
+      throw new UnsupportedOperationException(
+          "Arrow C stream export requires a non-empty column projection: an empty projection makes "
+              + "the native scan surface the internal _rowid column. Fall back to the columnar "
+              + "reader for this partition.");
+    }
+    List<String> unsupported = new ArrayList<>();
+    for (StructField field : schema.fields()) {
+      String name = field.name();
+      if (name.equals(LanceConstant.FRAGMENT_ID)
+          || name.equals(LanceConstant.ROW_ID)
+          || name.equals(LanceConstant.ROW_ADDRESS)
+          || name.equals(LanceConstant.ROW_CREATED_AT_VERSION)
+          || name.equals(LanceConstant.ROW_LAST_UPDATED_AT_VERSION)
+          || name.equals(LanceConstant.SCORE)
+          || name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)
+          || name.endsWith(LanceConstant.BLOB_SIZE_SUFFIX)
+          || BlobUtils.isBlobReadColumn(field)) {
+        unsupported.add(name);
+      }
+    }
+    if (!unsupported.isEmpty()) {
+      throw new UnsupportedOperationException(
+          "Arrow C stream export does not support metadata or blob columns that the columnar "
+              + "reader synthesizes, strips, or reorders relative to the native scan: "
+              + unsupported
+              + ". Fall back to the columnar reader for this partition.");
+    }
+  }
+
   private static void closeQuietly(AutoCloseable closeable) {
     if (closeable != null) {
       try {
@@ -85,9 +144,12 @@ public final class LanceArrowStreamScanner {
   /**
    * Owns an exported {@link ArrowArrayStream} together with the fragment scan behind it.
    *
-   * <p>{@link #close()} releases, in order, the exported stream (whose release callback tears down
-   * the native scan, freeing its buffers) and then the Lance scanner and dataset handles. These are
-   * distinct resources: the stream drives the native scan, while the scanner owns the open dataset.
+   * <p>{@link #close()} runs the stream's release callback (tearing down the native scan), frees
+   * the stream struct, and then closes the Lance scanner and dataset handles, in that order. These
+   * are distinct resources: the stream drives the native scan, while the scanner owns the open
+   * dataset. Running the release callback here is what frees the native provider state when a
+   * consumer abandons or only partially consumes the raw C stream; it is skipped when a consumer
+   * has already imported or released the stream.
    */
   public static final class LanceArrowStream implements AutoCloseable {
     private final ArrowArrayStream stream;
@@ -114,8 +176,9 @@ public final class LanceArrowStreamScanner {
     @Override
     public void close() throws IOException {
       Throwable primary = null;
-      // Closing the stream runs its release callback, tearing down the native scan and its buffers;
-      // then release the scanner and the dataset it holds open.
+      // Run the C release callback (drops the native provider's private_data + record-batch
+      // stream), then free the struct buffer, then release the scanner and the dataset it holds.
+      primary = releaseStream(primary);
       primary = closeAndAccumulate(stream, primary);
       primary = closeAndAccumulate(fragmentScanner, primary);
       if (primary != null) {
@@ -132,6 +195,34 @@ public final class LanceArrowStreamScanner {
       }
     }
 
+    /**
+     * Invokes the stream's release callback so an abandoned or partially-consumed raw C stream
+     * still drops its native provider state, then leaves {@link #close()} to free the struct.
+     *
+     * <p>Idempotent against a consumer that already took the stream: {@code ArrowArrayStreamReader}
+     * snapshots the callback into its own struct and closes this one on import, so the struct may
+     * be freed ({@link ArrowArrayStream#snapshot()} throws) or the callback already moved/released
+     * (release address is {@code NULL} per the Arrow C ABI). In both cases there is nothing to
+     * release here.
+     */
+    private Throwable releaseStream(Throwable primary) {
+      long releaseCallback;
+      try {
+        releaseCallback = stream.snapshot().release;
+      } catch (RuntimeException alreadyClosed) {
+        return primary;
+      }
+      if (releaseCallback == 0L) {
+        return primary;
+      }
+      try {
+        stream.release();
+        return primary;
+      } catch (Throwable t) {
+        return accumulate(primary, t);
+      }
+    }
+
     private static Throwable closeAndAccumulate(AutoCloseable closeable, Throwable primary) {
       if (closeable == null) {
         return primary;
@@ -140,12 +231,16 @@ public final class LanceArrowStreamScanner {
         closeable.close();
         return primary;
       } catch (Throwable t) {
-        if (primary != null) {
-          primary.addSuppressed(t);
-          return primary;
-        }
-        return t;
+        return accumulate(primary, t);
       }
+    }
+
+    private static Throwable accumulate(Throwable primary, Throwable t) {
+      if (primary != null) {
+        primary.addSuppressed(t);
+        return primary;
+      }
+      return t;
     }
   }
 }
