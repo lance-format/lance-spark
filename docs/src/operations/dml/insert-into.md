@@ -368,10 +368,12 @@ These options control how data is written to Lance datasets. They can be set usi
 
 By default, Arrow uses 32-bit offset vectors (`VarCharVector` / `VarBinaryVector`) for string and binary columns, which limits the total data buffer to 2GB per batch. When writing rows with very large values (e.g., documents, images, serialized objects), a single batch can exceed this limit and fail with `OversizedAllocationException`.
 
-Setting `use_large_var_types` to `true` switches all string and binary columns to 64-bit offset vectors (`LargeVarCharVector` / `LargeVarBinaryVector`), removing the 2GB-per-batch ceiling. This applies to all string and binary columns in the schema, including those nested inside structs, arrays, and maps.
+Setting `use_large_var_types` to `true` switches all string and binary columns to 64-bit offset vectors (`LargeVarCharVector` / `LargeVarBinaryVector`) when creating a dataset or performing a full-table overwrite. This applies recursively to string and binary columns nested inside structs, arrays, and maps.
 
 !!!note
-    This differs from the per-column [`arrow.large_var_char` table property](../ddl/create-table.md#large-string-columns), which is set at table creation time and applies only to specific columns. The `use_large_var_types` write option applies to all string/binary columns for a single write operation.
+    Append and row-level writes must use the existing table schema. Setting this option while appending to a table that still has `Utf8` or `Binary` fields fails before executor writers start; create the table with large variable-width fields first.
+
+    This differs from the per-column [`arrow.large_var_char` table property](../ddl/create-table.md#large-string-columns), which is set at table creation time and applies only to specific columns.
 
 === "Python"
     ```python

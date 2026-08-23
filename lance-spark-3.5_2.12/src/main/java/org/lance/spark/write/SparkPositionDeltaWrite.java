@@ -34,6 +34,7 @@ import org.lance.spark.utils.Utils;
 import com.google.common.collect.ImmutableList;
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.distributions.Distribution;
 import org.apache.spark.sql.connector.distributions.Distributions;
@@ -80,6 +81,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
   private static final int ID_COL_ROW_ID = 1;
 
   private final StructType sparkSchema;
+  private final Schema arrowSchema;
   private final LanceSparkWriteOptions writeOptions;
 
   /**
@@ -110,6 +112,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       Map<String, BlobSourceContext> blobSourceContexts) {
     this.sparkSchema = sparkSchema;
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
+      this.arrowSchema =
+          Objects.requireNonNull(ds.getSchema(), "Failed to get schema from existing dataset");
       this.writeOptions = writeOptions.withVersion(ds.version());
       this.hasStableRowIds = hasStableRowIds(ds, writeOptions);
       LOG.debug(
@@ -153,6 +157,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     public DeltaWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
       return new PositionDeltaWriteFactory(
           sparkSchema,
+          arrowSchema,
           writeOptions,
           initialStorageOptions,
           namespaceImpl,
@@ -253,6 +258,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
   private static class PositionDeltaWriteFactory implements DeltaWriterFactory {
     private final StructType sparkSchema;
+    private final String arrowSchemaJson;
     private final LanceSparkWriteOptions writeOptions;
 
     /**
@@ -271,6 +277,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
     PositionDeltaWriteFactory(
         StructType sparkSchema,
+        Schema arrowSchema,
         LanceSparkWriteOptions writeOptions,
         Map<String, String> initialStorageOptions,
         String namespaceImpl,
@@ -279,6 +286,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
         boolean hasStableRowIds,
         Map<String, BlobSourceContext> blobSourceContexts) {
       this.sparkSchema = sparkSchema;
+      this.arrowSchemaJson = arrowSchema.toJson();
       this.writeOptions = writeOptions;
       this.initialStorageOptions = initialStorageOptions;
       this.namespaceImpl = namespaceImpl;
@@ -292,7 +300,6 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     public DeltaWriter<InternalRow> createWriter(int partitionId, long taskId) {
       int batchSize = writeOptions.getBatchSize();
       boolean useQueuedBuffer = writeOptions.isUseQueuedWriteBuffer();
-      boolean useLargeVarTypes = writeOptions.isUseLargeVarTypes();
       long maxBatchBytes = writeOptions.getMaxBatchBytes();
 
       LanceSparkWriteOptions fragmentWriteOptions =
@@ -303,17 +310,24 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       // created so copy tokens resolve even without captured contexts (falls back to open-by-URI).
       BlobReferenceResolver blobResolver = new BlobReferenceResolver(blobSourceContexts);
 
-      // Select buffer type based on configuration
+      final Schema arrowSchema;
+      try {
+        arrowSchema = Schema.fromJSON(arrowSchemaJson);
+      } catch (IOException e) {
+        throw new IllegalStateException("Failed to deserialize existing Arrow schema", e);
+      }
+
+      // Write replacement rows with the schema from the same dataset snapshot as readVersion.
       ArrowBatchWriteBuffer writeBuffer;
       if (useQueuedBuffer) {
         int queueDepth = writeOptions.getQueueDepth();
         writeBuffer =
             new QueuedArrowBatchWriteBuffer(
-                sparkSchema, batchSize, queueDepth, useLargeVarTypes, maxBatchBytes, blobResolver);
+                arrowSchema, sparkSchema, batchSize, queueDepth, maxBatchBytes, blobResolver);
       } else {
         writeBuffer =
             new SemaphoreArrowBatchWriteBuffer(
-                sparkSchema, batchSize, useLargeVarTypes, maxBatchBytes, blobResolver);
+                arrowSchema, sparkSchema, batchSize, maxBatchBytes, blobResolver);
       }
 
       // Create fragment in background thread

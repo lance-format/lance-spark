@@ -237,9 +237,9 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
     private final Map<String, BlobSourceContext> blobSourceContexts;
 
     /**
-     * JSON representation of the original Arrow Schema from the existing dataset. Used in overwrite
-     * mode to construct the write buffer with the correct schema, avoiding information loss during
-     * Spark to Arrow conversion. Null for append mode or new datasets.
+     * JSON representation of the Arrow schema resolved from the existing dataset snapshot. Used to
+     * construct the write buffer for append and schema-preserving overwrite without losing Lance
+     * native types during Spark-to-Arrow conversion. Null only for writes that create a dataset.
      */
     private final String originalArrowSchemaJson;
 
@@ -259,6 +259,31 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
           tableId,
           null,
           Collections.emptyMap(),
+          null);
+    }
+
+    /**
+     * @deprecated Use the overload that accepts the existing Arrow schema JSON.
+     */
+    @Deprecated
+    public WriterFactory(
+        StructType schema,
+        LanceSparkWriteOptions writeOptions,
+        Map<String, String> initialStorageOptions,
+        String namespaceImpl,
+        Map<String, String> namespaceProperties,
+        List<String> tableId,
+        ShardingSpec shardingSpec,
+        Map<String, BlobSourceContext> blobSourceContexts) {
+      this(
+          schema,
+          writeOptions,
+          initialStorageOptions,
+          namespaceImpl,
+          namespaceProperties,
+          tableId,
+          shardingSpec,
+          blobSourceContexts,
           null);
     }
 
@@ -315,6 +340,15 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
                 ArrowArrayStream.allocateNew(LanceRuntime.allocator())) {
               Data.exportArrayStream(LanceRuntime.allocator(), bufferRef, arrowStream);
               return Fragment.create(writeOptions.getDatasetUri(), arrowStream, params);
+            } catch (Exception e) {
+              if (originalSchema != null) {
+                throw new IOException(
+                    "Failed to create a Lance fragment using the existing Arrow schema. "
+                        + "Preserved nullability is enforced; a null parent struct cannot be "
+                        + "written when it contains non-nullable children.",
+                    e);
+              }
+              throw e;
             }
           };
       FutureTask<List<FragmentMetadata>> task = writeBuffer.createTrackedTask(fragmentCreator);

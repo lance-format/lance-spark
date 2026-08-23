@@ -138,6 +138,14 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
         resolver);
   }
 
+  /**
+   * @deprecated Use the overload that explicitly selects large variable-width types.
+   */
+  @Deprecated
+  public QueuedArrowBatchWriteBuffer(StructType sparkSchema, int batchSize, int queueDepth) {
+    this(sparkSchema, batchSize, queueDepth, false);
+  }
+
   /** Constructor with large var types support, using default max batch bytes. */
   public QueuedArrowBatchWriteBuffer(
       StructType sparkSchema, int batchSize, int queueDepth, boolean useLargeVarTypes) {
@@ -167,7 +175,11 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
         resolver);
   }
 
-  QueuedArrowBatchWriteBuffer(
+  /**
+   * @deprecated Retained for source and binary compatibility.
+   */
+  @Deprecated
+  public QueuedArrowBatchWriteBuffer(
       BufferAllocator allocator, Schema schema, StructType sparkSchema, int batchSize) {
     this(
         allocator,
@@ -179,7 +191,11 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
         null);
   }
 
-  QueuedArrowBatchWriteBuffer(
+  /**
+   * @deprecated Retained for source and binary compatibility.
+   */
+  @Deprecated
+  public QueuedArrowBatchWriteBuffer(
       BufferAllocator allocator,
       Schema schema,
       StructType sparkSchema,
@@ -195,7 +211,11 @@ public class QueuedArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
         null);
   }
 
-  QueuedArrowBatchWriteBuffer(
+  /**
+   * @deprecated Retained for source and binary compatibility.
+   */
+  @Deprecated
+  public QueuedArrowBatchWriteBuffer(
       BufferAllocator allocator,
       Schema schema,
       StructType sparkSchema,

@@ -24,7 +24,12 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.connector.write.DeltaBatchWrite;
+import org.apache.spark.sql.connector.write.DeltaWriter;
+import org.apache.spark.sql.connector.write.DeltaWriterFactory;
+import org.apache.spark.sql.connector.write.WriterCommitMessage;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 import org.junit.jupiter.api.Test;
@@ -76,6 +81,45 @@ public class SparkPositionDeltaWriteTest {
           useCommitCoordinator.getDeclaringClass(),
           "Position delta writes must explicitly override Spark's commit coordinator default");
       assertFalse(batchWrite.useCommitCoordinator());
+    }
+  }
+
+  @Test
+  public void positionDeltaWriteUsesExistingUnsignedSchema(TestInfo testInfo) throws Exception {
+    String datasetUri =
+        TestUtils.getDatasetUri(tempDir.toString(), testInfo.getTestMethod().get().getName());
+    Schema arrowSchema =
+        new Schema(
+            Arrays.asList(
+                new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
+                new Field("value", FieldType.nullable(new ArrowType.Int(32, false)), null)));
+
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Dataset.create(allocator, datasetUri, arrowSchema, new WriteParams.Builder().build()).close();
+      StructType sparkSchema = LanceArrowUtils.fromArrowSchema(arrowSchema);
+      SparkPositionDeltaWrite write =
+          new SparkPositionDeltaWrite(
+              sparkSchema,
+              LanceSparkWriteOptions.from(datasetUri),
+              null,
+              null,
+              null,
+              false,
+              null,
+              Collections.emptyMap());
+
+      DeltaBatchWrite batchWrite = write.toBatch();
+      DeltaWriterFactory factory = batchWrite.createBatchWriterFactory(null);
+      DeltaWriter<InternalRow> writer = factory.createWriter(0, 0);
+      writer.insert(new GenericInternalRow(new Object[] {1, 42L}));
+      WriterCommitMessage message = writer.commit();
+      writer.close();
+      batchWrite.commit(new WriterCommitMessage[] {message});
+
+      try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
+        assertEquals(arrowSchema, dataset.getSchema());
+        assertEquals(1, dataset.countRows());
+      }
     }
   }
 }

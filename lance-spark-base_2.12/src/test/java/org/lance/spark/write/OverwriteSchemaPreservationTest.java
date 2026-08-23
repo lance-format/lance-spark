@@ -17,10 +17,15 @@ import org.lance.Dataset;
 import org.lance.WriteParams;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.utils.Float16Utils;
 
+import org.apache.arrow.dataset.scanner.Scanner;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.arrow.vector.types.FloatingPointPrecision;
+import org.apache.arrow.vector.types.TimeUnit;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
@@ -36,6 +41,7 @@ import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 import org.apache.spark.unsafe.types.UTF8String;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.io.TempDir;
@@ -74,13 +80,8 @@ public class OverwriteSchemaPreservationTest {
     return overwriteAndGetSchemaWithSparkSchema(uri, sparkSchema, writeOptions, rows);
   }
 
-  /**
-   * Overwrites dataset using an explicitly provided Spark schema + write options. Useful for
-   * testing schema compatibility branches where Spark schema differs from Lance schema.
-   */
-  private Schema overwriteAndGetSchemaWithSparkSchema(
-      String uri, StructType sparkSchema, LanceSparkWriteOptions writeOptions, InternalRow... rows)
-      throws IOException {
+  private LanceBatchWrite buildOverwriteBatch(
+      StructType sparkSchema, LanceSparkWriteOptions writeOptions) {
     SparkWrite.SparkWriteBuilder builder =
         new SparkWrite.SparkWriteBuilder(
             sparkSchema,
@@ -91,7 +92,17 @@ public class OverwriteSchemaPreservationTest {
             null,
             false);
     builder.truncate();
-    LanceBatchWrite batchWrite = (LanceBatchWrite) builder.build().toBatch();
+    return (LanceBatchWrite) builder.build().toBatch();
+  }
+
+  /**
+   * Overwrites dataset using an explicitly provided Spark schema + write options. Useful for
+   * testing schema compatibility branches where Spark schema differs from Lance schema.
+   */
+  private Schema overwriteAndGetSchemaWithSparkSchema(
+      String uri, StructType sparkSchema, LanceSparkWriteOptions writeOptions, InternalRow... rows)
+      throws IOException {
+    LanceBatchWrite batchWrite = buildOverwriteBatch(sparkSchema, writeOptions);
     LanceDataWriter.WriterFactory factory =
         (LanceDataWriter.WriterFactory) batchWrite.createBatchWriterFactory(null);
     LanceDataWriter writer = (LanceDataWriter) factory.createWriter(0, 0);
@@ -107,6 +118,15 @@ public class OverwriteSchemaPreservationTest {
         Dataset.open().allocator(new RootAllocator(Long.MAX_VALUE)).uri(uri).build()) {
       return ds.getSchema();
     }
+  }
+
+  private boolean causeContains(Throwable error, String message) {
+    for (Throwable current = error; current != null; current = current.getCause()) {
+      if (current.getMessage() != null && current.getMessage().contains(message)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** Compares two Arrow schemas field-by-field (type, nullability, metadata, children). */
@@ -182,7 +202,7 @@ public class OverwriteSchemaPreservationTest {
 
   // Verifies uint64 high-range values (-1L, Long.MIN_VALUE) round-trip with bit pattern preserved.
   @Test
-  public void testUint64HighRangeWriteAndReadBack(TestInfo testInfo) throws IOException {
+  public void testUint64HighRangeWriteAndReadBack(TestInfo testInfo) throws Exception {
     Schema schema =
         new Schema(
             Arrays.asList(
@@ -201,44 +221,22 @@ public class OverwriteSchemaPreservationTest {
     // Schema preserved
     assertSchemaEquals(schema, after, "uint64 schema must be preserved");
 
-    // Read back and verify values are identical (bit-pattern preserved)
-    try (Dataset ds =
-        Dataset.open().allocator(new RootAllocator(Long.MAX_VALUE)).uri(uri).build()) {
-      assertEquals(3, ds.countRows());
-    }
-
-    // Use vectorized reader to verify the actual long values read back
-    StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
-    LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(uri);
-    SparkWrite.SparkWriteBuilder builder =
-        new SparkWrite.SparkWriteBuilder(
-            sparkSchema,
-            writeOptions,
-            Collections.emptyMap(),
-            null,
-            Collections.emptyMap(),
-            null,
-            false);
-    builder.truncate();
-    LanceBatchWrite batchWrite = (LanceBatchWrite) builder.build().toBatch();
-    LanceDataWriter.WriterFactory factory =
-        (LanceDataWriter.WriterFactory) batchWrite.createBatchWriterFactory(null);
-    LanceDataWriter writer = (LanceDataWriter) factory.createWriter(0, 0);
-
-    // Write again with same values to verify round-trip
-    writer.write(row1);
-    writer.write(row2);
-    writer.write(row3);
-    WriterCommitMessage commitMsg = writer.commit();
-    writer.close();
-    batchWrite.commit(new WriterCommitMessage[] {commitMsg});
-
-    // Verify schema still intact after second overwrite
-    try (Dataset ds =
-        Dataset.open().allocator(new RootAllocator(Long.MAX_VALUE)).uri(uri).build()) {
-      Schema finalSchema = ds.getSchema();
-      assertSchemaEquals(schema, finalSchema, "uint64 schema after second overwrite");
-      assertEquals(3, ds.countRows());
+    // Read through Arrow so values above Long.MAX_VALUE remain observable as unsigned BigInteger.
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
+        Dataset ds = Dataset.open().allocator(allocator).uri(uri).build();
+        Scanner scanner = ds.newScan();
+        ArrowReader reader = scanner.scanBatches()) {
+      assertTrue(reader.loadNextBatch());
+      VectorSchemaRoot root = reader.getVectorSchemaRoot();
+      assertEquals(3, root.getRowCount());
+      assertEquals(
+          "18446744073709551615",
+          Long.toUnsignedString(((Number) root.getVector("u64").getObject(0)).longValue()));
+      assertEquals(
+          "9223372036854775808",
+          Long.toUnsignedString(((Number) root.getVector("u64").getObject(1)).longValue()));
+      assertEquals(
+          "42", Long.toUnsignedString(((Number) root.getVector("u64").getObject(2)).longValue()));
     }
   }
 
@@ -550,6 +548,27 @@ public class OverwriteSchemaPreservationTest {
     assertSchemaEquals(schema, after3, "Schema after 3rd overwrite");
   }
 
+  @Test
+  public void testNullStructWithNonNullableChildHasActionableError(TestInfo testInfo) {
+    Field payload =
+        new Field(
+            "payload",
+            FieldType.nullable(ArrowType.Struct.INSTANCE),
+            Collections.singletonList(
+                new Field("value", FieldType.notNullable(new ArrowType.Int(32, true)), null)));
+    Schema schema = new Schema(Collections.singletonList(payload));
+    String uri = datasetUri(testInfo.getTestMethod().get().getName());
+    createEmptyDataset(uri, schema);
+
+    IOException error =
+        assertThrows(
+            IOException.class,
+            () -> overwriteAndGetSchema(uri, schema, new GenericInternalRow(new Object[] {null})));
+    assertTrue(
+        causeContains(error, "null parent struct cannot be written"),
+        "Error must explain the preserved struct nullability constraint: " + error);
+  }
+
   // ==================== Schema Mismatch Rejection ====================
 
   @Test
@@ -581,14 +600,11 @@ public class OverwriteSchemaPreservationTest {
             null,
             false);
     builder.truncate();
-    LanceBatchWrite batchWrite = (LanceBatchWrite) builder.build().toBatch();
-    LanceDataWriter.WriterFactory factory =
-        (LanceDataWriter.WriterFactory) batchWrite.createBatchWriterFactory(null);
 
-    // WriterFactory.createWriter should throw on field count mismatch
+    // Early-fail on driver: field count mismatch is caught in LanceBatchWrite constructor
     assertThrows(
-        IllegalStateException.class,
-        () -> factory.createWriter(0, 0),
+        IllegalArgumentException.class,
+        () -> builder.build().toBatch(),
         "Must reject field count mismatch in overwrite mode");
   }
 
@@ -692,14 +708,10 @@ public class OverwriteSchemaPreservationTest {
             });
 
     LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(uri);
-    InternalRow row =
-        new GenericInternalRow(
-            new Object[] {UTF8String.fromString("1"), UTF8String.fromString("alice")});
-
     assertThrows(
-        RuntimeException.class,
-        () -> overwriteAndGetSchemaWithSparkSchema(uri, incompatibleSparkSchema, writeOptions, row),
-        "Overwrite must reject incompatible top-level types even when field count matches");
+        IllegalArgumentException.class,
+        () -> buildOverwriteBatch(incompatibleSparkSchema, writeOptions),
+        "Driver must reject incompatible top-level types before creating executor writers");
   }
 
   @Test
@@ -738,19 +750,14 @@ public class OverwriteSchemaPreservationTest {
             });
 
     LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(uri);
-    InternalRow payload =
-        new GenericInternalRow(
-            new Object[] {UTF8String.fromString("0.95"), UTF8String.fromString("tag-a")});
-    InternalRow row = new GenericInternalRow(new Object[] {1, payload});
-
     assertThrows(
-        RuntimeException.class,
-        () -> overwriteAndGetSchemaWithSparkSchema(uri, incompatibleSparkSchema, writeOptions, row),
-        "Overwrite must reject incompatible nested child types");
+        IllegalArgumentException.class,
+        () -> buildOverwriteBatch(incompatibleSparkSchema, writeOptions),
+        "Driver must reject incompatible nested types before creating executor writers");
   }
 
   @Test
-  public void testOverwriteLocksUnsignedOverflowWrapBehavior(TestInfo testInfo) throws IOException {
+  public void testOverwriteRejectsOutOfRangeUint8(TestInfo testInfo) throws IOException {
     Schema schema =
         new Schema(
             Arrays.asList(
@@ -759,17 +766,48 @@ public class OverwriteSchemaPreservationTest {
     String uri = datasetUri(testInfo.getTestMethod().get().getName());
     createEmptyDataset(uri, schema);
 
-    // Current writer behavior narrows with cast (modulo wrap) for out-of-range values.
-    // Lock this behavior explicitly to avoid accidental semantic drift.
-    InternalRow row1 = new GenericInternalRow(new Object[] {(short) -1, -1});
-    InternalRow row2 = new GenericInternalRow(new Object[] {(short) 256, 65536});
-    Schema after = overwriteAndGetSchema(uri, schema, row1, row2);
+    // -1 is out of uint8 range [0, 255]
+    InternalRow row = new GenericInternalRow(new Object[] {(short) -1, 100});
+    assertThrows(
+        ArithmeticException.class,
+        () -> overwriteAndGetSchema(uri, schema, row),
+        "uint8 writer must reject negative values");
+  }
 
-    assertSchemaEquals(schema, after, "Unsigned overflow writes must still preserve Lance schema");
-    try (Dataset ds =
-        Dataset.open().allocator(new RootAllocator(Long.MAX_VALUE)).uri(uri).build()) {
-      assertEquals(2, ds.countRows(), "Overflow-behavior guard test should write 2 rows");
-    }
+  @Test
+  public void testOverwriteRejectsOutOfRangeUint16(TestInfo testInfo) throws IOException {
+    Schema schema =
+        new Schema(
+            Arrays.asList(
+                new Field("u8", FieldType.nullable(new ArrowType.Int(8, false)), null),
+                new Field("u16", FieldType.nullable(new ArrowType.Int(16, false)), null)));
+    String uri = datasetUri(testInfo.getTestMethod().get().getName());
+    createEmptyDataset(uri, schema);
+
+    // 65536 is out of uint16 range [0, 65535]
+    InternalRow row = new GenericInternalRow(new Object[] {(short) 100, 65536});
+    assertThrows(
+        ArithmeticException.class,
+        () -> overwriteAndGetSchema(uri, schema, row),
+        "uint16 writer must reject values above 65535");
+  }
+
+  @Test
+  public void testOverwriteRejectsOutOfRangeUint32(TestInfo testInfo) throws IOException {
+    Schema schema =
+        new Schema(
+            Arrays.asList(
+                new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
+                new Field("u32", FieldType.nullable(new ArrowType.Int(32, false)), null)));
+    String uri = datasetUri(testInfo.getTestMethod().get().getName());
+    createEmptyDataset(uri, schema);
+
+    // 5000000000L is out of uint32 range [0, 4294967295]
+    InternalRow row = new GenericInternalRow(new Object[] {1, 5000000000L});
+    assertThrows(
+        ArithmeticException.class,
+        () -> overwriteAndGetSchema(uri, schema, row),
+        "uint32 writer must reject values above 4294967295");
   }
 
   @Test
@@ -799,17 +837,15 @@ public class OverwriteSchemaPreservationTest {
     assertSchemaEquals(schema, after, "Queued write buffer path must preserve Lance schema");
   }
 
-  // ==================== Append Does Not Use Original Schema ====================
+  // ==================== Append Uses Existing Schema ====================
 
   @Test
-  public void testAppendDoesNotCarryOriginalSchema(TestInfo testInfo) throws IOException {
-    // Use a simple signed-only schema so append mode (which doesn't use original schema)
-    // can succeed without schema mismatch at the Lance native layer.
+  public void testAppendUsesExistingUnsignedSchema(TestInfo testInfo) throws IOException {
     Schema schema =
         new Schema(
             Arrays.asList(
                 new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
-                new Field("value", FieldType.nullable(new ArrowType.Int(64, true)), null)));
+                new Field("value", FieldType.nullable(new ArrowType.Int(32, false)), null)));
     String uri = datasetUri(testInfo.getTestMethod().get().getName());
     createEmptyDataset(uri, schema);
 
@@ -840,7 +876,35 @@ public class OverwriteSchemaPreservationTest {
     try (Dataset ds =
         Dataset.open().allocator(new RootAllocator(Long.MAX_VALUE)).uri(uri).build()) {
       assertEquals(1, ds.countRows());
+      assertSchemaEquals(schema, ds.getSchema(), "Append must use the existing uint32 schema");
     }
+  }
+
+  @Test
+  public void testAppendRejectsLargeVarOptionForExistingSmallVarSchema(TestInfo testInfo) {
+    Schema schema =
+        new Schema(
+            Collections.singletonList(
+                new Field("value", FieldType.nullable(ArrowType.Utf8.INSTANCE), null)));
+    String uri = datasetUri(testInfo.getTestMethod().get().getName());
+    createEmptyDataset(uri, schema);
+
+    StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
+    LanceSparkWriteOptions writeOptions =
+        LanceSparkWriteOptions.builder().datasetUri(uri).useLargeVarTypes(true).build();
+    SparkWrite.SparkWriteBuilder builder =
+        new SparkWrite.SparkWriteBuilder(
+            sparkSchema,
+            writeOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            null,
+            false);
+
+    IllegalArgumentException error =
+        assertThrows(IllegalArgumentException.class, () -> builder.build().toBatch());
+    assertTrue(error.getMessage().contains("cannot change an existing table schema during append"));
   }
 
   // ==================== Overwrite Empty Dataset ====================
@@ -1083,5 +1147,179 @@ public class OverwriteSchemaPreservationTest {
         Dataset.open().allocator(new RootAllocator(Long.MAX_VALUE)).uri(uri).build()) {
       assertEquals(numRows, ds.countRows());
     }
+  }
+
+  // ==================== Unsigned Value Round-Trip ====================
+
+  @Test
+  public void testUnsignedValueRoundTrip(TestInfo testInfo) throws Exception {
+    Schema schema =
+        new Schema(
+            Arrays.asList(
+                new Field("u8", FieldType.nullable(new ArrowType.Int(8, false)), null),
+                new Field("u16", FieldType.nullable(new ArrowType.Int(16, false)), null),
+                new Field("u32", FieldType.nullable(new ArrowType.Int(32, false)), null)));
+    String uri = datasetUri(testInfo.getTestMethod().get().getName());
+    createEmptyDataset(uri, schema);
+
+    // Boundary values: 0, max, and a mid value
+    InternalRow row1 = new GenericInternalRow(new Object[] {(short) 0, 0, 0L});
+    InternalRow row2 = new GenericInternalRow(new Object[] {(short) 255, 65535, 4294967295L});
+    InternalRow row3 = new GenericInternalRow(new Object[] {(short) 128, 32768, 2147483648L});
+    Schema after = overwriteAndGetSchema(uri, schema, row1, row2, row3);
+
+    assertSchemaEquals(schema, after, "unsigned schema must be preserved");
+
+    // Verify actual values via Scanner
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
+        Dataset ds = Dataset.open().allocator(allocator).uri(uri).build();
+        Scanner scanner = ds.newScan();
+        ArrowReader reader = scanner.scanBatches()) {
+      assertTrue(reader.loadNextBatch());
+      VectorSchemaRoot root = reader.getVectorSchemaRoot();
+      assertEquals(3, root.getRowCount());
+
+      // Row 0: all zeros
+      assertEquals(0, ((Number) root.getVector("u8").getObject(0)).byteValue() & 0xFF);
+      assertEquals(0, ((Character) root.getVector("u16").getObject(0)) & 0xFFFF);
+      assertEquals(0L, Integer.toUnsignedLong((int) root.getVector("u32").getObject(0)));
+
+      // Row 1: max values — read back as unsigned interpretation
+      // uint8 max=255 stored as byte -1, uint16 max=65535 stored as char 0xFFFF,
+      // uint32 max=4294967295 stored as int -1
+      assertEquals(
+          ((short) 255 & 0xFF), ((Number) root.getVector("u8").getObject(1)).byteValue() & 0xFF);
+      assertEquals(65535, ((Character) root.getVector("u16").getObject(1)) & 0xFFFF);
+      assertEquals(4294967295L, Integer.toUnsignedLong((int) root.getVector("u32").getObject(1)));
+
+      // Row 2: mid values
+      assertEquals(128, ((Number) root.getVector("u8").getObject(2)).byteValue() & 0xFF);
+      assertEquals(32768, ((Character) root.getVector("u16").getObject(2)) & 0xFFFF);
+      assertEquals(2147483648L, Integer.toUnsignedLong((int) root.getVector("u32").getObject(2)));
+    }
+  }
+
+  @Test
+  public void testUnsignedIntWriterValueRoundTrip(TestInfo testInfo) throws Exception {
+    Schema schema =
+        new Schema(
+            Collections.singletonList(
+                new Field("u32", FieldType.nullable(new ArrowType.Int(32, false)), null)));
+    String uri = datasetUri(testInfo.getTestMethod().get().getName());
+    createEmptyDataset(uri, schema);
+
+    StructType sparkSchema =
+        new StructType(
+            new StructField[] {
+              new StructField("u32", DataTypes.IntegerType, true, new MetadataBuilder().build())
+            });
+    overwriteAndGetSchemaWithSparkSchema(
+        uri,
+        sparkSchema,
+        LanceSparkWriteOptions.from(uri),
+        new GenericInternalRow(new Object[] {0}),
+        new GenericInternalRow(new Object[] {Integer.MAX_VALUE}));
+
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
+        Dataset ds = Dataset.open().allocator(allocator).uri(uri).build();
+        Scanner scanner = ds.newScan();
+        ArrowReader reader = scanner.scanBatches()) {
+      assertTrue(reader.loadNextBatch());
+      VectorSchemaRoot root = reader.getVectorSchemaRoot();
+      assertEquals(0L, Integer.toUnsignedLong((int) root.getVector("u32").getObject(0)));
+      assertEquals(
+          Integer.MAX_VALUE, Integer.toUnsignedLong((int) root.getVector("u32").getObject(1)));
+    }
+  }
+
+  // ==================== Type family compatibility: Timestamp, LargeList, Float16
+  // ====================
+
+  @Test
+  public void testOverwritePreservesNonUtcTimestamp(TestInfo testInfo) throws IOException {
+    Schema schema =
+        new Schema(
+            Arrays.asList(
+                new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
+                new Field(
+                    "ts",
+                    FieldType.nullable(
+                        new ArrowType.Timestamp(TimeUnit.MICROSECOND, "America/New_York")),
+                    null)));
+    String uri = datasetUri(testInfo.getTestMethod().get().getName());
+    createEmptyDataset(uri, schema);
+
+    // Spark reads any timestamp as LongType (micros since epoch)
+    InternalRow row = new GenericInternalRow(new Object[] {1, 1000000L});
+    Schema after = overwriteAndGetSchema(uri, schema, row);
+
+    assertSchemaEquals(schema, after, "Non-UTC timestamp must be preserved after overwrite");
+  }
+
+  @Test
+  public void testOverwritePreservesLargeList(TestInfo testInfo) throws IOException {
+    Schema schema =
+        new Schema(
+            Arrays.asList(
+                new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
+                new Field(
+                    "tags",
+                    FieldType.nullable(new ArrowType.LargeList()),
+                    Collections.singletonList(
+                        new Field("item", FieldType.nullable(ArrowType.Utf8.INSTANCE), null)))));
+    String uri = datasetUri(testInfo.getTestMethod().get().getName());
+    createEmptyDataset(uri, schema);
+
+    // Spark sees LargeList as ArrayType(StringType) — same as List
+    InternalRow row =
+        new GenericInternalRow(
+            new Object[] {
+              1,
+              new GenericArrayData(
+                  new Object[] {UTF8String.fromString("a"), UTF8String.fromString("b")})
+            });
+    Schema after = overwriteAndGetSchema(uri, schema, row);
+
+    Field tagsField = after.getFields().get(1);
+    assertTrue(
+        tagsField.getType() instanceof ArrowType.LargeList,
+        "LargeList must be preserved, got: " + tagsField.getType());
+  }
+
+  @Test
+  public void testOverwritePreservesFloat16InFixedSizeList(TestInfo testInfo) throws IOException {
+    Assumptions.assumeTrue(
+        Float16Utils.isFloat2VectorAvailable(), "Float16 requires Arrow 18+ (Spark 4.0+)");
+    Schema schema =
+        new Schema(
+            Arrays.asList(
+                new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
+                new Field(
+                    "embedding",
+                    FieldType.nullable(new ArrowType.FixedSizeList(4)),
+                    Collections.singletonList(
+                        new Field(
+                            "item",
+                            FieldType.nullable(
+                                new ArrowType.FloatingPoint(FloatingPointPrecision.HALF)),
+                            null)))));
+    String uri = datasetUri(testInfo.getTestMethod().get().getName());
+    createEmptyDataset(uri, schema);
+
+    // Spark maps Float16 -> Float32 on read; FixedSizeList<Float16>(4) -> Array<Float>
+    InternalRow row =
+        new GenericInternalRow(
+            new Object[] {1, new GenericArrayData(new Object[] {1.0f, 2.0f, 3.0f, 4.0f})});
+    Schema after = overwriteAndGetSchema(uri, schema, row);
+
+    Field embField = after.getFields().get(1);
+    assertTrue(
+        embField.getType() instanceof ArrowType.FixedSizeList,
+        "FixedSizeList must be preserved, got: " + embField.getType());
+    Field child = embField.getChildren().get(0);
+    assertEquals(
+        new ArrowType.FloatingPoint(FloatingPointPrecision.HALF),
+        child.getType(),
+        "Float16 child type must be preserved");
   }
 }

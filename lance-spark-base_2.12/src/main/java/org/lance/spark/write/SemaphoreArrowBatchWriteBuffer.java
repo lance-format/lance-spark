@@ -130,7 +130,11 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
         resolver);
   }
 
-  SemaphoreArrowBatchWriteBuffer(
+  /**
+   * @deprecated Retained for source and binary compatibility.
+   */
+  @Deprecated
+  public SemaphoreArrowBatchWriteBuffer(
       BufferAllocator allocator,
       Schema schema,
       StructType sparkSchema,
@@ -152,7 +156,11 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
     this.count = batchSize;
   }
 
-  SemaphoreArrowBatchWriteBuffer(
+  /**
+   * @deprecated Retained for source and binary compatibility.
+   */
+  @Deprecated
+  public SemaphoreArrowBatchWriteBuffer(
       BufferAllocator allocator, Schema schema, StructType sparkSchema, int batchSize) {
     this(
         allocator,

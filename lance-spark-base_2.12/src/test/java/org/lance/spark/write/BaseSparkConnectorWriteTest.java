@@ -212,6 +212,42 @@ public abstract class BaseSparkConnectorWriteTest {
   }
 
   @Test
+  public void writeModeOptionOverwriteReplacesDataAndKeepsSchemaReadable(TestInfo testInfo) {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String uri = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+    testData
+        .write()
+        .format(LanceDataSource.name)
+        .option(LanceSparkReadOptions.CONFIG_DATASET_URI, uri)
+        .save();
+
+    testData
+        .filter(col("id").equalTo(1))
+        .write()
+        .format(LanceDataSource.name)
+        .option(LanceSparkReadOptions.CONFIG_DATASET_URI, uri)
+        .option(LanceSparkWriteOptions.CONFIG_WRITE_MODE, "overwrite")
+        .option(LanceSparkWriteOptions.CONFIG_USE_LARGE_VAR_TYPES, "true")
+        .mode("append")
+        .save();
+
+    Dataset<Row> result =
+        spark
+            .read()
+            .format(LanceDataSource.name)
+            .option(LanceSparkReadOptions.CONFIG_DATASET_URI, uri)
+            .load();
+    assertEquals(1, result.count());
+    assertEquals(1, result.filter(col("id").equalTo(1)).count());
+    assertEquals(0, result.filter(col("id").equalTo(2)).count());
+
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(uri).build()) {
+      assertEquals(ArrowType.LargeUtf8.INSTANCE, ds.getSchema().findField("name").getType());
+    }
+  }
+
+  @Test
   public void appendAfterOverwrite(TestInfo testInfo) {
     String datasetName = testInfo.getTestMethod().get().getName();
     testData

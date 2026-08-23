@@ -85,6 +85,10 @@ object LanceArrowWriter {
         val elementWriter = createFieldWriter(vector.getDataVector(), elementType, null, resolver)
         new ArrayWriter(vector, elementWriter)
 
+      case (ArrayType(elementType, _), vector: LargeListVector) =>
+        val elementWriter = createFieldWriter(vector.getDataVector(), elementType, null, resolver)
+        new LargeArrayWriter(vector, elementWriter)
+
       case (BooleanType, vector: BitVector) => new BooleanWriter(vector)
       case (ByteType, vector: TinyIntVector) => new ByteWriter(vector)
       case (ShortType, vector: SmallIntVector) => new ShortWriter(vector)
@@ -301,7 +305,12 @@ private[arrow] class ShortToUnsignedByteWriter(val valueVector: UInt1Vector)
   extends LanceArrowFieldWriter {
   override def setNull(): Unit = {}
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
-    valueVector.setSafe(count, input.getShort(ordinal).toByte)
+    val value = input.getShort(ordinal)
+    if (value < 0 || value > 255) {
+      throw new ArithmeticException(
+        s"Value $value out of range for uint8 column '$name' [0, 255]")
+    }
+    valueVector.setSafe(count, value.toByte)
   }
 }
 
@@ -310,7 +319,12 @@ private[arrow] class IntToUnsignedShortWriter(val valueVector: UInt2Vector)
   extends LanceArrowFieldWriter {
   override def setNull(): Unit = {}
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
-    valueVector.setSafe(count, input.getInt(ordinal).toChar)
+    val value = input.getInt(ordinal)
+    if (value < 0 || value > 65535) {
+      throw new ArithmeticException(
+        s"Value $value out of range for uint16 column '$name' [0, 65535]")
+    }
+    valueVector.setSafe(count, value.toChar)
   }
 }
 
@@ -319,7 +333,12 @@ private[arrow] class UnsignedIntWriter(val valueVector: UInt4Vector)
   extends LanceArrowFieldWriter {
   override def setNull(): Unit = {}
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
-    valueVector.setSafe(count, input.getInt(ordinal))
+    val value = input.getInt(ordinal)
+    if (value < 0) {
+      throw new ArithmeticException(
+        s"Value $value out of range for uint32 column '$name' [0, 4294967295]")
+    }
+    valueVector.setSafe(count, value)
   }
 }
 
@@ -328,7 +347,12 @@ private[arrow] class LongToUnsignedIntWriter(val valueVector: UInt4Vector)
   extends LanceArrowFieldWriter {
   override def setNull(): Unit = {}
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
-    valueVector.setSafe(count, input.getLong(ordinal).toInt)
+    val value = input.getLong(ordinal)
+    if (value < 0L || value > 4294967295L) {
+      throw new ArithmeticException(
+        s"Value $value out of range for uint32 column '$name' [0, 4294967295]")
+    }
+    valueVector.setSafe(count, value.toInt)
   }
 }
 
@@ -473,6 +497,31 @@ private[arrow] class ArrayWriter(
       i += 1
     }
     valueVector.endValue(count, array.numElements())
+  }
+  override def finish(): Unit = {
+    super.finish()
+    elementWriter.finish()
+  }
+  override def estimatedBufferedBytes: Long = elementWriter.estimatedBufferedBytes
+  override def reset(): Unit = {
+    super.reset()
+    elementWriter.reset()
+  }
+}
+
+private[arrow] class LargeArrayWriter(
+    val valueVector: LargeListVector,
+    val elementWriter: LanceArrowFieldWriter) extends LanceArrowFieldWriter {
+  override def setNull(): Unit = valueVector.setNull(count)
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    val array = input.getArray(ordinal)
+    var i = 0
+    valueVector.startNewValue(count.toLong)
+    while (i < array.numElements()) {
+      elementWriter.write(array, i)
+      i += 1
+    }
+    valueVector.endValue(count, array.numElements().toLong)
   }
   override def finish(): Unit = {
     super.finish()

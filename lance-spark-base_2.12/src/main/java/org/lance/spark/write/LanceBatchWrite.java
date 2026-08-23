@@ -25,10 +25,9 @@ import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.utils.BlobSourceContext;
+import org.lance.spark.utils.SchemaCompatibility;
 import org.lance.spark.utils.Utils;
 
-import org.apache.arrow.vector.types.pojo.ArrowType;
-import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.connector.write.BatchWrite;
 import org.apache.spark.sql.connector.write.DataWriterFactory;
@@ -51,6 +50,7 @@ public class LanceBatchWrite implements BatchWrite {
   private final StructType schema;
   private LanceSparkWriteOptions writeOptions;
   private final boolean overwrite;
+  private final boolean schemaPreservingOverwrite;
 
   /**
    * Original Arrow Schema from the existing dataset. Used in overwrite mode to preserve the exact
@@ -121,6 +121,8 @@ public class LanceBatchWrite implements BatchWrite {
       Map<String, BlobSourceContext> blobSourceContexts) {
     this.schema = schema;
     this.overwrite = overwrite;
+    this.schemaPreservingOverwrite =
+        stagedCommit == null && (overwrite || writeOptions.isOverwrite());
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
@@ -138,22 +140,42 @@ public class LanceBatchWrite implements BatchWrite {
       this.originalArrowSchema = null;
     } else {
       try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
-        this.originalArrowSchema =
+        Schema datasetSchema =
             Objects.requireNonNull(ds.getSchema(), "Failed to get schema from existing dataset");
+        if (!schemaPreservingOverwrite
+            && writeOptions.isUseLargeVarTypes()
+            && SchemaCompatibility.hasSmallVarTypes(datasetSchema)) {
+          throw new IllegalArgumentException(
+              "use_large_var_types cannot change an existing table schema during append. "
+                  + "Create the table with large variable-width fields or use a full-table "
+                  + "overwrite to promote them.");
+        }
+        this.originalArrowSchema =
+            schemaPreservingOverwrite && writeOptions.isUseLargeVarTypes()
+                ? SchemaCompatibility.withLargeVarTypes(datasetSchema)
+                : datasetSchema;
         this.writeOptions = writeOptions.withVersion(ds.version());
         logger.debug(
             "Resolved dataset version for batch write: {}", this.writeOptions.getVersion());
+      }
+      // Early-fail on driver: every write to an existing dataset uses its Arrow schema.
+      Schema sparkSchema =
+          LanceArrowUtils.toArrowSchema(
+              schema, "UTC", true, this.writeOptions.isUseLargeVarTypes());
+      if (!SchemaCompatibility.isCompatible(originalArrowSchema, sparkSchema)) {
+        throw new IllegalArgumentException(
+            "Write schema is incompatible with the existing Lance schema. "
+                + "Writes must not change schema type families.");
       }
     }
   }
 
   @Override
   public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
-    // In explicit non-staged truncate-overwrite mode, pass original schema JSON so executor writes
-    // with correct Arrow types.
-    boolean isExplicitOverwrite = overwrite && stagedCommit == null;
+    // In non-staged overwrite mode, pass original schema JSON so executor writes with the exact
+    // Arrow types that commit() will place in the manifest.
     String originalSchemaJson = null;
-    if (isExplicitOverwrite && originalArrowSchema != null) {
+    if (originalArrowSchema != null) {
       originalSchemaJson = originalArrowSchema.toJson();
     }
     return new LanceDataWriter.WriterFactory(
@@ -185,19 +207,14 @@ public class LanceBatchWrite implements BatchWrite {
 
     Schema arrowSchema =
         LanceArrowUtils.toArrowSchema(schema, "UTC", true, writeOptions.isUseLargeVarTypes());
-    boolean isOverwrite = overwrite;
-    boolean isExplicitOverwrite = overwrite && stagedCommit == null;
+    boolean isOverwrite = overwrite || writeOptions.isOverwrite();
 
-    // In explicit non-staged overwrite mode, original schema must exist and remain compatible.
-    if (isExplicitOverwrite) {
+    // In non-staged overwrite mode, use the exact schema supplied to the executor writers.
+    // Compatibility was already validated in the constructor (early-fail on driver).
+    if (schemaPreservingOverwrite) {
       if (originalArrowSchema == null) {
         throw new IllegalStateException(
             "Overwrite requires existing Lance schema, but none was found.");
-      }
-      if (!isTypeCompatible(originalArrowSchema, arrowSchema)) {
-        throw new IllegalArgumentException(
-            "Overwrite schema is incompatible with existing Lance schema. "
-                + "Overwrite must not change schema type families.");
       }
       arrowSchema = originalArrowSchema;
     }
@@ -265,98 +282,6 @@ public class LanceBatchWrite implements BatchWrite {
   public void abort(WriterCommitMessage[] messages) {
     // For staged tables, the dataset is managed by StagedCommit (via abortStagedChanges)
     // For non-staged tables, no resources to clean up (dataset opened fresh at commit time)
-  }
-
-  // ==================== Schema compatibility helpers ====================
-
-  /**
-   * Checks whether the original schema is structurally compatible with the Spark-derived schema.
-   * Compatible means same number of fields and each field pair is in the same "type family" (e.g.
-   * int32 signed and int32 unsigned, List and FixedSizeList, Utf8 and LargeUtf8).
-   */
-  static boolean isTypeCompatible(Schema original, Schema spark) {
-    if (original.getFields().size() != spark.getFields().size()) {
-      return false;
-    }
-    for (int i = 0; i < original.getFields().size(); i++) {
-      if (!isFieldCompatible(original.getFields().get(i), spark.getFields().get(i))) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  private static boolean isFieldCompatible(Field orig, Field spark) {
-    ArrowType ot = orig.getType();
-    ArrowType st = spark.getType();
-
-    // Same type is always compatible
-    if (ot.equals(st)) {
-      return childrenCompatible(orig, spark);
-    }
-
-    // Integer family: allow Spark read-side widening for unsigned Lance ints,
-    // while still requiring same field shape.
-    if (ot instanceof ArrowType.Int && st instanceof ArrowType.Int) {
-      ArrowType.Int oi = (ArrowType.Int) ot;
-      ArrowType.Int si = (ArrowType.Int) st;
-      if (oi.getBitWidth() == si.getBitWidth()) {
-        return childrenCompatible(orig, spark);
-      }
-      // Unsigned widening mappings produced by LanceArrowUtils.fromArrowField:
-      // uint8 -> int16, uint16 -> int32, uint32 -> int64.
-      if (!oi.getIsSigned() && si.getIsSigned()) {
-        if ((oi.getBitWidth() == 8 && si.getBitWidth() == 16)
-            || (oi.getBitWidth() == 16 && si.getBitWidth() == 32)
-            || (oi.getBitWidth() == 32 && si.getBitWidth() == 64)) {
-          return childrenCompatible(orig, spark);
-        }
-      }
-      return false;
-    }
-
-    // List family: List <-> FixedSizeList
-    if (isListFamily(ot) && isListFamily(st)) {
-      return childrenCompatible(orig, spark);
-    }
-
-    // String family: Utf8 <-> LargeUtf8
-    if (isStringFamily(ot) && isStringFamily(st)) {
-      return true;
-    }
-
-    // Binary family: Binary <-> LargeBinary <-> FixedSizeBinary
-    if (isBinaryFamily(ot) && isBinaryFamily(st)) {
-      return true;
-    }
-
-    return false;
-  }
-
-  private static boolean childrenCompatible(Field orig, Field spark) {
-    if (orig.getChildren().size() != spark.getChildren().size()) {
-      return false;
-    }
-    for (int i = 0; i < orig.getChildren().size(); i++) {
-      if (!isFieldCompatible(orig.getChildren().get(i), spark.getChildren().get(i))) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  private static boolean isListFamily(ArrowType type) {
-    return type instanceof ArrowType.List || type instanceof ArrowType.FixedSizeList;
-  }
-
-  private static boolean isStringFamily(ArrowType type) {
-    return type instanceof ArrowType.Utf8 || type instanceof ArrowType.LargeUtf8;
-  }
-
-  private static boolean isBinaryFamily(ArrowType type) {
-    return type instanceof ArrowType.Binary
-        || type instanceof ArrowType.LargeBinary
-        || type instanceof ArrowType.FixedSizeBinary;
   }
 
   @Override
