@@ -160,9 +160,17 @@ class IndexUtilsTest {
   }
 
   @Test
-  def buildIndexType_ftsReturnsInverted(): Unit = {
+  def buildIndexType_ftsAndInvertedReturnInverted(): Unit = {
     assertEquals(IndexType.INVERTED, IndexUtils.buildIndexType("fts"))
     assertEquals(IndexType.INVERTED, IndexUtils.buildIndexType("FTS"))
+    assertEquals(IndexType.INVERTED, IndexUtils.buildIndexType("inverted"))
+    assertEquals(IndexType.INVERTED, IndexUtils.buildIndexType("INVERTED"))
+  }
+
+  @Test
+  def buildScalarIndexParamType_ftsAndInvertedReturnInverted(): Unit = {
+    assertEquals("inverted", IndexUtils.buildScalarIndexParamType("fts"))
+    assertEquals("inverted", IndexUtils.buildScalarIndexParamType("inverted"))
   }
 
   @Test
@@ -173,7 +181,9 @@ class IndexUtilsTest {
       ("label_list", IndexType.LABEL_LIST, "labellist"),
       ("ngram", IndexType.NGRAM, "ngram"),
       ("bloomfilter", IndexType.BLOOM_FILTER, "bloomfilter"),
-      ("rtree", IndexType.RTREE, "rtree"))
+      ("rtree", IndexType.RTREE, "rtree"),
+      ("fts", IndexType.INVERTED, "inverted"),
+      ("inverted", IndexType.INVERTED, "inverted"))
 
     expected.foreach { case (method, indexType, coreParamType) =>
       Seq(method, method.toUpperCase).foreach { spelling =>

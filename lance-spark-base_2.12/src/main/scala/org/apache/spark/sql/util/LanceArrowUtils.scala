@@ -30,7 +30,7 @@ import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.apache.spark.{SparkException, SparkUnsupportedOperationException}
 import org.apache.spark.sql.types._
 import org.lance.spark.LanceConstant
-import org.lance.spark.utils.{BlobUtils, DateMilliUtils, FixedSizeBinaryUtils, Float16Utils, LargeVarCharUtils, ListChildUtils, VectorUtils}
+import org.lance.spark.utils.{BlobUtils, DateMilliUtils, FixedSizeBinaryUtils, Float16Utils, LargeVarBinaryUtils, LargeVarCharUtils, ListChildUtils, VectorUtils}
 
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
@@ -47,6 +47,7 @@ object LanceArrowUtils {
   val ARROW_EXT_NAME_KEY = BlobUtils.ARROW_EXTENSION_NAME_KEY
   val BLOB_V2_EXT_NAME = BlobUtils.ARROW_EXTENSION_BLOB_V2
   val ARROW_LARGE_VAR_CHAR_KEY = LargeVarCharUtils.ARROW_LARGE_VAR_CHAR_KEY
+  val ARROW_LARGE_VAR_BINARY_KEY = LargeVarBinaryUtils.ARROW_LARGE_VAR_BINARY_KEY
   val ARROW_DATE_MILLISECOND_KEY = DateMilliUtils.ARROW_DATE_MILLISECOND_KEY
   val ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY =
     FixedSizeBinaryUtils.ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY
@@ -244,6 +245,17 @@ object LanceArrowUtils {
         }
       case _: ArrowType.LargeUtf8 =>
         builder.putString(ARROW_LARGE_VAR_CHAR_KEY, LargeVarCharUtils.ARROW_LARGE_VAR_CHAR_VALUE)
+      // Spark has a single BinaryType covering both Arrow Binary (32-bit offsets) and LargeBinary
+      // (64-bit offsets), so record which one this field was. Without the marker a Lance
+      // LargeBinary column is silently narrowed to Binary whenever a Spark operation round-trips
+      // the schema (UPDATE, ADD COLUMNS FROM, or simply read -> transform -> write), and the
+      // resulting write fails type validation against the existing Lance schema.
+      // Blob columns are excluded: they are already LargeBinary-backed via the blob marker, which
+      // toArrowField honors on its own.
+      case _: ArrowType.LargeBinary if !isBlobField(field) =>
+        builder.putString(
+          ARROW_LARGE_VAR_BINARY_KEY,
+          LargeVarBinaryUtils.ARROW_LARGE_VAR_BINARY_VALUE)
       case date: ArrowType.Date if date.getUnit == DateUnit.MILLISECOND =>
         builder.putString(ARROW_DATE_MILLISECOND_KEY, DateMilliUtils.ARROW_DATE_MILLISECOND_VALUE)
       case fsb: ArrowType.FixedSizeBinary =>
@@ -349,6 +361,14 @@ object LanceArrowUtils {
       }
       if (metadata.contains(ARROW_LARGE_VAR_CHAR_KEY)
         && metadata.getString(ARROW_LARGE_VAR_CHAR_KEY).equalsIgnoreCase("true")) {
+        large = true
+      }
+      // Restore 64-bit offsets for a BinaryType that came from an Arrow LargeBinary column.
+      // Gated on dt == BinaryType so the marker cannot leak onto an unrelated type if the
+      // metadata is copied across columns by a Spark transform.
+      if (dt == BinaryType
+        && metadata.contains(ARROW_LARGE_VAR_BINARY_KEY)
+        && metadata.getString(ARROW_LARGE_VAR_BINARY_KEY).equalsIgnoreCase("true")) {
         large = true
       }
 

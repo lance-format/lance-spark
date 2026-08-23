@@ -838,4 +838,40 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
     assert(roundtripField.getType.isInstanceOf[ArrowType.FixedSizeBinary])
     assert(roundtripField.getType.asInstanceOf[ArrowType.FixedSizeBinary].getByteWidth === 32)
   }
+
+  test("LargeBinary roundtrip preserves 64-bit offsets") {
+    // Spark represents both Arrow Binary and LargeBinary as BinaryType. The metadata marker must
+    // retain the distinction so a read -> transform -> write round trip through Spark does not
+    // silently narrow a Lance LargeBinary column to Binary and fail schema validation.
+    val arrowSchema = new Schema(java.util.Arrays.asList(
+      primitiveField("image_bytes", ArrowType.LargeBinary.INSTANCE),
+      primitiveField("small_bytes", ArrowType.Binary.INSTANCE)))
+
+    val sparkSchema = LanceArrowUtils.fromArrowSchema(arrowSchema)
+    assert(sparkSchema("image_bytes").dataType === BinaryType)
+    assert(sparkSchema("small_bytes").dataType === BinaryType)
+    assert(sparkSchema("image_bytes").metadata.contains(
+      LanceArrowUtils.ARROW_LARGE_VAR_BINARY_KEY))
+    assert(!sparkSchema("small_bytes").metadata.contains(
+      LanceArrowUtils.ARROW_LARGE_VAR_BINARY_KEY))
+
+    val roundtrip = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false)
+    assert(roundtrip.findField("image_bytes").getType === ArrowType.LargeBinary.INSTANCE)
+    // A plain Binary column must NOT be widened by the marker on its sibling.
+    assert(roundtrip.findField("small_bytes").getType === ArrowType.Binary.INSTANCE)
+  }
+
+  test("LargeBinary inside Array roundtrips to LargeBinary") {
+    val arrow = new Schema(java.util.Arrays.asList(listField(
+      "arr",
+      primitiveField("element", ArrowType.LargeBinary.INSTANCE))))
+    val sparkSchema = LanceArrowUtils.fromArrowSchema(arrow)
+    assert(sparkSchema("arr").dataType === ArrayType(BinaryType, containsNull = true))
+
+    val arrowBack = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false)
+    val elementType = arrowBack.findField("arr").getChildren.get(0).getType
+    assert(
+      elementType === ArrowType.LargeBinary.INSTANCE,
+      s"Array element should remain LargeBinary, got $elementType")
+  }
 }
