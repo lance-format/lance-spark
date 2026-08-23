@@ -544,4 +544,112 @@ public class ZonemapFragmentPrunerTest {
     assertTrue(result.isPresent());
     assertEquals(Set.of(0, 2), result.get());
   }
+
+  /** Fragments 0 and 1 have zone entries; fragment 2 does not. */
+  private static Map<String, List<ZoneStats>> partiallyCoveredStats(String column) {
+    Map<String, List<ZoneStats>> stats = new HashMap<>();
+    stats.put(
+        column,
+        Arrays.asList(
+            new ZoneStats(0, 0, 100, 0L, 99L, 0), new ZoneStats(1, 0, 100, 100L, 199L, 0)));
+    return stats;
+  }
+
+  @Test
+  public void testUncoveredFragmentSurvivesWhenPredicateMatchesElsewhere() {
+    Map<String, List<ZoneStats>> stats = partiallyCoveredStats("x");
+    Predicate[] filters = new Predicate[] {TestPredicates.eq("x", 150L)};
+
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, Map.of("x", Set.of(2)));
+
+    assertTrue(result.isPresent());
+    assertEquals(Set.of(1, 2), result.get());
+  }
+
+  @Test
+  public void testUncoveredFragmentSurvivesWhenNoCoveredFragmentMatches() {
+    // Every zone excludes the value, so only the unknown fragment survives.
+    Map<String, List<ZoneStats>> stats = partiallyCoveredStats("x");
+    Predicate[] filters = new Predicate[] {TestPredicates.eq("x", 250L)};
+
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, Map.of("x", Set.of(2)));
+
+    assertTrue(result.isPresent());
+    assertEquals(Set.of(2), result.get());
+  }
+
+  @Test
+  public void testFullyCoveredStatsStillPruneExactly() {
+    Map<String, List<ZoneStats>> stats = threeFragmentStats("x");
+    Predicate[] filters = new Predicate[] {TestPredicates.eq("x", 150L)};
+
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, Collections.emptyMap());
+
+    assertTrue(result.isPresent());
+    assertEquals(Set.of(1), result.get());
+  }
+
+  @Test
+  public void testPredicateIsNotWidenedByAnotherColumnsUncoveredFragments() {
+    // Widening must be scoped to the columns a predicate actually references. Column y's
+    // index misses fragment 2, but x's index covers it fully — so x's zones DO rule
+    // fragment 2 out, and borrowing y's gap would keep a fragment that is provably empty.
+    // This is the over-permissive direction: not a correctness bug, but it silently gives
+    // up pruning that the index supports.
+    Map<String, List<ZoneStats>> stats = threeFragmentStats("x");
+    stats.put(
+        "y",
+        Arrays.asList(new ZoneStats(0, 0, 100, 0L, 9L, 0), new ZoneStats(1, 0, 100, 10L, 19L, 0)));
+    Predicate[] filters = new Predicate[] {TestPredicates.eq("x", 150L)};
+
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(
+            filters, stats, Map.of("x", Collections.emptySet(), "y", Set.of(2)));
+
+    assertTrue(result.isPresent());
+    assertEquals(
+        Set.of(1),
+        result.get(),
+        "fragment 2 is covered by x's index and excluded by its zones; y's coverage gap is"
+            + " irrelevant to a predicate on x");
+  }
+
+  @Test
+  public void testFragmentCoveredByOneColumnButNotAnotherSurvives() {
+    // Indexes are built independently, so their coverage differs. Column x is indexed over
+    // fragments {0,1} only; column y over {0,1,2}. Fragment 2 is therefore described by y's
+    // index but NOT by x's, so x's predicate knows nothing about it and must not exclude it.
+    //
+    // Widening each predicate's set with its OWN column's uncovered fragments — before the
+    // intersection — is what makes this work. A single dataset-wide uncovered set computed as
+    // the union of per-column coverage would be empty here, and fragment 2 would be dropped.
+    Map<String, List<ZoneStats>> stats = new HashMap<>();
+    stats.put(
+        "x",
+        Arrays.asList(
+            new ZoneStats(0, 0, 100, 0L, 99L, 0), new ZoneStats(1, 0, 100, 100L, 199L, 0)));
+    stats.put(
+        "y",
+        Arrays.asList(
+            new ZoneStats(0, 0, 100, 0L, 9L, 0),
+            new ZoneStats(1, 0, 100, 10L, 19L, 0),
+            new ZoneStats(2, 0, 100, 20L, 29L, 0)));
+
+    // x = 250 matches no zone of x; y = 25 matches only fragment 2.
+    Predicate[] filters =
+        new Predicate[] {TestPredicates.eq("x", 250L), TestPredicates.eq("y", 25L)};
+
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(
+            filters, stats, Map.of("x", Set.of(2), "y", Collections.emptySet()));
+
+    assertTrue(result.isPresent());
+    assertEquals(
+        Set.of(2),
+        result.get(),
+        "fragment 2 is outside column x's index, so x's predicate cannot rule it out");
+  }
 }

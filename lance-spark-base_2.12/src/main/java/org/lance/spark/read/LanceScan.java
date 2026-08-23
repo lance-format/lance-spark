@@ -13,7 +13,6 @@
  */
 package org.lance.spark.read;
 
-import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
@@ -80,12 +79,6 @@ public class LanceScan
   private final String scanId = UUID.randomUUID().toString();
 
   /**
-   * Per-column zonemap statistics loaded on the driver during scan building. Used for
-   * fragment-level pruning in {@link #planInputPartitions()}.
-   */
-  private final java.util.Map<String, List<ZoneStats>> zonemapStats;
-
-  /**
    * Pre-computed surviving fragment IDs from zonemap pruning in LanceScanBuilder. When non-null,
    * {@link #pruneByZonemapStats} skips re-computing and uses these directly.
    */
@@ -137,7 +130,6 @@ public class LanceScan
       Optional<Aggregation> pushedAggregation,
       Predicate[] pushedPredicates,
       LanceStatistics statistics,
-      java.util.Map<String, List<ZoneStats>> zonemapStats,
       Set<Integer> survivingFragmentIds,
       List<LanceSplit> precomputedSplits,
       java.util.Map<Integer, Long> precomputedFragmentRowCounts,
@@ -158,7 +150,6 @@ public class LanceScan
             ? Arrays.copyOf(pushedPredicates, pushedPredicates.length)
             : new Predicate[0];
     this.statistics = statistics;
-    this.zonemapStats = zonemapStats != null ? zonemapStats : Collections.emptyMap();
     this.cachedSurvivingFragmentIds = survivingFragmentIds;
     this.precomputedSplits = precomputedSplits;
     this.precomputedFragmentRowCounts =
@@ -365,20 +356,12 @@ public class LanceScan
    * predicate are skipped entirely, avoiding fragment opens, scan setup, and task scheduling.
    */
   private List<LanceSplit> pruneByZonemapStats(List<LanceSplit> allSplits) {
-    // Use cached result from LanceScanBuilder if available, otherwise compute.
-    Set<Integer> allowedIds;
-    if (cachedSurvivingFragmentIds != null) {
-      allowedIds = cachedSurvivingFragmentIds;
-    } else if (!zonemapStats.isEmpty()) {
-      allowedIds =
-          ZonemapFragmentPruner.pruneFragments(pushedPredicates, zonemapStats).orElse(null);
-    } else {
+    // Null means the builder did not prune. Do not recompute here.
+    if (cachedSurvivingFragmentIds == null) {
       return allSplits;
     }
+    Set<Integer> allowedIds = cachedSurvivingFragmentIds;
 
-    if (allowedIds == null) {
-      return allSplits;
-    }
     List<LanceSplit> pruned =
         allSplits.stream()
             .filter(split -> split.getFragments().stream().anyMatch(allowedIds::contains))
