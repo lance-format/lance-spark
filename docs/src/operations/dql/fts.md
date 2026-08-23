@@ -111,9 +111,34 @@ SELECT * FROM lance.db.documents
 WHERE lance_multi_match('machine learning', 'operator=AND', title, body);
 ```
 
+## Relevance Score (`_score`)
+
+The `_score` metadata column exposes the BM25 relevance score computed by the FTS index. It is available only when a full-text search predicate is active.
+
+```sql
+-- Project _score alongside data columns
+SELECT id, body, _score FROM lance.db.documents
+WHERE lance_match(body, 'machine learning');
+
+-- Sort by relevance
+SELECT id, _score FROM lance.db.documents
+WHERE lance_match(body, 'vector database')
+ORDER BY _score DESC;
+
+-- Combine with scalar filters
+SELECT id, _score FROM lance.db.documents
+WHERE lance_match(body, 'deep learning') AND year >= 2024
+ORDER BY _score DESC;
+```
+
+`_score` is a hidden metadata column — it does not appear in `SELECT *` output. Selecting `_score` without an FTS predicate raises an error at planning time.
+
+!!! note "Not a ranked-retrieval push"
+    `ORDER BY _score DESC LIMIT k` sorts in Spark above the scan — it does **not** push a ranked top-k query to the Lance engine. All matching rows are scanned and scored; Spark applies the sort and limit. A pushed ranked-retrieval path is planned as a future extension.
+
 ## Known Limitations
 
-- **No global relevance ordering.** FTS predicates act as WHERE filters and return all matching rows. There is no `lance_score()` function or relevance-based `ORDER BY` — rows are returned in storage order. In particular, `SELECT * FROM t WHERE lance_match(...) LIMIT N` returns N matching rows determined by Spark task scheduling, not by BM25 rank — it is not a "top-N by relevance" query.
+- **No pushed ranked retrieval.** `ORDER BY _score DESC LIMIT k` is correct but not optimized — all matching rows are scanned, scored, and sorted in Spark. A pushed top-k path that leverages Lance's native scoring order is a planned future extension.
 - **Column names must match the schema exactly.** Column references are resolved at planning time; aliases or expressions are not supported.
 - **`lance_match_phrase` requires positional index.** The FTS index must be built with `with_position = true`. Without it, phrase queries will fail.
 - **WHERE-filter uses full BM25 scoring (no WAND early stopping).** Every row matching the query is evaluated — `wand_factor` is not exposed because SQL WHERE semantics require returning all matching rows.

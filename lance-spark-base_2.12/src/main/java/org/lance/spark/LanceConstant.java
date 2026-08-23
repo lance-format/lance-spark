@@ -19,8 +19,8 @@ public class LanceConstant {
   public static final String ROW_ADDRESS = "_rowaddr";
 
   /**
-   * Relevance score column. Lance auto-projects it onto the scan output whenever a full-text query
-   * is set, so it is exposed as a metadata column and stripped from the native column projection.
+   * BM25 relevance score column. Explicitly included in the native column projection when a
+   * full-text query is active. Exposed as a metadata column so it is hidden from SELECT *.
    */
   public static final String SCORE = "_score";
 
