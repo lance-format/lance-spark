@@ -21,6 +21,7 @@ import org.lance.Transaction;
 import org.lance.fragment.FragmentUpdateResult;
 import org.lance.operation.Update;
 import org.lance.spark.LanceDataset;
+import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.utils.Utils;
@@ -39,6 +40,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -83,9 +85,8 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
       List<String> tableId) {
     this.schema = schema;
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
-      this.writeOptions = writeOptions.withVersion(ds.version());
-      logger.debug(
-          "Resolved dataset version for UPDATE COLUMNS: {}", this.writeOptions.getVersion());
+      this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
+      logger.debug("Resolved dataset ref for UPDATE COLUMNS: {}", this.writeOptions.getRef());
     }
     this.updateColumns = updateColumns;
     this.initialStorageOptions = initialStorageOptions;
@@ -129,6 +130,12 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
             .findFirst()
             .orElse(new long[0]);
 
+    Map<Long, byte[]> mergedUpdatedFragmentOffsets = new HashMap<>();
+    Arrays.stream(messages)
+        .map(m -> (TaskCommit) m)
+        .map(TaskCommit::getUpdatedFragmentOffsets)
+        .forEach(m -> m.forEach(mergedUpdatedFragmentOffsets::put));
+
     if (updatedFragments.isEmpty()) {
       logger.info("No updated fragments to commit.");
       return;
@@ -145,25 +152,33 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
           .map(Fragment::metadata)
           .forEach(updatedFragments::add);
 
-      // Commit update operation using CommitBuilder
+      // Commit update operation using CommitBuilder. Pass matched physical row offsets per
+      // fragment so Lance can partially refresh _row_last_updated_at_version (stable row IDs).
       Update update =
           Update.builder()
               .updatedFragments(updatedFragments)
               .fieldsModified(fieldsModified)
               .updateMode(Optional.of(Update.UpdateMode.RewriteColumns))
+              .updatedFragmentOffsets(mergedUpdatedFragmentOffsets)
               .build();
       long version =
           Objects.requireNonNull(
-              writeOptions.getVersion(),
-              "version must be set (resolved in UpdateColumnsBackfillBatchWrite constructor)");
+                  writeOptions.getRef(),
+                  "ref must be set (resolved in UpdateColumnsBackfillBatchWrite constructor)")
+              .getVersionNumber()
+              .get();
+      CommitBuilder commitBuilder =
+          new CommitBuilder(dataset)
+              .writeParams(
+                  LanceRuntime.mergeStorageOptions(
+                      writeOptions.getStorageOptions(), initialStorageOptions));
+      String fileFormatVersion = writeOptions.getFileFormatVersion();
+      if (fileFormatVersion != null) {
+        commitBuilder.storageFormat(fileFormatVersion);
+      }
       try (Transaction txn =
               new Transaction.Builder().readVersion(version).operation(update).build();
-          Dataset committed =
-              new CommitBuilder(dataset)
-                  .writeParams(
-                      LanceRuntime.mergeStorageOptions(
-                          writeOptions.getStorageOptions(), initialStorageOptions))
-                  .execute(txn)) {
+          Dataset committed = commitBuilder.execute(txn)) {
         // auto-close txn and committed dataset
       }
     }
@@ -171,6 +186,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
 
   public static class UpdateColumnsWriter extends AbstractBackfillWriter {
     private final List<FragmentMetadata> updatedFragments = new ArrayList<>();
+    private final Map<Long, byte[]> updatedFragmentOffsets = new HashMap<>();
     private long[] fieldsModified;
 
     public UpdateColumnsWriter(
@@ -200,11 +216,15 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
               LanceDataset.ROW_ADDRESS_COLUMN.name());
       updatedFragments.add(result.getUpdatedFragment());
       fieldsModified = result.getFieldsModified();
+      byte[] rowOffsetBytes = result.getUpdatedRowOffsetBytes();
+      if (rowOffsetBytes != null && rowOffsetBytes.length > 0) {
+        updatedFragmentOffsets.put((long) fragment.getId(), rowOffsetBytes);
+      }
     }
 
     @Override
     protected WriterCommitMessage buildCommitMessage() {
-      return new TaskCommit(updatedFragments, fieldsModified);
+      return new TaskCommit(updatedFragments, fieldsModified, updatedFragmentOffsets);
     }
   }
 
@@ -245,6 +265,8 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
 
     @Override
     public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
+      LanceRuntime.enableOpenTelemetry();
+
       return new UpdateColumnsWriter(
           writeOptions,
           schema,
@@ -269,10 +291,16 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
   public static class TaskCommit implements WriterCommitMessage {
     private final List<FragmentMetadata> updatedFragments;
     private final long[] fieldsModified;
+    private final Map<Long, byte[]> updatedFragmentOffsets;
 
-    TaskCommit(List<FragmentMetadata> updatedFragments, long[] fieldsModified) {
+    TaskCommit(
+        List<FragmentMetadata> updatedFragments,
+        long[] fieldsModified,
+        Map<Long, byte[]> updatedFragmentOffsets) {
       this.updatedFragments = updatedFragments;
       this.fieldsModified = fieldsModified;
+      this.updatedFragmentOffsets =
+          updatedFragmentOffsets != null ? updatedFragmentOffsets : Collections.emptyMap();
     }
 
     List<FragmentMetadata> getUpdatedFragments() {
@@ -281,6 +309,10 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
 
     long[] getFieldsModified() {
       return fieldsModified;
+    }
+
+    Map<Long, byte[]> getUpdatedFragmentOffsets() {
+      return updatedFragmentOffsets;
     }
   }
 }

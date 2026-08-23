@@ -258,6 +258,14 @@ def spark(request):
             "spark.sql.extensions",
             "org.lance.spark.extensions.LanceSparkSessionExtensions",
         )
+        .config(
+            f"spark.sql.catalog.{CATALOG}.index_cache_backend",
+            "moka://?capacity=16777216",
+        )
+        .config(
+            f"spark.sql.catalog.{CATALOG}.metadata_cache_backend",
+            "moka://?capacity=8388608",
+        )
     )
 
     if backend == "lancedb":

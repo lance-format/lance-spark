@@ -59,6 +59,22 @@ public class LanceSparkCatalogConfigTest {
   }
 
   @Test
+  public void testFromExtractsCacheBackendOptions() {
+    Map<String, String> catalogOptions = new HashMap<>();
+    catalogOptions.put("index_cache_backend", "moka://?capacity=1048576");
+    catalogOptions.put("metadata_cache_backend", "moka://?capacity=524288");
+    catalogOptions.put("storage.region", "us-west-2");
+
+    LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
+
+    assertEquals("moka://?capacity=1048576", config.getIndexCacheBackend());
+    assertEquals("moka://?capacity=524288", config.getMetadataCacheBackend());
+    assertFalse(config.getStorageOptions().containsKey("index_cache_backend"));
+    assertFalse(config.getStorageOptions().containsKey("metadata_cache_backend"));
+    assertEquals("us-west-2", config.getStorageOptions().get("region"));
+  }
+
+  @Test
   public void testFromIgnoresNullKeysOrValues() {
     Map<String, String> catalogOptions = new HashMap<>();
     catalogOptions.put("storage.region", "us-west-2");

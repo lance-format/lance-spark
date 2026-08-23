@@ -199,6 +199,94 @@ Use `VERSION AS OF` to query a specific version of the table:
     df.show();
     ```
 
+### Query by Tag
+
+Use `VERSION AS OF` with a quoted tag name to query the snapshot referenced by a tag:
+
+=== "SQL"
+    ```sql
+    -- Query the snapshot referenced by the release_candidate tag
+    SELECT * FROM users VERSION AS OF 'release_candidate';
+
+    -- Query specific columns from a tagged snapshot
+    SELECT id, name FROM users VERSION AS OF 'v1.0';
+    ```
+
+=== "Python"
+    ```python
+    # Query a tag using SQL
+    spark.sql("SELECT * FROM users VERSION AS OF 'release_candidate'").show()
+    ```
+
+=== "Scala"
+    ```scala
+    // Query a tag using SQL
+    spark.sql("SELECT * FROM users VERSION AS OF 'release_candidate'").show()
+    ```
+
+=== "Java"
+    ```java
+    // Query a tag using SQL
+    spark.sql("SELECT * FROM users VERSION AS OF 'release_candidate'").show();
+    ```
+
+!!! note
+    Tags whose names consist entirely of integer digits cannot be queried. Numeric values are
+    interpreted as table versions, even when quoted. For example, both `VERSION AS OF 123` and
+    `VERSION AS OF '123'` query table version 123 rather than a tag named `123`. Use a tag name that
+    contains at least one non-digit character.
+
+Tag queries are read-only. `UPDATE`, `DELETE`, `INSERT`, `MERGE INTO`, `ADD COLUMNS`, and
+`UPDATE COLUMNS` operations cannot target a tagged snapshot.
+
+### Query by Branch
+
+Read the current head of a named branch. Do not set `branch` and `version` on the same read.
+
+=== "SQL"
+    ```sql
+    SELECT * FROM catalog.db.users.branch_audit;
+    ```
+
+=== "Python"
+    ```python
+    audit = spark.read.option("branch", "audit").table("catalog.db.users")
+
+    audit_path = spark.read \
+        .format("lance") \
+        .option("branch", "audit") \
+        .load("/path/to/dataset.lance")
+    ```
+
+=== "Scala"
+    ```scala
+    val audit = spark.read.option("branch", "audit").table("catalog.db.users")
+
+    val auditPath = spark.read
+        .format("lance")
+        .option("branch", "audit")
+        .load("/path/to/dataset.lance")
+    ```
+
+=== "Java"
+    ```java
+    Dataset<Row> audit = spark.read()
+        .option("branch", "audit")
+        .table("catalog.db.users");
+
+    Dataset<Row> auditPath = spark.read()
+        .format("lance")
+        .option("branch", "audit")
+        .load("/path/to/dataset.lance");
+    ```
+
+If a table named `users.branch_audit` already exists, Spark reads that table. Otherwise the last
+segment is a branch on the parent table. Do not add `VERSION AS OF` or `TIMESTAMP AS OF`. Branch
+identifiers are read-only; mutating commands are rejected.
+
+`.option("branch").table(...)` applies the branch at scan time. Spark still analyzes with the table
+schema. Use `table.branch_name` when the branch schema differs from the table.
+
 ### Query by Timestamp
 
 Use `TIMESTAMP AS OF` to query the table as it existed at a specific point in time:
@@ -239,6 +327,7 @@ These options control how data is read from Lance datasets. They can be set usin
 | `batch_size`          | Integer | `8192`  | Number of rows to read per batch during scanning. Larger values may improve throughput but increase memory usage. |
 | `use_scalar_index`    | Boolean | `true`  | Whether to use scalar indices (e.g. btree) for filter acceleration during scanning.                               |
 | `version`             | Integer | Latest  | Specific dataset version to read. If not specified, reads the latest version.                                     |
+| `branch`              | String  | Main    | Named branch to read. Reads the current head. Do not set with `version`.                                          |
 | `block_size`          | Integer | -       | Block size in bytes for reading data.                                                                             |
 | `index_cache_size`    | Integer | -       | Size of the index cache in number of entries.                                                                     |
 | `metadata_cache_size` | Integer | -       | Size of the metadata cache in number of entries.                                                                  |

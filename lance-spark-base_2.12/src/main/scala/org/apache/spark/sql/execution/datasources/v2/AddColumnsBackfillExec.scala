@@ -29,11 +29,8 @@ case class AddColumnsBackfillExec(
   override def output: Seq[Attribute] = Seq.empty
 
   override protected def run(): Seq[InternalRow] = {
-    val originalTable = catalog.loadTable(ident) match {
-      case lanceTable: LanceDataset => lanceTable
-      case _ =>
-        throw new UnsupportedOperationException("AddColumnsBackfill only supports for LanceDataset")
-    }
+    val originalTable =
+      LanceDataset.requireWritable(catalog.loadTable(ident), "AddColumnsBackfill")
 
     // Check the added columns must not exist
     val originalFields = originalTable.schema().fieldNames.toSet

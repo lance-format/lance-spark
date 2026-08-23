@@ -16,14 +16,22 @@ package org.lance.spark;
 import org.lance.Session;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.QueryTableRequest;
+import org.lance.otel.LanceMetrics;
 
+import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.api.metrics.MeterProvider;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.spark.SparkEnv;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -35,8 +43,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>Session cache sizes can be configured via environment variables:
  *
  * <ul>
- *   <li>{@code LANCE_INDEX_CACHE_SIZE} - Index cache size in bytes (default: 256MB)
- *   <li>{@code LANCE_METADATA_CACHE_SIZE} - Metadata cache size in bytes (default: 256MB)
+ *   <li>{@code LANCE_INDEX_CACHE_SIZE} - Index cache size in bytes
+ *   <li>{@code LANCE_METADATA_CACHE_SIZE} - Metadata cache size in bytes
+ *   <li>{@code LANCE_INDEX_CACHE_BACKEND} - Registered index cache backend URI
+ *   <li>{@code LANCE_METADATA_CACHE_BACKEND} - Registered metadata cache backend URI
  * </ul>
  *
  * <p>Usage:
@@ -48,6 +58,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * }</pre>
  */
 public final class LanceRuntime {
+  private static final Logger LOG = LoggerFactory.getLogger(LanceRuntime.class);
 
   /** Environment variable for allocator size. */
   public static final String ENV_ALLOCATOR_SIZE = "LANCE_ALLOCATOR_SIZE";
@@ -57,6 +68,18 @@ public final class LanceRuntime {
 
   /** Environment variable for metadata cache size in bytes. */
   public static final String ENV_METADATA_CACHE_SIZE = "LANCE_METADATA_CACHE_SIZE";
+
+  /** Environment variable for the registered index cache backend URI. */
+  public static final String ENV_INDEX_CACHE_BACKEND = "LANCE_INDEX_CACHE_BACKEND";
+
+  /** Environment variable for the registered metadata cache backend URI. */
+  public static final String ENV_METADATA_CACHE_BACKEND = "LANCE_METADATA_CACHE_BACKEND";
+
+  /** Spark configuration key that enables Lance OpenTelemetry metrics in each JVM. */
+  public static final String SPARK_CONF_OPEN_TELEMETRY_ENABLED = "spark.lance.otel.enabled";
+
+  /** Environment variable fallback for enabling Lance OpenTelemetry metrics in each JVM. */
+  public static final String ENV_OPEN_TELEMETRY_ENABLED = "LANCE_SPARK_OTEL_ENABLED";
 
   /** Default allocator size (unlimited). */
   public static final long DEFAULT_ALLOCATOR_SIZE = Long.MAX_VALUE;
@@ -68,7 +91,7 @@ public final class LanceRuntime {
   private static volatile BufferAllocator GLOBAL_ALLOCATOR;
 
   /** Per-catalog sessions for cache isolation (lazy initialized). */
-  private static final Map<String, Session> CATALOG_SESSIONS = new ConcurrentHashMap<>();
+  private static final Map<String, CatalogSession> CATALOG_SESSIONS = new ConcurrentHashMap<>();
 
   /** External namespace implementation aliases used by Spark catalog configuration. */
   private static final Map<String, String> EXTERNAL_NAMESPACE_IMPLS =
@@ -80,6 +103,17 @@ public final class LanceRuntime {
 
   /** Cached {@code queryTable} support per namespace impl alias or class name. */
   private static final Map<String, Boolean> QUERY_TABLE_SUPPORT = new ConcurrentHashMap<>();
+
+  /** Invalid OpenTelemetry values already reported in this JVM. */
+  private static final Set<String> REPORTED_INVALID_OPEN_TELEMETRY_VALUES =
+      ConcurrentHashMap.newKeySet();
+
+  /** Process-local OpenTelemetry bridge initialization state. */
+  private static volatile OpenTelemetryInitialization OPEN_TELEMETRY_INITIALIZATION =
+      OpenTelemetryInitialization.NOT_ATTEMPTED;
+
+  /** OpenTelemetry provider used by the current bridge instruments. */
+  private static volatile MeterProvider OPEN_TELEMETRY_PROVIDER;
 
   private LanceRuntime() {}
 
@@ -197,23 +231,228 @@ public final class LanceRuntime {
    */
   public static Session session(String catalogName) {
     String key = catalogName != null ? catalogName : DEFAULT_CATALOG;
-    return CATALOG_SESSIONS.computeIfAbsent(key, k -> createSession());
+    return CATALOG_SESSIONS.computeIfAbsent(
+            key, k -> CatalogSession.managed(createSessionConfiguration(null, null)))
+        .session;
   }
 
-  private static Session createSession() {
-    Session.Builder builder = Session.builder();
-
-    Long indexCacheSize = getEnvLong(ENV_INDEX_CACHE_SIZE);
-    if (indexCacheSize != null) {
-      builder.indexCacheSizeBytes(indexCacheSize);
+  /**
+   * Returns the session for a catalog with registered cache backends selected by URI.
+   *
+   * <p>The first call for a catalog creates its process-local session. Later calls must request the
+   * same backend configuration. Cache backends cannot be changed after the session has been used;
+   * use a different catalog or restart the JVM to switch an existing catalog.
+   *
+   * <p>Catalog backend URIs take precedence over the corresponding environment backend and cache
+   * size settings. A {@code null} URI falls back to {@link #ENV_INDEX_CACHE_BACKEND} or {@link
+   * #ENV_METADATA_CACHE_BACKEND}, then to the legacy cache size environment variable.
+   *
+   * @param catalogName the catalog name for cache isolation
+   * @param indexCacheBackendUri index cache backend URI, or null for the environment/default
+   * @param metadataCacheBackendUri metadata cache backend URI, or null for the environment/default
+   * @return the session for the specified catalog
+   */
+  public static Session session(
+      String catalogName, String indexCacheBackendUri, String metadataCacheBackendUri) {
+    validateOptionalBackendUri(indexCacheBackendUri, "indexCacheBackendUri");
+    validateOptionalBackendUri(metadataCacheBackendUri, "metadataCacheBackendUri");
+    if (!hasText(indexCacheBackendUri) && !hasText(metadataCacheBackendUri)) {
+      return session(catalogName);
     }
 
-    Long metadataCacheSize = getEnvLong(ENV_METADATA_CACHE_SIZE);
-    if (metadataCacheSize != null) {
-      builder.metadataCacheSizeBytes(metadataCacheSize);
+    String key = catalogName != null ? catalogName : DEFAULT_CATALOG;
+    SessionConfiguration requested =
+        createSessionConfiguration(indexCacheBackendUri, metadataCacheBackendUri);
+    return CATALOG_SESSIONS.compute(
+            key,
+            (ignored, current) -> {
+              if (current == null) {
+                return CatalogSession.managed(requested);
+              }
+              if (!requested.equals(current.configuration)) {
+                throw new IllegalStateException(
+                    "Lance session for catalog '"
+                        + key
+                        + "' is already initialized with a different cache configuration");
+              }
+              return current;
+            })
+        .session;
+  }
+
+  /**
+   * Registers a Java SDK session for a Spark catalog.
+   *
+   * <p>Use this when the session was built programmatically, for example with structured {@code
+   * CacheBackendConfig} instances. Registration must happen before the catalog is first used in
+   * each driver or executor JVM. Ownership transfers to {@code LanceRuntime}; callers must not
+   * close the session after registration.
+   *
+   * @param catalogName the catalog that should use the session
+   * @param session the open Java SDK session to register
+   */
+  public static void registerSession(String catalogName, Session session) {
+    Objects.requireNonNull(session, "session must not be null");
+    if (session.isClosed()) {
+      throw new IllegalArgumentException("session must be open");
+    }
+
+    String key = catalogName != null ? catalogName : DEFAULT_CATALOG;
+    CATALOG_SESSIONS.compute(
+        key,
+        (ignored, current) -> {
+          if (current == null) {
+            return CatalogSession.registered(session);
+          }
+          if (current.session.isSameAs(session)) {
+            return current;
+          }
+          throw new IllegalStateException(
+              "Lance session for catalog '" + key + "' is already initialized");
+        });
+  }
+
+  private static void validateOptionalBackendUri(String backendUri, String name) {
+    if (backendUri != null && !hasText(backendUri)) {
+      throw new IllegalArgumentException(name + " must not be blank");
+    }
+  }
+
+  /**
+   * Installs Lance's JNI-backed OpenTelemetry metrics bridge when enabled.
+   *
+   * <p>The bridge is process-global and {@link LanceMetrics#instrument()} is idempotent, so Spark
+   * driver and executor code paths can call this before Lance work starts in each JVM.
+   *
+   * @return true if OpenTelemetry was enabled and the bridge was installed, false otherwise
+   */
+  public static boolean enableOpenTelemetry() {
+    if (!isOpenTelemetryEnabled()) {
+      return false;
+    }
+
+    MeterProvider meterProvider = GlobalOpenTelemetry.get().getMeterProvider();
+    OpenTelemetryInitialization initialization = OPEN_TELEMETRY_INITIALIZATION;
+    if (initialization == OpenTelemetryInitialization.FAILED) {
+      return false;
+    }
+    if (initialization == OpenTelemetryInitialization.INSTALLED
+        && OPEN_TELEMETRY_PROVIDER == meterProvider) {
+      return true;
+    }
+
+    synchronized (LanceRuntime.class) {
+      initialization = OPEN_TELEMETRY_INITIALIZATION;
+      if (initialization == OpenTelemetryInitialization.FAILED) {
+        return false;
+      }
+      if (initialization == OpenTelemetryInitialization.INSTALLED
+          && OPEN_TELEMETRY_PROVIDER == meterProvider) {
+        return true;
+      }
+
+      boolean instrumented = LanceMetrics.instrument(meterProvider);
+      if (instrumented) {
+        OPEN_TELEMETRY_PROVIDER = meterProvider;
+        OPEN_TELEMETRY_INITIALIZATION = OpenTelemetryInitialization.INSTALLED;
+      } else {
+        OPEN_TELEMETRY_INITIALIZATION = OpenTelemetryInitialization.FAILED;
+        LOG.warn(
+            "Lance OpenTelemetry metrics were enabled, but the native metrics recorder could not"
+                + " be installed. Another Rust metrics recorder may already be installed in this"
+                + " JVM.");
+      }
+      return instrumented;
+    }
+  }
+
+  static boolean isOpenTelemetryEnabled() {
+    SparkEnv sparkEnv = SparkEnv.get();
+    String sparkConfigured =
+        sparkEnv == null ? null : sparkEnv.conf().get(SPARK_CONF_OPEN_TELEMETRY_ENABLED, null);
+    return resolveOpenTelemetryEnabled(
+        sparkConfigured,
+        System.getProperty(SPARK_CONF_OPEN_TELEMETRY_ENABLED),
+        System.getenv(ENV_OPEN_TELEMETRY_ENABLED));
+  }
+
+  static boolean resolveOpenTelemetryEnabled(
+      String sparkConfigured, String systemConfigured, String environmentConfigured) {
+    if (hasText(sparkConfigured)) {
+      return parseOpenTelemetryEnabled(sparkConfigured, "Spark configuration");
+    }
+    if (hasText(systemConfigured)) {
+      return parseOpenTelemetryEnabled(systemConfigured, "JVM system property");
+    }
+    if (hasText(environmentConfigured)) {
+      return parseOpenTelemetryEnabled(environmentConfigured, "environment variable");
+    }
+    return false;
+  }
+
+  private static boolean parseOpenTelemetryEnabled(String configured, String source) {
+    String normalized = configured.trim();
+    if ("true".equalsIgnoreCase(normalized)) {
+      return true;
+    }
+    if ("false".equalsIgnoreCase(normalized)) {
+      return false;
+    }
+
+    String reportedValue = source + '\0' + configured;
+    if (REPORTED_INVALID_OPEN_TELEMETRY_VALUES.add(reportedValue)) {
+      LOG.warn(
+          "Invalid boolean value '{}' for {} from {}; expected 'true' or 'false'. OpenTelemetry"
+              + " metrics will remain disabled.",
+          configured,
+          SPARK_CONF_OPEN_TELEMETRY_ENABLED,
+          source);
+    }
+    return false;
+  }
+
+  private static boolean hasText(String value) {
+    return value != null && !value.trim().isEmpty();
+  }
+
+  private static SessionConfiguration createSessionConfiguration(
+      String indexCacheBackendUri, String metadataCacheBackendUri) {
+    String indexBackend =
+        firstNonBlank(indexCacheBackendUri, System.getenv(ENV_INDEX_CACHE_BACKEND));
+    String metadataBackend =
+        firstNonBlank(metadataCacheBackendUri, System.getenv(ENV_METADATA_CACHE_BACKEND));
+    Long indexCacheSize = indexBackend == null ? getEnvLong(ENV_INDEX_CACHE_SIZE) : null;
+    Long metadataCacheSize = metadataBackend == null ? getEnvLong(ENV_METADATA_CACHE_SIZE) : null;
+    return new SessionConfiguration(
+        indexBackend, metadataBackend, indexCacheSize, metadataCacheSize);
+  }
+
+  private static Session createSession(SessionConfiguration configuration) {
+    Session.Builder builder = Session.builder();
+
+    if (configuration.indexCacheBackendUri != null) {
+      builder.indexCacheBackend(configuration.indexCacheBackendUri);
+    } else if (configuration.indexCacheSize != null) {
+      builder.indexCacheSizeBytes(configuration.indexCacheSize);
+    }
+
+    if (configuration.metadataCacheBackendUri != null) {
+      builder.metadataCacheBackend(configuration.metadataCacheBackendUri);
+    } else if (configuration.metadataCacheSize != null) {
+      builder.metadataCacheSizeBytes(configuration.metadataCacheSize);
     }
 
     return builder.build();
+  }
+
+  private static String firstNonBlank(String primary, String fallback) {
+    if (hasText(primary)) {
+      return primary.trim();
+    }
+    if (hasText(fallback)) {
+      return fallback.trim();
+    }
+    return null;
   }
 
   /**
@@ -272,10 +511,82 @@ public final class LanceRuntime {
    */
   static void clearGlobalSession() {
     synchronized (LanceRuntime.class) {
-      for (Session session : CATALOG_SESSIONS.values()) {
-        session.close();
+      for (CatalogSession catalogSession : CATALOG_SESSIONS.values()) {
+        catalogSession.session.close();
       }
       CATALOG_SESSIONS.clear();
+    }
+  }
+
+  static void clearOpenTelemetry() {
+    synchronized (LanceRuntime.class) {
+      LanceMetrics.close();
+      OPEN_TELEMETRY_PROVIDER = null;
+      OPEN_TELEMETRY_INITIALIZATION = OpenTelemetryInitialization.NOT_ATTEMPTED;
+      REPORTED_INVALID_OPEN_TELEMETRY_VALUES.clear();
+    }
+  }
+
+  private enum OpenTelemetryInitialization {
+    NOT_ATTEMPTED,
+    INSTALLED,
+    FAILED
+  }
+
+  private static final class CatalogSession {
+    private final Session session;
+    private final SessionConfiguration configuration;
+
+    private CatalogSession(Session session, SessionConfiguration configuration) {
+      this.session = session;
+      this.configuration = configuration;
+    }
+
+    private static CatalogSession managed(SessionConfiguration configuration) {
+      return new CatalogSession(createSession(configuration), configuration);
+    }
+
+    private static CatalogSession registered(Session session) {
+      return new CatalogSession(session, null);
+    }
+  }
+
+  private static final class SessionConfiguration {
+    private final String indexCacheBackendUri;
+    private final String metadataCacheBackendUri;
+    private final Long indexCacheSize;
+    private final Long metadataCacheSize;
+
+    private SessionConfiguration(
+        String indexCacheBackendUri,
+        String metadataCacheBackendUri,
+        Long indexCacheSize,
+        Long metadataCacheSize) {
+      this.indexCacheBackendUri = indexCacheBackendUri;
+      this.metadataCacheBackendUri = metadataCacheBackendUri;
+      this.indexCacheSize = indexCacheSize;
+      this.metadataCacheSize = metadataCacheSize;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      if (this == other) {
+        return true;
+      }
+      if (!(other instanceof SessionConfiguration)) {
+        return false;
+      }
+      SessionConfiguration that = (SessionConfiguration) other;
+      return Objects.equals(indexCacheBackendUri, that.indexCacheBackendUri)
+          && Objects.equals(metadataCacheBackendUri, that.metadataCacheBackendUri)
+          && Objects.equals(indexCacheSize, that.indexCacheSize)
+          && Objects.equals(metadataCacheSize, that.metadataCacheSize);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(
+          indexCacheBackendUri, metadataCacheBackendUri, indexCacheSize, metadataCacheSize);
     }
   }
 

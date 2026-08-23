@@ -15,6 +15,7 @@ package org.lance.spark.read;
 
 import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
+import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.read.metric.LanceCustomMetrics;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
@@ -538,6 +539,7 @@ public class LanceScan
   private static class LanceReaderFactory implements PartitionReaderFactory {
     @Override
     public PartitionReader<InternalRow> createReader(InputPartition partition) {
+      LanceRuntime.enableOpenTelemetry();
       Preconditions.checkArgument(
           partition instanceof LanceInputPartition,
           "Unknown InputPartition type. Expecting LanceInputPartition");
@@ -546,6 +548,7 @@ public class LanceScan
 
     @Override
     public PartitionReader<ColumnarBatch> createColumnarReader(InputPartition partition) {
+      LanceRuntime.enableOpenTelemetry();
       Preconditions.checkArgument(
           partition instanceof LanceInputPartition,
           "Unknown InputPartition type. Expecting LanceInputPartition");

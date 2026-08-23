@@ -79,6 +79,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -116,6 +117,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   private static final String CONFIG_PARENT_DELIMITER = "parent_delimiter";
   private static final String CONFIG_PARENT_DELIMITER_DEFAULT = ".";
+
+  private static final Pattern BRANCH_SUFFIX = Pattern.compile("branch_(.+)");
 
   private boolean pathBasedOnly = false;
 
@@ -209,6 +212,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     // Parse catalog configuration
     this.catalogConfig = LanceSparkCatalogConfig.from(this.storageOptions);
+    if (catalogConfig.getIndexCacheBackend() != null
+        || catalogConfig.getMetadataCacheBackend() != null) {
+      LanceRuntime.session(
+          name, catalogConfig.getIndexCacheBackend(), catalogConfig.getMetadataCacheBackend());
+    }
 
     // impl is optional - if not provided, catalog operates in path-based only mode
     if (!options.containsKey(CONFIG_IMPL)) {
@@ -591,17 +599,69 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   @Override
   public Table loadTable(Identifier ident) throws NoSuchTableException {
-    return loadTableInternal(ident, Optional.empty(), Optional.empty());
+    return loadTableOrBranchSelector(ident, Optional.empty(), Optional.empty());
   }
 
   @Override
   public Table loadTable(Identifier ident, String version) throws NoSuchTableException {
-    return loadTableInternal(ident, Optional.empty(), Optional.of(version));
+    return loadTableOrBranchSelector(ident, Optional.empty(), Optional.of(version));
   }
 
   @Override
   public Table loadTable(Identifier ident, long timestamp) throws NoSuchTableException {
-    return loadTableInternal(ident, Optional.of(timestamp), Optional.empty());
+    return loadTableOrBranchSelector(ident, Optional.of(timestamp), Optional.empty());
+  }
+
+  private Table loadTableOrBranchSelector(
+      Identifier ident, Optional<Long> timestamp, Optional<String> version)
+      throws NoSuchTableException {
+    Optional<LanceRef> branch = branchSelector(ident);
+    if (!branch.isPresent()) {
+      return loadTableInternal(ident, timestamp, version, Optional.empty());
+    }
+
+    try {
+      ResolvedTable literal = resolveLiteralTable(ident);
+      return loadResolvedTable(ident, literal, timestamp, version, Optional.empty());
+    } catch (NoSuchTableException e) {
+      return loadBranchSelector(ident, timestamp, version, branch.get());
+    }
+  }
+
+  private ResolvedTable resolveLiteralTable(Identifier ident) throws NoSuchTableException {
+    try {
+      return resolveIdentifier(ident);
+    } catch (LanceNamespaceException e) {
+      ErrorCode code = e.getErrorCode();
+      if (code == ErrorCode.NAMESPACE_NOT_FOUND || code == ErrorCode.INVALID_INPUT) {
+        throw new NoSuchTableException(ident);
+      }
+      throw e;
+    }
+  }
+
+  private Table loadBranchSelector(
+      Identifier ident, Optional<Long> timestamp, Optional<String> version, LanceRef branch)
+      throws NoSuchTableException {
+    if (timestamp.isPresent() || version.isPresent()) {
+      throw new IllegalArgumentException(
+          "Cannot combine a branch identifier with VERSION AS OF or TIMESTAMP AS OF");
+    }
+    return loadTableInternal(parentIdent(ident), timestamp, version, Optional.of(branch));
+  }
+
+  private static Optional<LanceRef> branchSelector(Identifier ident) {
+    if (ident.namespace().length == 0 || isPathBasedIdentifier(ident)) {
+      return Optional.empty();
+    }
+    Matcher matcher = BRANCH_SUFFIX.matcher(ident.name());
+    return matcher.matches() ? Optional.of(LanceRef.ofBranch(matcher.group(1))) : Optional.empty();
+  }
+
+  private static Identifier parentIdent(Identifier ident) {
+    String[] namespace = ident.namespace();
+    return Identifier.of(
+        Arrays.copyOf(namespace, namespace.length - 1), namespace[namespace.length - 1]);
   }
 
   @Override
@@ -1125,6 +1185,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         StagedCommitOptions.of(
             merged,
             catalogConfig.isEnableStableRowIds(properties),
+            fileFormatVersion,
             namespace,
             tableIdList,
             managedVersioning);
@@ -1161,7 +1222,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     final StagedCommitOptions commitOptions =
         StagedCommitOptions.pathBased(
-            catalogConfig.getStorageOptions(), catalogConfig.isEnableStableRowIds(properties));
+            catalogConfig.getStorageOptions(),
+            catalogConfig.isEnableStableRowIds(properties),
+            fileFormatVersion);
     StagedCommit stagedCommit = StagedCommit.forNewTable(arrowSchema, datasetUri, commitOptions);
     stagedCommit.setShardingSpec(shardingSpec);
     return createStagedDataset(
@@ -1201,19 +1264,20 @@ public abstract class BaseLanceNamespaceSparkCatalog
     Dataset ds = Utils.openDatasetBuilder(resolved.readOptions).build();
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
+    // Use specified file format version, or fall back to existing table's version
+    if (fileFormatVersion == null) {
+      fileFormatVersion = ds.getLanceFileFormatVersion();
+    }
     final StagedCommitOptions commitOptions =
         StagedCommitOptions.of(
             merged,
             catalogConfig.isEnableStableRowIds(properties),
+            fileFormatVersion,
             namespace,
             resolved.tableIdList,
             managedVersioning);
     StagedCommit stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
     stagedCommit.setShardingSpec(shardingSpec);
-    // Use specified file format version, or fall back to existing table's version
-    if (fileFormatVersion == null) {
-      fileFormatVersion = ds.getLanceFileFormatVersion();
-    }
     return createStagedDataset(
         resolved.readOptions,
         processedSchema,
@@ -1250,16 +1314,18 @@ public abstract class BaseLanceNamespaceSparkCatalog
       throw new NoSuchTableException(ident);
     }
 
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
-    final StagedCommitOptions commitOptions =
-        StagedCommitOptions.pathBased(
-            catalogConfig.getStorageOptions(), catalogConfig.isEnableStableRowIds(properties));
-    StagedCommit stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
-    stagedCommit.setShardingSpec(shardingSpec);
     // Use specified file format version, or fall back to existing table's version
     if (fileFormatVersion == null) {
       fileFormatVersion = ds.getLanceFileFormatVersion();
     }
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
+    final StagedCommitOptions commitOptions =
+        StagedCommitOptions.pathBased(
+            catalogConfig.getStorageOptions(),
+            catalogConfig.isEnableStableRowIds(properties),
+            fileFormatVersion);
+    StagedCommit stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
+    stagedCommit.setShardingSpec(shardingSpec);
     return createStagedDataset(
         readOptions,
         processedSchema,
@@ -1333,24 +1399,32 @@ public abstract class BaseLanceNamespaceSparkCatalog
             name);
 
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
-    // Use specified file format version, or fall back to existing table's version
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
-    final StagedCommitOptions commitOptions =
-        StagedCommitOptions.of(
-            merged,
-            catalogConfig.isEnableStableRowIds(properties),
-            namespace,
-            tableIdList,
-            managedVersioning);
     StagedCommit stagedCommit;
     if (exists) {
       Dataset ds = Utils.openDatasetBuilder(readOptions).build();
-      stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
       if (fileFormatVersion == null) {
         fileFormatVersion = ds.getLanceFileFormatVersion();
       }
+      final StagedCommitOptions commitOptions =
+          StagedCommitOptions.of(
+              merged,
+              catalogConfig.isEnableStableRowIds(properties),
+              fileFormatVersion,
+              namespace,
+              tableIdList,
+              managedVersioning);
+      stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
     } else {
+      final StagedCommitOptions commitOptions =
+          StagedCommitOptions.of(
+              merged,
+              catalogConfig.isEnableStableRowIds(properties),
+              fileFormatVersion,
+              namespace,
+              tableIdList,
+              managedVersioning);
       stagedCommit = StagedCommit.forNewTable(arrowSchema, location, commitOptions);
     }
     stagedCommit.setShardingSpec(shardingSpec);
@@ -1384,18 +1458,24 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     boolean exists = tableExistsAtPath(ident);
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
-    final StagedCommitOptions commitOptions =
-        StagedCommitOptions.pathBased(
-            catalogConfig.getStorageOptions(), catalogConfig.isEnableStableRowIds(properties));
     StagedCommit stagedCommit;
-    // Use specified file format version, or fall back to existing table's version
     if (exists) {
       Dataset ds = Utils.openDatasetBuilder(readOptions).build();
-      stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
       if (fileFormatVersion == null) {
         fileFormatVersion = ds.getLanceFileFormatVersion();
       }
+      final StagedCommitOptions commitOptions =
+          StagedCommitOptions.pathBased(
+              catalogConfig.getStorageOptions(),
+              catalogConfig.isEnableStableRowIds(properties),
+              fileFormatVersion);
+      stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
     } else {
+      final StagedCommitOptions commitOptions =
+          StagedCommitOptions.pathBased(
+              catalogConfig.getStorageOptions(),
+              catalogConfig.isEnableStableRowIds(properties),
+              fileFormatVersion);
       stagedCommit = StagedCommit.forNewTable(arrowSchema, datasetUri, commitOptions);
     }
     stagedCommit.setShardingSpec(shardingSpec);
@@ -1628,44 +1708,54 @@ public abstract class BaseLanceNamespaceSparkCatalog
     }
   }
 
+  private LanceRef parseVersionRef(String version) {
+    try {
+      return LanceRef.ofMain(Utils.parseVersion(version));
+    } catch (NumberFormatException e) {
+      return LanceRef.ofTag(version);
+    }
+  }
+
   private Table loadTableInternal(
-      Identifier ident, Optional<Long> timestamp, Optional<String> version)
+      Identifier ident,
+      Optional<Long> timestamp,
+      Optional<String> version,
+      Optional<LanceRef> branchRef)
       throws NoSuchTableException {
 
     // Handle path-based access
     if (isPathBasedIdentifier(ident)) {
-      return loadTableFromPath(ident, timestamp, version);
+      return loadTableFromPath(ident, timestamp, version, branchRef);
     }
 
-    ResolvedTable resolved = resolveIdentifier(ident);
+    return loadResolvedTable(ident, resolveIdentifier(ident), timestamp, version, branchRef);
+  }
+
+  private Table loadResolvedTable(
+      Identifier ident,
+      ResolvedTable resolved,
+      Optional<Long> timestamp,
+      Optional<String> version,
+      Optional<LanceRef> branchRef)
+      throws NoSuchTableException {
     DescribeTableResponse describeResponse = resolved.describeResponse;
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
 
-    Optional<Long> versionId = Optional.empty();
+    Optional<LanceRef> ref = branchRef;
     if (timestamp.isPresent()) {
       try (Dataset dataset = Utils.openDatasetBuilder(resolved.readOptions).build()) {
-        versionId = Optional.of(Utils.findVersion(dataset.listVersions(), timestamp.get()));
+        ref =
+            Optional.of(
+                LanceRef.ofMain(Utils.findVersion(dataset.listVersions(), timestamp.get())));
       } catch (TableNotFoundException e) {
         throw new NoSuchTableException(ident);
       }
     } else if (version.isPresent()) {
-      versionId = Optional.of(Utils.parseVersion(version.get()));
+      ref = Optional.of(parseVersionRef(version.get()));
     }
 
-    // If time travel requested, rebuild readOptions with the resolved version
-    LanceSparkReadOptions readOptions;
-    if (versionId.isPresent()) {
-      readOptions =
-          createReadOptions(
-              describeResponse.getLocation(),
-              catalogConfig,
-              versionId,
-              Optional.of(namespace),
-              Optional.of(resolved.tableIdList),
-              name);
-    } else {
-      readOptions = resolved.readOptions;
-    }
+    LanceSparkReadOptions readOptions =
+        ref.isPresent() ? resolved.readOptions.withRef(ref.get()) : resolved.readOptions;
 
     // Read schema, file format version, and config from the dataset
     String fileFormatVersion;
@@ -1675,6 +1765,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       schema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
       fileFormatVersion = dataset.getLanceFileFormatVersion();
       tableProperties = dataset.getConfig();
+      readOptions = pinLoadedBranch(readOptions, dataset);
     }
 
     // Create read options with namespace support
@@ -1720,32 +1811,31 @@ public abstract class BaseLanceNamespaceSparkCatalog
    * spark.read.format("lance").load(path).
    */
   private Table loadTableFromPath(
-      Identifier ident, Optional<Long> timestamp, Optional<String> version)
+      Identifier ident,
+      Optional<Long> timestamp,
+      Optional<String> version,
+      Optional<LanceRef> branchRef)
       throws NoSuchTableException {
     String datasetUri = getDatasetUri(ident);
 
-    Optional<Long> versionId = Optional.empty();
+    LanceSparkReadOptions baseReadOptions =
+        createReadOptions(
+            datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
+    Optional<LanceRef> ref = branchRef;
     if (version.isPresent()) {
-      versionId = Optional.of(Utils.parseVersion(version.get()));
+      ref = Optional.of(parseVersionRef(version.get()));
     } else if (timestamp.isPresent()) {
-      LanceSparkReadOptions readOptions =
-          createReadOptions(
-              datasetUri,
-              catalogConfig,
-              Optional.empty(),
-              Optional.empty(),
-              Optional.empty(),
-              name);
-      try (Dataset dataset = Utils.openDatasetBuilder(readOptions).build()) {
-        versionId = Optional.of(Utils.findVersion(dataset.listVersions(), timestamp.get()));
+      try (Dataset dataset = Utils.openDatasetBuilder(baseReadOptions).build()) {
+        ref =
+            Optional.of(
+                LanceRef.ofMain(Utils.findVersion(dataset.listVersions(), timestamp.get())));
       } catch (IllegalArgumentException e) {
         throw new NoSuchTableException(ident);
       }
     }
 
     LanceSparkReadOptions readOptions =
-        createReadOptions(
-            datasetUri, catalogConfig, versionId, Optional.empty(), Optional.empty(), name);
+        ref.isPresent() ? baseReadOptions.withRef(ref.get()) : baseReadOptions;
 
     // Read schema, file format version, and config from the dataset
     String fileFormatVersion;
@@ -1755,12 +1845,22 @@ public abstract class BaseLanceNamespaceSparkCatalog
       schema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
       fileFormatVersion = dataset.getLanceFileFormatVersion();
       tableProperties = dataset.getConfig();
+      readOptions = pinLoadedBranch(readOptions, dataset);
     } catch (IllegalArgumentException e) {
       throw new NoSuchTableException(ident);
     }
 
     return createDataset(
         readOptions, schema, null, null, null, false, fileFormatVersion, tableProperties, null);
+  }
+
+  private static LanceSparkReadOptions pinLoadedBranch(
+      LanceSparkReadOptions readOptions, Dataset dataset) {
+    LanceRef ref = readOptions.getRef();
+    if (ref == null || !ref.isBranch()) {
+      return readOptions;
+    }
+    return readOptions.withRef(Utils.pinOpenedRef(dataset, ref));
   }
 
   public abstract LanceDataset createDataset(

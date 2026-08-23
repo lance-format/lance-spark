@@ -46,7 +46,7 @@ import java.util.Objects;
  * }</pre>
  */
 public class LanceSparkWriteOptions implements Serializable {
-  private static final long serialVersionUID = 1L;
+  private static final long serialVersionUID = 2L;
 
   public static final String CONFIG_DATASET_URI = "path";
   public static final String CONFIG_WRITE_MODE = "write_mode";
@@ -96,8 +96,15 @@ public class LanceSparkWriteOptions implements Serializable {
   /** The table identifier within the namespace, used for credential refresh. */
   private final List<String> tableId;
 
-  /** Use this version to open the dataset and apply write if set. */
-  private final Long version;
+  /** Use this reference to open the dataset and apply write if set. */
+  private final LanceRef ref;
+
+  /** Catalog and cache backend configuration for process-local session reuse. */
+  private final String catalogName;
+
+  private final String indexCacheBackend;
+
+  private final String metadataCacheBackend;
 
   private LanceSparkWriteOptions(Builder builder) {
     this.datasetUri = builder.datasetUri;
@@ -116,7 +123,10 @@ public class LanceSparkWriteOptions implements Serializable {
     this.storageOptions = new HashMap<>(builder.storageOptions);
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
-    this.version = builder.version;
+    this.ref = builder.ref;
+    this.catalogName = builder.catalogName;
+    this.indexCacheBackend = builder.indexCacheBackend;
+    this.metadataCacheBackend = builder.metadataCacheBackend;
   }
 
   /** Creates a new builder for LanceSparkWriteOptions. */
@@ -213,8 +223,20 @@ public class LanceSparkWriteOptions implements Serializable {
     return tableId;
   }
 
-  public Long getVersion() {
-    return version;
+  public LanceRef getRef() {
+    return ref;
+  }
+
+  public String getCatalogName() {
+    return catalogName;
+  }
+
+  public String getIndexCacheBackend() {
+    return indexCacheBackend;
+  }
+
+  public String getMetadataCacheBackend() {
+    return metadataCacheBackend;
   }
 
   /** Returns a builder pre-populated with all fields from this instance. */
@@ -236,12 +258,15 @@ public class LanceSparkWriteOptions implements Serializable {
         .storageOptions(storageOptions)
         .namespace(namespace)
         .tableId(tableId)
-        .version(version);
+        .ref(ref)
+        .catalogName(catalogName)
+        .indexCacheBackend(indexCacheBackend)
+        .metadataCacheBackend(metadataCacheBackend);
   }
 
-  /** Returns a copy of these options with version set to the given version. */
-  public LanceSparkWriteOptions withVersion(long version) {
-    return toBuilder().version(version).build();
+  /** Returns a copy of these options with the given reference. */
+  public LanceSparkWriteOptions withRef(LanceRef ref) {
+    return toBuilder().ref(ref).build();
   }
 
   public boolean hasNamespace() {
@@ -328,7 +353,10 @@ public class LanceSparkWriteOptions implements Serializable {
         && Objects.equals(blobPackFileSizeThreshold, that.blobPackFileSizeThreshold)
         && Objects.equals(storageOptions, that.storageOptions)
         && Objects.equals(tableId, that.tableId)
-        && Objects.equals(version, that.version);
+        && Objects.equals(ref, that.ref)
+        && Objects.equals(catalogName, that.catalogName)
+        && Objects.equals(indexCacheBackend, that.indexCacheBackend)
+        && Objects.equals(metadataCacheBackend, that.metadataCacheBackend);
   }
 
   @Override
@@ -349,7 +377,10 @@ public class LanceSparkWriteOptions implements Serializable {
         blobPackFileSizeThreshold,
         storageOptions,
         tableId,
-        version);
+        ref,
+        catalogName,
+        indexCacheBackend,
+        metadataCacheBackend);
   }
 
   /** Builder for creating LanceSparkWriteOptions instances. */
@@ -370,7 +401,10 @@ public class LanceSparkWriteOptions implements Serializable {
     private Map<String, String> storageOptions = new HashMap<>();
     private LanceNamespace namespace;
     private List<String> tableId;
-    private Long version;
+    private LanceRef ref;
+    private String catalogName;
+    private String indexCacheBackend;
+    private String metadataCacheBackend;
 
     private Builder() {}
 
@@ -458,9 +492,24 @@ public class LanceSparkWriteOptions implements Serializable {
       return this;
     }
 
-    /** Pin opens to this dataset manifest version. */
-    public Builder version(Long version) {
-      this.version = version;
+    /** Pin opens to this dataset reference. */
+    public Builder ref(LanceRef ref) {
+      this.ref = ref;
+      return this;
+    }
+
+    public Builder catalogName(String catalogName) {
+      this.catalogName = catalogName;
+      return this;
+    }
+
+    public Builder indexCacheBackend(String indexCacheBackend) {
+      this.indexCacheBackend = indexCacheBackend;
+      return this;
+    }
+
+    public Builder metadataCacheBackend(String metadataCacheBackend) {
+      this.metadataCacheBackend = metadataCacheBackend;
       return this;
     }
 
@@ -471,6 +520,9 @@ public class LanceSparkWriteOptions implements Serializable {
      * @return this builder
      */
     public Builder fromOptions(Map<String, String> options) {
+      Preconditions.checkArgument(
+          !options.containsKey(LanceSparkReadOptions.CONFIG_BRANCH),
+          "The branch option is read-only");
       this.storageOptions = new HashMap<>(options);
       if (options.containsKey(CONFIG_WRITE_MODE)) {
         this.writeMode = WriteMode.valueOf(options.get(CONFIG_WRITE_MODE).toUpperCase());
@@ -538,6 +590,8 @@ public class LanceSparkWriteOptions implements Serializable {
       // Merge storage options: catalog options are defaults, current options override
       Map<String, String> merged = new HashMap<>(catalogConfig.getStorageOptions());
       merged.putAll(this.storageOptions);
+      this.indexCacheBackend = catalogConfig.getIndexCacheBackend();
+      this.metadataCacheBackend = catalogConfig.getMetadataCacheBackend();
       return fromOptions(merged);
     }
 
