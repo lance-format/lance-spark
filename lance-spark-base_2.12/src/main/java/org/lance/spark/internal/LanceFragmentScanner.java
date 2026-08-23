@@ -186,6 +186,19 @@ public class LanceFragmentScanner implements AutoCloseable {
     return scanner.scanBatches();
   }
 
+  /**
+   * Exports this fragment scan into a caller-owned Arrow C Data Interface stream. The Lance native
+   * side populates the {@code ArrowArrayStream} at {@code streamAddress} directly, so only the
+   * C-struct address crosses the JVM/native boundary. The caller owns the stream and must close it
+   * (which releases the native scan via the stream's release callback); the scanner and dataset
+   * held by this object are released separately by {@link #close()}.
+   *
+   * @param streamAddress the memory address of a freshly-allocated, empty {@code ArrowArrayStream}
+   */
+  public void exportArrowStream(long streamAddress) throws IOException {
+    scanner.exportArrowStream(streamAddress);
+  }
+
   @Override
   public void close() throws IOException {
     Throwable primary = null;
