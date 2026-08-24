@@ -90,10 +90,7 @@ case class AddIndexExec(
   override def output: Seq[Attribute] = AddIndexOutputType.SCHEMA
 
   override protected def run(): Seq[InternalRow] = {
-    val lanceDataset = catalog.loadTable(ident) match {
-      case d: LanceDataset => d
-      case _ => throw new UnsupportedOperationException("AddIndex only supports LanceDataset")
-    }
+    val lanceDataset = LanceDataset.requireWritable(catalog.loadTable(ident), "AddIndex")
 
     val baseReadOptions = lanceDataset.readOptions()
     val (nsImpl, nsProps, tableId, initialStorageOpts) =

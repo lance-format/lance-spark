@@ -13,6 +13,8 @@
  */
 package org.lance.spark.read;
 
+import org.lance.ipc.FullTextQuery;
+import org.lance.spark.LanceRef;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 import org.lance.spark.utils.BlobUtils;
@@ -348,9 +350,39 @@ public class LanceScanBuilderTest {
     org.apache.spark.sql.connector.read.InputPartition[] partitions = scan.planInputPartitions();
     assertTrue(partitions.length > 0);
     LanceInputPartition first = (LanceInputPartition) partitions[0];
-    Long pinned = first.getReadOptions().getVersion();
+    LanceRef pinned = first.getReadOptions().getRef();
     assertNotNull(pinned, "build() must pin the resolved version onto readOptions");
-    assertTrue(pinned > 0);
+    assertTrue(pinned.getVersionNumber().get() > 0);
+  }
+
+  @Test
+  public void testTagFullTextQueryDoesNotUseNamespaceScan() {
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder()
+            .datasetUri(TestUtils.TestTable1Config.datasetUri)
+            .ref(LanceRef.ofTag("stable"))
+            .fullTextQuery(FullTextQuery.match("hello", "b"))
+            .build();
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            TEST_SCHEMA, options, Collections.emptyMap(), "dir", Collections.emptyMap());
+
+    assertFalse(builder.shouldNamespaceFtsScan());
+  }
+
+  @Test
+  public void testBranchFullTextQueryDoesNotUseNamespaceScan() {
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder()
+            .datasetUri(TestUtils.TestTable1Config.datasetUri)
+            .ref(LanceRef.ofBranch("audit"))
+            .fullTextQuery(FullTextQuery.match("hello", "b"))
+            .build();
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            TEST_SCHEMA, options, Collections.emptyMap(), "dir", Collections.emptyMap());
+
+    assertFalse(builder.shouldNamespaceFtsScan());
   }
 
   @Test

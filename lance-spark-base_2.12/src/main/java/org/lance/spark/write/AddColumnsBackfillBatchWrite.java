@@ -21,6 +21,7 @@ import org.lance.Transaction;
 import org.lance.fragment.FragmentMergeResult;
 import org.lance.operation.Merge;
 import org.lance.spark.LanceDataset;
+import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.utils.Utils;
@@ -75,8 +76,8 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
       List<String> tableId) {
     this.schema = schema;
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
-      this.writeOptions = writeOptions.withVersion(ds.version());
-      logger.debug("Resolved dataset version for ADD COLUMNS: {}", this.writeOptions.getVersion());
+      this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
+      logger.debug("Resolved dataset ref for ADD COLUMNS: {}", this.writeOptions.getRef());
     }
     this.newColumns = newColumns;
     this.initialStorageOptions = initialStorageOptions;
@@ -137,8 +138,10 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false);
     long version =
         Objects.requireNonNull(
-            writeOptions.getVersion(),
-            "version must be set (resolved in AddColumnsBackfillBatchWrite constructor)");
+                writeOptions.getRef(),
+                "ref must be set (resolved in AddColumnsBackfillBatchWrite constructor)")
+            .getVersionNumber()
+            .get();
 
     // Get existing fragments
     try (Dataset dataset = Utils.openDatasetBuilder(writeOptions).build()) {

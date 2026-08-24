@@ -14,10 +14,18 @@
 package org.lance.spark.branch;
 
 import org.lance.Ref;
+import org.lance.spark.LanceDataset;
+import org.lance.spark.LanceRef;
+import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.read.LanceInputPartition;
+import org.lance.spark.read.LanceSplit;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.TableCatalog;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
@@ -28,11 +36,14 @@ import java.io.IOException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 /** Base tests for BRANCH DDL commands. */
 public abstract class BaseBranchDDLTest {
@@ -379,6 +390,349 @@ public abstract class BaseBranchDDLTest {
         showBranches(String.format("show branches from %s", fullTable));
     Assertions.assertTrue(
         branches.containsKey(branchName), "Expected backtick-quoted branch to be returned");
+  }
+
+  @Test
+  public void testBranchReadUsesBranchSchemaAfterMainAddsColumn() throws Exception {
+    DatasetVersions versions = prepareDatasetWithHistory();
+    spark.sql(
+        String.format(
+            "alter table %s create branch audit as of version %d",
+            fullTable, versions.firstInsertVersion));
+    spark.sql(
+        String.format(
+            "create temporary view extra_cols as select _rowaddr, _fragid, 1 as extra from %s",
+            fullTable));
+    spark.sql(String.format("alter table %s add columns extra from extra_cols", fullTable));
+
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    List<String> expectedBranchSchema =
+        columnNames(
+            spark.sql(
+                "select * from " + fullTable + " version as of " + versions.firstInsertVersion));
+    List<String> catalogSchema =
+        Arrays.asList(
+            catalog
+                .loadTable(Identifier.of(new String[] {"default", tableName}, "branch_audit"))
+                .schema()
+                .fieldNames());
+    List<String> identifierSchema = columnNames(spark.table(fullTable + ".branch_audit"));
+
+    Assertions.assertEquals(expectedBranchSchema, catalogSchema);
+    Assertions.assertEquals(expectedBranchSchema, identifierSchema);
+  }
+
+  @Test
+  public void testBranchIdentifierPinsVersionOnLoad() throws Exception {
+    DatasetVersions versions = prepareDatasetWithHistory();
+    spark.sql(
+        String.format(
+            "alter table %s create branch audit as of version %d",
+            fullTable, versions.firstInsertVersion));
+
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    LanceDataset table =
+        (LanceDataset)
+            catalog.loadTable(Identifier.of(new String[] {"default", tableName}, "branch_audit"));
+    LanceRef ref = table.readOptions().getRef();
+
+    Assertions.assertEquals("audit", ref.getBranchName().get());
+    Assertions.assertEquals(versions.firstInsertVersion, ref.getVersionNumber().get());
+  }
+
+  @Test
+  public void testBranchOptionPinsVersionOnScan() throws Exception {
+    DatasetVersions versions = prepareDatasetWithHistory();
+    spark.sql(
+        String.format(
+            "alter table %s create branch audit as of version %d",
+            fullTable, versions.firstInsertVersion));
+
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    LanceDataset table =
+        (LanceDataset) catalog.loadTable(Identifier.of(new String[] {"default"}, tableName));
+    Map<String, String> options = new HashMap<>();
+    options.put("branch", "audit");
+    LanceInputPartition partition =
+        (LanceInputPartition)
+            table
+                .newScanBuilder(new CaseInsensitiveStringMap(options))
+                .build()
+                .toBatch()
+                .planInputPartitions()[0];
+    LanceRef ref = partition.getReadOptions().getRef();
+
+    Assertions.assertEquals("audit", ref.getBranchName().get());
+    Assertions.assertEquals(versions.firstInsertVersion, ref.getVersionNumber().get());
+  }
+
+  @Test
+  public void testTagScanPinsVersionNotName() {
+    DatasetVersions versions = prepareDatasetWithHistory();
+    LanceSparkReadOptions readOptions =
+        LanceSparkReadOptions.builder()
+            .datasetUri(tableDir)
+            .ref(LanceRef.ofTag(versions.firstInsertTag))
+            .build();
+
+    LanceRef plannedRef = LanceSplit.planScan(readOptions).getRef();
+
+    Assertions.assertTrue(plannedRef.getTagName().isEmpty());
+    Assertions.assertEquals(versions.firstInsertVersion, plannedRef.getVersionNumber().get());
+  }
+
+  @Test
+  public void testReadBranchByOptionPathAndIdentifier() {
+    DatasetVersions versions = prepareDatasetWithHistory();
+    spark.sql(
+        String.format(
+            "alter table %s create branch audit as of version %d",
+            fullTable, versions.firstInsertVersion));
+    insertRange(10, 15);
+
+    Assertions.assertEquals(15, spark.table(fullTable).count());
+    Assertions.assertEquals(5, spark.read().option("branch", "audit").table(fullTable).count());
+    Assertions.assertEquals(
+        5, spark.read().format("lance").option("branch", "audit").load(tableDir).count());
+    Assertions.assertEquals(5, spark.table(fullTable + ".branch_audit").count());
+    Assertions.assertEquals(
+        5, spark.read().option("branch", "audit").table(fullTable + ".branch_audit").count());
+  }
+
+  @Test
+  public void testExistingTableWinsOverBranchIdentifier() throws Exception {
+    DatasetVersions versions = prepareDatasetWithHistory();
+    spark.sql(
+        String.format(
+            "alter table %s create branch audit as of version %d",
+            fullTable, versions.firstInsertVersion));
+
+    String literalTable = fullTable + ".branch_audit";
+    spark.sql("create table " + literalTable + " (id int, text string) using lance");
+    spark.sql("insert into " + literalTable + " values (99, 'literal')");
+
+    Assertions.assertEquals(1, spark.table(literalTable).count());
+    Assertions.assertEquals(99, spark.table(literalTable).collectAsList().get(0).getInt(0));
+    Assertions.assertEquals(5, spark.read().option("branch", "audit").table(fullTable).count());
+
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    LanceDataset table =
+        (LanceDataset)
+            catalog.loadTable(Identifier.of(new String[] {"default", tableName}, "branch_audit"));
+    LanceRef ref = table.readOptions().getRef();
+    Assertions.assertTrue(ref == null || ref.isMain());
+  }
+
+  @Test
+  public void testBranchIdentifierKeepsRowsWhenBatchSizeIsSet() {
+    DatasetVersions versions = prepareDatasetWithHistory();
+    spark.sql(
+        String.format(
+            "alter table %s create branch audit as of version %d",
+            fullTable, versions.firstInsertVersion));
+    insertRange(10, 15);
+
+    Assertions.assertEquals(
+        5, spark.read().option("batch_size", "1024").table(fullTable + ".branch_audit").count());
+  }
+
+  @Test
+  public void testBranchScanPinsBranchAndVersion() {
+    DatasetVersions versions = prepareDatasetWithHistory();
+    spark.sql(
+        String.format(
+            "alter table %s create branch audit as of version %d",
+            fullTable, versions.firstInsertVersion));
+    LanceSparkReadOptions readOptions =
+        LanceSparkReadOptions.builder()
+            .datasetUri(tableDir)
+            .ref(LanceRef.ofBranch("audit"))
+            .build();
+
+    LanceRef plannedRef = LanceSplit.planScan(readOptions).getRef();
+
+    Assertions.assertEquals("audit", plannedRef.getBranchName().get());
+    Assertions.assertTrue(plannedRef.getVersionNumber().isPresent());
+    Assertions.assertEquals(versions.firstInsertVersion, plannedRef.getVersionNumber().get());
+  }
+
+  @Test
+  public void testMissingBranchFails() {
+    prepareDatasetWithHistory();
+
+    Exception missing =
+        Assertions.assertThrows(
+            Exception.class,
+            () -> spark.read().option("branch", "no_such_branch").table(fullTable).collectAsList());
+    Assertions.assertTrue(exceptionChainMessages(missing).contains("no_such_branch"));
+  }
+
+  @Test
+  public void testBranchAndVersionOptionsFail() {
+    prepareDatasetWithHistory();
+
+    Exception conflicting =
+        Assertions.assertThrows(
+            Exception.class,
+            () ->
+                spark
+                    .read()
+                    .option("branch", "audit")
+                    .option("version", "1")
+                    .table(fullTable)
+                    .collectAsList());
+    String conflictMessages = exceptionChainMessages(conflicting);
+    Assertions.assertTrue(conflictMessages.contains("branch"));
+    Assertions.assertTrue(conflictMessages.contains("version"));
+  }
+
+  @Test
+  public void testBranchIdentifierRejectsVersionAsOf() {
+    DatasetVersions versions = prepareDatasetWithHistory();
+    spark.sql(
+        String.format(
+            "alter table %s create branch audit as of version %d",
+            fullTable, versions.firstInsertVersion));
+
+    Exception asOf =
+        Assertions.assertThrows(
+            Exception.class,
+            () ->
+                spark
+                    .sql("select * from " + fullTable + ".branch_audit version as of 1")
+                    .collectAsList());
+    Assertions.assertTrue(exceptionChainMessages(asOf).contains("Cannot combine"));
+
+    Exception timestampAsOf =
+        Assertions.assertThrows(
+            Exception.class,
+            () ->
+                spark
+                    .sql("select * from " + fullTable + ".branch_audit timestamp as of now()")
+                    .collectAsList());
+    Assertions.assertTrue(exceptionChainMessages(timestampAsOf).contains("Cannot combine"));
+  }
+
+  @Test
+  public void testBranchIdentifierRejectsDifferentBranchOption() {
+    DatasetVersions versions = prepareDatasetWithHistory();
+    spark.sql(
+        String.format(
+            "alter table %s create branch audit as of version %d",
+            fullTable, versions.firstInsertVersion));
+
+    Exception mismatch =
+        Assertions.assertThrows(
+            Exception.class,
+            () ->
+                spark
+                    .read()
+                    .option("branch", "other")
+                    .table(fullTable + ".branch_audit")
+                    .collectAsList());
+    String mismatchMessages = exceptionChainMessages(mismatch);
+    Assertions.assertTrue(mismatchMessages.contains("audit"));
+    Assertions.assertTrue(mismatchMessages.contains("other"));
+  }
+
+  @Test
+  public void testInsertIntoBranchIdentifierFails() {
+    prepareDatasetWithHistory();
+    spark.sql(String.format("alter table %s create branch audit", fullTable));
+
+    Assertions.assertThrows(
+        Exception.class,
+        () ->
+            spark
+                .sql("insert into " + fullTable + ".branch_audit values (99, 'branch')")
+                .collectAsList());
+    Assertions.assertThrows(
+        Exception.class,
+        () ->
+            spark
+                .sql("select 99 as id, 'branch' as text")
+                .write()
+                .format("lance")
+                .option("branch", "audit")
+                .mode("append")
+                .save(tableDir));
+    Assertions.assertEquals(10, spark.table(fullTable).count());
+    Assertions.assertEquals(10, spark.table(fullTable + ".branch_audit").count());
+  }
+
+  @Test
+  public void testBranchIdentifierRejectsCreateIndexAndVacuum() throws Exception {
+    prepareDatasetWithHistory();
+    spark.sql(String.format("alter table %s create branch audit", fullTable));
+
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    Identifier branchIdentifier =
+        Identifier.of(new String[] {"default", tableName}, "branch_audit");
+    long branchVersionBefore =
+        ((LanceDataset) catalog.loadTable(branchIdentifier))
+            .readOptions()
+            .getRef()
+            .getVersionNumber()
+            .get();
+    long fileCountBefore = datasetFileCount();
+
+    Exception createIndex =
+        Assertions.assertThrows(
+            Exception.class,
+            () ->
+                spark
+                    .sql(
+                        "alter table "
+                            + fullTable
+                            + ".branch_audit create index id_idx using zonemap (id) "
+                            + "with (train=false)")
+                    .collectAsList());
+    Assertions.assertTrue(exceptionChainMessages(createIndex).contains("Writes are not supported"));
+
+    Exception vacuum =
+        Assertions.assertThrows(
+            Exception.class,
+            () ->
+                spark
+                    .sql("vacuum " + fullTable + ".branch_audit with (before_version=1000000)")
+                    .collectAsList());
+    Assertions.assertTrue(exceptionChainMessages(vacuum).contains("Writes are not supported"));
+
+    long branchVersionAfter =
+        ((LanceDataset) catalog.loadTable(branchIdentifier))
+            .readOptions()
+            .getRef()
+            .getVersionNumber()
+            .get();
+    Assertions.assertEquals(branchVersionBefore, branchVersionAfter);
+    Assertions.assertEquals(fileCountBefore, datasetFileCount());
+    Assertions.assertEquals(10, spark.table(fullTable).count());
+    Assertions.assertEquals(10, spark.table(fullTable + ".branch_audit").count());
+  }
+
+  private long datasetFileCount() throws IOException {
+    try (Stream<Path> files = Files.walk(FileSystems.getDefault().getPath(tableDir))) {
+      return files.filter(Files::isRegularFile).count();
+    }
+  }
+
+  private static String exceptionChainMessages(Throwable throwable) {
+    StringBuilder messages = new StringBuilder();
+    for (Throwable current = throwable; current != null; current = current.getCause()) {
+      if (current.getMessage() != null) {
+        messages.append(current.getMessage()).append('\n');
+      }
+    }
+    return messages.toString();
+  }
+
+  private static List<String> columnNames(Dataset<Row> rows) {
+    return Arrays.asList(rows.columns());
   }
 
   private DatasetVersions prepareDatasetWithHistory() {

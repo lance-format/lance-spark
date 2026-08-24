@@ -101,7 +101,7 @@ public class LanceFragmentScanner implements AutoCloseable {
         throw new IllegalStateException(
             String.format(
                 "Fragment %d not found in dataset at %s (version=%s)",
-                fragmentId, readOptions.getDatasetUri(), readOptions.getVersion()));
+                fragmentId, readOptions.getDatasetUri(), readOptions.getRef()));
       }
       ScanOptions.Builder scanOptions = new ScanOptions.Builder();
 
