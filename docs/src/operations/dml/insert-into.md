@@ -94,8 +94,8 @@ Add data to existing Lance tables using SQL or DataFrames.
 
 ## Writing Vector Data
 
-If you created a table with the `arrow.fixed-size-list.size` property (see [CREATE TABLE](../ddl/create-table.md#vector-columns)), 
-subsequent writes will automatically use `FixedSizeList`. No additional configuration is needed:
+If you created a table with the `arrow.fixed-size-list.size` property (see [CREATE TABLE](../ddl/create-table.md#vector-columns)),
+subsequent writes will automatically use `FixedSizeList`. No additional configuration is needed. Writes to existing `FixedSizeList` fields support floating-point elements (`Float16`, `Float32`, or `Float64`); other element shapes are rejected before write tasks start.
 
 === "SQL"
     ```sql

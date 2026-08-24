@@ -49,6 +49,7 @@ import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class SparkPositionDeltaWriteTest {
   @TempDir static Path tempDir;
@@ -126,6 +127,38 @@ public class SparkPositionDeltaWriteTest {
         assertEquals(arrowSchema, dataset.getSchema());
         assertEquals(1, dataset.countRows());
       }
+    }
+  }
+
+  @Test
+  public void positionDeltaWriteRejectsFixedSizeListWithLargeUtf8Elements(TestInfo testInfo) {
+    String datasetUri =
+        TestUtils.getDatasetUri(tempDir.toString(), testInfo.getTestMethod().get().getName());
+    Schema arrowSchema =
+        new Schema(
+            Collections.singletonList(
+                new Field(
+                    "values",
+                    FieldType.nullable(new ArrowType.FixedSizeList(3)),
+                    Collections.singletonList(
+                        new Field(
+                            "item", FieldType.nullable(ArrowType.LargeUtf8.INSTANCE), null)))));
+
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Dataset.create(allocator, datasetUri, arrowSchema, new WriteParams.Builder().build()).close();
+      StructType sparkSchema = LanceArrowUtils.fromArrowSchema(arrowSchema);
+      assertThrows(
+          IllegalArgumentException.class,
+          () ->
+              new SparkPositionDeltaWrite(
+                  sparkSchema,
+                  LanceSparkWriteOptions.from(datasetUri),
+                  null,
+                  null,
+                  null,
+                  false,
+                  null,
+                  Collections.emptyMap()));
     }
   }
 

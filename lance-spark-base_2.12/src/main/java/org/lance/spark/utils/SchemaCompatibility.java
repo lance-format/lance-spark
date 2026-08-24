@@ -118,14 +118,20 @@ public final class SchemaCompatibility {
               || (oi.getBitWidth() == 64 && si.getBitWidth() == 64));
     }
 
-    // Spark represents all three Arrow list variants as ArrayType. The executor has a dedicated
-    // writer for each original vector type. Two explicit FixedSizeLists must retain the same size.
+    // Spark represents all three Arrow list variants as ArrayType. Lance currently persists
+    // FixedSizeList only as a floating-point vector. Reject other element shapes before task launch
+    // because native fragment creation cannot encode them safely.
     if (isListFamily(ot) && isListFamily(st)) {
-      if (ot instanceof ArrowType.FixedSizeList && st instanceof ArrowType.FixedSizeList) {
-        ArrowType.FixedSizeList of = (ArrowType.FixedSizeList) ot;
-        ArrowType.FixedSizeList sf = (ArrowType.FixedSizeList) st;
-        if (of.getListSize() != sf.getListSize()) {
+      if (ot instanceof ArrowType.FixedSizeList) {
+        if (!hasFloatingPointElement(orig)) {
           return false;
+        }
+        if (st instanceof ArrowType.FixedSizeList) {
+          ArrowType.FixedSizeList of = (ArrowType.FixedSizeList) ot;
+          ArrowType.FixedSizeList sf = (ArrowType.FixedSizeList) st;
+          if (of.getListSize() != sf.getListSize()) {
+            return false;
+          }
         }
       }
       return childrenCompatible(orig, spark, false);
@@ -185,6 +191,11 @@ public final class SchemaCompatibility {
 
   private static boolean hasTimezone(ArrowType.Timestamp timestamp) {
     return timestamp.getTimezone() != null && !timestamp.getTimezone().isEmpty();
+  }
+
+  private static boolean hasFloatingPointElement(Field field) {
+    return field.getChildren().size() == 1
+        && field.getChildren().get(0).getType() instanceof ArrowType.FloatingPoint;
   }
 
   private static boolean isListFamily(ArrowType type) {

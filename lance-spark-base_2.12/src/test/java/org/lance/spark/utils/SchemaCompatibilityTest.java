@@ -166,10 +166,25 @@ class SchemaCompatibilityTest {
 
   @Test
   void fixedSizeListSizeMismatch() {
+    ArrowType.FloatingPoint float32 = new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE);
+    Schema orig = schema(listField("arr", new ArrowType.FixedSizeList(4), float32));
+    Schema spark = schema(listField("arr", new ArrowType.FixedSizeList(8), float32));
+    assertFalse(SchemaCompatibility.isCompatible(orig, spark));
+  }
+
+  @Test
+  void fixedSizeListWithFloatingPointElement() {
+    ArrowType.FloatingPoint float32 = new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE);
+    Schema orig = schema(listField("arr", new ArrowType.FixedSizeList(4), float32));
+    Schema spark = schema(listField("arr", ArrowType.List.INSTANCE, float32));
+    assertTrue(SchemaCompatibility.isCompatible(orig, spark));
+  }
+
+  @Test
+  void fixedSizeListWithLargeUtf8Element() {
     Schema orig =
-        schema(listField("arr", new ArrowType.FixedSizeList(4), new ArrowType.Int(32, true)));
-    Schema spark =
-        schema(listField("arr", new ArrowType.FixedSizeList(8), new ArrowType.Int(32, true)));
+        schema(listField("arr", new ArrowType.FixedSizeList(3), ArrowType.LargeUtf8.INSTANCE));
+    Schema spark = schema(listField("arr", ArrowType.List.INSTANCE, ArrowType.LargeUtf8.INSTANCE));
     assertFalse(SchemaCompatibility.isCompatible(orig, spark));
   }
 

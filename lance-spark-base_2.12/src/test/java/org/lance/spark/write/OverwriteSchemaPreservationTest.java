@@ -308,7 +308,7 @@ public class OverwriteSchemaPreservationTest {
   // ==================== Complex Types ====================
 
   @Test
-  public void testOverwritePreservesFixedSizeList(TestInfo testInfo) throws IOException {
+  public void testOverwritePreservesFixedSizeList(TestInfo testInfo) throws Exception {
     Schema schema =
         new Schema(
             Arrays.asList(
@@ -325,13 +325,16 @@ public class OverwriteSchemaPreservationTest {
     String uri = datasetUri(testInfo.getTestMethod().get().getName());
     createEmptyDataset(uri, schema);
 
-    // Spark represents FixedSizeList<Float32>(4) as ArrayType(FloatType)
-    InternalRow row =
+    // Spark represents FixedSizeList<Float32>(4) as ArrayType(FloatType).
+    InternalRow row1 =
         new GenericInternalRow(
             new Object[] {1, new GenericArrayData(new Object[] {1.0f, 2.0f, 3.0f, 4.0f})});
-    Schema after = overwriteAndGetSchema(uri, schema, row);
+    InternalRow row2 = new GenericInternalRow(new Object[] {2, null});
+    InternalRow row3 =
+        new GenericInternalRow(
+            new Object[] {3, new GenericArrayData(new Object[] {5.0f, 6.0f, 7.0f, 8.0f})});
+    Schema after = overwriteAndGetSchema(uri, schema, row1, row2, row3);
 
-    // Verify FixedSizeList is preserved (not downgraded to List)
     Field vecField = after.getFields().get(1);
     assertTrue(
         vecField.getType() instanceof ArrowType.FixedSizeList,
@@ -340,6 +343,39 @@ public class OverwriteSchemaPreservationTest {
         4,
         ((ArrowType.FixedSizeList) vecField.getType()).getListSize(),
         "FixedSizeList size must be preserved");
+
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
+        Dataset ds = Dataset.open().allocator(allocator).uri(uri).build();
+        Scanner scanner = ds.newScan();
+        ArrowReader reader = scanner.scanBatches()) {
+      assertTrue(reader.loadNextBatch());
+      VectorSchemaRoot root = reader.getVectorSchemaRoot();
+      assertEquals(3, root.getRowCount());
+      assertTrue(root.getVector("vec").isNull(1));
+      assertNotNull(root.getVector("vec").getObject(2));
+    }
+  }
+
+  @Test
+  public void testOverwriteRejectsFixedSizeListWithLargeUtf8Elements(TestInfo testInfo) {
+    Schema schema =
+        new Schema(
+            Collections.singletonList(
+                new Field(
+                    "values",
+                    FieldType.nullable(new ArrowType.FixedSizeList(3)),
+                    Collections.singletonList(
+                        new Field(
+                            "item", FieldType.nullable(ArrowType.LargeUtf8.INSTANCE), null)))));
+    String uri = datasetUri(testInfo.getTestMethod().get().getName());
+    createEmptyDataset(uri, schema);
+
+    StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
+    IllegalArgumentException error =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> buildOverwriteBatch(sparkSchema, LanceSparkWriteOptions.from(uri)));
+    assertTrue(error.getMessage().contains("incompatible with the existing Lance schema"));
   }
 
   @Test

@@ -6,7 +6,7 @@ Replace all existing data in a table with new data. This operation removes all e
 
 Full-table overwrite operations that use Spark's truncate capability—such as `INSERT OVERWRITE`, `writeTo(...).overwrite(lit(true))`, and `mode("overwrite").save(...)`—write data with the existing table's Arrow schema instead of rebuilding it solely from Spark-expressible types.
 
-This preserves schema-level semantics such as unsigned types, `FixedSizeList`, `FixedSizeBinary`, field nullability, and field metadata. If the existing schema cannot be loaded or is structurally incompatible with the incoming DataFrame schema, the overwrite fails before executor writers start.
+This preserves schema-level semantics such as unsigned types, `FixedSizeList`, `FixedSizeBinary`, field nullability, and field metadata. If the existing schema cannot be loaded or is structurally incompatible with the incoming DataFrame schema, the overwrite fails before executor writers start. Existing `FixedSizeList` fields are writable only when their element type is floating point (`Float16`, `Float32`, or `Float64`); other element shapes are rejected before write tasks start.
 
 When `use_large_var_types=true`, variable-width string and binary fields are intentionally promoted to `LargeUtf8` and `LargeBinary`; executor fragments and the committed manifest use the same promoted schema.
 

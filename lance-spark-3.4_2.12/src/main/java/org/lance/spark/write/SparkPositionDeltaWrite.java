@@ -26,6 +26,7 @@ import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
+import org.lance.spark.utils.SchemaCompatibility;
 import org.lance.spark.utils.Utils;
 
 import com.google.common.collect.ImmutableList;
@@ -49,6 +50,7 @@ import org.apache.spark.sql.connector.write.PhysicalWriteInfo;
 import org.apache.spark.sql.connector.write.RequiresDistributionAndOrdering;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
 import org.roaringbitmap.IntIterator;
 import org.roaringbitmap.RoaringBitmap;
 import org.slf4j.Logger;
@@ -100,6 +102,14 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
       this.arrowSchema =
           Objects.requireNonNull(ds.getSchema(), "Failed to get schema from existing dataset");
+      Schema sparkArrowSchema =
+          LanceArrowUtils.toArrowSchema(
+              sparkSchema, "UTC", true, writeOptions.isUseLargeVarTypes());
+      if (!SchemaCompatibility.isCompatible(arrowSchema, sparkArrowSchema)) {
+        throw new IllegalArgumentException(
+            "Row-level write schema is incompatible with the existing Lance schema. "
+                + "Writes must not change schema type families.");
+      }
       this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
       logger.debug("Resolved dataset ref for position delta write: {}", this.writeOptions.getRef());
     }
