@@ -218,7 +218,8 @@ case class AddIndexExec(
             ds.countRows()))
         } else None
         AddIndexTableSnapshot(
-          readOptions = baseReadOptions.withVersion(ds.version()),
+          readOptions = baseReadOptions.withRef(
+            Utils.pinOpenedRef(ds, baseReadOptions.getRef)),
           fragmentIds = ds.getFragments.asScala.map(_.getId).map(Integer.valueOf).toList,
           canonicalColumns = canonical,
           vectorPlan = vectorPlan)
