@@ -48,7 +48,7 @@ import scala.util.control.NonFatal
 class VectorIndexJob(
     addIndexExec: AddIndexExec,
     readOptions: LanceSparkReadOptions,
-    fragmentIds: List[Integer],
+    fragmentWorkloads: List[FragmentWorkload],
     plan: VectorIndexPlan,
     indexName: String,
     columns: Seq[String],
@@ -77,13 +77,13 @@ class VectorIndexJob(
     try {
       // ---- Phase 2: split fragments, parallelize tasks ----
       val batches =
-        IndexUtils.batchFragments(fragmentIds, numSegments, sc.defaultParallelism)
+        IndexUtils.batchFragments(fragmentWorkloads, numSegments, sc.defaultParallelism)
       if (batches.isEmpty) {
         return Seq.empty
       }
       logInfo(
         s"VectorIndexJob phase 2: $indexName (${plan.indexType}) — ${batches.size} segment(s) " +
-          s"covering ${fragmentIds.size} fragment(s) on ${batches.size} task(s)")
+          s"covering ${fragmentWorkloads.size} fragment(s) on ${batches.size} task(s)")
 
       val encodedReadOptions = encode(readOptions)
       val tasks = batches.map { batch =>
