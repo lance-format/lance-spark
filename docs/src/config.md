@@ -68,9 +68,89 @@ and namespace-specific options:
 | `spark.sql.catalog.{name}`                  | String | ✓        | Set to `org.lance.spark.LanceNamespaceSparkCatalog`                                                                        |
 | `spark.sql.catalog.{name}.impl`             | String | ✓        | Namespace implementation, short name like `dir`, `rest`, `hive3`, `glue` or full Java implementation class                 |
 | `spark.sql.catalog.{name}.storage.*`        | -      | ✗        | Lance IO storage options. See [Lance Object Store Guide](https://lance.org/guide/object_store) for all available options.  |
+| `spark.sql.catalog.{name}.index_cache_backend` | String | ✗     | Registered native index cache backend URI, for example `moka://?capacity=6442450944`. |
+| `spark.sql.catalog.{name}.metadata_cache_backend` | String | ✗  | Registered native metadata cache backend URI, for example `moka://?capacity=1073741824`. |
 | `spark.sql.catalog.{name}.single_level_ns`  | Boolean | ✗       | Enable single-level mode with virtual "default" namespace. Default: `false`. See [Note on Namespace Levels](#note-on-namespace-levels). |
 | `spark.sql.catalog.{name}.parent`           | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                             |
 | `spark.sql.catalog.{name}.parent_delimiter` | String | ✗        | Delimiter for parent prefix (default: `.`). See [Note on Namespace Levels](#note-on-namespace-levels).                           |
+
+## Cache Backends
+
+Each Spark catalog owns an isolated Lance `Session`. Select registered native cache backends for
+the index and metadata cache independently by setting backend URIs:
+
+```python
+spark = SparkSession.builder \
+    .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog") \
+    .config("spark.sql.catalog.lance.impl", "dir") \
+    .config("spark.sql.catalog.lance.root", "/path/to/lance/database") \
+    .config(
+        "spark.sql.catalog.lance.index_cache_backend",
+        "moka://?capacity=6442450944",
+    ) \
+    .config(
+        "spark.sql.catalog.lance.metadata_cache_backend",
+        "moka://?capacity=1073741824",
+    ) \
+    .getOrCreate()
+```
+
+`moka` is registered by Lance Core. Other backend kinds must already be registered by the native
+Lance runtime packaged with the application. These options select a registered backend; they do
+not register a Java cache implementation.
+
+The connector serializes the backend URIs with its read and write options, so driver and executor
+JVMs create equivalent process-local sessions. A catalog's session is fixed when that catalog is
+first used. To switch backends in one Spark application, configure a second catalog:
+
+```python
+spark = SparkSession.builder \
+    .config("spark.sql.catalog.memory_lance", "org.lance.spark.LanceNamespaceSparkCatalog") \
+    .config("spark.sql.catalog.memory_lance.impl", "dir") \
+    .config("spark.sql.catalog.memory_lance.root", "/path/to/lance/database") \
+    .config(
+        "spark.sql.catalog.memory_lance.index_cache_backend",
+        "moka://?capacity=6442450944",
+    ) \
+    .config("spark.sql.catalog.other_lance", "org.lance.spark.LanceNamespaceSparkCatalog") \
+    .config("spark.sql.catalog.other_lance.impl", "dir") \
+    .config("spark.sql.catalog.other_lance.root", "/path/to/lance/database") \
+    .config(
+        "spark.sql.catalog.other_lance.index_cache_backend",
+        "other://?option=value",
+    ) \
+    .getOrCreate()
+```
+
+For structured Java SDK configuration, build a `Session` with `CacheBackendConfig` and register it
+before the catalog is first used:
+
+```java
+import org.lance.CacheBackendConfig;
+import org.lance.Session;
+import org.lance.spark.LanceRuntime;
+
+Session session = Session.builder()
+    .indexCacheBackend(
+        CacheBackendConfig.builder("moka")
+            .option("capacity", "6442450944")
+            .build())
+    .metadataCacheBackend(
+        CacheBackendConfig.builder("moka")
+            .option("capacity", "1073741824")
+            .build())
+    .build();
+LanceRuntime.registerSession("lance", session);
+```
+
+Registration transfers session ownership to `LanceRuntime`; do not close it directly. In cluster
+mode, programmatic registration must run in every JVM that accesses Lance. Catalog URI options are
+recommended when the same configuration should be distributed automatically.
+
+The corresponding environment fallbacks are `LANCE_INDEX_CACHE_BACKEND` and
+`LANCE_METADATA_CACHE_BACKEND`. Per-catalog URIs take precedence over environment backend URIs.
+Backend URIs take precedence over the legacy `LANCE_INDEX_CACHE_SIZE` and
+`LANCE_METADATA_CACHE_SIZE` settings for the same cache tier.
 
 ## OpenTelemetry Metrics
 
@@ -498,6 +578,17 @@ For example, with Hive3:
 The parent configuration effectively "anchors" your Spark catalog at a specific level within the deeper namespace
 hierarchy, making the extra levels transparent to Spark users while maintaining compatibility with the underlying
 namespace implementation.
+
+## Branch Read Option
+
+Set `branch` to read the current head of a named branch. Do not set `version` on the same read.
+
+```python
+df = spark.read \
+    .format("lance") \
+    .option("branch", "audit") \
+    .load("/path/to/dataset.lance")
+```
 
 ## Memory Configuration
 

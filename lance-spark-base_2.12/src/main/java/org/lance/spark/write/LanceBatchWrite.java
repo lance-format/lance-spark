@@ -22,6 +22,7 @@ import org.lance.namespace.LanceNamespace;
 import org.lance.operation.Append;
 import org.lance.operation.Operation;
 import org.lance.operation.Overwrite;
+import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.utils.BlobSourceContext;
@@ -128,9 +129,8 @@ public class LanceBatchWrite implements BatchWrite {
       this.writeOptions = writeOptions;
     } else {
       try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
-        this.writeOptions = writeOptions.withVersion(ds.version());
-        logger.debug(
-            "Resolved dataset version for batch write: {}", this.writeOptions.getVersion());
+        this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
+        logger.debug("Resolved dataset ref for batch write: {}", this.writeOptions.getRef());
       }
     }
   }
@@ -192,8 +192,10 @@ public class LanceBatchWrite implements BatchWrite {
       // For non-staged tables, commit immediately
       long version =
           Objects.requireNonNull(
-              writeOptions.getVersion(),
-              "version must be set (resolved in LanceBatchWrite constructor)");
+                  writeOptions.getRef(),
+                  "ref must be set (resolved in LanceBatchWrite constructor)")
+              .getVersionNumber()
+              .get();
       try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
         Operation operation;
         if (isOverwrite) {

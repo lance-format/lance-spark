@@ -40,6 +40,7 @@ import org.lance.spark.write.SingleBatchArrowReader
 import java.util.{Collections, Locale, UUID}
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable.{ArrayBuffer, PriorityQueue}
 import scala.reflect.ClassTag
 
 /**
@@ -80,17 +81,14 @@ case class AddIndexExec(
   override def output: Seq[Attribute] = AddIndexOutputType.SCHEMA
 
   override protected def run(): Seq[InternalRow] = {
-    val lanceDataset = catalog.loadTable(ident) match {
-      case d: LanceDataset => d
-      case _ => throw new UnsupportedOperationException("AddIndex only supports LanceDataset")
-    }
+    val lanceDataset = LanceDataset.requireWritable(catalog.loadTable(ident), "AddIndex")
 
     val readOptions = lanceDataset.readOptions()
     val indexType = IndexUtils.buildIndexType(method)
     val btreeBuildMode = IndexUtils.btreeBuildMode(indexType, args)
     val scalarSegmentIndexType = IndexUtils.scalarSegmentIndexType(method)
 
-    val (fragmentIds, canonicalColumns) = {
+    val (fragmentWorkloads, canonicalColumns) = {
       val ds = Utils.openDatasetBuilder(readOptions).build()
       try {
         val canonical = columns.map { column =>
@@ -98,12 +96,15 @@ case class AddIndexExec(
           FieldPathUtils.pathByFieldId(ds.getLanceSchema, field.getId)
         }
         (
-          ds.getFragments.asScala.map(_.getId).map(Integer.valueOf).toList,
+          ds.getFragments.asScala
+            .map(fragment => FragmentWorkload(fragment.getId, fragment.metadata().getNumRows))
+            .toList,
           canonical)
       } finally {
         ds.close()
       }
     }
+    val fragmentIds = fragmentWorkloads.map(_.fragmentId)
 
     val train = IndexUtils.extractTrain(args)
 
@@ -183,7 +184,7 @@ case class AddIndexExec(
       val segmentJob = new ScalarSegmentIndexJob(
         this.copy(columns = canonicalColumns),
         readOptions,
-        fragmentIds,
+        fragmentWorkloads,
         validatedNumSegments,
         nsImpl,
         nsProps,
@@ -474,7 +475,7 @@ case class RangeBTreeIndexBuilder(
 class ScalarSegmentIndexJob(
     addIndexExec: AddIndexExec,
     readOptions: LanceSparkReadOptions,
-    fragmentIds: List[Integer],
+    fragmentWorkloads: List[FragmentWorkload],
     numSegments: Option[Int],
     nsImpl: Option[String],
     nsProps: Option[Map[String, String]],
@@ -490,7 +491,7 @@ class ScalarSegmentIndexJob(
     val columns = addIndexExec.columns.toList
     val argsJson = IndexUtils.toJson(addIndexExec.args)
     val fragmentBatches = IndexUtils.batchFragments(
-      fragmentIds,
+      fragmentWorkloads,
       numSegments,
       addIndexExec.session.sparkContext.defaultParallelism)
 
@@ -514,6 +515,8 @@ class ScalarSegmentIndexJob(
         "visible to readers and will not affect query correctness.")(_.execute())
   }
 }
+
+final private[v2] case class FragmentWorkload(fragmentId: Integer, numRows: Long)
 
 /**
  * A task to create a scalar index segment on a batch of fragments.
@@ -731,10 +734,10 @@ object IndexUtils extends Logging {
   }
 
   def batchFragments(
-      fragmentIds: List[Integer],
+      fragments: List[FragmentWorkload],
       numSegments: Option[Int],
       defaultParallelism: Int): Seq[List[Integer]] = {
-    val fragmentCount = fragmentIds.size
+    val fragmentCount = fragments.size
     if (fragmentCount == 0) {
       return Seq.empty
     }
@@ -751,11 +754,35 @@ object IndexUtils extends Logging {
       case None => math.max(1, math.min(fragmentCount, defaultParallelism))
     }
 
-    (0 until segmentCount).map { index =>
-      fragmentIds.slice(
-        (index.toLong * fragmentCount / segmentCount).toInt,
-        ((index.toLong + 1) * fragmentCount / segmentCount).toInt)
+    final class SegmentBatch(val index: Int) {
+      val fragmentIds: ArrayBuffer[Integer] = ArrayBuffer.empty
+      var numRows: Long = 0L
+
+      def add(fragment: FragmentWorkload): Unit = {
+        numRows = Math.addExact(numRows, fragment.numRows)
+        fragmentIds += fragment.fragmentId
+      }
     }
+
+    val segmentOrdering: Ordering[SegmentBatch] =
+      Ordering
+        .by[SegmentBatch, (Long, Int, Int)](segment =>
+          (segment.numRows, segment.fragmentIds.size, segment.index))
+        .reverse
+
+    val segments = PriorityQueue.empty[SegmentBatch](segmentOrdering)
+    (0 until segmentCount).foreach(index => segments.enqueue(new SegmentBatch(index)))
+
+    val sortedFragments = fragments.sortBy(fragment => (-fragment.numRows, fragment.fragmentId))
+    sortedFragments.foreach { fragment =>
+      val segment = segments.dequeue()
+      segment.add(fragment)
+      segments.enqueue(segment)
+    }
+
+    segments.toSeq
+      .sortBy(_.index)
+      .map(segment => segment.fragmentIds.sortBy(_.intValue()).toList)
   }
 
 }

@@ -51,9 +51,9 @@ These options apply to all index methods:
 The distributed build used by `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`,
 `rtree`, `fts` (or `inverted`), and `btree` with `build_mode = 'fragment'` supports:
 
-| Option         | Type    | Description                                                                                                                                                                                                 |
-|----------------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `num_segments` | Integer | Target number of parallel build tasks (upper bound; clamped to fragment count when larger). Each task covers a contiguous batch of fragments. Defaults to `min(fragment_count, spark.default.parallelism)`. |
+| Option         | Type    | Description                                                                                                                                                                                                                        |
+|----------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `num_segments` | Integer | Target number of parallel build tasks (upper bound; clamped to fragment count when larger). Fragments are assigned by row count to balance estimated task workloads. Defaults to `min(fragment_count, spark.default.parallelism)`. |
 
 ### ZoneMap Options
 

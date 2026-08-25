@@ -22,6 +22,7 @@ import org.lance.WriteParams;
 import org.lance.namespace.LanceNamespace;
 import org.lance.operation.Update;
 import org.lance.spark.LanceConstant;
+import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
@@ -95,9 +96,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       List<String> tableId) {
     this.sparkSchema = sparkSchema;
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
-      this.writeOptions = writeOptions.withVersion(ds.version());
-      logger.debug(
-          "Resolved dataset version for position delta write: {}", this.writeOptions.getVersion());
+      this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
+      logger.debug("Resolved dataset ref for position delta write: {}", this.writeOptions.getRef());
     }
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
@@ -173,8 +173,10 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
       long version =
           Objects.requireNonNull(
-              writeOptions.getVersion(),
-              "version must be set (resolved in SparkPositionDeltaWrite constructor)");
+                  writeOptions.getRef(),
+                  "ref must be set (resolved in SparkPositionDeltaWrite constructor)")
+              .getVersionNumber()
+              .get();
       try (Dataset dataset = Utils.openDatasetBuilder(writeOptions).build()) {
         // Parallel stream is safe: each deleteRows() operates on an independent
         // FileFragment value writing to a distinct object store path (see lance-core).

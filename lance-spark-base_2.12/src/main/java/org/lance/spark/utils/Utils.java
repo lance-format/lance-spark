@@ -15,8 +15,11 @@ package org.lance.spark.utils;
 
 import org.lance.Dataset;
 import org.lance.ReadOptions;
+import org.lance.Ref;
+import org.lance.Tag;
 import org.lance.Version;
 import org.lance.namespace.LanceNamespace;
+import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkCatalogConfig;
 import org.lance.spark.LanceSparkReadOptions;
@@ -31,6 +34,28 @@ public class Utils {
 
   public static long parseVersion(String version) {
     return Long.parseUnsignedLong(version);
+  }
+
+  // Tag names and branch heads move. Store the opened version, and the branch if a tag points at
+  // one.
+  public static LanceRef pinOpenedRef(Dataset dataset, LanceRef requested) {
+    long version = dataset.getVersion().getId();
+    if (requested != null && requested.isTag()) {
+      String tagName = requested.getTagName().get();
+      for (Tag tag : dataset.tags().list()) {
+        if (tag.getName().equals(tagName)) {
+          if (tag.getBranch().isPresent()) {
+            return LanceRef.ofBranch(tag.getBranch().get(), version);
+          }
+          return LanceRef.ofMain(version);
+        }
+      }
+      throw new RuntimeException("Tag not found: " + tagName);
+    }
+    if (requested != null && requested.isBranch()) {
+      return LanceRef.ofBranch(requested.getBranchName().get(), version);
+    }
+    return LanceRef.ofMain(version);
   }
 
   public static long findVersion(List<Version> versions, long timestamp) {
@@ -72,7 +97,9 @@ public class Utils {
     private final List<String> tableId;
     private final Map<String, String> storageOptions;
     private final String catalogName;
-    private final Long version;
+    private final String indexCacheBackend;
+    private final String metadataCacheBackend;
+    private final LanceRef ref;
     private final Integer blockSize;
     private final Integer indexCacheSize;
     private final Integer metadataCacheSize;
@@ -85,8 +112,10 @@ public class Utils {
     private OpenDatasetBuilder(LanceSparkReadOptions opts) {
       this.uri = opts.getDatasetUri();
       this.storageOptions = opts.getStorageOptions();
-      this.version = opts.getVersion();
+      this.ref = opts.getRef();
       this.catalogName = opts.getCatalogName();
+      this.indexCacheBackend = opts.getIndexCacheBackend();
+      this.metadataCacheBackend = opts.getMetadataCacheBackend();
       this.namespace = opts.getNamespace();
       this.tableId = opts.getTableId();
       this.blockSize = opts.getBlockSize();
@@ -99,8 +128,10 @@ public class Utils {
       this.storageOptions = opts.getStorageOptions();
       this.namespace = opts.getNamespace();
       this.tableId = opts.getTableId();
-      this.catalogName = null;
-      this.version = opts.getVersion();
+      this.catalogName = opts.getCatalogName();
+      this.indexCacheBackend = opts.getIndexCacheBackend();
+      this.metadataCacheBackend = opts.getMetadataCacheBackend();
+      this.ref = opts.getRef();
       this.blockSize = null;
       this.indexCacheSize = null;
       this.metadataCacheSize = null;
@@ -122,35 +153,63 @@ public class Utils {
     }
 
     public Dataset build() {
+      if (ref != null && (ref.getTagName().isPresent() || ref.getBranchName().isPresent())) {
+        // Open specific tag or branch/version
+        Dataset main = openMain(null);
+        try {
+          if (ref.getTagName().isPresent()) {
+            return main.checkout(Ref.ofTag(ref.getTagName().get()));
+          } else {
+            return ref.getVersionNumber().isPresent()
+                ? main.checkout(
+                    Ref.ofBranch(ref.getBranchName().get(), ref.getVersionNumber().get()))
+                : main.checkout(Ref.ofBranch(ref.getBranchName().get()));
+          }
+        } finally {
+          main.close();
+        }
+      } else {
+        return openMain(
+            ref != null && ref.getVersionNumber().isPresent()
+                ? ref.getVersionNumber().get()
+                : null);
+      }
+    }
+
+    private Dataset openMain(Long version) {
       LanceRuntime.enableOpenTelemetry();
 
       Map<String, String> base = storageOptions != null ? storageOptions : Collections.emptyMap();
       Map<String, String> merged = LanceRuntime.mergeStorageOptions(base, initialStorageOptions);
 
-      ReadOptions.Builder roBuilder =
+      ReadOptions.Builder builder =
           new ReadOptions.Builder()
               .setStorageOptions(merged)
               .setSession(
-                  catalogName != null ? LanceRuntime.session(catalogName) : LanceRuntime.session());
+                  LanceRuntime.session(catalogName, indexCacheBackend, metadataCacheBackend));
       if (version != null) {
-        roBuilder.setVersion(version);
+        builder.setVersion(version);
       }
       if (blockSize != null) {
-        roBuilder.setBlockSize(blockSize);
+        builder.setBlockSize(blockSize);
       }
       if (indexCacheSize != null) {
-        roBuilder.setIndexCacheSize(indexCacheSize);
+        builder.setIndexCacheSize(indexCacheSize);
       }
       if (metadataCacheSize != null) {
-        roBuilder.setMetadataCacheSize(metadataCacheSize);
+        builder.setMetadataCacheSize(metadataCacheSize);
       }
 
+      return open(builder.build());
+    }
+
+    private Dataset open(ReadOptions readOptions) {
       if (namespace != null && tableId != null) {
         return Dataset.open()
             .allocator(LanceRuntime.allocator())
             .namespaceClient(namespace)
             .tableId(tableId)
-            .readOptions(roBuilder.build())
+            .readOptions(readOptions)
             .build();
       }
       if (runtimeNamespaceImpl != null) {
@@ -162,14 +221,14 @@ public class Utils {
               .allocator(LanceRuntime.allocator())
               .namespaceClient(runtimeNamespace)
               .tableId(effectiveTableId)
-              .readOptions(roBuilder.build())
+              .readOptions(readOptions)
               .build();
         }
       }
       return Dataset.open()
           .allocator(LanceRuntime.allocator())
           .uri(uri)
-          .readOptions(roBuilder.build())
+          .readOptions(readOptions)
           .build();
     }
   }
@@ -199,7 +258,7 @@ public class Utils {
             .catalogName(catalogName);
 
     if (versionId.isPresent()) {
-      builder.version(versionId.get());
+      builder.ref(LanceRef.ofMain(versionId.get()));
     }
     if (tableId.isPresent()) {
       builder.tableId(tableId.get());

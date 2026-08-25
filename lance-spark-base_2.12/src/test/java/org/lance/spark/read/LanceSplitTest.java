@@ -14,6 +14,7 @@
 package org.lance.spark.read;
 
 import org.lance.Dataset;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 import org.lance.spark.utils.Utils;
 
@@ -29,7 +30,7 @@ public class LanceSplitTest {
   public void testPlanScanReturnsNonEmptySplits() {
     LanceSplit.ScanPlanResult result = LanceSplit.planScan(TestUtils.TestTable1Config.readOptions);
     assertFalse(result.getSplits().isEmpty());
-    assertTrue(result.getResolvedVersion() > 0);
+    assertTrue(result.getRef().getVersionNumber().get() > 0);
   }
 
   @Test
@@ -58,15 +59,16 @@ public class LanceSplitTest {
   }
 
   /**
-   * Contract test: {@link LanceSplit#planScan(Dataset)} must not close the externally-owned dataset
-   * handle. {@link LanceScanBuilder#build()} relies on this so it can keep using the single open
-   * handle for both manifest/zonemap loading and split planning.
+   * Contract test: {@link LanceSplit#planScan(Dataset, LanceSparkReadOptions)} must not close the
+   * externally-owned dataset handle. {@link LanceScanBuilder#build()} relies on this so it can keep
+   * using the single open handle for both manifest/zonemap loading and split planning.
    */
   @Test
   public void testPlanScanWithDatasetDoesNotCloseExternalDataset() {
     try (Dataset dataset =
         Utils.openDatasetBuilder(TestUtils.TestTable1Config.readOptions).build()) {
-      LanceSplit.ScanPlanResult result = LanceSplit.planScan(dataset);
+      LanceSplit.ScanPlanResult result =
+          LanceSplit.planScan(dataset, TestUtils.TestTable1Config.readOptions);
       assertFalse(result.getSplits().isEmpty());
 
       // If planScan(Dataset) accidentally closed the handle, subsequent native calls would
@@ -77,18 +79,22 @@ public class LanceSplitTest {
   }
 
   /**
-   * Contract test: the long-typed resolved version returned by {@link LanceSplit#planScan(Dataset)}
-   * must round-trip through {@link org.lance.spark.LanceSparkReadOptions#withVersion(long)} without
-   * truncation. This guards against silently casting to {@code int}, which would corrupt the
-   * snapshot-isolation guarantee for long-lived high-write-frequency datasets.
+   * Contract test: the long-typed resolved version returned by {@link LanceSplit#planScan(Dataset,
+   * LanceSparkReadOptions)} must round-trip through {@link org.lance.spark.LanceSparkReadOptions}
+   * as a LanceRef without truncation. This guards against silently casting to {@code int}, which
+   * would corrupt the snapshot-isolation guarantee for long-lived high-write-frequency datasets.
    */
   @Test
   public void testResolvedVersionRoundTripsAsLong() {
     LanceSplit.ScanPlanResult result = LanceSplit.planScan(TestUtils.TestTable1Config.readOptions);
-    long resolved = result.getResolvedVersion();
+    long resolved = result.getRef().getVersionNumber().get();
     assertEquals(
         resolved,
-        TestUtils.TestTable1Config.readOptions.withVersion(resolved).getVersion().longValue());
+        TestUtils.TestTable1Config.readOptions
+            .withRef(org.lance.spark.LanceRef.ofMain(resolved))
+            .getRef()
+            .getVersionNumber()
+            .get());
   }
 
   @SuppressWarnings("deprecation")
