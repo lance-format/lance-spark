@@ -209,8 +209,9 @@ public class Float16Utils {
       return (short) (halfSign | 0x7C00);
     }
 
-    if (unbiasedExponent < -24) {
-      // Too small for even subnormal representation: flush to zero
+    if (unbiasedExponent < -25) {
+      // Below the midpoint between zero and the smallest subnormal (2^-25): flush to zero.
+      // Exponent -25 itself falls through to the subnormal path, which ties to even.
       return (short) halfSign;
     }
 

@@ -105,6 +105,21 @@ public class Float16UtilsTest {
   }
 
   @Test
+  public void testRoundingBelowSmallestSubnormal() {
+    // 2^-25 (0x1p-25f == 2.98023e-8) is the midpoint between zero and the smallest
+    // float16 subnormal 2^-24. Round-to-nearest-even sends the midpoint itself to
+    // zero, but everything above it must round up to 2^-24 rather than flush.
+    assertEquals(
+        0x0000, Float16Utils.floatToHalf(0x1p-25f) & 0xFFFF, "2^-25 is a tie and rounds to zero");
+    assertEquals(
+        0x8000, Float16Utils.floatToHalf(-0x1p-25f) & 0xFFFF, "-2^-25 is a tie and rounds to zero");
+    assertEquals(
+        0x0001, Float16Utils.floatToHalf(4.0e-8f) & 0xFFFF, "Above 2^-25 rounds up to 2^-24");
+    assertEquals(
+        0x8001, Float16Utils.floatToHalf(-4.0e-8f) & 0xFFFF, "Below -2^-25 rounds up to -2^-24");
+  }
+
+  @Test
   public void testSubnormals() {
     // Smallest positive float16 subnormal: 2^-24 ~= 5.96e-8
     float smallestSubnormal = Float16Utils.halfToFloat((short) 0x0001);
