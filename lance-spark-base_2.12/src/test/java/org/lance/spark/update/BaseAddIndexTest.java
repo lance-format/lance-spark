@@ -148,6 +148,33 @@ public abstract class BaseAddIndexTest {
     }
   }
 
+  /** Four equal single-fragment appends: the shape a least-loaded batcher deals out round-robin. */
+  private void prepareEvenFragmentDataset() throws Exception {
+    spark.sql(String.format("create table %s (id int, text string) using lance;", fullTable));
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.IntegerType, false),
+              DataTypes.createStructField("text", DataTypes.StringType, false)
+            });
+    for (int batch = 0; batch < 4; batch++) {
+      int startId = batch * 5;
+      List<Row> rows =
+          IntStream.range(startId, startId + 5)
+              .boxed()
+              .map(i -> RowFactory.create(i, String.format("text_%d", i)))
+              .collect(Collectors.toList());
+      spark.createDataFrame(rows, schema).coalesce(1).writeTo(fullTable).append();
+    }
+  }
+
+  private int liveFragmentCount() {
+    try (org.lance.Dataset lanceDataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build()) {
+      return lanceDataset.getFragments().size();
+    }
+  }
+
   private void prepareNestedDataset() {
     spark.sql(
         String.format(
@@ -448,6 +475,56 @@ public abstract class BaseAddIndexTest {
           "Expected row-count batching to avoid the 130/50 workload split produced by count batching");
       Assertions.assertEquals(fragmentRows.keySet(), coveredFragments);
     }
+  }
+
+  /**
+   * A multi-segment index must not freeze the table against OPTIMIZE. Lance's compaction planner
+   * groups fragments only when the identical set of index metadata entries covers them, and every
+   * segment is its own entry, so segment coverage that interleaves fragment ids leaves no adjacent
+   * pair of fragments in the same group and compaction finds nothing to coalesce.
+   *
+   * <p>btree rather than zonemap: on this Lance version a zonemap index that covers only part of
+   * the table prunes the fragments it does not cover, which would break the row assertions for a
+   * reason unrelated to compaction.
+   */
+  @Test
+  public void testOptimizeCompactsTableCoveredByMultiSegmentIndex() throws Exception {
+    prepareEvenFragmentDataset();
+
+    spark
+        .sql(
+            String.format(
+                "alter table %s create index idx_contiguous using btree (id) "
+                    + "with (num_segments = 2)",
+                fullTable))
+        .collectAsList();
+    Assertions.assertEquals(
+        4, liveFragmentCount(), "Expected each of the four appends to land in its own fragment");
+
+    spark
+        .sql(String.format("optimize %s with (target_rows_per_fragment = 1000)", fullTable))
+        .collectAsList();
+
+    Assertions.assertTrue(
+        liveFragmentCount() < 4,
+        "Expected OPTIMIZE to coalesce fragments covered by a two-segment index, "
+            + "but the live fragment count did not drop");
+
+    Assertions.assertEquals(
+        IntStream.range(0, 20)
+            .mapToObj(i -> String.format("[%d,text_%d]", i, i))
+            .collect(Collectors.toList()),
+        spark
+            .sql(String.format("select id, text from %s order by id", fullTable))
+            .collectAsList()
+            .stream()
+            .map(Row::toString)
+            .collect(Collectors.toList()),
+        "Compaction under a multi-segment index must not change what the table returns");
+    Assertions.assertEquals(
+        1L,
+        spark.sql(String.format("select * from %s where id = 13", fullTable)).count(),
+        "The index must still answer point lookups after compaction");
   }
 
   @ParameterizedTest(name = "{0}")
