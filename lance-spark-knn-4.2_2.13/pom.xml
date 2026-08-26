@@ -1,0 +1,112 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.lance</groupId>
+        <artifactId>lance-spark-root</artifactId>
+        <version>0.7.1</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>lance-spark-knn-4.2_2.13</artifactId>
+    <name>${project.artifactId}</name>
+    <description>Indexed nearest-by join on Lance — Spark 4.2 SQL Catalyst integration (SPARK-56395)</description>
+    <packaging>jar</packaging>
+
+    <properties>
+        <scala.version>${scala213.version}</scala.version>
+        <scala.compat.version>${scala213.compat.version}</scala.compat.version>
+        <arrow.version>${arrow19.version}</arrow.version>
+        <java.release>${java17.release}</java.release>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.apache.spark</groupId>
+            <artifactId>spark-sql_${scala.compat.version}</artifactId>
+            <version>${spark42.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.spark</groupId>
+            <artifactId>spark-catalyst_${scala.compat.version}</artifactId>
+            <version>${spark42.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <!--
+          The Lance connector base. Supplies LanceRuntime / LanceConstant (used by LanceProbe) and
+          pulls in lance-core for the Lance Java API. The knn core (LanceKnnJoinStage, LanceProbe,
+          Metric, ...) lives in this module's own src, so no separate knn artifact is needed.
+          Exclude the netty buffer patch: Spark 4.2 (provided) supplies arrow 19.0.0 already.
+        -->
+        <dependency>
+            <groupId>org.lance</groupId>
+            <artifactId>lance-spark-base_${scala.compat.version}</artifactId>
+            <version>${project.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.arrow</groupId>
+                    <artifactId>arrow-memory-netty-buffer-patch</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <!-- Test-runtime: the Spark 4.2 connector so the e2e test's format("lance") resolves. -->
+        <dependency>
+            <groupId>org.lance</groupId>
+            <artifactId>lance-spark-4.2_${scala.compat.version}</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- junit-jupiter (test) is inherited from the root pom's global dependencies. -->
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>net.alchim31.maven</groupId>
+                <artifactId>scala-maven-plugin</artifactId>
+                <version>${scala-maven-plugin.version}</version>
+                <executions>
+                    <execution>
+                        <id>scala-compile-first</id>
+                        <phase>process-resources</phase>
+                        <goals>
+                            <goal>compile</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>scala-test-compile</id>
+                        <phase>process-test-resources</phase>
+                        <goals>
+                            <goal>testCompile</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <args>
+                        <arg>-feature</arg>
+                        <arg>-release</arg>
+                        <arg>${java.release}</arg>
+                    </args>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>${maven-compiler-plugin.version}</version>
+                <configuration>
+                    <release>${java.release}</release>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+    <profiles>
+        <profile>
+            <id>java21</id>
+            <properties>
+                <java.release>21</java.release>
+            </properties>
+        </profile>
+    </profiles>
+</project>
