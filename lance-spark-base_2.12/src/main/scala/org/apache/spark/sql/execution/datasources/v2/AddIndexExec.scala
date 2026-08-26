@@ -88,7 +88,11 @@ case class AddIndexExec(
     val btreeBuildMode = IndexUtils.btreeBuildMode(indexType, args)
     val scalarSegmentIndexType = IndexUtils.scalarSegmentIndexType(method)
 
-    val (fragmentWorkloads, canonicalColumns) = {
+    // Plan and build against a single pinned version. Tasks open the dataset themselves, so without
+    // pinning each one resolves the latest version independently and may see a different fragment
+    // set than the driver batched, or than its sibling tasks. Coverage the commit cannot establish is
+    // then accounted for at commit time; see IndexUtils.committedCoverage.
+    val (fragmentWorkloads, canonicalColumns, buildReadOptions) = {
       val ds = Utils.openDatasetBuilder(readOptions).build()
       try {
         val canonical = columns.map { column =>
@@ -96,10 +100,9 @@ case class AddIndexExec(
           FieldPathUtils.pathByFieldId(ds.getLanceSchema, field.getId)
         }
         (
-          ds.getFragments.asScala
-            .map(fragment => FragmentWorkload(fragment.getId, fragment.metadata().getNumRows))
-            .toList,
-          canonical)
+          IndexUtils.fragmentWorkloads(ds),
+          canonical,
+          IndexUtils.pinVersion(readOptions, ds))
       } finally {
         ds.close()
       }
@@ -163,7 +166,10 @@ case class AddIndexExec(
     val (nsImpl, nsProps, tableId, initialStorageOpts) =
       extractNamespaceInfo(lanceDataset, readOptions)
 
-    // Range-mode BTree uses preprocessed data from Spark and keeps its dedicated path.
+    // Range-mode BTree uses preprocessed data from Spark and keeps its dedicated path. It reads the
+    // table back through the catalog, so its coverage follows the scan rather than the fragment list
+    // planned above; pinning the build to the planning version would record a segment version older
+    // than the data the segment holds, which core's staleness pruning would act on.
     if (btreeBuildMode.contains("range")) {
       val segments = new RangeBasedBTreeIndexJob(
         this.copy(columns = canonicalColumns),
@@ -173,9 +179,9 @@ case class AddIndexExec(
         nsProps,
         tableId,
         initialStorageOpts).run()
-      commitIndexSegments(readOptions, canonicalColumns.head, segments)
+      val indexed = commitIndexSegments(readOptions, canonicalColumns.head, segments)
       return Seq(new GenericInternalRow(Array[Any](
-        fragmentIds.size.toLong,
+        indexed.toLong,
         UTF8String.fromString(indexName))))
     }
 
@@ -183,7 +189,7 @@ case class AddIndexExec(
     if (scalarSegmentIndexType.isDefined) {
       val segmentJob = new ScalarSegmentIndexJob(
         this.copy(columns = canonicalColumns),
-        readOptions,
+        buildReadOptions,
         fragmentWorkloads,
         validatedNumSegments,
         nsImpl,
@@ -192,9 +198,9 @@ case class AddIndexExec(
         initialStorageOpts)
       val segments = segmentJob.run()
       // Atomic add+remove via Lance core; see commitIndexSegments
-      commitIndexSegments(readOptions, canonicalColumns.head, segments)
+      val indexed = commitIndexSegments(readOptions, canonicalColumns.head, segments)
       return Seq(new GenericInternalRow(Array[Any](
-        fragmentIds.size.toLong,
+        indexed.toLong,
         UTF8String.fromString(indexName))))
     }
 
@@ -231,16 +237,31 @@ case class AddIndexExec(
   // Lance core's commitExistingIndexSegments handles atomic replacement:
   // it finds existing segments whose fragments overlap with incoming ones
   // and removes them in the same CreateIndex transaction.
+  //
+  // Returns the number of fragments the commit actually covers, which is what the command reports.
   private def commitIndexSegments(
       readOptions: LanceSparkReadOptions,
       column: String,
-      segments: Seq[Index]): Unit = {
+      segments: Seq[Index]): Int = {
     val dataset = Utils.openDatasetBuilder(readOptions).build()
     try {
-      dataset.commitExistingIndexSegments(
+      IndexUtils.requireCommittableCoverage(
+        IndexUtils.liveFragmentIds(dataset),
+        segments,
+        indexName)
+      val committed = dataset.commitExistingIndexSegments(
         indexName,
         column,
         segments.toList.asJava)
+      // The commit advances this handle to the manifest it wrote, so both the returned metadata and
+      // the fragment list below describe the committed state rather than the one validated above.
+      IndexUtils
+        .establishedCoverage(
+          segments,
+          committed.asScala.toSeq,
+          IndexUtils.liveFragmentIds(dataset),
+          indexName)
+        .size
     } finally {
       dataset.close()
     }
@@ -275,6 +296,12 @@ case class AddIndexExec(
  * set of fragments, sorted by the indexed value. Each partition becomes one uncommitted segment
  * covering exactly those fragments, so the resulting segments have disjoint fragment coverage and
  * can be committed directly as a single logical index.
+ *
+ * Unlike the segmented path, coverage here is derived from the fragment ids present in the scanned
+ * rows rather than from a fragment list fixed at planning time. The scan goes back through the
+ * catalog, which resolves and pins its own version, so this job is deliberately handed unpinned read
+ * options: the version an executor opens must not predate the rows it is indexing, or the segment
+ * would record a dataset version older than its own contents.
  *
  * @param addIndexExec       The AddIndexExec instance that initiated this job
  * @param readOptions        Configuration options for reading the Lance dataset
@@ -618,6 +645,115 @@ object IndexUtils extends Logging {
     methodToIndexTypes
       .get(method.toLowerCase(Locale.ROOT))
       .filter(scalarSegmentIndexTypes.contains)
+
+  /**
+   * Pins `readOptions` to the version `dataset` is open at.
+   *
+   * Distributed index builds hand read options to tasks that open the dataset themselves. Pinning
+   * makes every task observe the fragment set the driver planned over instead of resolving the
+   * latest version independently.
+   */
+  def pinVersion(
+      readOptions: LanceSparkReadOptions,
+      dataset: Dataset): LanceSparkReadOptions =
+    readOptions.withRef(Utils.pinOpenedRef(dataset, readOptions.getRef))
+
+  /**
+   * Fragment ids and live row counts of `dataset`, in manifest order.
+   *
+   * Reads the primitive fragment-statistics view rather than [[Dataset#getFragments]], which
+   * materializes a Java object per fragment and per data file. Both commands enumerate fragments on
+   * the driver, once to plan and once to check the commit, so on a large table that difference is
+   * the bulk of planning cost.
+   */
+  def fragmentWorkloads(dataset: Dataset): List[FragmentWorkload] = {
+    val stats = dataset.getFragmentStatistics
+    val ids = stats.getIds
+    val rowCounts = stats.getRowCounts
+    List.tabulate(ids.length)(index =>
+      FragmentWorkload(Integer.valueOf(ids(index)), rowCounts(index)))
+  }
+
+  /** Fragment ids live in `dataset`. See [[fragmentWorkloads]] for why this avoids getFragments. */
+  def liveFragmentIds(dataset: Dataset): Set[Int] =
+    dataset.getFragmentStatistics.getIds.toSet
+
+  /** Fragment ids the given segments declare coverage of. */
+  def declaredCoverage(segments: Seq[Index]): Set[Int] =
+    segments.iterator
+      .flatMap(_.fragments().orElse(Collections.emptyList[Integer]()).asScala)
+      .map(_.intValue)
+      .toSet
+
+  /**
+   * Refuses to publish a segment set that would establish no coverage at all.
+   *
+   * Commit intersects each segment's declared coverage with the dataset's live fragments, so a
+   * fragment retired while the build ran contributes nothing. Lance accepts such a set: an empty
+   * fragment bitmap is valid metadata, and an existing segment is trivially disjoint from it and so
+   * survives. Nothing is corrupted, but the transaction would publish segments that index no data and
+   * report a build that achieved nothing, and this is the last point at which it can still be
+   * declined.
+   *
+   * Partial loss is not refused. A fragment leaves the manifest either because its rows moved
+   * (compaction, an in-place rewrite) or because they were all deleted; only the first leaves data
+   * unindexed, and either way the segments covering what remains are correct. Discarding a finished
+   * distributed build over that would be the wrong response, and it would make a routine concurrent
+   * DELETE fatal on a long one. What the commit actually established is reported afterwards, by
+   * [[establishedCoverage]].
+   */
+  def requireCommittableCoverage(
+      liveFragmentIds: Set[Int],
+      segments: Seq[Index],
+      indexName: String): Unit = {
+    val declared = declaredCoverage(segments)
+    if (declared.nonEmpty && declared.intersect(liveFragmentIds).isEmpty) {
+      throw new IllegalStateException(
+        s"Index '$indexName' build raced a concurrent operation: every fragment it covers " +
+          s"(${describeFragmentIds(declared)}) was retired while the build ran, so the segments " +
+          "would cover nothing. No index change was committed; re-run the command.")
+    }
+  }
+
+  /**
+   * The coverage a commit established, read back from the metadata the commit returned.
+   *
+   * A check taken before the commit cannot answer this, for two reasons. It reads the manifest its
+   * handle was opened at, while the commit lands on whatever version is current by then. And Lance
+   * prunes an incoming segment's coverage not only for a fragment that is gone but also for one whose
+   * indexed field was rewritten under the same id, which no comparison of fragment ids can see. The
+   * returned metadata is post-pruning, so it is the only truthful account of what was indexed.
+   *
+   * Only the segments this build produced are counted. Existing segments that were disjoint from them
+   * survive the commit, and their coverage is not this command's to report.
+   *
+   * @return the fragment ids the commit covered with these segments
+   */
+  def establishedCoverage(
+      builtSegments: Seq[Index],
+      committedSegments: Seq[Index],
+      liveFragmentIds: Set[Int],
+      indexName: String): Set[Int] = {
+    val builtUuids = builtSegments.map(_.uuid).toSet
+    val established =
+      declaredCoverage(committedSegments.filter(segment => builtUuids.contains(segment.uuid)))
+        .intersect(liveFragmentIds)
+    val uncovered = declaredCoverage(builtSegments).diff(established)
+    if (uncovered.nonEmpty) {
+      logWarning(
+        s"Index '$indexName' build raced a concurrent operation: fragments " +
+          s"${describeFragmentIds(uncovered)} are not covered by this commit, because they were " +
+          "retired or because their indexed field was rewritten while the build ran. The segments " +
+          "for the remaining fragments are committed; re-run the command to cover them.")
+    }
+    established
+  }
+
+  private def describeFragmentIds(ids: Set[Int]): String = {
+    val ordered = ids.toSeq.sorted
+    val shown = ordered.take(10).mkString(", ")
+    if (ordered.size > 10) s"$shown, ... (${ordered.size} total)" else shown
+  }
 
   def resolveIndexField(
       schema: LanceSchema,
