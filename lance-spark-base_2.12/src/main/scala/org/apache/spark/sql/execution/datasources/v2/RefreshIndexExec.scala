@@ -180,11 +180,14 @@ case class RefreshIndexExec(
     val segments = matched.head._2
 
     val indexType = segments.head.indexType()
+    // An index type this command cannot rebuild is also one CREATE INDEX cannot build, since both go
+    // through the same method mapping: a vector index, for instance, only exists because something
+    // outside Spark SQL created it. Pointing such a user at CREATE INDEX would be a dead end.
     val method = Option(indexType).flatMap(IndexUtils.methodForIndexType).getOrElse {
       val described = Option(indexType).map(_.name()).getOrElse("unknown")
       throw new UnsupportedOperationException(
-        s"REFRESH INDEX does not support index type $described. Rebuild the index with " +
-          "ALTER TABLE ... CREATE INDEX instead.")
+        s"Spark SQL cannot build index type $described, so '$indexName' cannot be refreshed here. " +
+          "Maintain it through the Lance SDK, which is also where it was created.")
     }
 
     val fieldIds = segments.head.fields()

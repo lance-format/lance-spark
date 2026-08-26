@@ -60,10 +60,11 @@ The `SHOW INDEXES` command returns the following columns:
 
 ## Interpreting the Output
 
-An `indexed_percent` below 100 means part of the table is not covered — either rows were appended
-since the index was last built, or [OPTIMIZE](./optimize.md) rewrote fragments a `zonemap` or
-`bloomfilter` index had covered. Use [REFRESH INDEX](./refresh-index.md) to index just the uncovered
-fragments.
+An `indexed_percent` below 100 means part of the table is not covered, either because rows were
+appended since the index was last built, or because [OPTIMIZE](./optimize.md) rewrote fragments a
+`zonemap` or `bloomfilter` index had covered. For the index methods Spark SQL can build, use
+[REFRESH INDEX](./refresh-index.md) to index just the uncovered fragments. A vector index is listed
+here too, but Spark SQL can neither create nor refresh one; maintain it through the Lance SDK.
 
 Do not treat partial coverage as merely slower. For most methods the uncovered fragments are scanned
 and results stay complete, but a partially covered `zonemap` index prunes them instead, so a

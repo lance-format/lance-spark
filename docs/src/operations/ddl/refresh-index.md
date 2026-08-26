@@ -161,7 +161,9 @@ rebuild is the fix there.
 
 - **Index Methods**: supported for the same methods as
   [CREATE INDEX](./create-index.md#index-methods): `zonemap`, `btree`, `bitmap`, `label_list`,
-  `ngram`, `bloomfilter`, `rtree`, and `fts` (or `inverted`).
+  `ngram`, `bloomfilter`, `rtree`, and `fts` (or `inverted`). A vector index cannot be created from
+  Spark SQL either, so refreshing one is rejected and pointed at the Lance SDK rather than at
+  `CREATE INDEX`, which could not build it.
 - **Full-Build Options**: `train`, `build_mode`, and `rows_per_range` are rejected. Range-mode
   `btree` redistributes and sorts the whole table, which an incremental refresh does not do — use
   `CREATE INDEX` to rebuild that way.
