@@ -801,6 +801,46 @@ public abstract class BaseAddIndexTest {
   }
 
   /**
+   * WITH-clause option names are normalized at parse time, so an upper-case {@code TRAIN} defers
+   * the build exactly as the lower-case spelling does. Without that normalization the option is not
+   * the one any command recognizes: the index is trained anyway, and the name reaches Lance as an
+   * index parameter.
+   */
+  @Test
+  public void testCreateZonemapIndexDeferredWithUpperCaseOptionName() {
+    prepareDataset();
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index idx_upper_defer using zonemap (id) "
+                    + "with (TRAIN = false)",
+                fullTable));
+
+    Row row = result.collectAsList().get(0);
+    Assertions.assertEquals(0L, row.getLong(0), "Deferred create should index zero fragments");
+    Assertions.assertEquals("idx_upper_defer", row.getString(1));
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      List<Index> deferred =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> "idx_upper_defer".equals(index.name()))
+              .collect(Collectors.toList());
+
+      Assertions.assertEquals(
+          1, deferred.size(), "Deferred zonemap should commit a single empty index");
+      Assertions.assertEquals(IndexType.ZONEMAP, deferred.get(0).indexType());
+      Assertions.assertEquals(
+          0,
+          deferred.get(0).fragments().orElse(Collections.emptyList()).size(),
+          "Deferred zonemap should cover no fragments");
+    } finally {
+      lanceDataset.close();
+    }
+  }
+
+  /**
    * A deferred ZONEMAP can be populated by re-running CREATE INDEX (eager): the distributed segment
    * build replaces the empty index and covers all fragments.
    */

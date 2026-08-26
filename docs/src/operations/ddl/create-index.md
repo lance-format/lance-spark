@@ -38,6 +38,8 @@ The following index methods are supported:
 
 The `CREATE INDEX` command supports options via the `WITH` clause to control index creation. These options are specific to the chosen index method.
 
+Option names are case-insensitive: `WITH (TRAIN = false)` and `WITH (train = false)` are the same option.
+
 ### Common Options
 
 These options apply to all index methods:
