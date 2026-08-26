@@ -185,11 +185,11 @@ rebuild is the fix there.
   refresh afterwards. `btree`, `bitmap`, `label_list`, `ngram`, `rtree` and `fts` record row ids,
   which follow their rows, so compaction carries their coverage over and a refresh reports
   `fragments_indexed = 0`.
-- **Stale `zonemap` Coverage Can Hide Rows**: on the Lance version this connector builds against, a
-  partially covered `zonemap` index prunes the fragments it does not cover, so a predicate on the
-  indexed column can return fewer rows than the table holds (`COUNT(*)` over the whole table stays
-  correct). Refresh a `zonemap` index after appending or compacting before relying on filters over
-  it. The other methods return complete results while partially covered.
+- **Stale `zonemap` Coverage Can Hide Rows**: a partially covered `zonemap` index prunes the
+  fragments it does not cover, so a predicate on the indexed column can return fewer rows than the
+  table holds (`COUNT(*)` over the whole table stays correct). Refresh a `zonemap` index after
+  appending or compacting before relying on filters over it. The other methods return complete
+  results while partially covered.
 - **Concurrent Retirement**: if a concurrent operation retires a fragment while a refresh is
   building it, that fragment is left out of the commit and named in a warning, and
   `fragments_indexed` counts only what was covered. Re-run the refresh to pick up whatever replaced

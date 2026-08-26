@@ -90,9 +90,11 @@ case class AddIndexExec(
     val scalarSegmentIndexType = IndexUtils.scalarSegmentIndexType(method)
 
     // Plan and build against a single pinned version. Tasks open the dataset themselves, so without
-    // pinning each one resolves the latest version independently and may see a different fragment
-    // set than the driver batched, or than its sibling tasks. Coverage the commit cannot establish is
-    // then accounted for at commit time; see IndexUtils.committedCoverage.
+    // pinning each one resolves the latest version independently. The driver's batches fix which
+    // fragments a segment covers either way, but not what sits behind them: siblings would read the
+    // same fragments at different versions and stamp their segments with those versions, and a
+    // fragment compacted away since planning fails its task outright. Coverage the commit cannot
+    // establish is accounted for at commit time; see IndexUtils.establishedCoverage.
     val (fragmentWorkloads, canonicalColumns, buildReadOptions) = {
       val ds = Utils.openDatasetBuilder(readOptions).build()
       try {
