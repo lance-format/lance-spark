@@ -57,7 +57,11 @@ case class LanceKnnJoinExec(
     val childRdd = child.execute()
     val leftSchemaCaptured = leftSchema
     val finalSchemaCaptured = finalSchema
-    val confCaptured = stageConf
+    // Resolve + pin the Lance read context ONCE here on the driver (merge the relation options over
+    // the base table options, open the dataset, pin its version) before capturing it into the RDD
+    // closure — so every executor probe opens the SAME snapshot. This is the driver-side I/O the
+    // Catalyst rule deliberately avoids; it never runs in pure-plan unit tests, which don't execute.
+    val confCaptured = LanceKnnJoinStage.resolveReadContext(stageConf)
 
     // Encoders are created on the driver and captured into the closure (ExpressionEncoder is
     // serializable). The deserializer/serializer instances are NOT thread-safe, so build them

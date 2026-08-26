@@ -266,7 +266,8 @@ class IndexedNearestByJoinSqlTest {
     LanceVectorIndexBuilder.buildIvfPq(uniformUri, "rvec", numPartitions = 4, numSubVectors = 8)
 
     val (clusteredDf, clusteredIds, clusteredVecs) = buildLeftDf(
-      ClusteredEmbeddings.generate(NumLeft, Dim, numClusters = 4, seed = Seed + 2), Dim)
+      ClusteredEmbeddings.generate(NumLeft, Dim, numClusters = 4, seed = Seed + 2),
+      Dim)
     val (clusteredUri, clusteredRightIds, clusteredRightVecs) = writeRightDf(
       ClusteredEmbeddings.generate(NumRight, Dim, numClusters = 16, seed = Seed + 3),
       Dim,
@@ -274,9 +275,19 @@ class IndexedNearestByJoinSqlTest {
     LanceVectorIndexBuilder.buildIvfPq(clusteredUri, "rvec", numPartitions = 4, numSubVectors = 8)
 
     val uniformRecall = recallAgainst(
-      uniformDf, uniformUri, uniformIds, uniformVecs, uniformRightIds, uniformRightVecs)
+      uniformDf,
+      uniformUri,
+      uniformIds,
+      uniformVecs,
+      uniformRightIds,
+      uniformRightVecs)
     val clusteredRecall = recallAgainst(
-      clusteredDf, clusteredUri, clusteredIds, clusteredVecs, clusteredRightIds, clusteredRightVecs)
+      clusteredDf,
+      clusteredUri,
+      clusteredIds,
+      clusteredVecs,
+      clusteredRightIds,
+      clusteredRightVecs)
     println(
       s"  IVF-PQ recall@$K: uniform=$uniformRecall, clustered=$clusteredRecall " +
         "(uniform = IVF worst case; clustered = production-shaped)")

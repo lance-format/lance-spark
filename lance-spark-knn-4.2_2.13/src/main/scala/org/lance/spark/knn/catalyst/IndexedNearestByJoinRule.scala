@@ -17,10 +17,10 @@ import org.apache.spark.sql.catalyst.expressions.{And, Attribute, AttributeRefer
 import org.apache.spark.sql.catalyst.plans.{JoinType, LeftOuter, NearestByDirection, NearestByDistance, NearestBySimilarity}
 import org.apache.spark.sql.catalyst.plans.logical.{Filter, LogicalPlan, NearestByJoin, Project, SubqueryAlias}
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.connector.catalog.Table
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.types.{BooleanType, ByteType, DoubleType, FloatType, IntegerType, LongType, ShortType, StringType, StructField, StructType}
 import org.apache.spark.unsafe.types.UTF8String
+import org.lance.spark.{LanceDataset, LanceSparkReadOptions}
 import org.lance.spark.knn.internal.{LanceKnnJoinStage, Metric}
 
 /**
@@ -65,13 +65,15 @@ import org.lance.spark.knn.internal.{LanceKnnJoinStage, Metric}
  *
  * == Lance scan detection ==
  *
- * Class-name match: `getClass.getName.contains("Lance")`. The probe / materialize path drives
- * Lance's Java API directly, so the indexed-path executor is Lance-specific by construction —
- * there's no general "any vector-capable backend" extension point here. URI extracted from the
- * standard `path` / `datasetUri` option. The rule is opt-in via
- * `spark.lance.knn.indexedNearestByJoin.enabled`, so a false positive can only fire when the user
- * explicitly enabled the feature against a non-Lance backend; the runtime probe would surface the
- * mismatch.
+ * The right relation's V2 table must be a connector [[org.lance.spark.LanceDataset]]. The probe /
+ * materialize path drives Lance's Java API directly, so the indexed-path executor is Lance-specific
+ * by construction — there's no general "any vector-capable backend" extension point here. From the
+ * `LanceDataset` the rule captures the FULL read context: the base `LanceSparkReadOptions`, the
+ * driver-side initial storage options, and the runtime namespace impl / properties. The relation's
+ * OWN options are captured too — that is where a DataFrame read carries branch / version / storage
+ * credentials, since `LanceDataSource` is a `SupportsCatalogOptions` whose identifier is the URI
+ * alone. [[org.lance.spark.knn.catalyst.LanceKnnJoinExec]] merges + pins that context once on the
+ * driver (as `LanceScanBuilder` does) and opens on executors through `Utils.openDatasetBuilder`.
  *
  * == Prefilter pushdown ==
  *
@@ -175,8 +177,11 @@ object IndexedNearestByJoinRule extends Rule[LogicalPlan] {
       val rightProjection: Seq[String] = lance.output.map(_.name)
 
       val stageConf = LanceKnnJoinStage.Conf(
-        datasetUri = lance.uri,
-        version = lance.version,
+        readOptions = lance.readOptions,
+        relationOptions = lance.relationOptions,
+        initialStorageOptions = lance.initialStorageOptions,
+        namespaceImpl = lance.namespaceImpl,
+        namespaceProperties = lance.namespaceProperties,
         vectorColumn = rightVecCol,
         metric = metric,
         k = k,
@@ -223,10 +228,19 @@ object IndexedNearestByJoinRule extends Rule[LogicalPlan] {
     }
   }
 
-  /** Lance scan info extracted from a DSv2 relation, optionally with a translated prefilter. */
+  /**
+   * Lance scan context extracted from a DSv2 relation, optionally with a translated prefilter. Carries
+   * the full read context so the executor can merge + pin + open exactly as the connector's scan path
+   * does — see [[LanceKnnJoinStage.resolveReadContext]]. `relationOptions` is where a DataFrame read
+   * carries branch / version / storage credentials (the `SupportsCatalogOptions` identifier is the URI
+   * alone), so it must be captured alongside the base `readOptions`.
+   */
   final private case class LanceScanInfo(
-      uri: String,
-      version: Option[Long],
+      readOptions: LanceSparkReadOptions,
+      relationOptions: java.util.Map[String, String],
+      initialStorageOptions: java.util.Map[String, String],
+      namespaceImpl: String,
+      namespaceProperties: java.util.Map[String, String],
       output: Seq[Attribute],
       prefilter: Option[String])
 
@@ -256,21 +270,29 @@ object IndexedNearestByJoinRule extends Rule[LogicalPlan] {
       // computed columns) would change the schema we rely on for `j.output` mapping, so we
       // refuse those by falling through to the default `_ => None` case.
       unwrapLanceScan(child)
-    case rel: DataSourceV2Relation if isLanceTable(rel.table) =>
+    case rel: DataSourceV2Relation if rel.table.isInstanceOf[LanceDataset] =>
       // The probe / materialize path drives Lance's Java API directly, so this rule is
-      // Lance-specific by construction — there's no plug-in point for a non-Lance backend
-      // here. We detect Lance via class-name match and pull the URI from the standard `path`
-      // / `datasetUri` option. If neither is present we fall through (returning None lets
-      // Spark's brute-force rewrite handle the query).
-      val opts = rel.options
-      val uri = Option(opts.get("path")).orElse(Option(opts.get("datasetUri")))
-      uri.map { u =>
+      // Lance-specific by construction — there's no plug-in point for a non-Lance backend here.
+      // Capture the FULL read context from the connector's `LanceDataset` (base read options +
+      // runtime namespace) PLUS the relation's own options, which is where a DataFrame read carries
+      // branch / version / storage credentials (`LanceDataSource` is a `SupportsCatalogOptions`
+      // whose identifier is the URI alone). `LanceKnnJoinExec.doExecute` merges + pins these exactly
+      // as `LanceScanBuilder` does. Namespace / storage maps are copied into fresh serializable
+      // HashMaps so they ship cleanly to executors inside the stage Conf.
+      val ds = rel.table.asInstanceOf[LanceDataset]
+      Some(
         LanceScanInfo(
-          uri = u,
-          version = Option(opts.get("version")).map(_.toLong),
+          readOptions = ds.readOptions(),
+          relationOptions = new java.util.HashMap[String, String](rel.options.asCaseSensitiveMap()),
+          initialStorageOptions = Option(ds.getInitialStorageOptions())
+            .map(new java.util.HashMap[String, String](_))
+            .orNull,
+          namespaceImpl = ds.getNamespaceImpl(),
+          namespaceProperties = Option(ds.getNamespaceProperties())
+            .map(new java.util.HashMap[String, String](_))
+            .orNull,
           output = rel.output,
-          prefilter = None)
-      }
+          prefilter = None))
     case _ => None
   }
 
@@ -350,16 +372,29 @@ object IndexedNearestByJoinRule extends Rule[LogicalPlan] {
   }
 
   private def asRightColumn(e: Expression, rightAttrs: AttributeSet): Option[String] = e match {
-    case a: Attribute if rightAttrs.contains(a) => Some(a.name)
+    case a: Attribute if rightAttrs.contains(a) => Some(quoteIdentifier(a.name))
     case g: GetStructField =>
       // Nested struct field: render as a dotted path `col.field` (recursing so `a.b.c` works).
       // Lance's filter dialect treats a dotted identifier as a nested column path — its scan
-      // planner runs with enable_relations = false — so this maps 1:1. The recursion also gates
-      // on the ROOT resolving to a right-side attribute, so a left-side or foreign root refuses.
+      // planner runs with enable_relations = false — so this maps 1:1. Each path segment is quoted
+      // independently. The recursion also gates on the ROOT resolving to a right-side attribute, so
+      // a left-side or foreign root refuses.
       val fieldName = g.name.getOrElse(g.childSchema(g.ordinal).name)
-      asRightColumn(g.child, rightAttrs).map(base => s"$base.$fieldName")
+      asRightColumn(g.child, rightAttrs).map(base => s"$base.${quoteIdentifier(fieldName)}")
     case _ => None
   }
+
+  /**
+   * Render a column identifier for a Lance (DataFusion-flavored) filter. A plain identifier
+   * (`[A-Za-z_][A-Za-z0-9_]*`) is emitted bare so the common case stays readable; anything else —
+   * spaces, punctuation, a leading digit, an embedded quote — is double-quoted with embedded quotes
+   * doubled. Without this, a column named e.g. `my col` renders as a bare `my col` and produces a
+   * malformed / mis-parsed filter string. Applied per dotted-path segment, so `outer.inner field`
+   * becomes `outer."inner field"`.
+   */
+  private def quoteIdentifier(name: String): String =
+    if (name.matches("[A-Za-z_][A-Za-z0-9_]*")) name
+    else "\"" + name.replace("\"", "\"\"") + "\""
 
   /**
    * Render a Spark literal as a Lance SQL literal. Dispatch is by `dataType`, NOT by the boxed
@@ -402,14 +437,6 @@ object IndexedNearestByJoinRule extends Rule[LogicalPlan] {
       case (a: Attribute, c) => a.exprId == c.exprId
       case _ => false
     }
-  }
-
-  private def isLanceTable(table: Table): Boolean = {
-    val cls = table.getClass.getName
-    // Loose by design — the rule is opt-in via spark.lance.knn.indexedNearestByJoin.enabled, so
-    // a false positive here would only fire when the user explicitly turned the feature on
-    // against a non-Lance backend, and the runtime probe would surface the mismatch.
-    cls.contains("Lance") || cls.contains("lance")
   }
 
   /**

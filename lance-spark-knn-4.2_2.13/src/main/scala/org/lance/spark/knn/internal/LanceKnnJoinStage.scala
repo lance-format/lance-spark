@@ -13,10 +13,12 @@
  */
 package org.lance.spark.knn.internal
 
+import org.apache.spark.TaskContext
 import org.apache.spark.sql.Row
-import org.apache.spark.sql.types.StructField
-
-import scala.collection.mutable
+import org.apache.spark.sql.types.{ArrayType, DataType, MapType, StructField, StructType}
+import org.lance.Dataset
+import org.lance.spark.LanceSparkReadOptions
+import org.lance.spark.utils.Utils
 
 /**
  * The whole indexed nearest-by join, done per Spark partition with NO shuffle.
@@ -53,10 +55,20 @@ object LanceKnnJoinStage {
    * Everything a probe task needs, shipped from the driver. `internalK` is the overfetch count
    * handed to Lance (`k × overfetch`); `k` is the final per-left-row cut applied after the native
    * search. `leftVecIdx` is the position of the query-vector column in the left row.
+   *
+   * The read context — `readOptions`, `relationOptions`, `initialStorageOptions`, `namespaceImpl`,
+   * `namespaceProperties` — is the full Lance scan context captured from the connector's
+   * `LanceDataset` plus the DataSourceV2 relation options (where a DataFrame read carries branch /
+   * version / storage credentials). [[resolveReadContext]] merges + pins these once on the driver
+   * before the probe RDD launches; the resolved `readOptions` carry the pinned ref so every task
+   * probes one consistent snapshot. All five fields are serializable so they ship to executors.
    */
   final case class Conf(
-      datasetUri: String,
-      version: Option[Long],
+      readOptions: LanceSparkReadOptions,
+      relationOptions: java.util.Map[String, String],
+      initialStorageOptions: java.util.Map[String, String],
+      namespaceImpl: String,
+      namespaceProperties: java.util.Map[String, String],
       vectorColumn: String,
       metric: Metric,
       k: Int,
@@ -74,73 +86,166 @@ object LanceKnnJoinStage {
     extends Serializable
 
   /**
-   * Run the join for one partition of left rows. Opens the probe once, probes + materializes per
-   * row, and returns assembled join rows. Materializing into an `ArrayBuffer` before returning the
-   * iterator is deliberate: Spark pulls from `mapPartitions` lazily, so a bare lazy iterator would
-   * let the consumer outlive the `try`/`finally` and read from a closed probe handle.
+   * Resolve and pin the Lance read context ONCE, on the driver, before the probe RDD is launched —
+   * the same thing the connector's `LanceScanBuilder` does at scan-build time. Merges the
+   * DataSourceV2 relation options over the base table read options (branch / version / storage
+   * credentials), opens the dataset to read its current version, and pins that version so every
+   * executor probe sees one consistent snapshot even under concurrent writes.
+   *
+   * Returns a [[Conf]] whose `readOptions` carry the pinned ref; `relationOptions` is cleared since
+   * it has been folded in. Call this from the physical operator's `doExecute` (driver side) — never
+   * from the Catalyst rule, which must stay I/O-free so it can pattern-match against fake-URI
+   * relations in unit tests.
+   */
+  def resolveReadContext(conf: Conf): Conf = {
+    val merged = mergeReadOptions(conf.readOptions, conf.relationOptions)
+    val builder = Utils.openDatasetBuilder(merged)
+    if (conf.initialStorageOptions != null) {
+      builder.initialStorageOptions(conf.initialStorageOptions)
+    }
+    builder.runtimeNamespace(conf.namespaceImpl, conf.namespaceProperties, merged.getTableId())
+    val dataset: Dataset = builder.build()
+    val pinned =
+      try merged.withRef(Utils.pinOpenedRef(dataset, merged.getRef()))
+      finally dataset.close()
+    conf.copy(readOptions = pinned, relationOptions = new java.util.HashMap[String, String]())
+  }
+
+  /**
+   * Port of the connector's `LanceDataset.mergeScanOptions`: overlay the DataSourceV2 relation
+   * options on the base table's read options. Storage options merge with the relation winning, and
+   * any stale `version` / `branch` keys are stripped from the base first so the relation's ref is
+   * not shadowed by a leftover storage entry. An empty relation returns the base options untouched.
+   *
+   * The connector additionally guards against combining an incompatible pre-pinned table ref with a
+   * relation-specified branch / version; that guard only fires when the base options already carry
+   * a ref (a catalog table time-travelled at load), which does not happen on the DataFrame-relation
+   * path this rule matches, so it is intentionally omitted here.
+   */
+  private def mergeReadOptions(
+      base: LanceSparkReadOptions,
+      relationOptions: java.util.Map[String, String]): LanceSparkReadOptions = {
+    if (relationOptions == null || relationOptions.isEmpty) {
+      return base
+    }
+    val merged = new java.util.HashMap[String, String](base.getStorageOptions)
+    merged.remove(LanceSparkReadOptions.CONFIG_VERSION)
+    merged.remove(LanceSparkReadOptions.CONFIG_BRANCH)
+    merged.putAll(relationOptions)
+    LanceSparkReadOptions
+      .builder()
+      .datasetUri(base.getDatasetUri)
+      .namespace(base.getNamespace)
+      .tableId(base.getTableId)
+      .catalogName(base.getCatalogName)
+      .indexCacheBackend(base.getIndexCacheBackend)
+      .metadataCacheBackend(base.getMetadataCacheBackend)
+      .ref(base.getRef)
+      .fromOptions(merged)
+      .build()
+  }
+
+  /**
+   * Run the join for one partition of left rows. Opens the probe once, then streams the output: each
+   * left row expands to its (≤k) join rows on demand via [[lazyJoinIterator]], so the whole
+   * partition is never buffered.
+   *
+   * Because Spark pulls from `mapPartitions` lazily, the returned iterator can outlive this method —
+   * so the probe is closed on task completion (success OR failure) via the `TaskContext` listener,
+   * NOT a `try`/`finally` here (which would release the native handle before the consumer reads it).
+   * When there is no `TaskContext` (a direct call outside a Spark task, e.g. a JVM-only test), we
+   * fall back to draining eagerly and closing before returning so the handle cannot leak.
    */
   def runPartition(leftRows: Iterator[Row], conf: Conf): Iterator[Row] = {
     if (leftRows.isEmpty) return Iterator.empty
 
-    val probe = new LanceProbe(conf.datasetUri, fragmentIds = None, version = conf.version)
-    val out = mutable.ArrayBuffer.empty[Row]
-    try {
-      leftRows.foreach { leftRow =>
-        val q = extractVector(leftRow, conf.leftVecIdx)
-        if (q == null) {
-          // Null query vector: nothing to search. Emit a null-right row only for an outer join.
-          if (conf.outerJoin) {
-            out += assembleRow(leftRow, conf.leftFieldCount, conf.rightFields, null, null)
-          }
-        } else {
-          // Overfetch `internalK` candidates natively, then trim to the final `k`. Lance already
-          // returns them best-first, so when it hands back no more than `k` we keep them as-is and
-          // skip the heap entirely.
-          val refs = probe
-            .probe(
-              conf.vectorColumn,
-              q,
-              conf.internalK,
-              conf.metric,
-              conf.nprobes,
-              conf.refineFactor,
-              conf.ef,
-              conf.prefilter)
-            .toArray
-          val trimmed =
-            if (refs.length <= conf.k) refs
-            else {
-              val heap = new TopKHeap(conf.k, conf.smallerIsBetter)
-              heap.offerAll(refs)
-              heap.drain()
-            }
+    val probe = new LanceProbe(
+      conf.readOptions,
+      conf.initialStorageOptions,
+      conf.namespaceImpl,
+      conf.namespaceProperties,
+      fragmentIds = None)
 
-          if (trimmed.isEmpty) {
-            if (conf.outerJoin) {
-              out += assembleRow(leftRow, conf.leftFieldCount, conf.rightFields, null, null)
-            }
-          } else {
-            // Late materialization: point-fetch the surviving right rows by `_rowid`. Building the
-            // `rowAddr -> row` map collapses any duplicate rowAddr to one payload; the loop below
-            // still emits one output row per surviving ref.
-            val materialized: Map[Long, Map[String, Any]] = probe
-              .materialize(trimmed.iterator.map(_.rowAddr).toSeq, conf.rightProjection)
-              .map(m => extractRowAddr(m) -> m)
-              .toMap
-            trimmed.foreach { ref =>
-              val rightMap = materialized.getOrElse(ref.rowAddr, null)
-              out += assembleRow(
-                leftRow,
-                conf.leftFieldCount,
-                conf.rightFields,
-                rightMap,
-                ref.score)
-            }
-          }
+    val output = lazyJoinIterator(leftRows, leftRow => processRow(leftRow, probe, conf))
+    TaskContext.get() match {
+      case null =>
+        try output.toList.iterator
+        finally probe.close()
+      case tc =>
+        tc.addTaskCompletionListener[Unit](_ => probe.close())
+        output
+    }
+  }
+
+  /**
+   * Lazily compose per-partition output: each left row expands to its (≤k) join rows on demand.
+   * Extracted so a unit test can assert laziness — the left iterator is pulled element-by-element,
+   * not drained up front — with a stub expander and no Lance dataset. [[runPartition]] wires the
+   * real per-row probe / trim / materialize expansion through here.
+   */
+  private[knn] def lazyJoinIterator(
+      leftRows: Iterator[Row],
+      expand: Row => Iterator[Row]): Iterator[Row] =
+    leftRows.flatMap(expand)
+
+  /**
+   * Expand one left row into its join output rows: probe R's index, trim to `k`, late-materialize
+   * the surviving right rows by `_rowid`, and assemble `left ++ right ++ score`. Returns an empty
+   * iterator (inner join) or a single null-right row (outer join) when there is no query vector or
+   * no hit.
+   */
+  private def processRow(leftRow: Row, probe: LanceProbe, conf: Conf): Iterator[Row] = {
+    val q = extractVector(leftRow, conf.leftVecIdx)
+    if (q == null) {
+      // Null query vector: nothing to search. Emit a null-right row only for an outer join.
+      if (conf.outerJoin) {
+        Iterator.single(assembleRow(leftRow, conf.leftFieldCount, conf.rightFields, null, null))
+      } else {
+        Iterator.empty
+      }
+    } else {
+      // Overfetch `internalK` candidates natively, then trim to the final `k`. Lance already
+      // returns them best-first, so when it hands back no more than `k` we keep them as-is and
+      // skip the heap entirely.
+      val refs = probe
+        .probe(
+          conf.vectorColumn,
+          q,
+          conf.internalK,
+          conf.metric,
+          conf.nprobes,
+          conf.refineFactor,
+          conf.ef,
+          conf.prefilter)
+        .toArray
+      val trimmed =
+        if (refs.length <= conf.k) refs
+        else {
+          val heap = new TopKHeap(conf.k, conf.smallerIsBetter)
+          heap.offerAll(refs)
+          heap.drain()
+        }
+
+      if (trimmed.isEmpty) {
+        if (conf.outerJoin) {
+          Iterator.single(assembleRow(leftRow, conf.leftFieldCount, conf.rightFields, null, null))
+        } else {
+          Iterator.empty
+        }
+      } else {
+        // Late materialization: point-fetch the surviving right rows by `_rowid`. Building the
+        // `rowAddr -> row` map collapses any duplicate rowAddr to one payload; we still emit one
+        // output row per surviving ref. Bounded by `k`, so this stays per-row, not per-partition.
+        val materialized: Map[Long, Map[String, Any]] = probe
+          .materialize(trimmed.iterator.map(_.rowAddr).toSeq, conf.rightProjection)
+          .map(m => extractRowAddr(m) -> m)
+          .toMap
+        trimmed.iterator.map { ref =>
+          val rightMap = materialized.getOrElse(ref.rowAddr, null)
+          assembleRow(leftRow, conf.leftFieldCount, conf.rightFields, rightMap, ref.score)
         }
       }
-    } finally probe.close()
-    out.iterator
+    }
   }
 
   /**
@@ -184,7 +289,8 @@ object LanceKnnJoinStage {
 
   /**
    * Assemble one output row: `left fields ++ right fields ++ score`. A null `rightValues` (outer
-   * join with no hit) fills the right side with nulls.
+   * join with no hit) fills the right side with nulls. Each right value is shaped to its target
+   * Spark type via [[coerceToSpark]] so the join's `ExpressionEncoder` accepts it.
    */
   private def assembleRow(
       leftRow: Row,
@@ -197,11 +303,55 @@ object LanceKnnJoinStage {
     while (i < leftFieldCount) { arr(i) = leftRow.get(i); i += 1 }
     var j = 0
     while (j < rightFields.size) {
+      val field = rightFields(j)
       arr(leftFieldCount + j) =
-        if (rightValues == null) null else rightValues.getOrElse(rightFields(j).name, null)
+        if (rightValues == null) null
+        else coerceToSpark(rightValues.getOrElse(field.name, null), field.dataType)
       j += 1
     }
     arr(leftFieldCount + rightFields.size) = score
     Row.fromSeq(arr.toSeq)
+  }
+
+  /**
+   * Shape a materialized right-side value to match its target Spark [[DataType]] so the assembled
+   * row satisfies the join's `ExpressionEncoder`. [[LanceProbe]] returns payloads Spark-agnostically
+   * — an Arrow struct cell arrives as a `Map[String, Any]` keyed by child-field name and a list cell
+   * as a `Seq` — but a Spark `StructType` slot expects a positional `Row`, not a `Map`. Without this
+   * coercion a nested-struct payload column is handed to the encoder as a `Map` and either fails
+   * encoding or materializes as garbage.
+   *
+   * Recurses so nested shapes all land correctly:
+   *  - `StructType` → `Row` built in declared field order, each field coerced to its type
+   *  - `ArrayType`  → `Seq` with every element coerced to the element type
+   *  - `MapType`    → map with keys and values coerced
+   *  - anything else (numeric / string / boolean primitives) → passed through unchanged
+   */
+  private[knn] def coerceToSpark(value: Any, dataType: DataType): Any = {
+    if (value == null) return null
+    dataType match {
+      case s: StructType =>
+        value match {
+          case m: scala.collection.Map[_, _] =>
+            val byName = m.asInstanceOf[scala.collection.Map[String, Any]]
+            Row.fromSeq(
+              s.fields.map(f => coerceToSpark(byName.getOrElse(f.name, null), f.dataType)).toSeq)
+          case r: Row => r
+          case _ => value
+        }
+      case ArrayType(elementType, _) =>
+        value match {
+          case seq: scala.collection.Seq[_] => seq.map(v => coerceToSpark(v, elementType))
+          case arr: Array[_] => arr.toSeq.map(v => coerceToSpark(v, elementType))
+          case _ => value
+        }
+      case MapType(keyType, valueType, _) =>
+        value match {
+          case m: scala.collection.Map[_, _] =>
+            m.map { case (k, v) => coerceToSpark(k, keyType) -> coerceToSpark(v, valueType) }
+          case _ => value
+        }
+      case _ => value
+    }
   }
 }

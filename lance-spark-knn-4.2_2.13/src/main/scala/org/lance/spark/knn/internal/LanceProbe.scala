@@ -16,9 +16,10 @@ package org.lance.spark.knn.internal
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.{BigIntVector, FieldVector, Float4Vector, Float8Vector, UInt8Vector, VectorSchemaRoot}
 import org.apache.arrow.vector.ipc.ArrowReader
-import org.lance.{Dataset, ReadOptions}
+import org.lance.Dataset
 import org.lance.ipc.{LanceScanner, Query, ScanOptions}
-import org.lance.spark.{LanceConstant, LanceRuntime}
+import org.lance.spark.{LanceConstant, LanceRef, LanceRuntime, LanceSparkReadOptions}
+import org.lance.spark.utils.Utils
 
 import java.util
 
@@ -38,21 +39,48 @@ import scala.collection.mutable
  *
  * Lifecycle: instantiate per task, call `probe(...)` repeatedly, close at end.
  *
- * @param datasetUri  Lance dataset URI (passed straight to `Dataset.open`).
- * @param fragmentIds Fragments this probe is restricted to. Pass `None` for whole-dataset search.
- * @param version     Optional Lance version to pin. Required when used inside a join, so all
- *                    probe / materialize stages see the same snapshot.
- * @param allocator   Arrow allocator. Defaults to lance-spark's shared `LanceRuntime.allocator()`.
+ * @param readOptions           Fully resolved Lance read context — dataset URI, storage
+ *                              credentials, catalog / cache backends, and the pinned branch /
+ *                              version ref. Inside a join this is resolved and pinned once on the
+ *                              driver (see [[LanceKnnJoinStage.resolveReadContext]]) so every task
+ *                              probes the same snapshot.
+ * @param initialStorageOptions Driver-side storage options from `namespace.describeTable()`, merged
+ *                              into the base storage options at open. May be `null`.
+ * @param namespaceImpl         Namespace implementation type, for reconnecting the namespace on an
+ *                              executor where the live handle did not survive serialization. May be
+ *                              `null` for a plain URI dataset.
+ * @param namespaceProperties   Namespace connection properties for that reconnection. May be `null`.
+ * @param fragmentIds           Fragments this probe is restricted to. Pass `None` for whole-dataset
+ *                              search.
+ * @param allocator             Arrow allocator. Defaults to lance-spark's shared
+ *                              `LanceRuntime.allocator()`.
  */
 final class LanceProbe(
-    datasetUri: String,
+    readOptions: LanceSparkReadOptions,
+    initialStorageOptions: java.util.Map[String, String],
+    namespaceImpl: String,
+    namespaceProperties: java.util.Map[String, String],
     fragmentIds: Option[Seq[Int]],
-    version: Option[Long] = None,
     allocator: BufferAllocator = LanceRuntime.allocator())
   extends AutoCloseable {
 
+  /**
+   * URI + optional pinned-version convenience constructor. Builds read options straight from a bare
+   * dataset URI and pins `version` on the main branch when present. For callers / tests that have
+   * only a plain URI and no namespace or storage context.
+   */
+  def this(datasetUri: String, fragmentIds: Option[Seq[Int]], version: Option[Long]) =
+    this(LanceProbe.readOptionsFor(datasetUri, version), null, null, null, fragmentIds)
+
+  def this(datasetUri: String, fragmentIds: Option[Seq[Int]]) =
+    this(datasetUri, fragmentIds, None)
+
   // Open the dataset once. Lance's Java binding caches index metadata against the Dataset handle,
-  // so reusing it across probes keeps subsequent calls index-warm.
+  // so reusing it across probes keeps subsequent calls index-warm. Opening through
+  // `Utils.openDatasetBuilder` (rather than a bare `Dataset.open().uri(...)`) makes the probe honor
+  // the full resolved read context — storage credentials, catalog / cache backends, the pinned
+  // branch / version ref, and (on executors, where the live namespace handle is transient) the
+  // runtime-namespace reconnection — exactly as the connector's own scan path does.
   private val dataset: Dataset = openDataset()
 
   private val javaFragmentIds: Option[util.List[Integer]] = fragmentIds.map { ids =>
@@ -62,16 +90,12 @@ final class LanceProbe(
   }
 
   private def openDataset(): Dataset = {
-    val readOpts = {
-      val b = new ReadOptions.Builder()
-      version.foreach(v => b.setVersion(v))
-      b.build()
+    val builder = Utils.openDatasetBuilder(readOptions)
+    if (initialStorageOptions != null) {
+      builder.initialStorageOptions(initialStorageOptions)
     }
-    Dataset.open()
-      .uri(datasetUri)
-      .allocator(allocator)
-      .readOptions(readOpts)
-      .build()
+    builder.runtimeNamespace(namespaceImpl, namespaceProperties, readOptions.getTableId())
+    builder.build()
   }
 
   /**
@@ -317,6 +341,20 @@ object LanceProbe {
    * output schema.
    */
   val ScoreColumns: Seq[String] = Seq("_distance", "_score")
+
+  /**
+   * Build read options from a bare dataset URI, pinning `version` on the main branch when present.
+   * Backs the URI convenience constructor.
+   */
+  private[knn] def readOptionsFor(
+      datasetUri: String,
+      version: Option[Long]): LanceSparkReadOptions = {
+    val base = LanceSparkReadOptions.from(datasetUri)
+    version match {
+      case Some(v) => base.withRef(LanceRef.ofMain(v))
+      case None => base
+    }
+  }
 
   /**
    * Convert an Arrow-returned cell value into something Spark's encoders accept when stuffed

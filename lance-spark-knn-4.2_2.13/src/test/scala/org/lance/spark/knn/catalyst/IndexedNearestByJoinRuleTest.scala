@@ -15,9 +15,9 @@ package org.lance.spark.knn.catalyst
 
 import org.apache.spark.sql.{RowFactory, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.{Add, And, Attribute, AttributeSet, EqualTo, Expression, GetStructField, GreaterThan, In, IsNotNull, IsNull, LessThanOrEqual, Literal, Not, Or, VectorCosineSimilarity, VectorInnerProduct, VectorL2Distance}
+import org.apache.spark.sql.catalyst.plans.{NearestByDistance, NearestBySimilarity}
 import org.apache.spark.sql.catalyst.plans.Inner
 import org.apache.spark.sql.catalyst.plans.logical.{Filter, LogicalPlan, NearestByJoin, Project, SubqueryAlias}
-import org.apache.spark.sql.catalyst.plans.{NearestByDistance, NearestBySimilarity}
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
@@ -40,7 +40,7 @@ import scala.collection.JavaConverters._
  *  - Happy path: VectorL2Distance + NearestByDistance over a Lance DSv2 relation rewrites.
  *  - Direction mismatch (e.g. L2 distance with NearestBySimilarity) does NOT rewrite.
  *  - EXACT (`approx = false`) does NOT rewrite — Spark's brute-force keeps owning that path.
- *  - Non-Lance right side does NOT rewrite (duck-type check via class name).
+ *  - Non-Lance right side does NOT rewrite (right relation's table is not a `LanceDataset`).
  *  - Disabled by default — fires only when the gating config is set.
  *  - Prefilter pushdown: right-side `WHERE` translates to a Lance SQL filter string, or refuses
  *    the rewrite entirely when the predicate can't be pushed in full.
@@ -319,7 +319,8 @@ class IndexedNearestByJoinRuleTest {
     val rid = makeAttr("rid", IntegerType)
     val category = makeAttr("category", StringType)
     val bucket = makeAttr("bucket", IntegerType)
-    val meta = makeAttr("meta", new StructType().add("category", StringType).add("bucket", IntegerType))
+    val meta =
+      makeAttr("meta", new StructType().add("category", StringType).add("bucket", IntegerType))
     val attrs = AttributeSet(Seq(rid, category, bucket, meta))
 
     val cases: Seq[(Expression, String)] = Seq(
@@ -375,11 +376,83 @@ class IndexedNearestByJoinRuleTest {
     }
   }
 
+  /**
+   * Identifiers that aren't plain `[A-Za-z_][A-Za-z0-9_]*` — spaces, punctuation — must be
+   * double-quoted (embedded quotes doubled) so the Lance filter string is well-formed rather than
+   * malformed. Plain identifiers stay bare (covered by the shapes test above). Applies per
+   * dotted-path segment for nested struct fields.
+   */
+  @Test def testTranslatorQuotesUnsafeIdentifiers(): Unit = {
+    val spaced = makeAttr("weird col", StringType)
+    val quoteName = makeAttr("has\"quote", IntegerType)
+    val outer = makeAttr("outer", new StructType().add("inner field", StringType))
+    val attrs = AttributeSet(Seq(spaced, quoteName, outer))
+
+    val cases: Seq[(Expression, String)] = Seq(
+      EqualTo(spaced, lit("A")) -> "\"weird col\" = 'A'",
+      GreaterThan(quoteName, lit(5)) -> "\"has\"\"quote\" > 5",
+      // nested field with a space -> only the unsafe segment gets quoted
+      EqualTo(GetStructField(outer, 0, Some("inner field")), lit("A")) ->
+        "outer.\"inner field\" = 'A'")
+    cases.foreach { case (expr, expected) =>
+      assertEquals(
+        Some(expected),
+        IndexedNearestByJoinRule.translateFilter(expr, attrs),
+        s"identifier quoting mismatch for: $expr")
+    }
+  }
+
+  /**
+   * A DataFrame read carries branch / version / storage credentials in the DSv2 RELATION options,
+   * not the base read options (`LanceDataSource` is a `SupportsCatalogOptions` whose identifier is
+   * the URI alone). The rule must capture `rel.options` into the stage `Conf` so the executor can
+   * merge + pin them; capturing only the base read options would silently read `main` HEAD without
+   * credentials — the exact bug this regression guards against.
+   */
+  @Test def testCapturesBranchAndStorageOptionsFromRelation(): Unit = {
+    spark.conf.set(IndexedNearestByJoinRule.EnabledConfKey, "true")
+    val left = trivialPlan("lid", "lvec")
+    val schema = new StructType(Array(
+      StructField("rid", IntegerType, nullable = false),
+      StructField("rvec", ArrayType(FloatType, containsNull = false), nullable = false)))
+    val uri = tempDir.resolve("branch_lance").toString
+    val table = new FakeLanceTable(schema, uri)
+    val opts = new java.util.HashMap[String, String]()
+    opts.put("path", uri)
+    opts.put("branch", "frozen")
+    opts.put("storage.account_key", "secret")
+    val cims = new org.apache.spark.sql.util.CaseInsensitiveStringMap(opts)
+    val right = DataSourceV2Relation.create(table, None, None, cims)
+    val leftVec = left.output.find(_.name == "lvec").get
+    val rightVec = right.output.find(_.name == "rvec").get
+    val join = NearestByJoin(
+      left,
+      right,
+      Inner,
+      approx = true,
+      numResults = 5,
+      rankingExpression = VectorL2Distance(leftVec, rightVec),
+      direction = NearestByDistance)
+    val conf = IndexedNearestByJoinRule(join) match {
+      case Project(_, node: LanceKnnJoinLogicalPlan) => node.stageConf
+      case other => fail(s"expected rewrite, got: $other"); ???
+    }
+    assertEquals(uri, conf.readOptions.getDatasetUri, "base read options should carry the URI")
+    assertEquals(
+      "frozen",
+      conf.relationOptions.get("branch"),
+      "relation branch must be captured for merge + pin")
+    assertEquals(
+      "secret",
+      conf.relationOptions.get("storage.account_key"),
+      "relation storage credential must be captured")
+  }
+
   // -- helpers ------------------------------------------------------------------------------
 
   /**
-   * Construct a left-side regular plan and a right-side that resembles a Lance DSv2 scan via the
-   * duck-type check. Avoids the need for a real Lance reader.
+   * Construct a left-side regular plan and a right-side Lance DSv2 scan (a `FakeLanceTable`, which
+   * IS a `LanceDataset`). Avoids the need for a real Lance reader.
    */
   private def buildPlans(metricFunction: String)
       : (LogicalPlan, Attribute, LogicalPlan, Attribute) = {
@@ -399,10 +472,11 @@ class IndexedNearestByJoinRuleTest {
   }
 
   /**
-   * Build a `DataSourceV2Relation` whose `table.getClass.getName.contains("Lance")` so the
-   * rule's duck-type check accepts it. We don't actually run any I/O. Includes a `category`
-   * (string) and `bucket` (int) column so prefilter-pushdown tests can build realistic
-   * filter predicates without needing to extend the schema separately.
+   * Build a `DataSourceV2Relation` backed by a `FakeLanceTable` (a real connector `LanceDataset`
+   * subclass) so the rule's `instanceof LanceDataset` check accepts it. We don't run any I/O — the
+   * `LanceDataset` constructor only stores its options + schema. Includes a `category` (string) and
+   * `bucket` (int) column so prefilter-pushdown tests can build realistic filter predicates without
+   * needing to extend the schema separately.
    */
   private def lanceLikeDsv2Relation(): LogicalPlan = {
     val schema = new StructType(Array(
@@ -410,9 +484,10 @@ class IndexedNearestByJoinRuleTest {
       StructField("category", StringType, nullable = true),
       StructField("bucket", IntegerType, nullable = true),
       StructField("rvec", ArrayType(FloatType, containsNull = false), nullable = false)))
-    val table = new FakeLanceTable(schema)
+    val uri = tempDir.resolve("fake_lance").toString
+    val table = new FakeLanceTable(schema, uri)
     val opts = new java.util.HashMap[String, String]()
-    opts.put("path", tempDir.resolve("fake_lance").toString)
+    opts.put("path", uri)
     val cims = new org.apache.spark.sql.util.CaseInsensitiveStringMap(opts)
     DataSourceV2Relation.create(table, None, None, cims)
   }
@@ -450,13 +525,19 @@ class IndexedNearestByJoinRuleTest {
 }
 
 /**
- * Stub Table whose class name ends with "Lance" so the rule's duck-type check accepts it. No I/O
- * — the rule only reads schema and options. Lives in the test source tree.
+ * Stub table that IS a connector `LanceDataset` (the rule requires `instanceof LanceDataset`). The
+ * `LanceDataset` constructor does no I/O — it only stores its read options + schema — so building
+ * one over a fake URI is safe and keeps these tests backend-free. `readOptions()` returns options
+ * carrying the fake URI; `getInitialStorageOptions()`/namespace getters return the empty / null
+ * values the constructor stores, which is exactly the read context the rule captures. Lives in the
+ * test source tree.
  */
-class FakeLanceTable(_schema: StructType) extends org.apache.spark.sql.connector.catalog.Table {
-  override def name(): String = "fake_lance"
-  override def schema(): StructType = _schema
-  override def capabilities()
-      : java.util.Set[org.apache.spark.sql.connector.catalog.TableCapability] =
-    java.util.Collections.emptySet()
-}
+class FakeLanceTable(_schema: StructType, uri: String)
+  extends org.lance.spark.LanceDataset(
+    org.lance.spark.LanceSparkReadOptions.from(uri),
+    _schema,
+    java.util.Collections.emptyMap[String, String](),
+    null,
+    null,
+    false,
+    null)
