@@ -335,6 +335,7 @@ class RangeBasedBTreeIndexJob(
 
     val indexBuilder = RangeBTreeIndexBuilder(
       encode(readOptions),
+      addIndexExec.indexName,
       columns,
       zoneSize,
       nsImpl,
@@ -364,6 +365,7 @@ class RangeBasedBTreeIndexJob(
  * This class is serialized and sent to executors to build the index for a specific range of data.
  *
  * @param encodedReadOptions      Serialized configuration for Lance dataset access.
+ * @param indexName               Name of the logical index the segment will belong to.
  * @param columns                 The names of the columns to be indexed.
  * @param zoneSize                Optional size of zones within the B-tree index.
  * @param namespaceImpl           Optional implementation class for namespace operations, used for credential vending.
@@ -374,6 +376,7 @@ class RangeBasedBTreeIndexJob(
  */
 case class RangeBTreeIndexBuilder(
     encodedReadOptions: String,
+    indexName: String,
     columns: List[String],
     zoneSize: Option[Long],
     namespaceImpl: Option[String],
@@ -438,9 +441,10 @@ case class RangeBTreeIndexBuilder(
       Data.exportArrayStream(allocator, reader, stream)
 
       // Build an uncommitted BTree segment for this fragment group from the
-      // pre-sorted data. No index name or UUID is set: Lance generates the
-      // segment UUID, and the fragment ids declare the segment's coverage so
-      // the per-partition segments stay disjoint.
+      // pre-sorted data. No UUID is set: Lance generates the segment UUID, and
+      // the fragment ids declare the segment's coverage so the per-partition
+      // segments stay disjoint. See ScalarSegmentIndexTask for why the segment
+      // build names the index and sets replace.
       val btreeParamsBuilder = BTreeIndexParams.builder()
       if (zoneSize.isDefined) {
         btreeParamsBuilder.zoneSize(zoneSize.get)
@@ -451,7 +455,8 @@ case class RangeBTreeIndexBuilder(
 
       val indexOptions = IndexOptions
         .builder(columns.asJava, IndexType.BTREE, indexParams)
-        .replace(false)
+        .withIndexName(indexName)
+        .replace(true)
         .withFragmentIds(fragmentIds.toList.asJava)
         .withPreprocessedData(stream)
         .build()
@@ -498,6 +503,7 @@ class ScalarSegmentIndexJob(
     val tasks = fragmentBatches.map { batch =>
       ScalarSegmentIndexTask(
         encodedReadOptions,
+        addIndexExec.indexName,
         columns,
         addIndexExec.method,
         argsJson,
@@ -520,9 +526,18 @@ final private[v2] case class FragmentWorkload(fragmentId: Integer, numRows: Long
 
 /**
  * A task to create a scalar index segment on a batch of fragments.
+ *
+ * The segment is named after the logical index it will join, and {@code replace} is set because that
+ * index may already exist: on the uncommitted build path Lance consults {@code replace} only to
+ * reject a name that is already taken, which is precisely the normal case for a CREATE INDEX that
+ * replaces an index of the same name. Nothing is removed here — the driver's single
+ * {@code commitExistingIndexSegments} transaction decides which existing segments to keep. Leaving
+ * the name unset instead makes Lance derive its own default (`{column}_idx`) and reject the build
+ * whenever an index of that name exists on the column.
  */
 case class ScalarSegmentIndexTask(
     encodedReadOptions: String,
+    indexName: String,
     columns: List[String],
     method: String,
     argsJson: String,
@@ -545,8 +560,9 @@ case class ScalarSegmentIndexTask(
 
     val indexOptions = IndexOptions
       .builder(java.util.Arrays.asList(columns: _*), indexType, params)
+      .withIndexName(indexName)
       .withFragmentIds(fragmentIds.asJava)
-      .replace(false)
+      .replace(true)
       .build()
 
     val dataset = Utils.openDatasetBuilder(readOptions)

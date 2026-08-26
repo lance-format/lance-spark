@@ -670,6 +670,55 @@ public abstract class BaseAddIndexTest {
     }
   }
 
+  /**
+   * {@code id_idx} is the name Lance itself gives an index created on {@code id} without one, so it
+   * is the name a segment build that sets no name of its own lands on. Recreating an index under
+   * that name used to fail every executor task on a name collision with the index already there.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("segmentBuildIndexMethods")
+  public void testRepeatedCreateIndexUnderLanceDefaultName(
+      String caseName, String method, String options) {
+    prepareDataset();
+
+    String sql =
+        String.format(
+            "alter table %s create index id_idx using %s (id) %s", fullTable, method, options);
+
+    spark.sql(sql);
+    checkIndex("id_idx");
+    spark.sql(sql);
+    checkIndex("id_idx");
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int fragmentCount = lanceDataset.getFragments().size();
+      int coveredFragments =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> "id_idx".equals(index.name()))
+              .map(index -> index.fragments().orElse(Collections.emptyList()).size())
+              .mapToInt(Integer::intValue)
+              .sum();
+      Assertions.assertEquals(
+          fragmentCount,
+          coveredFragments,
+          "Expected the recreated " + caseName + " segments to cover all fragments exactly once");
+    } finally {
+      lanceDataset.close();
+    }
+
+    // The index has to answer queries after the replacement, not merely exist in the manifest.
+    Dataset<Row> query = spark.sql(String.format("select * from %s where id=15", fullTable));
+    Assertions.assertEquals(1L, query.count());
+    Assertions.assertEquals("text_15", query.collectAsList().get(0).getString(1));
+  }
+
+  private static Stream<Arguments> segmentBuildIndexMethods() {
+    return Stream.of(
+        Arguments.of("zonemap", "zonemap", ""),
+        Arguments.of("btree-range", "btree", "with (build_mode = 'range')"));
+  }
+
   @ParameterizedTest(name = "{0}")
   @MethodSource("singleColumnIndexMethods")
   public void testIndexesRejectMultipleColumns(String method, IndexType indexType) {
@@ -994,8 +1043,8 @@ public abstract class BaseAddIndexTest {
         firstRunUuids.size(),
         "Expected one disjoint range segment per fragment on first create");
 
-    // Re-create with the same name: exercises replace(false) on the segment builds plus
-    // atomic replacement at commit time. The old segments must be replaced, not duplicated.
+    // Re-create with the same name: exercises the named segment builds plus atomic replacement at
+    // commit time. The old segments must be replaced, not duplicated.
     spark.sql(sql);
     checkIndex("test_range_repeat");
 
