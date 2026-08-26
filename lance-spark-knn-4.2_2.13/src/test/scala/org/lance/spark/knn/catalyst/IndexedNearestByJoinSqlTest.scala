@@ -215,6 +215,69 @@ class IndexedNearestByJoinSqlTest {
     }
   }
 
+  /**
+   * Read-context end-to-end: a `version` supplied through the Lance read option
+   * (`spark.read.format("lance").option("version", "1")`) must be captured from the DataSourceV2
+   * relation options, merged, and pinned on the driver — so every probe scans that snapshot, not
+   * HEAD. `LanceDataSource` is a `SupportsCatalogOptions` whose identifier is the URI alone, so this
+   * option lives ONLY on the relation options; a rule that captured just the base read options would
+   * silently read HEAD.
+   *
+   * We write v1, then append v2 rows that are EXACT duplicates of each left query vector (distance
+   * 0 — they would be the #1 nearest neighbor if visible), then assert:
+   *   - pinned to v1: no appended row (`rid >= DupIdBase`) may appear, and every left row still gets
+   *     `k` v1 hits;
+   *   - latest (no version option): each left row's own duplicate (`rid == DupIdBase + lid`) DOES
+   *     appear — proving the pin is what excluded them, so the pinned assertion is discriminating,
+   *     not vacuously satisfied.
+   */
+  @Test def testSqlVersionReadOptionPinsSnapshot(): Unit = {
+    val DupIdBase = 5000
+    val leftVecs = generateUniform(ExactLeft, ExactDim, Seed + 300)
+    val (leftDf, leftIds, _) = buildLeftDf(leftVecs, ExactDim)
+
+    // v1: baseline right rows (ids 1000..1063, all < DupIdBase).
+    val v1Vecs = generateUniform(ExactRight, ExactDim, Seed + 301)
+    val (rightUri, _, _) = writeRightDf(v1Vecs, ExactDim, idBase = 1000)
+
+    // v2: append one exact duplicate of each left query vector (id DupIdBase + lid).
+    val dupRows = leftIds.zip(leftVecs).map { case (lid, v) =>
+      RowFactory.create(Integer.valueOf(DupIdBase + lid), v)
+    }
+    spark
+      .createDataFrame(dupRows.toSeq.asJava, rightSchema(ExactDim))
+      .write
+      .format("lance")
+      .mode("append")
+      .save(rightUri)
+
+    val k = 5
+
+    // Pinned to version 1: the appended duplicates must be invisible.
+    val pinnedRows = runKnnSqlVersioned(leftDf, rightUri, k, version = Some(1L))
+    assertEquals(
+      ExactLeft * k,
+      pinnedRows.length,
+      "expected k v1 hits per left row when pinned to v1")
+    val pinnedByLid = pinnedRows.groupBy(_.getAs[Int]("lid"))
+    leftIds.foreach { lid =>
+      val rids = pinnedByLid(lid).map(_.getAs[Int]("rid"))
+      assertTrue(
+        rids.forall(_ < DupIdBase),
+        s"pinned-to-v1 result for lid=$lid leaked an appended (v2) row: ${rids.mkString(",")}")
+    }
+
+    // Latest (no version option): each left row's own duplicate is a nearest hit (distance 0).
+    val latestRows = runKnnSqlVersioned(leftDf, rightUri, k, version = None)
+    val latestByLid = latestRows.groupBy(_.getAs[Int]("lid"))
+    leftIds.foreach { lid =>
+      val rids = latestByLid(lid).map(_.getAs[Int]("rid")).toSet
+      assertTrue(
+        rids.contains(DupIdBase + lid),
+        s"latest result for lid=$lid should contain its duplicate ${DupIdBase + lid}; got $rids")
+    }
+  }
+
   // -- approximate path (IVF-PQ): recall floors, refineFactor -------------------------------
 
   /**
@@ -354,6 +417,33 @@ class IndexedNearestByJoinSqlTest {
       s"""SELECT q.lid, d.rid
          |FROM $q q INNER JOIN $d d
          |APPROX NEAREST $k BY DISTANCE vector_l2_distance(q.lvec, d.rvec)""".stripMargin).collect()
+  }
+
+  /**
+   * Like [[runKnnSql]] but registers the right Lance view through an optional `version` READ OPTION,
+   * exercising the DataSourceV2-relation-options path that carries branch / version / storage
+   * credentials. Also asserts the indexed rule still fires when a version option is present.
+   */
+  private def runKnnSqlVersioned(
+      leftDf: DataFrame,
+      rightUri: String,
+      k: Int,
+      version: Option[Long]): Array[Row] = {
+    viewSeq += 1
+    val q = s"queries_$viewSeq"
+    val d = s"docs_$viewSeq"
+    leftDf.createOrReplaceTempView(q)
+    val reader = spark.read.format("lance")
+    version.foreach(v => reader.option("version", v.toString))
+    reader.load(rightUri).createOrReplaceTempView(d)
+    val df = spark.sql(
+      s"""SELECT q.lid, d.rid
+         |FROM $q q INNER JOIN $d d
+         |APPROX NEAREST $k BY DISTANCE vector_l2_distance(q.lvec, d.rvec)""".stripMargin)
+    assertTrue(
+      df.queryExecution.optimizedPlan.collect { case p: LanceKnnJoinLogicalPlan => p }.nonEmpty,
+      s"expected indexed rewrite even with a version option; plan:\n${df.queryExecution.optimizedPlan}")
+    df.collect()
   }
 
   private def leftSchema(dim: Int): StructType = new StructType(Array(
