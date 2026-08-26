@@ -159,4 +159,35 @@ public abstract class BaseBucketSpjTest {
             + " partitioning must be recognized. Plan: "
             + plan);
   }
+
+  @Test
+  public void testPartialZonemapCoverageDisablesSpj() {
+    String tableA = "bkt_partial_a_" + UUID.randomUUID().toString().replace("-", "");
+    String tableB = "bkt_partial_b_" + UUID.randomUUID().toString().replace("-", "");
+    createBucketedTable(tableA, 4);
+    createBucketedTable(tableB, 4);
+
+    String fullA = catalogName + ".default." + tableA;
+    String fullB = catalogName + ".default." + tableB;
+
+    // This fragment is not covered by the already-committed zonemap index.
+    spark.sql(
+        String.format("INSERT INTO %s (id, region, value) VALUES (1000, 'east', 1000.0)", fullA));
+
+    Dataset<Row> joined =
+        spark.sql(
+            String.format(
+                "SELECT a.id, a.region, b.value "
+                    + "FROM %s a JOIN %s b "
+                    + "ON a.region = b.region",
+                fullA, fullB));
+
+    long count = joined.count();
+    assertEquals(310, count, "The unindexed fragment must participate in the join");
+
+    String plan = joined.queryExecution().executedPlan().toString();
+    assertTrue(
+        plan.contains("Exchange"),
+        "Partial zonemap coverage must disable SPJ and require a shuffle. Plan: " + plan);
+  }
 }

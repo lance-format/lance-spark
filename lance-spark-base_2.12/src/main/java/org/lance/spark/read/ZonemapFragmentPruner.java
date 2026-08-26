@@ -31,6 +31,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
@@ -61,11 +62,16 @@ public final class ZonemapFragmentPruner {
    *
    * @param pushedPredicates the V2 predicates pushed down by Spark
    * @param zonemapStatsByColumn map from column name to its zonemap zone stats
+   * @param liveFragmentIds fragment IDs in the Dataset snapshot that produced the stats
    * @return present with the set of fragment IDs that might match; empty if no pruning can be
    *     derived
    */
   public static Optional<Set<Integer>> pruneFragments(
-      Predicate[] pushedPredicates, Map<String, List<ZoneStats>> zonemapStatsByColumn) {
+      Predicate[] pushedPredicates,
+      Map<String, List<ZoneStats>> zonemapStatsByColumn,
+      Set<Integer> liveFragmentIds) {
+
+    Objects.requireNonNull(liveFragmentIds, "liveFragmentIds");
 
     if (pushedPredicates == null
         || pushedPredicates.length == 0
@@ -76,7 +82,8 @@ public final class ZonemapFragmentPruner {
 
     Set<Integer> result = null;
     for (Predicate predicate : pushedPredicates) {
-      Optional<Set<Integer>> fragmentIds = analyzePredicate(predicate, zonemapStatsByColumn);
+      Optional<Set<Integer>> fragmentIds =
+          analyzePredicate(predicate, zonemapStatsByColumn, liveFragmentIds);
       if (fragmentIds.isPresent()) {
         if (result == null) {
           result = new HashSet<>(fragmentIds.get());
@@ -100,13 +107,15 @@ public final class ZonemapFragmentPruner {
    * not aliased by any other reference. Callers may freely mutate it.
    */
   private static Optional<Set<Integer>> analyzePredicate(
-      Predicate predicate, Map<String, List<ZoneStats>> statsByColumn) {
+      Predicate predicate,
+      Map<String, List<ZoneStats>> statsByColumn,
+      Set<Integer> liveFragmentIds) {
 
     if (predicate instanceof And) {
-      return analyzeAnd((And) predicate, statsByColumn);
+      return analyzeAnd((And) predicate, statsByColumn, liveFragmentIds);
     }
     if (predicate instanceof Or) {
-      return analyzeOr((Or) predicate, statsByColumn);
+      return analyzeOr((Or) predicate, statsByColumn, liveFragmentIds);
     }
     if (predicate instanceof Not) {
       return Optional.empty();
@@ -116,21 +125,25 @@ public final class ZonemapFragmentPruner {
     String name = predicate.name();
     switch (name) {
       case "=":
-        return analyzeComparison(children, statsByColumn, ComparisonType.EQUALS);
+        return analyzeComparison(children, statsByColumn, liveFragmentIds, ComparisonType.EQUALS);
       case "<":
-        return analyzeComparison(children, statsByColumn, ComparisonType.LESS_THAN);
+        return analyzeComparison(
+            children, statsByColumn, liveFragmentIds, ComparisonType.LESS_THAN);
       case "<=":
-        return analyzeComparison(children, statsByColumn, ComparisonType.LESS_THAN_OR_EQUAL);
+        return analyzeComparison(
+            children, statsByColumn, liveFragmentIds, ComparisonType.LESS_THAN_OR_EQUAL);
       case ">":
-        return analyzeComparison(children, statsByColumn, ComparisonType.GREATER_THAN);
+        return analyzeComparison(
+            children, statsByColumn, liveFragmentIds, ComparisonType.GREATER_THAN);
       case ">=":
-        return analyzeComparison(children, statsByColumn, ComparisonType.GREATER_THAN_OR_EQUAL);
+        return analyzeComparison(
+            children, statsByColumn, liveFragmentIds, ComparisonType.GREATER_THAN_OR_EQUAL);
       case "IN":
-        return analyzeIn(children, statsByColumn);
+        return analyzeIn(children, statsByColumn, liveFragmentIds);
       case "IS_NULL":
-        return analyzeIsNull(children, statsByColumn);
+        return analyzeIsNull(children, statsByColumn, liveFragmentIds);
       case "IS_NOT_NULL":
-        return analyzeIsNotNull(children, statsByColumn);
+        return analyzeIsNotNull(children, statsByColumn, liveFragmentIds);
       default:
         return Optional.empty();
     }
@@ -138,7 +151,10 @@ public final class ZonemapFragmentPruner {
 
   @SuppressWarnings("unchecked")
   private static Optional<Set<Integer>> analyzeComparison(
-      Expression[] children, Map<String, List<ZoneStats>> statsByColumn, ComparisonType type) {
+      Expression[] children,
+      Map<String, List<ZoneStats>> statsByColumn,
+      Set<Integer> liveFragmentIds,
+      ComparisonType type) {
 
     if (children.length != 2
         || !(children[0] instanceof NamedReference)
@@ -162,13 +178,19 @@ public final class ZonemapFragmentPruner {
     }
 
     Set<Integer> matchingFragments = new HashSet<>();
+    Set<Integer> indexedFragments = new HashSet<>();
     for (ZoneStats zone : stats) {
+      if (!liveFragmentIds.contains(zone.getFragmentId())) {
+        continue;
+      }
+      indexedFragments.add(zone.getFragmentId());
       if (zoneMatchesComparison(zone, target, type)) {
         matchingFragments.add(zone.getFragmentId());
       }
     }
 
-    return Optional.of(matchingFragments);
+    return Optional.of(
+        includeUnindexedFragments(matchingFragments, indexedFragments, liveFragmentIds));
   }
 
   @SuppressWarnings("unchecked")
@@ -206,7 +228,9 @@ public final class ZonemapFragmentPruner {
   }
 
   private static Optional<Set<Integer>> analyzeIn(
-      Expression[] children, Map<String, List<ZoneStats>> statsByColumn) {
+      Expression[] children,
+      Map<String, List<ZoneStats>> statsByColumn,
+      Set<Integer> liveFragmentIds) {
 
     if (children.length < 1 || !(children[0] instanceof NamedReference)) {
       return Optional.empty();
@@ -229,7 +253,12 @@ public final class ZonemapFragmentPruner {
     }
 
     Set<Integer> matchingFragments = new HashSet<>();
+    Set<Integer> indexedFragments = new HashSet<>();
     for (ZoneStats zone : stats) {
+      if (!liveFragmentIds.contains(zone.getFragmentId())) {
+        continue;
+      }
+      indexedFragments.add(zone.getFragmentId());
       for (Object value : normalizedValues) {
         if (value == null) {
           if (zone.getNullCount() > 0) {
@@ -252,11 +281,14 @@ public final class ZonemapFragmentPruner {
       }
     }
 
-    return Optional.of(matchingFragments);
+    return Optional.of(
+        includeUnindexedFragments(matchingFragments, indexedFragments, liveFragmentIds));
   }
 
   private static Optional<Set<Integer>> analyzeIsNull(
-      Expression[] children, Map<String, List<ZoneStats>> statsByColumn) {
+      Expression[] children,
+      Map<String, List<ZoneStats>> statsByColumn,
+      Set<Integer> liveFragmentIds) {
 
     if (children.length != 1 || !(children[0] instanceof NamedReference)) {
       return Optional.empty();
@@ -268,17 +300,25 @@ public final class ZonemapFragmentPruner {
     }
 
     Set<Integer> matchingFragments = new HashSet<>();
+    Set<Integer> indexedFragments = new HashSet<>();
     for (ZoneStats zone : stats) {
+      if (!liveFragmentIds.contains(zone.getFragmentId())) {
+        continue;
+      }
+      indexedFragments.add(zone.getFragmentId());
       if (zone.getNullCount() > 0) {
         matchingFragments.add(zone.getFragmentId());
       }
     }
 
-    return Optional.of(matchingFragments);
+    return Optional.of(
+        includeUnindexedFragments(matchingFragments, indexedFragments, liveFragmentIds));
   }
 
   private static Optional<Set<Integer>> analyzeIsNotNull(
-      Expression[] children, Map<String, List<ZoneStats>> statsByColumn) {
+      Expression[] children,
+      Map<String, List<ZoneStats>> statsByColumn,
+      Set<Integer> liveFragmentIds) {
 
     if (children.length != 1 || !(children[0] instanceof NamedReference)) {
       return Optional.empty();
@@ -290,7 +330,12 @@ public final class ZonemapFragmentPruner {
     }
 
     Set<Integer> matchingFragments = new HashSet<>();
+    Set<Integer> indexedFragments = new HashSet<>();
     for (ZoneStats zone : stats) {
+      if (!liveFragmentIds.contains(zone.getFragmentId())) {
+        continue;
+      }
+      indexedFragments.add(zone.getFragmentId());
       // Zone has non-null rows if zoneLength exceeds nullCount.
       // Conservative: zoneLength may include gaps from deletions.
       if (zone.getNullCount() < zone.getZoneLength()) {
@@ -298,13 +343,16 @@ public final class ZonemapFragmentPruner {
       }
     }
 
-    return Optional.of(matchingFragments);
+    return Optional.of(
+        includeUnindexedFragments(matchingFragments, indexedFragments, liveFragmentIds));
   }
 
   private static Optional<Set<Integer>> analyzeAnd(
-      And predicate, Map<String, List<ZoneStats>> statsByColumn) {
-    Optional<Set<Integer>> left = analyzePredicate(predicate.left(), statsByColumn);
-    Optional<Set<Integer>> right = analyzePredicate(predicate.right(), statsByColumn);
+      And predicate, Map<String, List<ZoneStats>> statsByColumn, Set<Integer> liveFragmentIds) {
+    Optional<Set<Integer>> left =
+        analyzePredicate(predicate.left(), statsByColumn, liveFragmentIds);
+    Optional<Set<Integer>> right =
+        analyzePredicate(predicate.right(), statsByColumn, liveFragmentIds);
 
     if (left.isPresent() && right.isPresent()) {
       Set<Integer> intersection = new HashSet<>(left.get());
@@ -317,9 +365,11 @@ public final class ZonemapFragmentPruner {
   }
 
   private static Optional<Set<Integer>> analyzeOr(
-      Or predicate, Map<String, List<ZoneStats>> statsByColumn) {
-    Optional<Set<Integer>> left = analyzePredicate(predicate.left(), statsByColumn);
-    Optional<Set<Integer>> right = analyzePredicate(predicate.right(), statsByColumn);
+      Or predicate, Map<String, List<ZoneStats>> statsByColumn, Set<Integer> liveFragmentIds) {
+    Optional<Set<Integer>> left =
+        analyzePredicate(predicate.left(), statsByColumn, liveFragmentIds);
+    Optional<Set<Integer>> right =
+        analyzePredicate(predicate.right(), statsByColumn, liveFragmentIds);
 
     if (left.isPresent() && right.isPresent()) {
       Set<Integer> union = new HashSet<>(left.get());
@@ -327,6 +377,15 @@ public final class ZonemapFragmentPruner {
       return Optional.of(union);
     }
     return Optional.empty();
+  }
+
+  private static Set<Integer> includeUnindexedFragments(
+      Set<Integer> matchingFragments, Set<Integer> indexedFragments, Set<Integer> liveFragmentIds) {
+    Set<Integer> candidates = new HashSet<>(matchingFragments);
+    Set<Integer> unindexedFragments = new HashSet<>(liveFragmentIds);
+    unindexedFragments.removeAll(indexedFragments);
+    candidates.addAll(unindexedFragments);
+    return candidates;
   }
 
   private static String columnName(NamedReference ref) {

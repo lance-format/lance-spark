@@ -191,6 +191,12 @@ public class LanceScanBuilder
           SparkLanceShardingUtils.isEmpty(shardingSpec)
               ? SparkLanceShardingUtils.firstShardingSpec(dataset)
               : shardingSpec;
+
+      // Plan splits before zonemap analysis so live fragment IDs, zonemap stats, and the splits
+      // shipped to workers all come from the same Dataset snapshot.
+      LanceSplit.ScanPlanResult scanPlan = LanceSplit.planScan(dataset, readOptions);
+      Set<Integer> liveFragmentIds = new HashSet<>(scanPlan.getFragmentRowCounts().keySet());
+
       for (ShardingField field : SparkLanceShardingUtils.fields(activeShardingSpec)) {
         columnsToLoad.add(SparkLanceShardingUtils.columnName(field, lanceSchema));
       }
@@ -215,7 +221,8 @@ public class LanceScanBuilder
           continue;
         }
         java.util.Optional<Map<Integer, Object>> keys =
-            SparkLanceShardingUtils.detectFragmentKeys(field, lanceSchema, colStats);
+            SparkLanceShardingUtils.detectFragmentKeys(
+                field, lanceSchema, colStats, liveFragmentIds);
         if (keys.isPresent()) {
           fragmentShardingKeys = keys.get();
           activeShardingExpression = SparkLanceShardingUtils.toSparkExpression(field, lanceSchema);
@@ -234,7 +241,8 @@ public class LanceScanBuilder
       Set<Integer> survivingFragmentIds = null;
       if (pushedPredicates.length > 0 && !zonemapStats.isEmpty()) {
         survivingFragmentIds =
-            ZonemapFragmentPruner.pruneFragments(pushedPredicates, zonemapStats).orElse(null);
+            ZonemapFragmentPruner.pruneFragments(pushedPredicates, zonemapStats, liveFragmentIds)
+                .orElse(null);
       }
 
       // Scale rows and full size by the zonemap fragment-pruning ratio first, then let
@@ -242,10 +250,14 @@ public class LanceScanBuilder
       // (when the projected schema is narrower than the full schema).
       long projectedRows = summary.getTotalRows();
       long projectedFullSize = summary.getTotalFilesSize();
-      if (survivingFragmentIds != null && summary.getTotalFragments() > 0) {
-        double ratio = (double) survivingFragmentIds.size() / summary.getTotalFragments();
-        projectedRows = (long) (projectedRows * ratio);
-        projectedFullSize = (long) (projectedFullSize * ratio);
+      if (survivingFragmentIds != null && !liveFragmentIds.isEmpty()) {
+        long survivingRows =
+            survivingFragmentIds.stream().mapToLong(scanPlan.getFragmentRowCounts()::get).sum();
+        LanceStatistics postPruning =
+            LanceStatistics.estimatePostPruningByRows(
+                summary.getTotalRows(), summary.getTotalFilesSize(), survivingRows);
+        projectedRows = postPruning.numRows().getAsLong();
+        projectedFullSize = postPruning.sizeInBytes().getAsLong();
       }
       LanceStatistics statistics =
           LanceStatistics.estimateProjected(projectedRows, projectedFullSize, fullSchema, schema);
@@ -254,19 +266,13 @@ public class LanceScanBuilder
             "Scan statistics after pruning: {} of {} fragments survive,"
                 + " estimatedSize={}, estimatedRows={} (full: size={}, rows={})",
             survivingFragmentIds.size(),
-            summary.getTotalFragments(),
+            liveFragmentIds.size(),
             statistics.sizeInBytes(),
             statistics.numRows(),
             summary.getTotalFilesSize(),
             summary.getTotalRows());
       }
 
-      // Pre-compute splits and per-fragment row counts from the same Dataset handle that we
-      // already opened above. This consolidates two driver-side opens into one and lets us pin
-      // the resolved version onto the read options shipped to workers, providing snapshot
-      // isolation across all tasks of this query. The version is kept as a long end-to-end so
-      // long-lived high-write-frequency datasets do not silently truncate to a wrong version.
-      LanceSplit.ScanPlanResult scanPlan = LanceSplit.planScan(dataset, readOptions);
       LanceSparkReadOptions resolvedReadOptions = readOptions.withRef(scanPlan.getRef());
 
       Optional<String> whereCondition =
@@ -282,6 +288,7 @@ public class LanceScanBuilder
           pushedPredicates,
           statistics,
           zonemapStats,
+          liveFragmentIds,
           survivingFragmentIds,
           scanPlan.getSplits(),
           scanPlan.getFragmentRowCounts(),

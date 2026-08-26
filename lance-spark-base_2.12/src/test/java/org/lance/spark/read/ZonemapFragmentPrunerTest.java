@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -55,12 +56,20 @@ public class ZonemapFragmentPrunerTest {
     return stats;
   }
 
+  private static Set<Integer> fragmentIds(Map<String, List<ZoneStats>> stats) {
+    return stats.values().stream()
+        .flatMap(List::stream)
+        .map(ZoneStats::getFragmentId)
+        .collect(Collectors.toSet());
+  }
+
   @Test
   public void testEqualToMatchesOneFragment() {
     Map<String, List<ZoneStats>> stats = threeFragmentStats("x");
     Predicate[] filters = new Predicate[] {TestPredicates.eq("x", 150L)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(1), result.get());
   }
@@ -70,7 +79,8 @@ public class ZonemapFragmentPrunerTest {
     Map<String, List<ZoneStats>> stats = threeFragmentStats("x");
     Predicate[] filters = new Predicate[] {TestPredicates.eq("x", 500L)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertTrue(result.get().isEmpty());
   }
@@ -81,7 +91,8 @@ public class ZonemapFragmentPrunerTest {
     // Value at exact boundary between fragment 0 and 1
     Predicate[] filters = new Predicate[] {TestPredicates.eq("x", 99L)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(0), result.get());
   }
@@ -91,7 +102,8 @@ public class ZonemapFragmentPrunerTest {
     Map<String, List<ZoneStats>> stats = threeFragmentStats("x");
     Predicate[] filters = new Predicate[] {TestPredicates.eq("x", 100L)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(1), result.get());
   }
@@ -102,7 +114,8 @@ public class ZonemapFragmentPrunerTest {
     // x < 50 → only fragment 0's min (0) < 50
     Predicate[] filters = new Predicate[] {TestPredicates.lt("x", 50L)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(0), result.get());
   }
@@ -113,7 +126,8 @@ public class ZonemapFragmentPrunerTest {
     // x <= 100 → fragment 0 (min=0 <= 100) and fragment 1 (min=100 <= 100)
     Predicate[] filters = new Predicate[] {TestPredicates.lte("x", 100L)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(0, 1), result.get());
   }
@@ -124,7 +138,8 @@ public class ZonemapFragmentPrunerTest {
     // x > 250 → only fragment 2's max (299) > 250
     Predicate[] filters = new Predicate[] {TestPredicates.gt("x", 250L)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(2), result.get());
   }
@@ -135,7 +150,8 @@ public class ZonemapFragmentPrunerTest {
     // x >= 199 → fragment 1 (max=199 >= 199) and fragment 2 (max=299 >= 199)
     Predicate[] filters = new Predicate[] {TestPredicates.gte("x", 199L)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(1, 2), result.get());
   }
@@ -146,7 +162,8 @@ public class ZonemapFragmentPrunerTest {
     // x IN (50, 250) → fragment 0 and fragment 2
     Predicate[] filters = new Predicate[] {TestPredicates.in("x", 50L, 250L)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(0, 2), result.get());
   }
@@ -157,7 +174,8 @@ public class ZonemapFragmentPrunerTest {
     // x IN (500, 600) → no fragments match
     Predicate[] filters = new Predicate[] {TestPredicates.in("x", 500L, 600L)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertTrue(result.get().isEmpty());
   }
@@ -175,7 +193,8 @@ public class ZonemapFragmentPrunerTest {
         };
     Predicate[] filters = new Predicate[] {new Predicate("IN", children)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertFalse(
         result.isPresent(),
         "IN with a non-Literal child must bail out instead of pruning on the remaining literals");
@@ -187,7 +206,8 @@ public class ZonemapFragmentPrunerTest {
     // All zones have nullCount=0
     Predicate[] filters = new Predicate[] {TestPredicates.isNull("x")};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertTrue(result.get().isEmpty());
   }
@@ -204,7 +224,8 @@ public class ZonemapFragmentPrunerTest {
 
     Predicate[] filters = new Predicate[] {TestPredicates.isNull("x")};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(1), result.get());
   }
@@ -221,7 +242,8 @@ public class ZonemapFragmentPrunerTest {
 
     Predicate[] filters = new Predicate[] {TestPredicates.isNotNull("x")};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(0, 2), result.get());
   }
@@ -235,7 +257,8 @@ public class ZonemapFragmentPrunerTest {
           TestPredicates.and(TestPredicates.gte("x", 50L), TestPredicates.lte("x", 150L))
         };
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(0, 1), result.get());
   }
@@ -249,7 +272,8 @@ public class ZonemapFragmentPrunerTest {
           TestPredicates.or(TestPredicates.eq("x", 50L), TestPredicates.eq("x", 250L))
         };
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(0, 2), result.get());
   }
@@ -263,7 +287,8 @@ public class ZonemapFragmentPrunerTest {
           TestPredicates.or(TestPredicates.eq("x", 50L), TestPredicates.eq("name", "Alice"))
         };
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertFalse(result.isPresent());
   }
 
@@ -272,7 +297,8 @@ public class ZonemapFragmentPrunerTest {
     Map<String, List<ZoneStats>> stats = threeFragmentStats("x");
     Predicate[] filters = new Predicate[] {TestPredicates.not(TestPredicates.eq("x", 50L))};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertFalse(result.isPresent());
   }
 
@@ -282,21 +308,24 @@ public class ZonemapFragmentPrunerTest {
     // Filter on column 'y' which has no zonemap stats
     Predicate[] filters = new Predicate[] {TestPredicates.eq("y", 50L)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertFalse(result.isPresent());
   }
 
   @Test
   public void testEmptyFilters() {
     Map<String, List<ZoneStats>> stats = threeFragmentStats("x");
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(new Predicate[] {}, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(new Predicate[] {}, stats, fragmentIds(stats));
     assertFalse(result.isPresent());
   }
 
   @Test
   public void testNullFilters() {
     Map<String, List<ZoneStats>> stats = threeFragmentStats("x");
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(null, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(null, stats, fragmentIds(stats));
     assertFalse(result.isPresent());
   }
 
@@ -304,7 +333,8 @@ public class ZonemapFragmentPrunerTest {
   public void testEmptyStats() {
     Predicate[] filters = new Predicate[] {TestPredicates.eq("x", 50L)};
     Optional<Set<Integer>> result =
-        ZonemapFragmentPruner.pruneFragments(filters, Collections.emptyMap());
+        ZonemapFragmentPruner.pruneFragments(
+            filters, Collections.emptyMap(), Collections.emptySet());
     assertFalse(result.isPresent());
   }
 
@@ -316,7 +346,8 @@ public class ZonemapFragmentPrunerTest {
     Predicate[] filters =
         new Predicate[] {TestPredicates.gte("x", 50L), TestPredicates.lt("x", 150L)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     // x >= 50 matches {0,1,2} (all have max >= 50)
     // x < 150 matches {0,1} (min < 150 for frags 0 and 1)
@@ -347,7 +378,8 @@ public class ZonemapFragmentPrunerTest {
     Predicate[] filters =
         new Predicate[] {TestPredicates.eq("x", 50L), TestPredicates.eq("y", 1200L)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertTrue(result.get().isEmpty());
   }
@@ -367,7 +399,8 @@ public class ZonemapFragmentPrunerTest {
     // x = 75 → matches second zone of fragment 0 → fragment 0 survives
     Predicate[] filters = new Predicate[] {TestPredicates.eq("x", 75L)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(0), result.get());
   }
@@ -385,7 +418,8 @@ public class ZonemapFragmentPrunerTest {
     // name = 'foo' → falls in [eaa, hzz] → fragment 1
     Predicate[] filters = new Predicate[] {TestPredicates.eq("name", "foo")};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(1), result.get());
   }
@@ -402,7 +436,8 @@ public class ZonemapFragmentPrunerTest {
     // x IN (null, 50) → fragment 0 (has 50) and fragment 1 (has nulls)
     Predicate[] filters = new Predicate[] {TestPredicates.in("x", null, 50L)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(0, 1), result.get());
   }
@@ -416,7 +451,8 @@ public class ZonemapFragmentPrunerTest {
           TestPredicates.and(TestPredicates.gt("x", 300L), TestPredicates.lt("x", 0L))
         };
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertTrue(result.get().isEmpty());
   }
@@ -435,7 +471,8 @@ public class ZonemapFragmentPrunerTest {
               TestPredicates.eq("x", 250L))
         };
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(0, 2), result.get());
   }
@@ -452,7 +489,8 @@ public class ZonemapFragmentPrunerTest {
     // x = 50 → fragment 0 matches, fragment 1 (all null) does not
     Predicate[] filters = new Predicate[] {TestPredicates.eq("x", 50L)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(0), result.get());
   }
@@ -462,7 +500,8 @@ public class ZonemapFragmentPrunerTest {
     Map<String, List<ZoneStats>> stats = threeFragmentStats("seq");
     Predicate[] filters = new Predicate[] {TestPredicates.eq("seq", 150)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(1), result.get());
   }
@@ -472,7 +511,8 @@ public class ZonemapFragmentPrunerTest {
     Map<String, List<ZoneStats>> stats = threeFragmentStats("x");
     Predicate[] filters = new Predicate[] {TestPredicates.gt("x", (short) 150)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(1, 2), result.get());
   }
@@ -482,7 +522,8 @@ public class ZonemapFragmentPrunerTest {
     Map<String, List<ZoneStats>> stats = threeFragmentStats("x");
     Predicate[] filters = new Predicate[] {TestPredicates.lte("x", (byte) 50)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(0), result.get());
   }
@@ -499,7 +540,8 @@ public class ZonemapFragmentPrunerTest {
 
     Predicate[] filters = new Predicate[] {TestPredicates.eq("f", 15.0f)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(1), result.get());
   }
@@ -519,7 +561,8 @@ public class ZonemapFragmentPrunerTest {
     Predicate[] filters =
         new Predicate[] {TestPredicates.eq("d", Date.valueOf("2022-04-27"))}; // day 19109
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(1), result.get());
   }
@@ -529,7 +572,8 @@ public class ZonemapFragmentPrunerTest {
     Map<String, List<ZoneStats>> stats = threeFragmentStats("x");
     Predicate[] filters = new Predicate[] {TestPredicates.in("x", 50, 250, 999)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(0, 2), result.get());
   }
@@ -540,8 +584,122 @@ public class ZonemapFragmentPrunerTest {
     Map<String, List<ZoneStats>> stats = threeFragmentStats("x");
     Predicate[] filters = new Predicate[] {TestPredicates.in("x", 50, 250L, (short) 70, (byte) 5)};
 
-    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(filters, stats, fragmentIds(stats));
     assertTrue(result.isPresent());
     assertEquals(Set.of(0, 2), result.get());
+  }
+
+  @Test
+  public void testPartialComparisonIncludesUnindexedFragment() {
+    Map<String, List<ZoneStats>> stats = new HashMap<>();
+    stats.put(
+        "x",
+        Arrays.asList(
+            new ZoneStats(0, 0, 100, 0L, 99L, 0), new ZoneStats(1, 0, 100, 100L, 199L, 0)));
+
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(
+            new Predicate[] {TestPredicates.eq("x", 500L)}, stats, Set.of(0, 1, 2));
+
+    assertTrue(result.isPresent());
+    assertEquals(Set.of(2), result.get());
+  }
+
+  @Test
+  public void testPartialInIncludesMatchingAndUnindexedFragments() {
+    Map<String, List<ZoneStats>> stats = new HashMap<>();
+    stats.put(
+        "x",
+        Arrays.asList(
+            new ZoneStats(0, 0, 100, 0L, 99L, 0), new ZoneStats(1, 0, 100, 100L, 199L, 0)));
+
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(
+            new Predicate[] {TestPredicates.in("x", 50L, 500L)}, stats, Set.of(0, 1, 2));
+
+    assertTrue(result.isPresent());
+    assertEquals(Set.of(0, 2), result.get());
+  }
+
+  @Test
+  public void testPartialIsNullIncludesUnindexedFragment() {
+    Map<String, List<ZoneStats>> stats = new HashMap<>();
+    stats.put(
+        "x",
+        Arrays.asList(
+            new ZoneStats(0, 0, 100, 0L, 99L, 0), new ZoneStats(1, 0, 100, 100L, 199L, 5)));
+
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(
+            new Predicate[] {TestPredicates.isNull("x")}, stats, Set.of(0, 1, 2));
+
+    assertTrue(result.isPresent());
+    assertEquals(Set.of(1, 2), result.get());
+  }
+
+  @Test
+  public void testPartialIsNotNullIncludesUnindexedFragment() {
+    Map<String, List<ZoneStats>> stats = new HashMap<>();
+    stats.put(
+        "x",
+        Arrays.asList(
+            new ZoneStats(0, 0, 100, 0L, 99L, 0), new ZoneStats(1, 0, 100, null, null, 100)));
+
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(
+            new Predicate[] {TestPredicates.isNotNull("x")}, stats, Set.of(0, 1, 2));
+
+    assertTrue(result.isPresent());
+    assertEquals(Set.of(0, 2), result.get());
+  }
+
+  @Test
+  public void testPartialCoverageIsAppliedBeforeAndOrAcrossColumns() {
+    Map<String, List<ZoneStats>> stats = new HashMap<>();
+    stats.put(
+        "x",
+        Arrays.asList(
+            new ZoneStats(0, 0, 100, 0L, 99L, 0), new ZoneStats(1, 0, 100, 100L, 199L, 0)));
+    stats.put(
+        "y",
+        Arrays.asList(
+            new ZoneStats(1, 0, 100, 1000L, 1099L, 0), new ZoneStats(2, 0, 100, 2000L, 2099L, 0)));
+
+    Optional<Set<Integer>> andResult =
+        ZonemapFragmentPruner.pruneFragments(
+            new Predicate[] {
+              TestPredicates.and(TestPredicates.eq("x", 50L), TestPredicates.eq("y", 2050L))
+            },
+            stats,
+            Set.of(0, 1, 2));
+    Optional<Set<Integer>> orResult =
+        ZonemapFragmentPruner.pruneFragments(
+            new Predicate[] {
+              TestPredicates.or(TestPredicates.eq("x", 150L), TestPredicates.eq("y", 1050L))
+            },
+            stats,
+            Set.of(0, 1, 2));
+
+    assertTrue(andResult.isPresent());
+    assertEquals(Set.of(0, 2), andResult.get());
+    assertTrue(orResult.isPresent());
+    assertEquals(Set.of(0, 1, 2), orResult.get());
+  }
+
+  @Test
+  public void testRetiredFragmentStatsAreIgnored() {
+    Map<String, List<ZoneStats>> stats = new HashMap<>();
+    stats.put(
+        "x",
+        Arrays.asList(
+            new ZoneStats(0, 0, 100, 0L, 99L, 0), new ZoneStats(9, 0, 100, 500L, 599L, 0)));
+
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(
+            new Predicate[] {TestPredicates.eq("x", 550L)}, stats, Set.of(0, 1));
+
+    assertTrue(result.isPresent());
+    assertEquals(Set.of(1), result.get());
   }
 }

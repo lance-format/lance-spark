@@ -51,6 +51,7 @@ import scala.collection.immutable.Map;
 import java.io.Serializable;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -84,6 +85,9 @@ public class LanceScan
    * fragment-level pruning in {@link #planInputPartitions()}.
    */
   private final java.util.Map<String, List<ZoneStats>> zonemapStats;
+
+  /** Live fragment IDs from the same Dataset snapshot as {@link #zonemapStats}. */
+  private final Set<Integer> liveFragmentIds;
 
   /**
    * Pre-computed surviving fragment IDs from zonemap pruning in LanceScanBuilder. When non-null,
@@ -138,6 +142,7 @@ public class LanceScan
       Predicate[] pushedPredicates,
       LanceStatistics statistics,
       java.util.Map<String, List<ZoneStats>> zonemapStats,
+      Set<Integer> liveFragmentIds,
       Set<Integer> survivingFragmentIds,
       List<LanceSplit> precomputedSplits,
       java.util.Map<Integer, Long> precomputedFragmentRowCounts,
@@ -159,6 +164,9 @@ public class LanceScan
             : new Predicate[0];
     this.statistics = statistics;
     this.zonemapStats = zonemapStats != null ? zonemapStats : Collections.emptyMap();
+    this.liveFragmentIds =
+        Collections.unmodifiableSet(
+            new HashSet<>(Objects.requireNonNull(liveFragmentIds, "liveFragmentIds")));
     this.cachedSurvivingFragmentIds = survivingFragmentIds;
     this.precomputedSplits = precomputedSplits;
     this.precomputedFragmentRowCounts =
@@ -371,7 +379,8 @@ public class LanceScan
       allowedIds = cachedSurvivingFragmentIds;
     } else if (!zonemapStats.isEmpty()) {
       allowedIds =
-          ZonemapFragmentPruner.pruneFragments(pushedPredicates, zonemapStats).orElse(null);
+          ZonemapFragmentPruner.pruneFragments(pushedPredicates, zonemapStats, liveFragmentIds)
+              .orElse(null);
     } else {
       return allSplits;
     }

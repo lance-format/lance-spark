@@ -915,6 +915,41 @@ class TestDDLIndex:
         )
         assert spark.sql("SELECT * FROM default.test_table").count() == 4
 
+    def test_zonemap_partial_coverage_after_append(self, spark):
+        """A fragment appended after index creation must remain visible to filtered scans."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING,
+                value DOUBLE
+            )
+        """)
+
+        initial = [(i, f"Name{i}", float(i)) for i in range(10)]
+        spark.createDataFrame(initial, ["id", "name", "value"]).writeTo(
+            "default.test_table"
+        ).append()
+
+        spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX idx_id_zonemap USING zonemap (id)
+            WITH (rows_per_zone = 4)
+        """).collect()
+
+        spark.createDataFrame(
+            [(1000, "Appended", 1000.0)], ["id", "name", "value"]
+        ).writeTo("default.test_table").append()
+
+        rows = spark.sql("""
+            SELECT id, name, value
+            FROM default.test_table
+            WHERE id = 1000
+        """).collect()
+
+        assert len(rows) == 1
+        assert rows[0].id == 1000
+        assert rows[0].name == "Appended"
+
     def test_create_btree_index_on_nested_literal_dot_field(self, spark):
         """Test CREATE INDEX on nested struct fields, including literal dots."""
         spark.sql("""
