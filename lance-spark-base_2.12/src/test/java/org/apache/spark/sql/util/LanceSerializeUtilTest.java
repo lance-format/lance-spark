@@ -22,6 +22,8 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Tests that {@link LanceSerializeUtil}'s Kryo codec roundtrips JDK immutable collections. */
@@ -108,5 +110,80 @@ public class LanceSerializeUtilTest {
       in.defaultReadObject();
       executed = true;
     }
+  }
+
+  // The immutable collections are rebuilt via their public factory during decode, so the value
+  // returned to callers is not the mutable buffer Kryo registered while reading. Aliased
+  // collections (the same instance referenced twice) must still round-trip to a single immutable
+  // instance -- otherwise a back-reference could hand back the throwaway mutable ArrayList (or the
+  // wrong type for a set/map), which is exactly what an unfixed rebuild-on-read serializer does.
+  @Test
+  public void preservesReferenceIdentityOfAliasedImmutableCollections() {
+    List<Long> sharedList = List.copyOf(Arrays.asList(1L, 2L, 3L));
+    List<List<Long>> decodedList = roundtrip(List.of(sharedList, sharedList));
+    assertSame(decodedList.get(0), decodedList.get(1));
+    assertEquals(sharedList, decodedList.get(0));
+    assertThrows(UnsupportedOperationException.class, () -> decodedList.get(0).add(4L));
+
+    java.util.Set<Long> sharedSet = java.util.Set.of(9L, 8L, 7L);
+    List<java.util.Set<Long>> decodedSet = roundtrip(List.of(sharedSet, sharedSet));
+    assertSame(decodedSet.get(0), decodedSet.get(1));
+    assertEquals(sharedSet, decodedSet.get(0));
+    assertThrows(UnsupportedOperationException.class, () -> decodedSet.get(0).add(6L));
+
+    java.util.Map<String, Long> sharedMap = java.util.Map.of("a", 1L, "b", 2L);
+    List<java.util.Map<String, Long>> decodedMap = roundtrip(List.of(sharedMap, sharedMap));
+    assertSame(decodedMap.get(0), decodedMap.get(1));
+    assertEquals(sharedMap, decodedMap.get(0));
+    assertThrows(UnsupportedOperationException.class, () -> decodedMap.get(0).put("c", 3L));
+  }
+
+  // A cycle can only form through a mutable object in the loop (an immutable collection cannot
+  // contain itself). When the immutable collection is not the object the cycle re-enters, the
+  // mutable member is registered before its back-reference is read, so the graph decodes correctly
+  // and the collection is still immutable.
+  @Test
+  public void supportsCycleThroughAMutableObjectHoldingAnImmutableCollection() {
+    CycleHolder holder = new CycleHolder();
+    holder.tag = 42;
+    holder.ref = List.of(holder); // immutable list contains holder; holder points back at the list
+
+    CycleHolder decoded = roundtrip(holder);
+    assertEquals(42, decoded.tag);
+    assertTrue(decoded.ref instanceof List);
+    List<?> list = (List<?>) decoded.ref;
+    assertEquals(1, list.size());
+    assertSame(decoded, list.get(0));
+    assertThrows(UnsupportedOperationException.class, () -> ((List<Object>) decoded.ref).add(0));
+  }
+
+  // The one unsupportable shape: an immutable collection that a back-reference re-enters while it
+  // is still being read (here it is the graph root). Its immutable value does not exist yet, so
+  // rather than leak the mutable buffer the decode fails fast with a clear message.
+  @Test
+  public void rejectsCycleThatReentersAnImmutableCollectionStillBeingRead() {
+    CycleHolder holder = new CycleHolder();
+    holder.tag = 7;
+    List<CycleHolder> root = List.of(holder); // root is the immutable list itself
+    holder.ref = root;
+
+    RuntimeException thrown = assertThrows(RuntimeException.class, () -> roundtrip(root));
+    assertTrue(
+        messageChain(thrown).contains("cyclic reference through an immutable collection"),
+        messageChain(thrown));
+  }
+
+  private static String messageChain(Throwable t) {
+    StringBuilder sb = new StringBuilder();
+    for (Throwable cur = t; cur != null; cur = cur.getCause()) {
+      sb.append(cur.getMessage()).append('\n');
+    }
+    return sb.toString();
+  }
+
+  /** A mutable object that can hold a back-reference, used to build cyclic object graphs. */
+  public static final class CycleHolder {
+    public int tag;
+    public Object ref;
   }
 }
