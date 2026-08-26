@@ -91,10 +91,11 @@ case class AddIndexExec(
 
     // Plan and build against a single pinned version. Tasks open the dataset themselves, so without
     // pinning each one resolves the latest version independently. The driver's batches fix which
-    // fragments a segment covers either way, but not what sits behind them: siblings would read the
-    // same fragments at different versions and stamp their segments with those versions, and a
-    // fragment compacted away since planning fails its task outright. Coverage the commit cannot
-    // establish is accounted for at commit time; see IndexUtils.establishedCoverage.
+    // fragments a segment covers either way, but not the version each segment records, and that
+    // version is what core checks: it validates a segment's coverage only when the stamp predates
+    // the commit, so a task that opens after a concurrent rewrite of the indexed column stamps the
+    // current version over keys it read earlier and the stale keys are trusted. Coverage the commit
+    // cannot establish is accounted for at commit time; see IndexUtils.establishedCoverage.
     val (fragmentWorkloads, canonicalColumns, buildReadOptions) = {
       val ds = Utils.openDatasetBuilder(readOptions).build()
       try {
@@ -154,14 +155,15 @@ case class AddIndexExec(
     val (nsImpl, nsProps, tableId, initialStorageOpts) =
       IndexUtils.extractNamespaceInfo(catalog, lanceDataset, readOptions)
 
-    // Range-mode BTree uses preprocessed data from Spark and keeps its dedicated path. It reads the
-    // table back through the catalog, so its coverage follows the scan rather than the fragment list
-    // planned above; pinning the build to the planning version would record a segment version older
-    // than the data the segment holds, which core's staleness pruning would act on.
+    // Range-mode BTree uses preprocessed data from Spark and keeps its dedicated path: its coverage
+    // follows the fragment ids in the scanned rows rather than the fragment list planned above. The
+    // build is pinned like the segmented one all the same. The scan resolves its own version through
+    // the catalog, so an unpinned executor can open a version newer than the rows it was handed and
+    // stamp the segment with it, and core only validates segments stamped older than the commit.
     if (btreeBuildMode.contains("range")) {
       val segments = new RangeBasedBTreeIndexJob(
         this.copy(columns = canonicalColumns),
-        readOptions,
+        buildReadOptions,
         fragmentIds.size,
         nsImpl,
         nsProps,
@@ -272,10 +274,11 @@ case class AddIndexExec(
  * can be committed directly as a single logical index.
  *
  * Unlike the segmented path, coverage here is derived from the fragment ids present in the scanned
- * rows rather than from a fragment list fixed at planning time. The scan goes back through the
- * catalog, which resolves and pins its own version, so this job is deliberately handed unpinned read
- * options: the version an executor opens must not predate the rows it is indexing, or the segment
- * would record a dataset version older than its own contents.
+ * rows rather than from a fragment list fixed at planning time. The read options are pinned even so.
+ * The scan resolves its own version through the catalog, which is at or after the pinned one, so a
+ * segment can end up stamped older than the rows it holds and lose its coverage to core's staleness
+ * pruning; leaving the build unpinned instead lets an executor stamp the current version over rows
+ * read earlier, and core validates a segment only when its stamp predates the commit.
  *
  * @param addIndexExec       The AddIndexExec instance that initiated this job
  * @param readOptions        Configuration options for reading the Lance dataset
