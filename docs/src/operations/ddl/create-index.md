@@ -53,7 +53,13 @@ The distributed build used by `zonemap`, `bitmap`, `label_list`, `ngram`, `bloom
 
 | Option         | Type    | Description                                                                                                                                                                                                                        |
 |----------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `num_segments` | Integer | Target number of parallel build tasks (upper bound; clamped to fragment count when larger). Fragments are assigned by row count to balance estimated task workloads. Defaults to `min(fragment_count, spark.default.parallelism)`. |
+| `num_segments` | Integer | Number of parallel build tasks, and so of index segments created (clamped to fragment count when larger). Each task takes a contiguous run of fragments, sized to balance estimated workloads by row count. Defaults to `min(fragment_count, spark.default.parallelism)`. |
+
+Option names are case-insensitive: `WITH (NUM_SEGMENTS = 8)` and `WITH (num_segments = 8)` are the same option.
+
+Contiguous coverage matters beyond parallelism: [OPTIMIZE](./optimize.md) can only group fragments
+that the identical set of index segments covers, so segments whose fragment ids interleave leave it
+nothing to coalesce.
 
 ### ZoneMap Options
 
@@ -252,28 +258,30 @@ fill it in later, or when you intend to build it incrementally:
 A deferred index returns `fragments_indexed = 0` and is treated as fully unindexed: queries fall back
 to scanning the data until it is populated. There are two ways to populate it:
 
-- **Full distributed build (recommended):** re-run `CREATE INDEX` with the same name. This uses the
-  normal distributed build across Spark tasks and atomically replaces the empty index:
+- **[REFRESH INDEX](./refresh-index.md) (recommended):** builds only the fragments the index does not
+  cover, distributed across Spark tasks. For a deferred index that is the whole table; afterwards it
+  is whatever has been appended since. Repeat any method options here, since a deferred index holds
+  no built data to inherit them from:
+
+    ```sql
+    ALTER TABLE lance.db.users REFRESH INDEX idx_id;
+    ```
+
+- **Re-run `CREATE INDEX`** with the same name. This rebuilds every fragment and atomically replaces
+  the existing index, which is what you want when you also need to change the index options or
+  consolidate accumulated segments:
 
     ```sql
     ALTER TABLE lance.db.users CREATE INDEX idx_id USING zonemap (id);
     ```
 
-- **Incremental build through the SDK:** when only some fragments are unindexed (for example after
-  appending data to an already-built index), `Dataset.optimizeIndices` indexes just the unindexed
-  fragments. This currently runs on a single node:
-
-    ```java
-    dataset.optimizeIndices(OptimizeOptions.builder().build());
-    ```
-
 `train = false` is supported for all index methods. Because deferred index creation does not build
-index data, `num_segments` cannot be combined with `train = false` — pass it on the eager build
-that populates the index instead.
+index data, `num_segments` cannot be combined with `train = false` — pass it on the build that
+populates the index instead.
 
 Creating a scalar index on an empty table also registers an empty index with zero fragment
 coverage. The index is immediately visible through `SHOW INDEXES`. After data is appended, populate
-it by re-running `CREATE INDEX` or calling `Dataset.optimizeIndices`.
+it with `REFRESH INDEX`.
 
 ## Output
 
@@ -305,4 +313,5 @@ The `CREATE INDEX` command operates as follows:
 - **Index Methods**: The `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, `rtree`, `btree`, and `fts` (or `inverted`) methods are supported for index creation.
 - **Indexed Column Count**: All supported index methods currently support exactly one indexed column.
 - **Index Replacement**: If you create an index with the same name as an existing one, the old index will be replaced by the new one.
-- **Deferred Training**: With `train = false` the index is registered empty and is populated later, either by re-running `CREATE INDEX` (a full distributed build that replaces the empty index) or, for incremental coverage of newly appended fragments, by `Dataset.optimizeIndices` in the SDK. The SQL `OPTIMIZE` command compacts fragments and does not train deferred indexes.
+- **Deferred Training**: With `train = false` the index is registered empty and is populated later, either by [REFRESH INDEX](./refresh-index.md) (a distributed build of the fragments the index does not cover) or by re-running `CREATE INDEX` (a full distributed rebuild that replaces the existing index). The SQL `OPTIMIZE` command compacts fragments and does not train deferred indexes.
+- **Incremental Maintenance**: after appending data, [REFRESH INDEX](./refresh-index.md) indexes just the new fragments instead of rebuilding the table.

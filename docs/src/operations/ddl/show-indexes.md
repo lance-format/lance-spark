@@ -54,12 +54,36 @@ The `SHOW INDEXES` command returns the following columns:
 | `num_indexed_rows`      | long          | Approximate number of rows covered by the index.                   |
 | `num_unindexed_fragments` | long        | Number of fragments that are not yet indexed.                      |
 | `num_unindexed_rows`    | long          | Approximate number of rows that are not yet covered by the index.  |
+| `indexed_percent`       | double        | Share of rows the index covers, as a percentage truncated to two decimals, so it never overstates coverage. Null for an empty table. |
+| `num_segments`          | long          | Number of physical index segments backing this logical index.       |
+| `size_bytes`            | long          | Total size of all index files across the segments. Null if any segment predates index file size tracking. |
+
+## Interpreting the Output
+
+An `indexed_percent` below 100 means part of the table is not covered, either because rows were
+appended since the index was last built, or because [OPTIMIZE](./optimize.md) rewrote fragments a
+`zonemap` or `bloomfilter` index had covered. For the index methods Spark SQL can build, use
+[REFRESH INDEX](./refresh-index.md) to index just the uncovered fragments. A vector index is listed
+here too, but Spark SQL can neither create nor refresh one; maintain it through the Lance SDK.
+
+Do not treat partial coverage as merely slower. For most methods the uncovered fragments are scanned
+and results stay complete, but a partially covered `zonemap` index prunes them instead, so a
+predicate on the indexed column can return fewer rows than the table holds. Refresh before relying on
+filters over a `zonemap` index that reports less than 100.
+
+`num_segments` reflects how the index was built: a distributed build produces one segment per
+parallel task, and each [REFRESH INDEX](./refresh-index.md) adds more, since a refresh appends
+coverage rather than rewriting existing segments. Queries search every segment, and Lance can only
+compact fragments covered by the identical set of segments, so a high count costs both query time and
+`OPTIMIZE`'s ability to coalesce. Rebuilding with [CREATE INDEX](./create-index.md) consolidates them.
 
 ## Notes
 
 - The `fields` column returns the logical column names from the Lance schema, ordered according to the index definition.
 - Lance-maintained system indexes, including fragment-reuse and MemWAL indexes, are excluded from the output.
+- Row counts are approximate, so `indexed_percent` is a guide rather than an exact figure.
 
 ## See Also
 
 - [CREATE INDEX](./create-index.md)
+- [REFRESH INDEX](./refresh-index.md)

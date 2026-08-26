@@ -17,39 +17,35 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference}
 import org.apache.spark.sql.types.{DataTypes, StructField, StructType}
 
 /**
- * ShowIndexes logical plan representing listing all indexes on a Lance dataset.
+ * RefreshIndex logical plan representing incremental index maintenance on a Lance dataset.
+ *
+ * Unlike [[AddIndex]], which rebuilds every fragment, this command builds index segments only for
+ * the fragments an existing index does not yet cover, and adds them to that index.
  */
-case class ShowIndexes(table: LogicalPlan) extends Command {
+case class RefreshIndex(
+    table: LogicalPlan,
+    indexName: String,
+    args: Seq[LanceNamedArgument]) extends Command {
 
   override def children: Seq[LogicalPlan] = Seq(table)
 
-  override def output: Seq[Attribute] = ShowIndexesOutputType.SCHEMA
+  override def output: Seq[Attribute] = RefreshIndexOutputType.SCHEMA
 
   override def simpleString(maxFields: Int): String = {
-    "ShowIndexesOnLanceDataset"
+    s"RefreshIndex(${indexName})"
   }
 
   override protected def withNewChildrenInternal(newChildren: IndexedSeq[LogicalPlan])
-      : ShowIndexes = {
-    copy(newChildren(0))
+      : RefreshIndex = {
+    copy(newChildren(0), this.indexName, this.args)
   }
 }
 
-object ShowIndexesOutputType {
+object RefreshIndexOutputType {
   val SCHEMA: Seq[Attribute] = StructType(
     Array(
-      StructField("name", DataTypes.StringType, nullable = true),
-      StructField(
-        "fields",
-        DataTypes.createArrayType(DataTypes.StringType, true),
-        nullable = true),
-      StructField("index_type", DataTypes.StringType, nullable = true),
-      StructField("num_indexed_fragments", DataTypes.LongType, nullable = true),
-      StructField("num_indexed_rows", DataTypes.LongType, nullable = true),
-      StructField("num_unindexed_fragments", DataTypes.LongType, nullable = true),
-      StructField("num_unindexed_rows", DataTypes.LongType, nullable = true),
-      StructField("indexed_percent", DataTypes.DoubleType, nullable = true),
-      StructField("num_segments", DataTypes.LongType, nullable = true),
-      StructField("size_bytes", DataTypes.LongType, nullable = true)))
+      StructField("fragments_indexed", DataTypes.LongType, nullable = true),
+      StructField("segments_added", DataTypes.LongType, nullable = true),
+      StructField("index_name", DataTypes.StringType, nullable = true)))
     .map(field => AttributeReference(field.name, field.dataType, field.nullable, field.metadata)())
 }
