@@ -235,15 +235,23 @@ case class AddIndexExec(
       segments: Seq[Index]): Int = {
     val dataset = Utils.openDatasetBuilder(readOptions).build()
     try {
-      val covered = IndexUtils.committedCoverage(
+      IndexUtils.requireCommittableCoverage(
         IndexUtils.liveFragmentIds(dataset),
         segments,
         indexName)
-      dataset.commitExistingIndexSegments(
+      val committed = dataset.commitExistingIndexSegments(
         indexName,
         column,
         segments.toList.asJava)
-      covered.size
+      // The commit advances this handle to the manifest it wrote, so both the returned metadata and
+      // the fragment list below describe the committed state rather than the one validated above.
+      IndexUtils
+        .establishedCoverage(
+          segments,
+          committed.asScala.toSeq,
+          IndexUtils.liveFragmentIds(dataset),
+          indexName)
+        .size
     } finally {
       dataset.close()
     }
@@ -738,43 +746,67 @@ object IndexUtils extends Logging {
       .toSet
 
   /**
-   * The coverage a commit of `segments` will actually establish: what they declare, restricted to
-   * the fragments still live.
+   * Refuses to publish a segment set that would establish no coverage at all.
    *
    * Commit intersects each segment's declared coverage with the dataset's live fragments, so a
-   * fragment retired while the build ran contributes nothing. Reporting the planned count instead
-   * would claim coverage the commit did not achieve, which is the failure this guards against.
+   * fragment retired while the build ran contributes nothing. Lance accepts such a set: an empty
+   * fragment bitmap is valid metadata, and an existing segment is trivially disjoint from it and so
+   * survives. Nothing is corrupted, but the transaction would publish segments that index no data and
+   * report a build that achieved nothing, and this is the last point at which it can still be
+   * declined.
    *
-   * Retirement alone is not a reason to discard the build. A fragment leaves the manifest either
-   * because its rows moved (compaction, an in-place rewrite) or because they are gone (every row
-   * deleted); only the first leaves data unindexed, and in both cases the segments that remain are
-   * correct for the fragments they still cover. So a partial loss is logged and the truthful count
-   * returned, and only a total loss fails: committing segments that cover nothing would replace real
-   * coverage with none.
-   *
-   * @return the fragment ids the commit will cover
+   * Partial loss is not refused. A fragment leaves the manifest either because its rows moved
+   * (compaction, an in-place rewrite) or because they were all deleted; only the first leaves data
+   * unindexed, and either way the segments covering what remains are correct. Discarding a finished
+   * distributed build over that would be the wrong response, and it would make a routine concurrent
+   * DELETE fatal on a long one. What the commit actually established is reported afterwards, by
+   * [[establishedCoverage]].
    */
-  def committedCoverage(
+  def requireCommittableCoverage(
       liveFragmentIds: Set[Int],
       segments: Seq[Index],
-      indexName: String): Set[Int] = {
+      indexName: String): Unit = {
     val declared = declaredCoverage(segments)
-    val committed = declared.intersect(liveFragmentIds)
-    val retired = declared.diff(liveFragmentIds)
-    if (retired.nonEmpty) {
-      if (committed.isEmpty) {
-        throw new IllegalStateException(
-          s"Index '$indexName' build raced a concurrent operation: every fragment it covers " +
-            s"(${describeFragmentIds(retired)}) was retired while the build ran, so the segments " +
-            "would cover nothing. No index change was committed; re-run the command.")
-      }
+    if (declared.nonEmpty && declared.intersect(liveFragmentIds).isEmpty) {
+      throw new IllegalStateException(
+        s"Index '$indexName' build raced a concurrent operation: every fragment it covers " +
+          s"(${describeFragmentIds(declared)}) was retired while the build ran, so the segments " +
+          "would cover nothing. No index change was committed; re-run the command.")
+    }
+  }
+
+  /**
+   * The coverage a commit established, read back from the metadata the commit returned.
+   *
+   * A check taken before the commit cannot answer this, for two reasons. It reads the manifest its
+   * handle was opened at, while the commit lands on whatever version is current by then. And Lance
+   * prunes an incoming segment's coverage not only for a fragment that is gone but also for one whose
+   * indexed field was rewritten under the same id, which no comparison of fragment ids can see. The
+   * returned metadata is post-pruning, so it is the only truthful account of what was indexed.
+   *
+   * Only the segments this build produced are counted. Existing segments that were disjoint from them
+   * survive the commit, and their coverage is not this command's to report.
+   *
+   * @return the fragment ids the commit covered with these segments
+   */
+  def establishedCoverage(
+      builtSegments: Seq[Index],
+      committedSegments: Seq[Index],
+      liveFragmentIds: Set[Int],
+      indexName: String): Set[Int] = {
+    val builtUuids = builtSegments.map(_.uuid).toSet
+    val established =
+      declaredCoverage(committedSegments.filter(segment => builtUuids.contains(segment.uuid)))
+        .intersect(liveFragmentIds)
+    val uncovered = declaredCoverage(builtSegments).diff(established)
+    if (uncovered.nonEmpty) {
       logWarning(
         s"Index '$indexName' build raced a concurrent operation: fragments " +
-          s"${describeFragmentIds(retired)} were retired while the build ran, so this commit does " +
-          "not cover them. The segments for the remaining fragments are committed; re-run the " +
-          "command to cover whatever replaced them.")
+          s"${describeFragmentIds(uncovered)} are not covered by this commit, because they were " +
+          "retired or because their indexed field was rewritten while the build ran. The segments " +
+          "for the remaining fragments are committed; re-run the command to cover them.")
     }
-    committed
+    established
   }
 
   private def describeFragmentIds(ids: Set[Int]): String = {

@@ -491,33 +491,32 @@ class IndexUtilsTest {
     assertEquals(Set.empty[Int], IndexUtils.declaredCoverage(Seq.empty))
   }
 
-  @Test
-  def committedCoverage_returnsDeclaredCoverageWhenEverythingIsLive(): Unit = {
-    assertEquals(
-      Set(0, 2),
-      IndexUtils.committedCoverage(
-        Set(0, 1, 2),
-        Seq(coveringSegment(0), coveringSegment(2)),
-        "idx_id"))
-  }
+  /** A segment keeping its identity but reporting narrower coverage, as a pruned commit returns. */
+  private def prunedTo(built: Index, fragmentIds: Seq[Int]): Index =
+    Index
+      .builder()
+      .uuid(built.uuid)
+      .name(built.name)
+      .indexType(built.indexType)
+      .fragments(fragmentIds.map(java.lang.Integer.valueOf).asJava)
+      .build()
 
-  /**
-   * A fragment can leave the manifest because its rows moved or because they were all deleted. Only
-   * the first leaves data unindexed, and either way the segments covering what remains are correct,
-   * so the command reports the coverage it achieved rather than discarding the whole build.
-   */
   @Test
-  def committedCoverage_dropsRetiredFragmentsAndKeepsTheRest(): Unit = {
-    assertEquals(
-      Set(1),
-      IndexUtils.committedCoverage(Set(1, 5), Seq(coveringSegment(0, 1)), "idx_id"))
+  def requireCommittableCoverage_acceptsCoverageThatSurvives(): Unit = {
+    IndexUtils.requireCommittableCoverage(Set(1, 5), Seq(coveringSegment(0, 1)), "idx_id")
   }
 
   @Test
-  def committedCoverage_failsWhenNothingWouldBeCovered(): Unit = {
+  def requireCommittableCoverage_acceptsSegmentsThatDeclareNothing(): Unit = {
+    IndexUtils.requireCommittableCoverage(Set(1), Seq(segment(None)), "idx_id")
+    IndexUtils.requireCommittableCoverage(Set.empty[Int], Seq.empty, "idx_id")
+  }
+
+  @Test
+  def requireCommittableCoverage_refusesASetThatWouldCoverNothing(): Unit = {
     val error = assertThrows(
       classOf[IllegalStateException],
-      () => IndexUtils.committedCoverage(Set(5), Seq(coveringSegment(0, 7)), "idx_id"))
+      () => IndexUtils.requireCommittableCoverage(Set(5), Seq(coveringSegment(0, 7)), "idx_id"))
 
     assertTrue(error.getMessage.contains("idx_id"), error.getMessage)
     assertTrue(error.getMessage.contains("0, 7"), error.getMessage)
@@ -525,13 +524,82 @@ class IndexUtilsTest {
   }
 
   @Test
-  def committedCoverage_summarizesLargeRetiredSets(): Unit = {
+  def requireCommittableCoverage_summarizesLargeRetiredSets(): Unit = {
     val error = assertThrows(
       classOf[IllegalStateException],
       () =>
-        IndexUtils.committedCoverage(Set.empty[Int], Seq(coveringSegment(0 to 20: _*)), "idx_id"))
+        IndexUtils.requireCommittableCoverage(
+          Set.empty[Int],
+          Seq(coveringSegment(0 to 20: _*)),
+          "idx_id"))
 
     assertTrue(error.getMessage.contains("21 total"), error.getMessage)
+  }
+
+  // ── establishedCoverage ───────────────────────────────────────────────────
+
+  @Test
+  def establishedCoverage_reportsWhatTheCommitReturned(): Unit = {
+    val built = Seq(coveringSegment(0, 1), coveringSegment(2))
+
+    assertEquals(
+      Set(0, 1, 2),
+      IndexUtils.establishedCoverage(built, built, Set(0, 1, 2), "idx_id"))
+  }
+
+  /**
+   * Lance prunes a fragment whose indexed field was rewritten under the same id, so the committed
+   * bitmap can be narrower than the one handed in while every fragment is still live. No comparison
+   * of fragment ids can see that, which is why the report has to come from what the commit returned.
+   */
+  @Test
+  def establishedCoverage_followsAPrunedCommitEvenWhileEveryFragmentIsLive(): Unit = {
+    val built = coveringSegment(0, 1)
+
+    assertEquals(
+      Set(0),
+      IndexUtils.establishedCoverage(
+        Seq(built),
+        Seq(prunedTo(built, Seq(0))),
+        Set(0, 1),
+        "idx_id"))
+  }
+
+  @Test
+  def establishedCoverage_excludesFragmentsRetiredByTheCommit(): Unit = {
+    val built = coveringSegment(0, 1)
+
+    assertEquals(
+      Set(1),
+      IndexUtils.establishedCoverage(Seq(built), Seq(built), Set(1, 5), "idx_id"))
+  }
+
+  /** Existing segments survive a commit they are disjoint from; their coverage is not ours. */
+  @Test
+  def establishedCoverage_countsOnlyTheSegmentsThisBuildProduced(): Unit = {
+    val built = coveringSegment(2)
+    val survivor = coveringSegment(0, 1)
+
+    assertEquals(
+      Set(2),
+      IndexUtils.establishedCoverage(
+        Seq(built),
+        Seq(survivor, built),
+        Set(0, 1, 2),
+        "idx_id"))
+  }
+
+  @Test
+  def establishedCoverage_isEmptyWhenNothingOfThisBuildSurvived(): Unit = {
+    val built = coveringSegment(0)
+
+    assertEquals(
+      Set.empty[Int],
+      IndexUtils.establishedCoverage(
+        Seq(built),
+        Seq(prunedTo(built, Seq.empty)),
+        Set(0),
+        "idx_id"))
   }
 
   // ── retainedSegments ──────────────────────────────────────────────────────

@@ -17,8 +17,11 @@ import org.lance.Fragment;
 import org.lance.index.Index;
 import org.lance.index.IndexCriteria;
 import org.lance.index.IndexDescription;
+import org.lance.index.IndexOptions;
+import org.lance.index.IndexParams;
 import org.lance.index.IndexType;
 import org.lance.index.OptimizeOptions;
+import org.lance.index.scalar.ScalarIndexParams;
 import org.lance.ipc.FullTextQuery;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
@@ -102,6 +105,75 @@ public abstract class BaseAddIndexTest {
   public void tearDown() throws IOException {
     if (spark != null) {
       spark.close();
+    }
+  }
+
+  /**
+   * Pins the two Lance behaviours the coverage report rests on: a segment commit returns the
+   * metadata of the index as committed, and the handle it was made on advances to the manifest it
+   * wrote.
+   *
+   * <p>Together they are what make the reported count truthful. A check taken before the commit
+   * reads the manifest its handle was opened at, so a fragment retired in between is still counted;
+   * intersecting the returned metadata with the fragments live <em>after</em> the commit is what
+   * excludes it. This asserts the contract rather than the connector code consuming it, because a
+   * change on either side would silently make the count overstate again.
+   */
+  @Test
+  public void testSegmentCommitReportsCoverageAsCommitted() {
+    spark.sql(String.format("create table %s (id int) using lance", fullTable));
+    spark.sql(String.format("insert into %s values (0), (1), (2)", fullTable));
+    spark.sql(String.format("insert into %s values (3), (4), (5)", fullTable));
+
+    try (org.lance.Dataset committer =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build()) {
+      List<Fragment> fragments = committer.getFragments();
+      int coveredFragmentId = fragments.get(fragments.size() - 1).getId();
+
+      IndexParams indexParams =
+          IndexParams.builder()
+              .setScalarIndexParams(ScalarIndexParams.create("zonemap", "{}"))
+              .build();
+      Index built =
+          committer.createIndex(
+              IndexOptions.builder(Collections.singletonList("id"), IndexType.ZONEMAP, indexParams)
+                  .withIndexName("idx_committed_coverage")
+                  .replace(true)
+                  .withFragmentIds(Collections.singletonList(coveredFragmentId))
+                  .build());
+      Assertions.assertEquals(
+          Collections.singletonList(coveredFragmentId),
+          built.fragments().orElse(Collections.emptyList()),
+          "the uncommitted segment should declare the fragment it was built for");
+
+      // Retire every fragment from another handle, leaving the committer on a stale manifest.
+      spark.sql(String.format("delete from %s where id >= 0", fullTable));
+
+      List<Index> committed =
+          committer.commitExistingIndexSegments(
+              "idx_committed_coverage", "id", Collections.singletonList(built));
+
+      Set<UUID> ours = Collections.singleton(built.uuid());
+      Assertions.assertTrue(
+          committed.stream().anyMatch(index -> ours.contains(index.uuid())),
+          "the commit must return the metadata of the segments it was handed");
+
+      Set<Integer> liveAfter =
+          committer.getFragments().stream().map(Fragment::getId).collect(Collectors.toSet());
+      Assertions.assertFalse(
+          liveAfter.contains(coveredFragmentId),
+          "the committing handle must advance to the manifest the commit wrote");
+
+      Set<Integer> established =
+          committed.stream()
+              .filter(index -> ours.contains(index.uuid()))
+              .flatMap(index -> index.fragments().orElse(Collections.emptyList()).stream())
+              .filter(liveAfter::contains)
+              .collect(Collectors.toSet());
+      Assertions.assertEquals(
+          Collections.emptySet(),
+          established,
+          "coverage read from the committed state must not count a fragment retired in between");
     }
   }
 

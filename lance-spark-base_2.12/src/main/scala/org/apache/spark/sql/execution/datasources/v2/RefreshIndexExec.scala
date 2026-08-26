@@ -115,9 +115,21 @@ case class RefreshIndexExec(
           plan.method,
           retainedSegments,
           segments)
-        val covered = IndexUtils.committedCoverage(liveFragmentIds, segments, plan.resolvedName)
-        dataset.commitExistingIndexSegments(plan.resolvedName, plan.column, segments.toList.asJava)
-        covered.size
+        IndexUtils.requireCommittableCoverage(liveFragmentIds, segments, plan.resolvedName)
+        val committed =
+          dataset.commitExistingIndexSegments(
+            plan.resolvedName,
+            plan.column,
+            segments.toList.asJava)
+        // The commit advances this handle, so the returned metadata and the fragment list below both
+        // describe the committed state rather than the one the checks above validated.
+        IndexUtils
+          .establishedCoverage(
+            segments,
+            committed.asScala.toSeq,
+            IndexUtils.liveFragmentIds(dataset),
+            plan.resolvedName)
+          .size
       } finally {
         dataset.close()
       }
