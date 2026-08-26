@@ -122,6 +122,53 @@ class LanceProbeValidationTest {
   }
 
   /**
+   * The folded fast path ([[LanceProbe.probeRows]]) must be observationally identical to the split
+   * probe + materialize path: the SAME (rowAddr, score) hits in the SAME order, and the SAME
+   * materialized payload per row. This is the invariant the SQL join relies on when it single-scans
+   * (internalK == k) instead of probing then late-materializing. Runs on the brute-force path so the
+   * search itself is deterministic.
+   */
+  @Test def testProbeRowsMatchesProbeThenMaterialize(): Unit = {
+    val datasetUri = writeSyntheticDataset()
+    val query = randomVector(new Random(321L), VectorDim)
+    val k = 8
+    val projection = Seq("id", "vec")
+    val projectionFields = Seq(
+      StructField("id", IntegerType, nullable = false),
+      StructField("vec", ArrayType(FloatType, containsNull = false), nullable = false))
+
+    val probe = new LanceProbe(datasetUri, fragmentIds = None)
+    try {
+      // Split path: search for refs, then late-materialize the payload by _rowid.
+      val refs = probe.probe("vec", query, k, Metric.L2)
+      val expectedPayload: Map[Long, Map[String, Any]] = probe
+        .materialize(refs.map(_.rowAddr), projection, projectionFields)
+        .map(m => rowAddrOf(m) -> m)
+        .toMap
+
+      // Folded path: search AND project the payload in one scan.
+      val hits = probe.probeRows("vec", query, k, Metric.L2, projection, projectionFields)
+
+      assertEquals(k, hits.size, "probeRows should return exactly k hits")
+      // Same search: identical (rowAddr, score) sequence, in order.
+      assertEquals(
+        refs.map(r => (r.rowAddr, r.score)),
+        hits.map(h => (h.rowAddr, h.score)),
+        "probeRows hits must match probe refs (rowAddr + score), in order")
+      // Same payload: each folded hit equals the split materialize's row for that rowAddr, on the
+      // projected columns.
+      hits.foreach { h =>
+        val expected = expectedPayload(h.rowAddr)
+        assertEquals(expected("id"), h.row("id"), s"id mismatch for rowAddr=${h.rowAddr}")
+        assertEquals(
+          expected("vec").asInstanceOf[Seq[_]].toList,
+          h.row("vec").asInstanceOf[Seq[_]].toList,
+          s"vec mismatch for rowAddr=${h.rowAddr}")
+      }
+    } finally probe.close()
+  }
+
+  /**
    * Validate the dataset handle is reused across calls. The exact perf invariant ("second call
    * faster than first by some factor") is too brittle for CI, so we only assert that repeated
    * probes succeed and don't OOM — i.e., no JNI handle / Arrow buffer leak per call.
@@ -214,6 +261,13 @@ class LanceProbeValidationTest {
       RowFactory.create(Integer.valueOf(idx), v)
     }
     (rows, vectors)
+  }
+
+  /** Read the `_rowid` key out of a materialized row map (a boxed / stringy long). */
+  private def rowAddrOf(m: Map[String, Any]): Long = m(LanceProbe.RowIdColumn) match {
+    case l: java.lang.Long => l.longValue()
+    case l: Long => l
+    case other => other.toString.toLong
   }
 
   private def randomVector(rng: Random, dim: Int): Array[Float] = {

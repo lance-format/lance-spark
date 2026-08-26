@@ -34,10 +34,13 @@ import org.lance.spark.utils.Utils
  *   left.rdd.mapPartitions { rows =>
  *     val probe = new LanceProbe(uri, fragmentIds = None, version)   // whole-index, once per task
  *     rows.flatMap { leftRow =>
- *       val hits = probe.probe(query(leftRow), internalK, ...)       // native top-K search
- *       val topK = trimToK(hits)                                     // overfetch → K
- *       val payloads = probe.materialize(topK.map(_.rowAddr))        // late point-fetch by _rowid
- *       topK.map(ref => assembleRow(leftRow, payloads(ref), ref.score))
+ *       // No over-fetch (SQL path, internalK == k): search + project payload in ONE scan.
+ *       val hits = probe.probeRows(query(leftRow), k, projection, ...)
+ *       hits.map(hit => assembleRow(leftRow, hit.row, hit.score))
+ *       // Over-fetch path (internalK > k): search cheap refs → trim → materialize survivors.
+ *       //   val topK = trimToK(probe.probe(query, internalK, ...))
+ *       //   val payloads = probe.materialize(topK.map(_.rowAddr))
+ *       //   topK.map(ref => assembleRow(leftRow, payloads(ref), ref.score))
  *     }
  *   }
  * }}}
@@ -228,10 +231,38 @@ object LanceKnnJoinStage {
       } else {
         Iterator.empty
       }
+    } else if (conf.internalK <= conf.k) {
+      // No JVM-side over-fetch (the SQL path: internalK == k). Every probed row is kept, so probe
+      // and materialize in ONE native scan: Lance searches the index AND projects the payload
+      // columns in a single pass. A split probe → trim → materialize would re-scan the exact rows
+      // the search already found, for nothing. Lance returns them best-first, so no trim is needed.
+      val hits = probe.probeRows(
+        conf.vectorColumn,
+        q,
+        conf.internalK,
+        conf.metric,
+        conf.rightProjection,
+        conf.rightFields,
+        conf.nprobes,
+        conf.refineFactor,
+        conf.ef,
+        conf.prefilter)
+      if (hits.isEmpty) {
+        if (conf.outerJoin) {
+          Iterator.single(assembleRow(leftRow, conf.leftFieldCount, conf.rightFields, null, null))
+        } else {
+          Iterator.empty
+        }
+      } else {
+        hits.iterator.map { hit =>
+          assembleRow(leftRow, conf.leftFieldCount, conf.rightFields, hit.row, hit.score)
+        }
+      }
     } else {
-      // Overfetch `internalK` candidates natively, then trim to the final `k`. Lance already
-      // returns them best-first, so when it hands back no more than `k` we keep them as-is and
-      // skip the heap entirely.
+      // Over-fetch path (internalK > k): fetch `internalK` cheap refs natively, trim to the final
+      // `k`, then late-materialize ONLY the survivors by `_rowid`. Not exercised by the SQL rule
+      // (which sets internalK == k) but retained for a future over-fetching caller, where deferring
+      // the payload fetch to the survivors is the win. Lance already returns refs best-first.
       val refs = probe
         .probe(
           conf.vectorColumn,

@@ -31,9 +31,14 @@ import scala.collection.JavaConverters._
 import scala.collection.mutable
 
 /**
- * Per-task vector-index probe primitive. Opens a Lance dataset once and runs many `probe()` calls
- * against a fixed set of fragments. Returns row references + scores only — no payload. Late
- * materialization happens elsewhere (`LanceMaterialize`).
+ * Per-task vector-index probe primitive. Opens a Lance dataset once and serves many queries against
+ * a fixed set of fragments. Two query shapes:
+ *  - [[probe]] returns row references + scores only (no payload); the payload is fetched later via
+ *    [[materialize]]. This split late-materialization is the right shape when the caller OVER-FETCHES
+ *    candidates and trims before materializing — only the survivors are paid for.
+ *  - [[probeRows]] folds the nearest search AND the payload projection into a SINGLE scan. This is
+ *    the right shape when there is NO JVM-side over-fetch (every probed row is kept), so a separate
+ *    materialize scan would just re-fetch the exact rows the search already found.
  *
  * This is the core primitive Phase 0 of the indexed nearest-by design depends on. Validating its
  * cost profile is the first thing to do on a new Lance build:
@@ -155,22 +160,7 @@ final class LanceProbe(
     require(query != null && query.length > 0, "Query vector must be non-empty")
     require(k > 0, "k must be positive")
 
-    val q = {
-      val b = new Query.Builder()
-        .setColumn(vectorColumn)
-        .setKey(query)
-        .setK(k)
-        .setDistanceType(metric.lanceType)
-      nprobes.foreach(b.setNprobes(_))
-      // refineFactor: IVF-PQ recall knob. Lance fetches `k * refineFactor` approximate
-      // candidates, then re-ranks them with exact distance and trims to k. Bigger factor =
-      // better recall, more compute. None leaves Lance's default (= 1, no re-rank).
-      refineFactor.foreach(b.setRefineFactor(_))
-      // ef: HNSW search depth. Higher = better recall, more compute. None leaves Lance's
-      // index-default. Only meaningful for HNSW indexes; ignored for IVF-PQ.
-      ef.foreach(b.setEf(_))
-      b.build()
-    }
+    val q = buildNearestQuery(vectorColumn, query, k, metric, nprobes, refineFactor, ef)
 
     val opts = new ScanOptions.Builder()
       .nearest(q)
@@ -205,6 +195,92 @@ final class LanceProbe(
   }
 
   /**
+   * Nearest search AND payload projection in a SINGLE scan. Runs the top-`k` search projecting the
+   * requested payload `projection` columns directly into the result batch, so each hit comes back
+   * with its row-id, ranking score, AND materialized payload — no second point-fetch scan.
+   *
+   * This is the no-overfetch fast path. When the caller does not over-fetch at the JVM level (the
+   * SQL path: `internalK == k`), every probed row is kept, so the split [[probe]] → trim →
+   * [[materialize]] would just re-scan the exact rows the search already found — a second Lance scan
+   * plus a `k`-element `_rowid IN (arrow_cast …)` filter parse, per query, for nothing. Folding the
+   * two removes both. Rows come back best-first (Lance's native ordering), same as [[probe]].
+   *
+   * Use [[probe]] + [[materialize]] instead when the caller OVER-fetches candidates and trims before
+   * materializing — there, deferring the payload fetch to only the survivors is the win. `projection`
+   * / `projectionFields` follow [[materialize]]'s contract: an empty `projection` means "all columns",
+   * and each projected cell is converted to the Spark EXTERNAL value its declared type expects (see
+   * [[readRows]]).
+   */
+  def probeRows(
+      vectorColumn: String,
+      query: Array[Float],
+      k: Int,
+      metric: Metric,
+      projection: Seq[String],
+      projectionFields: Seq[StructField],
+      nprobes: Option[Int] = None,
+      refineFactor: Option[Int] = None,
+      ef: Option[Int] = None,
+      prefilter: Option[String] = None): Seq[MaterializedHit] = {
+    require(vectorColumn != null && vectorColumn.nonEmpty, "vectorColumn must be non-empty")
+    require(query != null && query.length > 0, "Query vector must be non-empty")
+    require(k > 0, "k must be positive")
+
+    val q = buildNearestQuery(vectorColumn, query, k, metric, nprobes, refineFactor, ef)
+
+    val opts = new ScanOptions.Builder()
+      .nearest(q)
+      .withRowId(true)
+    // Project the payload columns into the nearest scan itself. `_distance` is added by `nearest`
+    // regardless (Lance includes it even when explicit columns omit it), so the drain still finds a
+    // score column. An empty projection leaves columns unset → all columns, matching `materialize`.
+    if (projection.nonEmpty) {
+      opts.columns(projection.toList.asJava)
+    }
+
+    if (prefilter.nonEmpty || javaFragmentIds.nonEmpty) {
+      opts.prefilter(true)
+    }
+    prefilter.filter(_.nonEmpty).foreach(opts.filter)
+    javaFragmentIds.foreach(opts.fragmentIds)
+
+    val scanner: LanceScanner = LanceScanner.create(dataset, opts.build(), allocator)
+    try {
+      readScoredRows(scanner.scanBatches(), projectionFields)
+    } finally {
+      scanner.close()
+    }
+  }
+
+  /**
+   * Build the Lance nearest-neighbor query. Shared by [[probe]] (refs only) and [[probeRows]]
+   * (refs + folded payload) so both search the index identically.
+   */
+  private def buildNearestQuery(
+      vectorColumn: String,
+      query: Array[Float],
+      k: Int,
+      metric: Metric,
+      nprobes: Option[Int],
+      refineFactor: Option[Int],
+      ef: Option[Int]): Query = {
+    val b = new Query.Builder()
+      .setColumn(vectorColumn)
+      .setKey(query)
+      .setK(k)
+      .setDistanceType(metric.lanceType)
+    nprobes.foreach(b.setNprobes(_))
+    // refineFactor: IVF-PQ recall knob. Lance fetches `k * refineFactor` approximate
+    // candidates, then re-ranks them with exact distance and trims to k. Bigger factor =
+    // better recall, more compute. None leaves Lance's default (= 1, no re-rank).
+    refineFactor.foreach(b.setRefineFactor(_))
+    // ef: HNSW search depth. Higher = better recall, more compute. None leaves Lance's
+    // index-default. Only meaningful for HNSW indexes; ignored for IVF-PQ.
+    ef.foreach(b.setEf(_))
+    b.build()
+  }
+
+  /**
    * Drain the Arrow stream from a nearest-search scan into `(rowId, score)` pairs.
    *
    * Expected schema:
@@ -221,31 +297,12 @@ final class LanceProbe(
       while (reader.loadNextBatch()) {
         val root = reader.getVectorSchemaRoot
         val addrVec: FieldVector = root.getVector(LanceProbe.RowIdColumn)
-        val scoreVec: FieldVector = LanceProbe.ScoreColumns.iterator
-          .map(name => Option(root.getVector(name)).orNull)
-          .find(_ != null)
-          .getOrElse(throw new IllegalStateException(
-            s"Lance nearest scan did not return a score column. Got: " +
-              root.getSchema.getFields.asScala.map(_.getName).mkString(", ")))
+        val scoreVec: FieldVector = resolveScoreVector(root)
 
         val n = root.getRowCount
         var i = 0
         while (i < n) {
-          val addr = addrVec match {
-            case v: UInt8Vector => v.get(i)
-            case v: BigIntVector => v.get(i)
-            case other =>
-              throw new IllegalStateException(
-                s"Unexpected row-address vector type: ${other.getClass.getName}")
-          }
-          val score = scoreVec match {
-            case v: Float4Vector => v.get(i)
-            case v: Float8Vector => v.get(i).toFloat
-            case other =>
-              throw new IllegalStateException(
-                s"Unexpected score vector type: ${other.getClass.getName}")
-          }
-          out += ScoredRowRef(addr, score)
+          out += ScoredRowRef(rowAddrAt(addrVec, i), scoreAt(scoreVec, i))
           i += 1
         }
       }
@@ -253,6 +310,96 @@ final class LanceProbe(
       reader.close()
     }
     out.toSeq
+  }
+
+  /**
+   * Drain a nearest-search scan that ALSO projected payload columns into `(rowId, score, payload)`
+   * hits — the folded counterpart of [[readScored]] + [[readRows]]. Row-id and score are read out of
+   * the `_rowid` / `_distance` vectors directly; the payload columns (those with a Spark target type
+   * in `projectionFields`) go through the canonical [[org.lance.spark.vectorized.LanceArrowColumnVector]]
+   * adapter and back through [[CatalystTypeConverters]] to the external value the encoder expects —
+   * exactly as [[readRows]] does. `_rowid` / `_distance` are handled here, so they are deliberately
+   * excluded from the payload map (unlike [[readRows]], which surfaces `_rowid` for re-keying).
+   */
+  private def readScoredRows(
+      reader: ArrowReader,
+      projectionFields: Seq[StructField]): Seq[MaterializedHit] = {
+    val schemaByName: Map[String, StructField] =
+      projectionFields.iterator.map(f => f.name -> f).toMap
+    val out = mutable.ArrayBuffer.empty[MaterializedHit]
+    try {
+      while (reader.loadNextBatch()) {
+        val root: VectorSchemaRoot = reader.getVectorSchemaRoot
+        val n = root.getRowCount
+        val fields = root.getSchema.getFields.asScala.toIndexedSeq
+
+        val addrVec: FieldVector = root.getVector(LanceProbe.RowIdColumn)
+        val scoreVec: FieldVector = resolveScoreVector(root)
+
+        // Payload columns only (those with a Spark target type). `_rowid` / `_distance` are read out
+        // separately, so they are deliberately excluded from the payload map here.
+        val mapped = fields.filter(af => schemaByName.contains(af.getName))
+        val mappedNames: Array[String] = mapped.iterator.map(_.getName).toArray
+        val mappedTypes: Array[DataType] =
+          mapped.iterator.map(af => schemaByName(af.getName).dataType).toArray
+        val mappedConverters: Array[Any => Any] = mapped.iterator
+          .map(af =>
+            CatalystTypeConverters.createToScalaConverter(schemaByName(af.getName).dataType))
+          .toArray
+        val mappedVectors: Array[ColumnVector] = mapped.iterator
+          .map(af =>
+            new LanceArrowColumnVector(root.getVector(af.getName), false, schemaByName(af.getName))
+              .asInstanceOf[ColumnVector])
+          .toArray
+        // Thin view over the reader-owned Arrow vectors (closeVectorOnClose=false): `reader.close()`
+        // in the finally frees the buffers once the values below are copied out.
+        val batch = new ColumnarBatch(mappedVectors, n)
+
+        var i = 0
+        while (i < n) {
+          val rowMap = mutable.LinkedHashMap.empty[String, Any]
+          val internalRow = batch.getRow(i)
+          var j = 0
+          while (j < mappedNames.length) {
+            val internal = internalRow.get(j, mappedTypes(j))
+            rowMap(mappedNames(j)) = if (internal == null) null else mappedConverters(j)(internal)
+            j += 1
+          }
+          out += MaterializedHit(rowAddrAt(addrVec, i), scoreAt(scoreVec, i), rowMap.toMap)
+          i += 1
+        }
+      }
+    } finally {
+      reader.close()
+    }
+    out.toSeq
+  }
+
+  /** Locate the nearest-search score column by name, tolerant of `_distance` vs `_score`. */
+  private def resolveScoreVector(root: VectorSchemaRoot): FieldVector =
+    LanceProbe.ScoreColumns.iterator
+      .map(name => Option(root.getVector(name)).orNull)
+      .find(_ != null)
+      .getOrElse(throw new IllegalStateException(
+        "Lance nearest scan did not return a score column. Got: " +
+          root.getSchema.getFields.asScala.map(_.getName).mkString(", ")))
+
+  /** Read a Lance row id out of an Arrow `_rowid` vector (UInt8 or BigInt, encoding-dependent). */
+  private def rowAddrAt(addrVec: FieldVector, i: Int): Long = addrVec match {
+    case v: UInt8Vector => v.get(i)
+    case v: BigIntVector => v.get(i)
+    case other =>
+      throw new IllegalStateException(
+        s"Unexpected row-address vector type: ${other.getClass.getName}")
+  }
+
+  /** Read a ranking score out of an Arrow score vector (Float4 or Float8, encoding-dependent). */
+  private def scoreAt(scoreVec: FieldVector, i: Int): Float = scoreVec match {
+    case v: Float4Vector => v.get(i)
+    case v: Float8Vector => v.get(i).toFloat
+    case other =>
+      throw new IllegalStateException(
+        s"Unexpected score vector type: ${other.getClass.getName}")
   }
 
   /**

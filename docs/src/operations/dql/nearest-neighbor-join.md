@@ -135,6 +135,19 @@ are not rewritten and fall through to Spark's brute-force path.
 Only `APPROX` joins are rewritten. An exact (`EXACT`) nearest join is always handled by Spark's
 brute-force rewrite.
 
+## Right-Side Table Requirements
+
+Beyond the ranking function, the rewrite inspects the right (Lance) table's columns and declines —
+falling through to Spark's brute-force `APPROX NEAREST` path, with identical results — when:
+
+- **The vector column is not a fixed-size vector.** The right ranking column must be a fixed-size
+  list (an `ARRAY<FLOAT>` written with the `arrow.fixed-size-list.size` schema hint, the shape Lance
+  builds a vector index over). A variable-length `ARRAY<FLOAT>` column is not a probeable vector and
+  is not rewritten.
+- **The table has a blob column.** If any column in the scanned Lance relation is a blob
+  (`lance-encoding:blob` v1, or the `lance.blob.v2` extension type), the rewrite declines so that
+  Spark's canonical Lance reader materializes the true blob payload on the fallback path.
+
 ## WHERE Pushdown
 
 A `WHERE` clause on the right (Lance) side is translated into a Lance filter and applied by the

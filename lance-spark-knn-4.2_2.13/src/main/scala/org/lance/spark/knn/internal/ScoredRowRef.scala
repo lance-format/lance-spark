@@ -38,3 +38,18 @@ object ScoredRowRef {
   val similarityOrdering: Ordering[ScoredRowRef] =
     Ordering.by[ScoredRowRef, Float](-_.score)
 }
+
+/**
+ * A single probe hit WITH its materialized payload — the unit produced by the no-overfetch fast path
+ * ([[LanceProbe.probeRows]]), which folds the nearest search and the payload projection into one
+ * scan. Unlike [[ScoredRowRef]] (a payload-free ref bound for a later materialize point-fetch), this
+ * already carries the right row.
+ *
+ * @param rowAddr Lance row id of the hit (kept for de-duplication / re-keying by the join stage).
+ * @param score   Distance or similarity from Lance's vector search; direction is carried out-of-band
+ *                in the operator config, so this stays metric-agnostic (see [[ScoredRowRef.score]]).
+ * @param row     Materialized right-side payload keyed by column name, each value already the Spark
+ *                EXTERNAL representation its target type expects (the join's `ExpressionEncoder`
+ *                accepts it directly).
+ */
+final case class MaterializedHit(rowAddr: Long, score: Float, row: Map[String, Any])
