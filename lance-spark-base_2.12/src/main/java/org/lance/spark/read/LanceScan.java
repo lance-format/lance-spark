@@ -49,6 +49,7 @@ import org.slf4j.LoggerFactory;
 import scala.collection.immutable.Map;
 
 import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -69,6 +70,7 @@ public class LanceScan
   private static final Logger LOG = LoggerFactory.getLogger(LanceScan.class);
 
   private final StructType schema;
+  private final List<String> projectedColumns;
   private final LanceSparkReadOptions readOptions;
   private final Optional<String> whereConditions;
   private final Optional<Integer> limit;
@@ -137,6 +139,7 @@ public class LanceScan
       Optional<Aggregation> pushedAggregation,
       Predicate[] pushedPredicates,
       LanceStatistics statistics,
+      List<String> projectedColumns,
       java.util.Map<String, List<ZoneStats>> zonemapStats,
       Set<Integer> survivingFragmentIds,
       List<LanceSplit> precomputedSplits,
@@ -148,6 +151,10 @@ public class LanceScan
       java.util.Map<String, String> namespaceProperties) {
     this.schema = schema;
     this.readOptions = readOptions;
+    this.projectedColumns =
+        projectedColumns == null
+            ? Collections.emptyList()
+            : Collections.unmodifiableList(new ArrayList<>(projectedColumns));
     this.whereConditions = whereConditions;
     this.limit = limit;
     this.offset = offset;
@@ -223,6 +230,7 @@ public class LanceScan
                   }
                   return new LanceInputPartition(
                       schema,
+                      projectedColumns,
                       i,
                       split,
                       readOptions,
@@ -474,6 +482,7 @@ public class LanceScan
     }
     LanceScan that = (LanceScan) o;
     return Objects.equals(schema, that.schema)
+        && Objects.equals(projectedColumns, that.projectedColumns)
         && Objects.equals(readOptions, that.readOptions)
         && Objects.equals(whereConditions, that.whereConditions)
         && Objects.equals(limit, that.limit)
@@ -487,7 +496,13 @@ public class LanceScan
   public int hashCode() {
     int result =
         Objects.hash(
-            schema, readOptions, whereConditions, limit, offset, topNSortOrders.toString());
+            schema,
+            projectedColumns,
+            readOptions,
+            whereConditions,
+            limit,
+            offset,
+            topNSortOrders.toString());
     result = 31 * result + Arrays.hashCode(sortedByHash(pushedPredicates));
     result = 31 * result + aggregationHashCode(pushedAggregation);
     return result;

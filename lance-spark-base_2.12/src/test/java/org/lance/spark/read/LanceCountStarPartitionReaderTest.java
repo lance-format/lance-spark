@@ -49,6 +49,8 @@ public class LanceCountStarPartitionReaderTest {
     LanceInputPartition partition =
         new LanceInputPartition(
             TestUtils.TestTable1Config.schema,
+            ReadSchemaNestedColumnProjection.buildProjectedColumns(
+                TestUtils.TestTable1Config.schema, TestUtils.TestTable1Config.schema),
             0,
             new LanceSplit(Arrays.asList(0, 1)),
             TestUtils.TestTable1Config.readOptions,

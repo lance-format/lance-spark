@@ -17,6 +17,7 @@ import org.lance.namespace.LanceNamespace;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.read.LanceInputPartition;
+import org.lance.spark.read.ReadSchemaNestedColumnProjection;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Optional;
 
@@ -44,10 +45,16 @@ public class LanceFragmentScannerTest {
   private List<String> callGetColumnNames(StructType schema)
       throws NoSuchMethodException, InvocationTargetException, IllegalAccessException {
     Method method =
-        LanceFragmentScanner.class.getDeclaredMethod("getColumnNames", StructType.class);
+        LanceFragmentScanner.class.getDeclaredMethod(
+            "getColumnNames", StructType.class, List.class);
     method.setAccessible(true);
     @SuppressWarnings("unchecked")
-    List<String> result = (List<String>) method.invoke(null, schema);
+    List<String> result =
+        (List<String>)
+            method.invoke(
+                null,
+                schema,
+                ReadSchemaNestedColumnProjection.buildProjectedColumns(schema, schema));
     return result;
   }
 
@@ -249,6 +256,8 @@ public class LanceFragmentScannerTest {
     LanceInputPartition partition =
         new LanceInputPartition(
             new StructType(),
+            ReadSchemaNestedColumnProjection.buildProjectedColumns(
+                new StructType(), new StructType()),
             0,
             null,
             readOptions,

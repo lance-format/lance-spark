@@ -16,6 +16,7 @@ package org.lance.spark.internal;
 import org.lance.ipc.ScanStats;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.read.LanceInputPartition;
+import org.lance.spark.utils.FieldPathUtils;
 import org.lance.spark.vectorized.BlobStructAccessor;
 import org.lance.spark.vectorized.LanceArrowColumnVector;
 
@@ -25,6 +26,7 @@ import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.spark.sql.execution.vectorized.ConstantColumnVector;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
@@ -35,6 +37,7 @@ import org.apache.spark.sql.vectorized.ColumnarMap;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -119,11 +122,8 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
       VectorSchemaRoot root, LanceInputPartition inputPartition) {
     StructType schema = inputPartition.getSchema();
 
-    Map<String, FieldVector> actualFields = new HashMap<>();
+    Map<String, FieldVector> actualFields = buildActualFieldMap(root);
     List<FieldVector> rootVectors = root.getFieldVectors();
-    for (int i = 0; i < rootVectors.size(); i++) {
-      actualFields.put(rootVectors.get(i).getField().getName(), rootVectors.get(i));
-    }
 
     // Extract row addresses for blob reference support
     Set<String> blobColumnNames = fragmentScanner.getBlobColumnNames();
@@ -157,16 +157,16 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
           fieldVectors.add(sizeVector);
         }
       } else {
-        FieldVector vector = actualFields.get(fieldName);
-        if (vector == null) {
-          throw new IllegalStateException(
-              "Lance scan did not return expected field '" + fieldName + "'");
-        }
-        LanceArrowColumnVector colVec = new LanceArrowColumnVector(vector, false, field);
+        ColumnVector colVec =
+            buildColumnVector(
+                field, Collections.singletonList(fieldName), actualFields, root.getRowCount());
 
         // Set blob reference context so getBinary() produces blob references
-        if (rowAddresses != null && blobColumnNames.contains(fieldName)) {
-          BlobStructAccessor blobAccessor = colVec.getBlobStructAccessor();
+        if (rowAddresses != null
+            && blobColumnNames.contains(fieldName)
+            && colVec instanceof LanceArrowColumnVector) {
+          BlobStructAccessor blobAccessor =
+              ((LanceArrowColumnVector) colVec).getBlobStructAccessor();
           if (blobAccessor != null) {
             blobAccessor.setBlobReferenceContext(
                 fragmentScanner.getDatasetUri(), fieldName, rowAddresses);
@@ -177,6 +177,89 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
       }
     }
     return fieldVectors;
+  }
+
+  private Map<String, FieldVector> buildActualFieldMap(VectorSchemaRoot root) {
+    Map<String, FieldVector> actualFields = new HashMap<>();
+    List<FieldVector> rootVectors = root.getFieldVectors();
+    for (int i = 0; i < rootVectors.size(); i++) {
+      actualFields.put(rootVectors.get(i).getField().getName(), rootVectors.get(i));
+    }
+    return actualFields;
+  }
+
+  private ColumnVector buildColumnVector(
+      StructField field,
+      List<String> columnPath,
+      Map<String, FieldVector> actualFields,
+      int rowCount) {
+    String canonicalPath = FieldPathUtils.canonicalPath(columnPath);
+    FieldVector exactVector = actualFields.get(canonicalPath);
+    if (exactVector != null) {
+      return new LanceArrowColumnVector(exactVector, false, field);
+    }
+
+    if (field.dataType() instanceof StructType
+        && hasProjectedChildren(canonicalPath, actualFields)) {
+      StructType structType = (StructType) field.dataType();
+      ColumnVector[] childVectors = new ColumnVector[structType.fields().length];
+      for (int i = 0; i < structType.fields().length; i++) {
+        StructField childField = structType.fields()[i];
+        childVectors[i] =
+            buildChildColumnVector(
+                childField, appendPath(columnPath, childField.name()), actualFields, rowCount);
+      }
+      return new ProjectedStructColumnVector(structType, childVectors);
+    }
+
+    throw new IllegalStateException(
+        "Cannot materialize projected column '"
+            + canonicalPath
+            + "' with Spark type "
+            + field.dataType().catalogString()
+            + " from Lance output fields "
+            + summarizeActualFields(actualFields));
+  }
+
+  private boolean hasProjectedChildren(String columnPath, Map<String, FieldVector> actualFields) {
+    String childPrefix = columnPath + ".";
+    return actualFields.keySet().stream().anyMatch(name -> name.startsWith(childPrefix));
+  }
+
+  private ColumnVector buildChildColumnVector(
+      StructField field,
+      List<String> columnPath,
+      Map<String, FieldVector> actualFields,
+      int rowCount) {
+    String canonicalPath = FieldPathUtils.canonicalPath(columnPath);
+    if (actualFields.containsKey(canonicalPath)
+        || hasProjectedChildren(canonicalPath, actualFields)) {
+      return buildColumnVector(field, columnPath, actualFields, rowCount);
+    }
+    return buildNullColumnVector(field.dataType(), rowCount);
+  }
+
+  private List<String> appendPath(List<String> path, String fieldName) {
+    List<String> childPath = new ArrayList<>(path.size() + 1);
+    childPath.addAll(path);
+    childPath.add(fieldName);
+    return childPath;
+  }
+
+  private ColumnVector buildNullColumnVector(DataType dataType, int rowCount) {
+    ConstantColumnVector nullVector = new ConstantColumnVector(rowCount, dataType);
+    nullVector.setNull();
+    return nullVector;
+  }
+
+  private String summarizeActualFields(Map<String, FieldVector> actualFields) {
+    List<String> fieldNames = new ArrayList<>(actualFields.keySet());
+    int limit = Math.min(fieldNames.size(), 8);
+    List<String> preview = fieldNames.subList(0, limit);
+    if (fieldNames.size() <= limit) {
+      return preview.toString();
+    }
+    return preview + " ... (" + fieldNames.size() + " fields total)";
   }
 
   /**

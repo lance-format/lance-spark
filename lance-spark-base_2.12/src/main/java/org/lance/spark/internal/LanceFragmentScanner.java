@@ -30,7 +30,6 @@ import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
@@ -109,7 +108,8 @@ public class LanceFragmentScanner implements AutoCloseable {
       Set<String> blobColumnNames = getBlobColumnNames(scanSchema);
       boolean hasBlobColumns = !blobColumnNames.isEmpty();
 
-      List<String> projectedColumns = getColumnNames(scanSchema);
+      List<String> projectedColumns =
+          getColumnNames(scanSchema, inputPartition.getProjectedColumns());
       if (projectedColumns.isEmpty() && scanSchema.isEmpty()) {
         scanOptions.withRowId(true);
       }
@@ -266,25 +266,15 @@ public class LanceFragmentScanner implements AutoCloseable {
     return blobColumns;
   }
 
-  private static List<String> getColumnNames(StructType schema) {
+  private static List<String> getColumnNames(StructType schema, List<String> projectedDataColumns) {
     java.util.Set<String> schemaFields = new java.util.HashSet<>();
     for (StructField field : schema.fields()) {
       schemaFields.add(field.name());
     }
 
     List<String> columns =
-        Arrays.stream(schema.fields())
-            .map(StructField::name)
-            .filter(
-                name ->
-                    !name.equals(LanceConstant.FRAGMENT_ID)
-                        && !name.equals(LanceConstant.ROW_ID)
-                        && !name.equals(LanceConstant.ROW_ADDRESS)
-                        && !name.equals(LanceConstant.ROW_CREATED_AT_VERSION)
-                        && !name.equals(LanceConstant.ROW_LAST_UPDATED_AT_VERSION)
-                        && !name.equals(LanceConstant.SCORE)
-                        && !name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)
-                        && !name.endsWith(LanceConstant.BLOB_SIZE_SUFFIX))
+        projectedDataColumns.stream()
+            .filter(name -> !name.equals(LanceConstant.SCORE))
             .collect(Collectors.toList());
     if (schemaFields.contains(LanceConstant.ROW_LAST_UPDATED_AT_VERSION)) {
       columns.add(LanceConstant.ROW_LAST_UPDATED_AT_VERSION);

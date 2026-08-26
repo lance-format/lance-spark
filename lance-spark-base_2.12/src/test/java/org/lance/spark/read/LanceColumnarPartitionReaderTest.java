@@ -36,6 +36,8 @@ public class LanceColumnarPartitionReaderTest {
     LanceInputPartition partition =
         new LanceInputPartition(
             TestUtils.TestTable1Config.schema,
+            ReadSchemaNestedColumnProjection.buildProjectedColumns(
+                TestUtils.TestTable1Config.schema, TestUtils.TestTable1Config.schema),
             0 /* partitionId */,
             split,
             TestUtils.TestTable1Config.readOptions,
@@ -79,6 +81,8 @@ public class LanceColumnarPartitionReaderTest {
     LanceInputPartition partition =
         new LanceInputPartition(
             TestUtils.TestTable1Config.schema,
+            ReadSchemaNestedColumnProjection.buildProjectedColumns(
+                TestUtils.TestTable1Config.schema, TestUtils.TestTable1Config.schema),
             0 /* partitionId */,
             split,
             TestUtils.TestTable1Config.readOptions,
@@ -124,6 +128,8 @@ public class LanceColumnarPartitionReaderTest {
     LanceInputPartition partition =
         new LanceInputPartition(
             TestUtils.TestTable1Config.schema,
+            ReadSchemaNestedColumnProjection.buildProjectedColumns(
+                TestUtils.TestTable1Config.schema, TestUtils.TestTable1Config.schema),
             0 /* partitionId */,
             split,
             TestUtils.TestTable1Config.readOptions,
@@ -168,6 +174,8 @@ public class LanceColumnarPartitionReaderTest {
     LanceInputPartition partition =
         new LanceInputPartition(
             TestUtils.TestTable1Config.schema,
+            ReadSchemaNestedColumnProjection.buildProjectedColumns(
+                TestUtils.TestTable1Config.schema, TestUtils.TestTable1Config.schema),
             0 /* partitionId */,
             split,
             TestUtils.TestTable1Config.readOptions,
@@ -209,6 +217,8 @@ public class LanceColumnarPartitionReaderTest {
     LanceInputPartition partition =
         new LanceInputPartition(
             TestUtils.TestTable1Config.schema,
+            ReadSchemaNestedColumnProjection.buildProjectedColumns(
+                TestUtils.TestTable1Config.schema, TestUtils.TestTable1Config.schema),
             0 /* partitionId */,
             split,
             TestUtils.TestTable1Config.readOptions,

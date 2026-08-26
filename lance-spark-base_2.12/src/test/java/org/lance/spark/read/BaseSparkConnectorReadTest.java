@@ -435,6 +435,114 @@ public abstract class BaseSparkConnectorReadTest {
   }
 
   @Test
+  public void nestedStructAggregationShouldReturnConsistentResultWithoutNestedSchemaPruning() {
+    StructType usageMetricsSchema =
+        new StructType()
+            .add("token_prompt", DataTypes.LongType, true)
+            .add("token_total", DataTypes.LongType, true)
+            .add("token_completion", DataTypes.LongType, true);
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("business_domain", DataTypes.StringType, false)
+            .add("usage_metrics", usageMetricsSchema, true);
+
+    List<Row> testData =
+        Arrays.asList(
+            RowFactory.create(1, "public", RowFactory.create(10L, 10L, 0L)),
+            RowFactory.create(2, "public", RowFactory.create(20L, 20L, 0L)),
+            RowFactory.create(3, "public", RowFactory.create(30L, 30L, 0L)),
+            RowFactory.create(4, "private", RowFactory.create(40L, 40L, 0L)));
+
+    Dataset<Row> df = spark.createDataFrame(testData, schema);
+    String datasetPath = tempDir.toString() + "/nested_struct_aggregation_test";
+    df.write().format(LanceDataSource.name).save(datasetPath);
+
+    Dataset<Row> lanceData = spark.read().format(LanceDataSource.name).load(datasetPath);
+    lanceData.createOrReplaceTempView("nested_struct_aggregation_test");
+
+    String sql =
+        "SELECT COUNT(1), SUM(usage_metrics.token_total) "
+            + "FROM nested_struct_aggregation_test "
+            + "WHERE business_domain = 'public'";
+
+    String originalNestedSchemaPruning =
+        spark.conf().get("spark.sql.optimizer.nestedSchemaPruning.enabled");
+    try {
+      spark.conf().set("spark.sql.optimizer.nestedSchemaPruning.enabled", "false");
+      Row withoutPruning = spark.sql(sql).collectAsList().get(0);
+
+      spark.conf().set("spark.sql.optimizer.nestedSchemaPruning.enabled", "true");
+      Row withPruning = spark.sql(sql).collectAsList().get(0);
+
+      assertEquals(3L, withoutPruning.getLong(0));
+      assertEquals(60L, withoutPruning.getLong(1));
+      assertEquals(withoutPruning.getLong(0), withPruning.getLong(0));
+      assertEquals(withoutPruning.getLong(1), withPruning.getLong(1));
+    } finally {
+      spark
+          .conf()
+          .set("spark.sql.optimizer.nestedSchemaPruning.enabled", originalNestedSchemaPruning);
+    }
+  }
+
+  @Test
+  public void nestedStructNullnessShouldRemainCorrectWhenProjectingNullableSubfield() {
+    StructType usageMetricsSchema =
+        new StructType()
+            .add("token_prompt", DataTypes.LongType, true)
+            .add("token_total", DataTypes.LongType, true);
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("usage_metrics", usageMetricsSchema, true);
+
+    List<Row> testData =
+        Arrays.asList(
+            RowFactory.create(1, null),
+            RowFactory.create(2, RowFactory.create(7L, null)),
+            RowFactory.create(3, RowFactory.create(9L, 10L)));
+
+    Dataset<Row> df = spark.createDataFrame(testData, schema);
+    String datasetPath = tempDir.toString() + "/nested_struct_nullness_projection_test";
+    df.write().format(LanceDataSource.name).save(datasetPath);
+
+    String originalNestedSchemaPruning =
+        spark.conf().get("spark.sql.optimizer.nestedSchemaPruning.enabled");
+    try {
+      spark.conf().set("spark.sql.optimizer.nestedSchemaPruning.enabled", "true");
+
+      List<Row> result =
+          spark
+              .read()
+              .format(LanceDataSource.name)
+              .load(datasetPath)
+              .selectExpr(
+                  "id", "usage_metrics IS NULL AS metrics_is_null", "usage_metrics.token_total")
+              .orderBy("id")
+              .collectAsList();
+
+      assertEquals(3, result.size());
+
+      assertEquals(1, result.get(0).getInt(0));
+      assertTrue(result.get(0).getBoolean(1));
+      assertTrue(result.get(0).isNullAt(2));
+
+      assertEquals(2, result.get(1).getInt(0));
+      assertFalse(result.get(1).getBoolean(1));
+      assertTrue(result.get(1).isNullAt(2));
+
+      assertEquals(3, result.get(2).getInt(0));
+      assertFalse(result.get(2).getBoolean(1));
+      assertEquals(10L, result.get(2).getLong(2));
+    } finally {
+      spark
+          .conf()
+          .set("spark.sql.optimizer.nestedSchemaPruning.enabled", originalNestedSchemaPruning);
+    }
+  }
+
+  @Test
   public void testArrayMaxOnNestedStructField() {
     // Create a schema with nested struct containing an array:
     // features: struct

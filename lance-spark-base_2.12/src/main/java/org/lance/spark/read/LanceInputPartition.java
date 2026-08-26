@@ -22,6 +22,8 @@ import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
 import org.apache.spark.sql.connector.read.HasPartitionKey;
 import org.apache.spark.sql.types.StructType;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -29,6 +31,7 @@ public class LanceInputPartition implements HasPartitionKey {
   private static final long serialVersionUID = 4723894723984723985L;
 
   private final StructType schema;
+  private final List<String> projectedColumns;
   private final int partitionId;
   private final LanceSplit lanceSplit;
   private final LanceSparkReadOptions readOptions;
@@ -59,6 +62,7 @@ public class LanceInputPartition implements HasPartitionKey {
 
   public LanceInputPartition(
       StructType schema,
+      List<String> projectedColumns,
       int partitionId,
       LanceSplit lanceSplit,
       LanceSparkReadOptions readOptions,
@@ -73,6 +77,10 @@ public class LanceInputPartition implements HasPartitionKey {
       Map<String, String> namespaceProperties,
       InternalRow partitionKeyRow) {
     this.schema = schema;
+    this.projectedColumns =
+        projectedColumns == null
+            ? Collections.emptyList()
+            : Collections.unmodifiableList(new ArrayList<>(projectedColumns));
     this.partitionId = partitionId;
     this.lanceSplit = lanceSplit;
     this.readOptions = readOptions;
@@ -90,6 +98,10 @@ public class LanceInputPartition implements HasPartitionKey {
 
   public StructType getSchema() {
     return schema;
+  }
+
+  public List<String> getProjectedColumns() {
+    return projectedColumns;
   }
 
   public int getPartitionId() {
