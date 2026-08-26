@@ -262,7 +262,10 @@ object LanceKnnJoinStage {
         // `rowAddr -> row` map collapses any duplicate rowAddr to one payload; we still emit one
         // output row per surviving ref. Bounded by `k`, so this stays per-row, not per-partition.
         val materialized: Map[Long, Map[String, Any]] = probe
-          .materialize(trimmed.iterator.map(_.rowAddr).toSeq, conf.rightProjection)
+          .materialize(
+            trimmed.iterator.map(_.rowAddr).toSeq,
+            conf.rightProjection,
+            conf.rightFields)
           .map(m => extractRowAddr(m) -> m)
           .toMap
         trimmed.iterator.map { ref =>

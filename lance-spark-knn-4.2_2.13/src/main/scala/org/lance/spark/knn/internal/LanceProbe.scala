@@ -16,10 +16,14 @@ package org.lance.spark.knn.internal
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.{BigIntVector, FieldVector, Float4Vector, Float8Vector, UInt8Vector, VectorSchemaRoot}
 import org.apache.arrow.vector.ipc.ArrowReader
+import org.apache.spark.sql.catalyst.CatalystTypeConverters
+import org.apache.spark.sql.types.{DataType, StructField}
+import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 import org.lance.Dataset
 import org.lance.ipc.{LanceScanner, Query, ScanOptions}
 import org.lance.spark.{LanceConstant, LanceRef, LanceRuntime, LanceSparkReadOptions}
 import org.lance.spark.utils.Utils
+import org.lance.spark.vectorized.LanceArrowColumnVector
 
 import java.util
 
@@ -262,14 +266,20 @@ final class LanceProbe(
    * @param rowAddrs   list of Lance `_rowid` values (parameter name retained for source
    *                   compatibility with callers — semantically these are now row IDs).
    * @param projection projected column list. `Seq.empty` means "all columns".
-   * @return a sequence of materialized rows, each represented as a `Map[String, Any]` for the
-   *         projected columns plus an entry under `LanceProbe.RowIdColumn` so the caller can
-   *         re-key. Returning a Map keeps this primitive Spark-agnostic; conversion to
-   *         `InternalRow` happens in the API layer.
+   * @param projectionFields Spark target fields (name + dataType) for the projected columns. When
+   *                   non-empty, each projected payload cell is converted to the Spark EXTERNAL
+   *                   value its declared type expects (see [[readRows]]); when empty, cells fall
+   *                   back to a generic Arrow-object conversion.
+   * @return a sequence of materialized rows, each a `Map[String, Any]` keyed by column name. With
+   *         `projectionFields` supplied, each projected value is already the Spark external
+   *         representation of its target type — the shape the join's `ExpressionEncoder` accepts —
+   *         plus an entry under `LanceProbe.RowIdColumn` (a plain long) so the caller can re-key.
+   *         Building those values into a `Row` / `InternalRow` happens in the join stage.
    */
   def materialize(
       rowAddrs: Seq[Long],
-      projection: Seq[String] = Seq.empty): Seq[Map[String, Any]] = {
+      projection: Seq[String] = Seq.empty,
+      projectionFields: Seq[StructField] = Seq.empty): Seq[Map[String, Any]] = {
     if (rowAddrs.isEmpty) return Seq.empty
 
     val opts = new ScanOptions.Builder().withRowId(true)
@@ -305,28 +315,77 @@ final class LanceProbe(
 
     val scanner: LanceScanner = LanceScanner.create(dataset, opts.build(), allocator)
     try {
-      readRows(scanner.scanBatches())
+      readRows(scanner.scanBatches(), projectionFields)
     } finally {
       scanner.close()
     }
   }
 
-  private def readRows(reader: ArrowReader): Seq[Map[String, Any]] = {
+  /**
+   * Drain the materialize scan into row maps, converting each projected payload cell to the Spark
+   * EXTERNAL value its target type expects — the shape the join's `ExpressionEncoder` (external
+   * `Row` → `InternalRow`) accepts.
+   *
+   * Projected data columns are materialized through the connector's canonical Arrow→Spark adapter
+   * [[org.lance.spark.vectorized.LanceArrowColumnVector]] — the same vector-and-schema-aware path
+   * the connector's own reader uses — so every payload type Lance can store round-trips to the
+   * value Spark produces for that column on an ordinary read: DateType, the various timestamp / time
+   * units, unsigned integers, decimals, fixed/large binary and varchar, and nested structs / lists /
+   * maps. A raw Arrow `getObject` would instead hand back e.g. a `LocalDate` for a DateType column,
+   * which the encoder then rejects. The adapter yields Spark INTERNAL values (days for a date,
+   * micros for a timestamp, …), so each is run back through [[CatalystTypeConverters]] to the
+   * external representation the `Row` encoder wants.
+   *
+   * Columns absent from `projectionFields` — notably the `_rowid` virtual column, which carries no
+   * Spark type here — keep the generic Arrow `getObject` fallback; the caller reads `_rowid` only as
+   * a plain long.
+   */
+  private def readRows(
+      reader: ArrowReader,
+      projectionFields: Seq[StructField]): Seq[Map[String, Any]] = {
+    val schemaByName: Map[String, StructField] =
+      projectionFields.iterator.map(f => f.name -> f).toMap
     val out = mutable.ArrayBuffer.empty[Map[String, Any]]
     try {
       while (reader.loadNextBatch()) {
         val root: VectorSchemaRoot = reader.getVectorSchemaRoot
         val n = root.getRowCount
+        val fields = root.getSchema.getFields.asScala.toIndexedSeq
+
+        // Columns with a Spark target type are converted through the canonical connector adapter;
+        // the rest (e.g. `_rowid`) keep the raw Arrow-object fallback.
+        val mapped = fields.filter(af => schemaByName.contains(af.getName))
+        val unmapped = fields.filterNot(af => schemaByName.contains(af.getName))
+        val mappedNames: Array[String] = mapped.iterator.map(_.getName).toArray
+        val mappedTypes: Array[DataType] =
+          mapped.iterator.map(af => schemaByName(af.getName).dataType).toArray
+        val mappedConverters: Array[Any => Any] = mapped.iterator
+          .map(af =>
+            CatalystTypeConverters.createToScalaConverter(schemaByName(af.getName).dataType))
+          .toArray
+        val mappedVectors: Array[ColumnVector] = mapped.iterator
+          .map(af =>
+            new LanceArrowColumnVector(root.getVector(af.getName), false, schemaByName(af.getName))
+              .asInstanceOf[ColumnVector])
+          .toArray
+        // The batch is a thin view over the (reader-owned) Arrow vectors; closeVectorOnClose=false
+        // above means neither the batch nor its column vectors free the underlying buffers — the
+        // `reader.close()` in the finally does, once the values below have been copied out.
+        val batch = new ColumnarBatch(mappedVectors, n)
+
         var i = 0
         while (i < n) {
           val rowMap = mutable.LinkedHashMap.empty[String, Any]
-          val fields = root.getSchema.getFields.asScala
-          var f = 0
-          while (f < fields.size) {
-            val name = fields(f).getName
-            val v = root.getVector(name)
-            rowMap(name) = if (v.isNull(i)) null else LanceProbe.toSparkValue(v.getObject(i))
-            f += 1
+          val internalRow = batch.getRow(i)
+          var j = 0
+          while (j < mappedNames.length) {
+            val internal = internalRow.get(j, mappedTypes(j))
+            rowMap(mappedNames(j)) = if (internal == null) null else mappedConverters(j)(internal)
+            j += 1
+          }
+          unmapped.foreach { af =>
+            val v = root.getVector(af.getName)
+            rowMap(af.getName) = if (v.isNull(i)) null else LanceProbe.toSparkValue(v.getObject(i))
           }
           out += rowMap.toMap
           i += 1

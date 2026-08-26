@@ -279,6 +279,57 @@ class IndexedNearestByJoinSqlTest {
   }
 
   /**
+   * Payload parity for non-numeric projected columns. A projected `DateType` / `TimestampType`
+   * column must materialize through the indexed join EXACTLY as an ordinary Spark Lance read
+   * produces it. The join late-materializes right-side payloads by `_rowid` from native Arrow, so
+   * those cells must be shaped through the canonical connector Arrow-to-Spark adapter
+   * (vector-and-schema-aware) — NOT handed back as raw Arrow (`java.time.LocalDate` for a date,
+   * a boxed `Integer` day / `Long` micro). If the adapter is bypassed, the assembled row's external
+   * `java.sql.Date` / `java.sql.Timestamp` would diverge from the ordinary-read oracle (or fail to
+   * encode through the join's `ExpressionEncoder`). We build the oracle by reading the same columns
+   * back the ordinary way and assert every joined row's `(dt, ts)` equals the oracle for its `rid`.
+   */
+  @Test def dateAndTimestampPayloadMatchesOrdinarySparkTypes(): Unit = {
+    val leftVecs = generateUniform(ExactLeft, ExactDim, Seed + 500)
+    val (leftDf, _, _) = buildLeftDf(leftVecs, ExactDim)
+    val (_, _, rightUri) = writeRightWithDateTime(ExactRight, ExactDim, Seed + 501)
+
+    // Oracle: ordinary Spark Lance read of the same columns -> external java.sql.Date/Timestamp.
+    val oracle: Map[Int, (java.sql.Date, java.sql.Timestamp)] =
+      spark.read.format("lance").load(rightUri).select("rid", "dt", "ts").collect().map { r =>
+        r.getAs[Int]("rid") -> ((r.getAs[java.sql.Date]("dt"), r.getAs[java.sql.Timestamp]("ts")))
+      }.toMap
+
+    val k = 5
+    val (q, d) = registerViews(leftDf, rightUri)
+    val df = spark.sql(
+      s"""SELECT q.lid, d.rid, d.dt, d.ts
+         |FROM $q q INNER JOIN $d d
+         |APPROX NEAREST $k BY DISTANCE vector_l2_distance(q.lvec, d.rvec)""".stripMargin)
+
+    val joinLogicals = df.queryExecution.optimizedPlan.collect {
+      case p: LanceKnnJoinLogicalPlan => p
+    }
+    assertTrue(
+      joinLogicals.nonEmpty,
+      s"expected LanceKnnJoinLogicalPlan; optimized plan was:\n${df.queryExecution.optimizedPlan}")
+
+    val rows = df.collect()
+    assertEquals(ExactLeft * k, rows.length, "expected k results per left row")
+    rows.foreach { r =>
+      val rid = r.getAs[Int]("rid")
+      val (expectedDt, expectedTs) = oracle(rid)
+      val actualDt = r.getAs[java.sql.Date]("dt")
+      val actualTs = r.getAs[java.sql.Timestamp]("ts")
+      // Guard against a silent all-null column masquerading as parity, then assert equality.
+      assertNotNull(actualDt, s"date payload unexpectedly null for rid=$rid")
+      assertNotNull(actualTs, s"timestamp payload unexpectedly null for rid=$rid")
+      assertEquals(expectedDt, actualDt, s"date payload mismatch for rid=$rid")
+      assertEquals(expectedTs, actualTs, s"timestamp payload mismatch for rid=$rid")
+    }
+  }
+
+  /**
    * The rewrite runs as a `postHocResolutionRule`, BEFORE Spark's `FinishAnalysis` /
    * `CheckCartesianProducts`. It must NOT let a query that Spark would reject slip through: with
    * `spark.sql.crossJoin.enabled = false`, an `APPROX NEAREST` join (which lowers to a Cartesian
@@ -542,6 +593,36 @@ class IndexedNearestByJoinSqlTest {
     val out = tempDir.resolve(s"right_cat_${System.nanoTime()}").toString
     df.write.format("lance").save(out)
     (vectors, ids, categories, out)
+  }
+
+  /**
+   * Write a right Lance dataset whose rows carry a `DateType` and a `TimestampType` column
+   * alongside the vector, so the payload-parity test has non-numeric projected columns to
+   * round-trip through the indexed join's late materialization. Each row's date/timestamp is
+   * derived deterministically from its index. Returns the vectors, ids, and the dataset URI.
+   */
+  private def writeRightWithDateTime(
+      n: Int,
+      dim: Int,
+      seed: Long): (Array[Array[Float]], Array[Int], String) = {
+    val vectors = generateUniform(n, dim, seed)
+    val ids = vectors.indices.map(_ + 3000).toArray
+    val rows = ids.zip(vectors).map { case (id, v) =>
+      val i = id - 3000
+      val dt = java.sql.Date.valueOf(java.time.LocalDate.of(2020, 1, 1).plusDays(i.toLong))
+      val ts = java.sql.Timestamp.valueOf(
+        java.time.LocalDateTime.of(2020, 1, 1, 0, 0, 0).plusHours(i.toLong).plusSeconds(i.toLong))
+      RowFactory.create(Integer.valueOf(id), dt, ts, v)
+    }
+    val schema = new StructType(Array(
+      StructField("rid", IntegerType, nullable = false),
+      StructField("dt", DateType, nullable = false),
+      StructField("ts", TimestampType, nullable = false),
+      fixedSizeVec("rvec", dim)))
+    val df = spark.createDataFrame(rows.toSeq.asJava, schema)
+    val out = tempDir.resolve(s"right_dt_${System.nanoTime()}").toString
+    df.write.format("lance").save(out)
+    (vectors, ids, out)
   }
 
   /** Run an indexed nearest join (SQL path) against the given right dataset and compute recall@K. */

@@ -22,6 +22,7 @@ import org.apache.spark.sql.types.{BooleanType, ByteType, DoubleType, FloatType,
 import org.apache.spark.unsafe.types.UTF8String
 import org.lance.spark.{LanceDataset, LanceSparkReadOptions}
 import org.lance.spark.knn.internal.{LanceKnnJoinStage, Metric}
+import org.lance.spark.utils.VectorUtils
 
 /**
  * Catalyst rule that rewrites a Spark [[NearestByJoin]] (`approx = true`) over a Lance scan with
@@ -481,14 +482,16 @@ object IndexedNearestByJoinRule extends Rule[LogicalPlan] {
       case VectorInnerProduct(l, r) if direction == NearestBySimilarity => (Metric.Dot, l, r)
       case _ => return None
     }
-    // Each argument must be a bare attribute from one side of the join.
+    // Each argument must be a bare attribute from one side of the join. The RIGHT (Lance) argument
+    // must additionally be a real fixed-size vector column — see [[isFixedSizeVector]] — otherwise
+    // there is nothing for the index to probe and we must fall through to the brute-force path.
     (asAttr(lhs), asAttr(rhs)) match {
       case (Some(la), Some(ra)) =>
         val leftAttrIds = left.outputSet
         val rightAttrIds = right.outputSet
-        if (leftAttrIds.contains(la) && rightAttrIds.contains(ra)) {
+        if (leftAttrIds.contains(la) && rightAttrIds.contains(ra) && isFixedSizeVector(ra)) {
           Some((metric, la, ra.name))
-        } else if (leftAttrIds.contains(ra) && rightAttrIds.contains(la)) {
+        } else if (leftAttrIds.contains(ra) && rightAttrIds.contains(la) && isFixedSizeVector(la)) {
           // Argument order swapped — still valid for symmetric metrics. All three of L2/Cosine/Dot
           // are symmetric so we don't have to retain the original orientation.
           Some((metric, ra, la.name))
@@ -502,5 +505,22 @@ object IndexedNearestByJoinRule extends Rule[LogicalPlan] {
   private def asAttr(e: Expression): Option[Attribute] = e match {
     case a: Attribute => Some(a)
     case _ => None
+  }
+
+  /**
+   * True iff `attr` is the connector's canonical fixed-size vector shape: an `ArrayType` of float /
+   * double carrying the `arrow.fixed-size-list.size` metadata the connector stamps on a Lance
+   * `FixedSizeList` column. A plain variable-length `List<Float>` analyzes to the SAME Spark
+   * `ArrayType(FloatType)` but WITHOUT that metadata and is NOT index-searchable — probing it would
+   * fail at run time. Gating the rewrite on this marker (reusing the connector's own
+   * [[org.lance.spark.utils.VectorUtils.isVectorField]] so the definition lives in exactly one
+   * place) lets a non-vector right column fall through to Spark's brute-force path instead of
+   * producing a broken operator. A right attribute that is not an `AttributeReference` (so carries
+   * no field metadata) is conservatively treated as non-vector.
+   */
+  private def isFixedSizeVector(attr: Attribute): Boolean = attr match {
+    case ref: AttributeReference =>
+      VectorUtils.isVectorField(StructField(ref.name, ref.dataType, ref.nullable, ref.metadata))
+    case _ => false
   }
 }

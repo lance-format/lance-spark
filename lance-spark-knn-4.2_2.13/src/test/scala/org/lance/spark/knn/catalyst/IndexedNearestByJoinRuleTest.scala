@@ -188,6 +188,45 @@ class IndexedNearestByJoinRuleTest {
     assertSame(join, rewritten, "non-Lance right must fall through")
   }
 
+  /**
+   * The right `rvec` column is a plain variable-length `List<Float>` — `ArrayType(FloatType)` with
+   * NO `arrow.fixed-size-list.size` metadata — not a searchable fixed-size vector. Both shapes map
+   * to the same Spark `ArrayType(FloatType)`, so only the connector's canonical fixed-size-list
+   * metadata distinguishes them. Lance can only index/probe a fixed-size-list vector, so the rule
+   * must require that marker on the right attribute and otherwise leave the `NearestByJoin`
+   * unchanged for Spark's brute-force path to own — rewriting a variable list would hand Lance a
+   * column it cannot search.
+   */
+  @Test def variableListVectorFallsBackInsteadOfFailing(): Unit = {
+    spark.conf.set(IndexedNearestByJoinRule.EnabledConfKey, "true")
+    val left = trivialPlan("lid", "lvec")
+    // rvec deliberately carries NO fixed-size-list metadata → a variable-length list.
+    val schema = new StructType(Array(
+      StructField("rid", IntegerType, nullable = false),
+      StructField("rvec", ArrayType(FloatType, containsNull = false), nullable = false)))
+    val uri = tempDir.resolve("variable_list_lance").toString
+    val table = new FakeLanceTable(schema, uri)
+    val opts = new java.util.HashMap[String, String]()
+    opts.put("path", uri)
+    val cims = new org.apache.spark.sql.util.CaseInsensitiveStringMap(opts)
+    val right = DataSourceV2Relation.create(table, None, None, cims)
+    val leftVec = left.output.find(_.name == "lvec").get
+    val rightVec = right.output.find(_.name == "rvec").get
+    val join = NearestByJoin(
+      left,
+      right,
+      Inner,
+      approx = true,
+      numResults = 5,
+      rankingExpression = VectorL2Distance(leftVec, rightVec),
+      direction = NearestByDistance)
+    val rewritten = IndexedNearestByJoinRule(join)
+    assertSame(
+      join,
+      rewritten,
+      "variable-length List<Float> lacks fixed-size-vector metadata — rule must fall through")
+  }
+
   /** Right side wrapped in SubqueryAlias still rewrites — alias unwrapping happens in the rule. */
   @Test def testSubqueryAliasOnRightStillRewrites(): Unit = {
     spark.conf.set(IndexedNearestByJoinRule.EnabledConfKey, "true")
@@ -442,7 +481,7 @@ class IndexedNearestByJoinRuleTest {
     val left = trivialPlan("lid", "lvec")
     val schema = new StructType(Array(
       StructField("rid", IntegerType, nullable = false),
-      StructField("rvec", ArrayType(FloatType, containsNull = false), nullable = false)))
+      fixedSizeVectorField("rvec", 8)))
     val uri = tempDir.resolve("branch_lance").toString
     val table = new FakeLanceTable(schema, uri)
     val opts = new java.util.HashMap[String, String]()
@@ -500,6 +539,21 @@ class IndexedNearestByJoinRuleTest {
   }
 
   /**
+   * A `StructField` shaped exactly like the connector emits for a searchable Lance fixed-size-list
+   * vector column: `ArrayType(FloatType)` carrying the canonical `arrow.fixed-size-list.size`
+   * metadata key. `IndexedNearestByJoinRule` gates the rewrite on this marker (via
+   * `VectorUtils.isVectorField`), so the rule's rewrite-path scaffolds must stamp it — a plain
+   * `ArrayType(FloatType)` without it is a variable-length list Lance cannot search, and must fall
+   * through (see `variableListVectorFallsBackInsteadOfFailing`).
+   */
+  private def fixedSizeVectorField(name: String, dim: Int): StructField =
+    StructField(
+      name,
+      ArrayType(FloatType, containsNull = false),
+      nullable = false,
+      new MetadataBuilder().putLong("arrow.fixed-size-list.size", dim.toLong).build())
+
+  /**
    * Build a `DataSourceV2Relation` backed by a `FakeLanceTable` (a real connector `LanceDataset`
    * subclass) so the rule's `instanceof LanceDataset` check accepts it. We don't run any I/O — the
    * `LanceDataset` constructor only stores its options + schema. Includes a `category` (string) and
@@ -511,7 +565,7 @@ class IndexedNearestByJoinRuleTest {
       StructField("rid", IntegerType, nullable = false),
       StructField("category", StringType, nullable = true),
       StructField("bucket", IntegerType, nullable = true),
-      StructField("rvec", ArrayType(FloatType, containsNull = false), nullable = false)))
+      fixedSizeVectorField("rvec", 8)))
     val uri = tempDir.resolve("fake_lance").toString
     val table = new FakeLanceTable(schema, uri)
     val opts = new java.util.HashMap[String, String]()
