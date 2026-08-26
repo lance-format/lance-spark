@@ -1138,6 +1138,134 @@ class TestDDLIndex:
         assert len(query_result) == 1
         assert query_result[0].id == 50
 
+    def test_refresh_index_covers_appended_fragments(self, spark):
+        """Test REFRESH INDEX indexes only the fragments added after index creation."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING,
+                value DOUBLE
+            )
+        """)
+
+        def append(start, end):
+            data = [(i, f"Name{i}", float(i * 10)) for i in range(start, end)]
+            df = spark.createDataFrame(data, ["id", "name", "value"])
+            df.coalesce(1).writeTo("default.test_table").append()
+
+        append(0, 50)
+        spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX idx_id USING zonemap (id)
+        """)
+
+        indexed = spark.sql("SHOW INDEXES IN default.test_table").collect()[0]
+        assert indexed["num_unindexed_fragments"] == 0
+        assert indexed["indexed_percent"] == 100.0
+
+        # Two more fragments leave the index behind
+        append(50, 100)
+        append(100, 150)
+
+        stale = spark.sql("SHOW INDEXES IN default.test_table").collect()[0]
+        assert stale["num_unindexed_fragments"] == 2
+        assert stale["indexed_percent"] < 100.0
+
+        result = spark.sql("""
+            ALTER TABLE default.test_table REFRESH INDEX idx_id
+        """).collect()
+        assert len(result) == 1
+        assert result[0]["fragments_indexed"] == 2
+        assert result[0]["segments_added"] >= 1
+        assert result[0]["index_name"] == "idx_id"
+
+        refreshed = spark.sql("SHOW INDEXES IN default.test_table").collect()[0]
+        assert refreshed["num_unindexed_fragments"] == 0
+        assert refreshed["indexed_percent"] == 100.0
+
+        # Data in the newly indexed fragments stays queryable
+        assert spark.table("default.test_table").count() == 150
+        query_result = spark.sql("""
+            SELECT * FROM default.test_table WHERE id = 125
+        """).collect()
+        assert len(query_result) == 1
+        assert query_result[0].id == 125
+
+    def test_refresh_index_is_noop_when_fully_indexed(self, spark):
+        """Test REFRESH INDEX reports no work when the index already covers the table."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING,
+                value DOUBLE
+            )
+        """)
+
+        data = [(i, f"Name{i}", float(i * 10)) for i in range(100)]
+        df = spark.createDataFrame(data, ["id", "name", "value"])
+        df.writeTo("default.test_table").append()
+
+        spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX idx_id USING btree (id)
+        """)
+
+        result = spark.sql("""
+            ALTER TABLE default.test_table REFRESH INDEX idx_id
+        """).collect()
+        assert result[0]["fragments_indexed"] == 0
+        assert result[0]["segments_added"] == 0
+
+    def test_refresh_index_populates_deferred_index(self, spark):
+        """Test REFRESH INDEX builds an index registered with train = false."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING,
+                value DOUBLE
+            )
+        """)
+
+        data = [(i, f"Name{i}", float(i * 10)) for i in range(100)]
+        df = spark.createDataFrame(data, ["id", "name", "value"])
+        df.writeTo("default.test_table").append()
+
+        spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX idx_id USING zonemap (id) WITH (train = false)
+        """)
+
+        deferred = spark.sql("SHOW INDEXES IN default.test_table").collect()[0]
+        assert deferred["num_indexed_rows"] == 0
+
+        result = spark.sql("""
+            ALTER TABLE default.test_table REFRESH INDEX idx_id
+        """).collect()
+        assert result[0]["fragments_indexed"] >= 1
+
+        populated = spark.sql("SHOW INDEXES IN default.test_table").collect()[0]
+        assert populated["num_unindexed_rows"] == 0
+        assert populated["indexed_percent"] == 100.0
+
+    def test_refresh_index_rejects_unknown_index(self, spark):
+        """Test REFRESH INDEX fails with an actionable message for a missing index."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING,
+                value DOUBLE
+            )
+        """)
+
+        data = [(i, f"Name{i}", float(i * 10)) for i in range(10)]
+        df = spark.createDataFrame(data, ["id", "name", "value"])
+        df.writeTo("default.test_table").append()
+
+        with pytest.raises(Exception, match="does not exist"):
+            spark.sql("""
+                ALTER TABLE default.test_table REFRESH INDEX missing_idx
+            """).collect()
+
 
 class TestDDLOptimize:
     """Test DDL OPTIMIZE operations for compacting table fragments."""

@@ -54,12 +54,28 @@ The `SHOW INDEXES` command returns the following columns:
 | `num_indexed_rows`      | long          | Approximate number of rows covered by the index.                   |
 | `num_unindexed_fragments` | long        | Number of fragments that are not yet indexed.                      |
 | `num_unindexed_rows`    | long          | Approximate number of rows that are not yet covered by the index.  |
+| `indexed_percent`       | double        | Share of rows the index covers, as a percentage truncated to two decimals, so it never overstates coverage. Null for an empty table. |
+| `num_segments`          | long          | Number of physical index segments backing this logical index.       |
+| `size_bytes`            | long          | Total size of all index files across the segments. Null if any segment predates index file size tracking. |
+
+## Interpreting the Output
+
+An `indexed_percent` below 100 means rows have been appended since the index was last built, and
+queries filtering on the indexed column fall back to scanning those fragments. Use
+[REFRESH INDEX](./refresh-index.md) to index just the uncovered fragments.
+
+`num_segments` reflects how the index was built: a distributed build produces one segment per
+parallel task, and each [REFRESH INDEX](./refresh-index.md) adds more, since a refresh appends
+coverage rather than rewriting existing segments. Queries search every segment, so rebuilding with
+[CREATE INDEX](./create-index.md) consolidates them when the count gets high.
 
 ## Notes
 
 - The `fields` column returns the logical column names from the Lance schema, ordered according to the index definition.
 - Lance-maintained system indexes, including fragment-reuse and MemWAL indexes, are excluded from the output.
+- Row counts are approximate, so `indexed_percent` is a guide rather than an exact figure.
 
 ## See Also
 
 - [CREATE INDEX](./create-index.md)
+- [REFRESH INDEX](./refresh-index.md)

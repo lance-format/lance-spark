@@ -18,6 +18,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode
 import org.apache.arrow.c.{ArrowArrayStream, Data}
 import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.arrow.vector.ipc.ArrowReader
+import org.apache.spark.SparkContext
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
@@ -27,7 +28,7 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.LanceArrowUtils
 import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
 import org.apache.spark.unsafe.types.UTF8String
-import org.lance.{CommitBuilder, Dataset, Transaction}
+import org.lance.Dataset
 import org.lance.index.{Index, IndexOptions, IndexParams, IndexType}
 import org.lance.index.scalar.{BTreeIndexParams, ScalarIndexParams}
 import org.lance.operation.{CreateIndex => AddIndexOperation}
@@ -37,7 +38,7 @@ import org.lance.spark.arrow.LanceArrowWriter
 import org.lance.spark.utils.{CloseableUtil, FieldPathUtils, Utils}
 import org.lance.spark.write.SingleBatchArrowReader
 
-import java.util.{Collections, Locale, UUID}
+import java.util.{Locale, UUID}
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.{ArrayBuffer, PriorityQueue}
@@ -88,7 +89,11 @@ case class AddIndexExec(
     val btreeBuildMode = IndexUtils.btreeBuildMode(indexType, args)
     val scalarSegmentIndexType = IndexUtils.scalarSegmentIndexType(method)
 
-    val (fragmentWorkloads, canonicalColumns) = {
+    // Plan and build against a single pinned version. Tasks open the dataset themselves, so
+    // without pinning each one resolves the latest version instead of the one the driver planned
+    // over: a concurrent OPTIMIZE can retire a planned fragment, leaving a segment whose coverage
+    // intersects to nothing at commit time while the command still reports it as indexed.
+    val (fragmentWorkloads, canonicalColumns, buildReadOptions) = {
       val ds = Utils.openDatasetBuilder(readOptions).build()
       try {
         val canonical = columns.map { column =>
@@ -99,7 +104,8 @@ case class AddIndexExec(
           ds.getFragments.asScala
             .map(fragment => FragmentWorkload(fragment.getId, fragment.metadata().getNumRows))
             .toList,
-          canonical)
+          canonical,
+          IndexUtils.pinVersion(readOptions, ds))
       } finally {
         ds.close()
       }
@@ -126,22 +132,7 @@ case class AddIndexExec(
       throw new IllegalArgumentException(
         "num_segments is not supported with train=false: a deferred index performs no segmented build")
     }
-    val validatedNumSegments: Option[Int] = numSegmentsOpt.map { arg =>
-      arg.value match {
-        case null =>
-          throw new IllegalArgumentException(
-            "num_segments must be a positive integer, got: null")
-        case n: Number =>
-          val asLong = n.longValue()
-          if (asLong < 1L || asLong > Int.MaxValue)
-            throw new IllegalArgumentException(
-              s"num_segments must be a positive integer that fits in Int, got: $asLong")
-          asLong.toInt
-        case other =>
-          throw new IllegalArgumentException(
-            s"num_segments must be a positive integer, got: $other")
-      }
-    }
+    val validatedNumSegments: Option[Int] = numSegmentsOpt.map(IndexUtils.parseNumSegments)
 
     // train=false, or an empty table: commit an empty index on the driver and skip data
     // processing. Index and option validation above still applies to empty tables.
@@ -161,19 +152,19 @@ case class AddIndexExec(
     }
 
     val (nsImpl, nsProps, tableId, initialStorageOpts) =
-      extractNamespaceInfo(lanceDataset, readOptions)
+      IndexUtils.extractNamespaceInfo(catalog, lanceDataset, readOptions)
 
     // Range-mode BTree uses preprocessed data from Spark and keeps its dedicated path.
     if (btreeBuildMode.contains("range")) {
       val segments = new RangeBasedBTreeIndexJob(
         this.copy(columns = canonicalColumns),
-        readOptions,
+        buildReadOptions,
         fragmentIds.size,
         nsImpl,
         nsProps,
         tableId,
         initialStorageOpts).run()
-      commitIndexSegments(readOptions, canonicalColumns.head, segments)
+      commitIndexSegments(readOptions, canonicalColumns.head, segments, fragmentIds)
       return Seq(new GenericInternalRow(Array[Any](
         fragmentIds.size.toLong,
         UTF8String.fromString(indexName))))
@@ -182,8 +173,11 @@ case class AddIndexExec(
     // Scalar segment indexes use the logical segment commit path.
     if (scalarSegmentIndexType.isDefined) {
       val segmentJob = new ScalarSegmentIndexJob(
-        this.copy(columns = canonicalColumns),
-        readOptions,
+        session.sparkContext,
+        method,
+        canonicalColumns.toList,
+        IndexUtils.toJson(args),
+        buildReadOptions,
         fragmentWorkloads,
         validatedNumSegments,
         nsImpl,
@@ -192,7 +186,7 @@ case class AddIndexExec(
         initialStorageOpts)
       val segments = segmentJob.run()
       // Atomic add+remove via Lance core; see commitIndexSegments
-      commitIndexSegments(readOptions, canonicalColumns.head, segments)
+      commitIndexSegments(readOptions, canonicalColumns.head, segments, fragmentIds)
       return Seq(new GenericInternalRow(Array[Any](
         fragmentIds.size.toLong,
         UTF8String.fromString(indexName))))
@@ -234,33 +228,17 @@ case class AddIndexExec(
   private def commitIndexSegments(
       readOptions: LanceSparkReadOptions,
       column: String,
-      segments: Seq[Index]): Unit = {
+      segments: Seq[Index],
+      plannedFragmentIds: Seq[Integer]): Unit = {
     val dataset = Utils.openDatasetBuilder(readOptions).build()
     try {
+      IndexUtils.requireFragmentsLive(dataset, plannedFragmentIds, indexName)
       dataset.commitExistingIndexSegments(
         indexName,
         column,
         segments.toList.asJava)
     } finally {
       dataset.close()
-    }
-  }
-
-  private def extractNamespaceInfo(
-      lanceDataset: LanceDataset,
-      readOptions: LanceSparkReadOptions): (
-      Option[String],
-      Option[Map[String, String]],
-      Option[List[String]],
-      Option[Map[String, String]]) = {
-    catalog match {
-      case nsCatalog: BaseLanceNamespaceSparkCatalog =>
-        (
-          Option(nsCatalog.getNamespaceImpl),
-          Option(nsCatalog.getNamespaceProperties).map(_.asScala.toMap),
-          Option(readOptions.getTableId).map(_.asScala.toList),
-          Option(lanceDataset.getInitialStorageOptions).map(_.asScala.toMap))
-      case _ => (None, None, None, None)
     }
   }
 
@@ -275,6 +253,10 @@ case class AddIndexExec(
  * set of fragments, sorted by the indexed value. Each partition becomes one uncommitted segment
  * covering exactly those fragments, so the resulting segments have disjoint fragment coverage and
  * can be committed directly as a single logical index.
+ *
+ * Unlike the segmented path, coverage here is derived from the fragment ids present in the scanned
+ * rows rather than from a fragment list fixed at planning time. The scan goes back through the
+ * catalog, so it is not pinned to the planning version.
  *
  * @param addIndexExec       The AddIndexExec instance that initiated this job
  * @param readOptions        Configuration options for reading the Lance dataset
@@ -471,9 +453,15 @@ case class RangeBTreeIndexBuilder(
  * A job implementation for creating scalar segment indexes using logical segment commit.
  * Fragments are batched into segments, each built in parallel, and committed
  * as a logical index on the driver.
+ *
+ * Shared by CREATE INDEX, which passes every fragment, and REFRESH INDEX, which passes only the
+ * fragments an existing index does not cover.
  */
 class ScalarSegmentIndexJob(
-    addIndexExec: AddIndexExec,
+    sc: SparkContext,
+    method: String,
+    columns: List[String],
+    argsJson: String,
     readOptions: LanceSparkReadOptions,
     fragmentWorkloads: List[FragmentWorkload],
     numSegments: Option[Int],
@@ -483,23 +471,21 @@ class ScalarSegmentIndexJob(
     initialStorageOpts: Option[Map[String, String]]) {
 
   def run(): Seq[Index] = {
-    val indexType = IndexUtils.scalarSegmentIndexType(addIndexExec.method).getOrElse {
+    val indexType = IndexUtils.scalarSegmentIndexType(method).getOrElse {
       throw new UnsupportedOperationException(
-        s"Unsupported Lance index method: ${addIndexExec.method}")
+        s"Unsupported Lance index method: $method")
     }
     val encodedReadOptions = encode(readOptions)
-    val columns = addIndexExec.columns.toList
-    val argsJson = IndexUtils.toJson(addIndexExec.args)
     val fragmentBatches = IndexUtils.batchFragments(
       fragmentWorkloads,
       numSegments,
-      addIndexExec.session.sparkContext.defaultParallelism)
+      sc.defaultParallelism)
 
     val tasks = fragmentBatches.map { batch =>
       ScalarSegmentIndexTask(
         encodedReadOptions,
         columns,
-        addIndexExec.method,
+        method,
         argsJson,
         batch,
         nsImpl,
@@ -509,7 +495,7 @@ class ScalarSegmentIndexJob(
     }.toSeq
 
     IndexUtils.runSegmentTasks(
-      addIndexExec.session.sparkContext,
+      sc,
       tasks,
       s"${indexType.name()} index build failed. Uncommitted segments are not " +
         "visible to readers and will not affect query correctness.")(_.execute())
@@ -614,10 +600,111 @@ object IndexUtils extends Logging {
     IndexType.RTREE -> "rtree",
     IndexType.INVERTED -> "inverted")
 
+  // Reverse of `methodToIndexTypes`, for commands that resolve an already-created index and need
+  // the method name back. INVERTED maps to the canonical "fts" spelling rather than its alias.
+  private val methodByIndexType: Map[IndexType, String] = Map(
+    IndexType.BTREE -> "btree",
+    IndexType.ZONEMAP -> "zonemap",
+    IndexType.BITMAP -> "bitmap",
+    IndexType.LABEL_LIST -> "label_list",
+    IndexType.NGRAM -> "ngram",
+    IndexType.BLOOM_FILTER -> "bloomfilter",
+    IndexType.RTREE -> "rtree",
+    IndexType.INVERTED -> "fts")
+
   def scalarSegmentIndexType(method: String): Option[IndexType] =
     methodToIndexTypes
       .get(method.toLowerCase(Locale.ROOT))
       .filter(scalarSegmentIndexTypes.contains)
+
+  /** The SQL method name for an index type that supports segmented builds, if any. */
+  def methodForIndexType(indexType: IndexType): Option[String] =
+    Option(indexType).filter(scalarSegmentIndexTypes.contains).flatMap(methodByIndexType.get)
+
+  private val SystemIndexNames: Set[String] = Set("__lance_frag_reuse", "__lance_mem_wal")
+
+  /** True for indexes Lance maintains itself, which user commands must not target. */
+  def isSystemIndex(indexName: String): Boolean =
+    indexName != null && SystemIndexNames.exists(_.equalsIgnoreCase(indexName))
+
+  /** Parses and range-checks the `num_segments` option shared by the segmented build paths. */
+  def parseNumSegments(arg: LanceNamedArgument): Int = arg.value match {
+    case null =>
+      throw new IllegalArgumentException("num_segments must be a positive integer, got: null")
+    case n: Number =>
+      val asLong = n.longValue()
+      if (asLong < 1L || asLong > Int.MaxValue) {
+        throw new IllegalArgumentException(
+          s"num_segments must be a positive integer that fits in Int, got: $asLong")
+      }
+      asLong.toInt
+    case other =>
+      throw new IllegalArgumentException(s"num_segments must be a positive integer, got: $other")
+  }
+
+  /**
+   * Pins `readOptions` to the version `dataset` is open at.
+   *
+   * Distributed index builds hand read options to tasks that open the dataset themselves. Pinning
+   * makes every task observe the fragment set the driver planned over instead of resolving the
+   * latest version independently.
+   */
+  def pinVersion(
+      readOptions: LanceSparkReadOptions,
+      dataset: Dataset): LanceSparkReadOptions =
+    readOptions.withRef(Utils.pinOpenedRef(dataset, readOptions.getRef))
+
+  /**
+   * Fails if any planned fragment is no longer part of `dataset`.
+   *
+   * A segment declares the fragments it covers, and commit intersects that declaration with the
+   * dataset's live fragments. A fragment retired by a concurrent OPTIMIZE therefore contributes no
+   * coverage, so committing would silently drop it while the command still reported it as indexed.
+   */
+  def requireFragmentsLive(
+      dataset: Dataset,
+      plannedFragmentIds: Seq[Integer],
+      indexName: String): Unit =
+    requireFragmentsLive(
+      dataset.getFragments.asScala.map(_.getId).toSet,
+      plannedFragmentIds,
+      indexName)
+
+  /** Dataset-free form of [[requireFragmentsLive]], for callers that already listed fragments. */
+  def requireFragmentsLive(
+      liveFragmentIds: Set[Int],
+      plannedFragmentIds: Seq[Integer],
+      indexName: String): Unit = {
+    val retired = plannedFragmentIds.filterNot(id => liveFragmentIds.contains(id.intValue))
+    if (retired.nonEmpty) {
+      val shown = retired.take(10).map(_.toString).mkString(", ")
+      val suffix = if (retired.size > 10) s", ... (${retired.size} total)" else ""
+      throw new IllegalStateException(
+        s"Index '$indexName' build raced a concurrent operation: fragments $shown$suffix " +
+          "were retired after the build was planned, so their segments would cover nothing. " +
+          "No index change was committed; re-run the command.")
+    }
+  }
+
+  /** Namespace and storage context that tasks need to reopen the dataset on an executor. */
+  def extractNamespaceInfo(
+      catalog: TableCatalog,
+      lanceDataset: LanceDataset,
+      readOptions: LanceSparkReadOptions): (
+      Option[String],
+      Option[Map[String, String]],
+      Option[List[String]],
+      Option[Map[String, String]]) = {
+    catalog match {
+      case nsCatalog: BaseLanceNamespaceSparkCatalog =>
+        (
+          Option(nsCatalog.getNamespaceImpl),
+          Option(nsCatalog.getNamespaceProperties).map(_.asScala.toMap),
+          Option(readOptions.getTableId).map(_.asScala.toList),
+          Option(lanceDataset.getInitialStorageOptions).map(_.asScala.toMap))
+      case _ => (None, None, None, None)
+    }
+  }
 
   def resolveIndexField(
       schema: LanceSchema,
@@ -634,7 +721,7 @@ object IndexUtils extends Logging {
    * Extracts the `train` option from named arguments, defaulting to `true`.
    *
    * When `train=false`, index creation registers an empty index without processing any data.
-   * All existing rows will be unindexed and covered by a subsequent OPTIMIZE INDEX call.
+   * All existing rows are left unindexed until a subsequent REFRESH INDEX covers them.
    */
   def extractTrain(args: Seq[LanceNamedArgument]): Boolean =
     args.find(_.name == "train") match {
@@ -715,7 +802,7 @@ object IndexUtils extends Logging {
   }
 
   def runSegmentTasks[T <: Serializable: ClassTag](
-      sc: org.apache.spark.SparkContext,
+      sc: SparkContext,
       tasks: Seq[T],
       failureMessage: String)(execute: T => String): Seq[Index] = {
     if (tasks.isEmpty) {

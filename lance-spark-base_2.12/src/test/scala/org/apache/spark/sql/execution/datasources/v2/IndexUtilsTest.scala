@@ -26,6 +26,9 @@ import org.lance.index.IndexType
  */
 class IndexUtilsTest {
 
+  private def fragmentIds(ids: Int*): Seq[Integer] =
+    ids.map(java.lang.Integer.valueOf)
+
   private def fragmentWorkloads(rows: Long*): List[FragmentWorkload] =
     rows.zipWithIndex.map { case (rowCount, fragmentId) =>
       FragmentWorkload(java.lang.Integer.valueOf(fragmentId), rowCount)
@@ -256,5 +259,129 @@ class IndexUtilsTest {
     assertThrows(
       classOf[ArithmeticException],
       () => IndexUtils.batchFragments(fragmentWorkloads(Long.MaxValue, 1), Some(1), 1))
+  }
+
+  // ── methodForIndexType ────────────────────────────────────────────────────
+
+  @Test
+  def methodForIndexType_roundTripsEverySegmentBuildableType(): Unit = {
+    val types = Seq(
+      IndexType.BTREE,
+      IndexType.ZONEMAP,
+      IndexType.BITMAP,
+      IndexType.LABEL_LIST,
+      IndexType.NGRAM,
+      IndexType.BLOOM_FILTER,
+      IndexType.RTREE,
+      IndexType.INVERTED)
+
+    types.foreach { indexType =>
+      val method = IndexUtils.methodForIndexType(indexType)
+      assertTrue(method.isDefined, s"expected a method name for $indexType")
+      assertEquals(
+        Some(indexType),
+        IndexUtils.scalarSegmentIndexType(method.get),
+        s"method '${method.get}' should resolve back to $indexType")
+    }
+  }
+
+  @Test
+  def methodForIndexType_mapsInvertedToCanonicalFtsSpelling(): Unit = {
+    assertEquals(Some("fts"), IndexUtils.methodForIndexType(IndexType.INVERTED))
+  }
+
+  @Test
+  def methodForIndexType_returnsNoneForVectorType(): Unit = {
+    assertEquals(None, IndexUtils.methodForIndexType(IndexType.VECTOR))
+  }
+
+  @Test
+  def methodForIndexType_returnsNoneForNull(): Unit = {
+    assertEquals(None, IndexUtils.methodForIndexType(null))
+  }
+
+  // ── isSystemIndex ─────────────────────────────────────────────────────────
+
+  @Test
+  def isSystemIndex_matchesLanceMaintainedIndexesCaseInsensitively(): Unit = {
+    assertTrue(IndexUtils.isSystemIndex("__lance_frag_reuse"))
+    assertTrue(IndexUtils.isSystemIndex("__LANCE_MEM_WAL"))
+  }
+
+  @Test
+  def isSystemIndex_rejectsUserIndexesAndNull(): Unit = {
+    assertFalse(IndexUtils.isSystemIndex("idx_id"))
+    assertFalse(IndexUtils.isSystemIndex(null))
+  }
+
+  // ── requireFragmentsLive ──────────────────────────────────────────────────
+
+  @Test
+  def requireFragmentsLive_acceptsPlanCoveredByLiveFragments(): Unit = {
+    IndexUtils.requireFragmentsLive(Set(0, 1, 2), fragmentIds(0, 2), "idx_id")
+  }
+
+  @Test
+  def requireFragmentsLive_acceptsEmptyPlan(): Unit = {
+    IndexUtils.requireFragmentsLive(Set.empty[Int], Seq.empty, "idx_id")
+  }
+
+  @Test
+  def requireFragmentsLive_rejectsRetiredFragmentAndNamesIt(): Unit = {
+    val error = assertThrows(
+      classOf[IllegalStateException],
+      () => IndexUtils.requireFragmentsLive(Set(0, 1), fragmentIds(0, 7), "idx_id"))
+
+    assertTrue(error.getMessage.contains("idx_id"), error.getMessage)
+    assertTrue(error.getMessage.contains("7"), error.getMessage)
+    assertTrue(error.getMessage.contains("re-run"), error.getMessage)
+  }
+
+  @Test
+  def requireFragmentsLive_summarizesLargeRetiredSets(): Unit = {
+    val error = assertThrows(
+      classOf[IllegalStateException],
+      () => IndexUtils.requireFragmentsLive(Set.empty[Int], fragmentIds((0 to 20): _*), "idx_id"))
+
+    assertTrue(error.getMessage.contains("21 total"), error.getMessage)
+  }
+
+  // ── parseNumSegments ──────────────────────────────────────────────────────
+
+  @Test
+  def parseNumSegments_acceptsPositiveIntegers(): Unit = {
+    assertEquals(
+      8,
+      IndexUtils.parseNumSegments(LanceNamedArgument("num_segments", java.lang.Long.valueOf(8))))
+  }
+
+  @Test
+  def parseNumSegments_rejectsNonPositiveValues(): Unit = {
+    Seq(0L, -1L).foreach { value =>
+      assertThrows(
+        classOf[IllegalArgumentException],
+        () =>
+          IndexUtils.parseNumSegments(
+            LanceNamedArgument("num_segments", java.lang.Long.valueOf(value))))
+    }
+  }
+
+  @Test
+  def parseNumSegments_rejectsValuesWiderThanInt(): Unit = {
+    assertThrows(
+      classOf[IllegalArgumentException],
+      () =>
+        IndexUtils.parseNumSegments(
+          LanceNamedArgument("num_segments", java.lang.Long.valueOf(Int.MaxValue.toLong + 1))))
+  }
+
+  @Test
+  def parseNumSegments_rejectsNonNumericAndNullValues(): Unit = {
+    assertThrows(
+      classOf[IllegalArgumentException],
+      () => IndexUtils.parseNumSegments(LanceNamedArgument("num_segments", "eight")))
+    assertThrows(
+      classOf[IllegalArgumentException],
+      () => IndexUtils.parseNumSegments(LanceNamedArgument("num_segments", null)))
   }
 }

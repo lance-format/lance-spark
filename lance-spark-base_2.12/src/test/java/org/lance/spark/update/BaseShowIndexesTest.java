@@ -112,7 +112,7 @@ public abstract class BaseShowIndexesTest {
     Dataset<Row> result = spark.sql(String.format("show indexes from %s", fullTable));
 
     Assertions.assertEquals(
-        "StructType(StructField(name,StringType,true),StructField(fields,ArrayType(StringType,true),true),StructField(index_type,StringType,true),StructField(num_indexed_fragments,LongType,true),StructField(num_indexed_rows,LongType,true),StructField(num_unindexed_fragments,LongType,true),StructField(num_unindexed_rows,LongType,true))",
+        "StructType(StructField(name,StringType,true),StructField(fields,ArrayType(StringType,true),true),StructField(index_type,StringType,true),StructField(num_indexed_fragments,LongType,true),StructField(num_indexed_rows,LongType,true),StructField(num_unindexed_fragments,LongType,true),StructField(num_unindexed_rows,LongType,true),StructField(indexed_percent,DoubleType,true),StructField(num_segments,LongType,true),StructField(size_bytes,LongType,true))",
         result.schema().toString());
 
     List<Row> rows = result.collectAsList();
@@ -138,6 +138,15 @@ public abstract class BaseShowIndexesTest {
     // num_indexed_rows should be at least 1
     long numIndexedRows = row.getLong(4);
     Assertions.assertTrue(numIndexedRows >= 1L, "num_indexed_rows should be at least 1");
+
+    // a freshly created index covers every row
+    Assertions.assertEquals(100.0d, row.getDouble(7), 1e-9, "indexed_percent should be 100");
+
+    // one logical index backed by at least one physical segment
+    Assertions.assertTrue(row.getLong(8) >= 1L, "num_segments should be at least 1");
+
+    // a built index occupies storage
+    Assertions.assertTrue(row.getLong(9) > 0L, "size_bytes should be positive");
   }
 
   @Test
