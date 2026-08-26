@@ -14,6 +14,10 @@
 package org.lance.spark.update;
 
 import org.lance.index.Index;
+import org.lance.index.IndexOptions;
+import org.lance.index.IndexParams;
+import org.lance.index.IndexType;
+import org.lance.index.scalar.ScalarIndexParams;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Utils;
 
@@ -27,6 +31,7 @@ import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -593,6 +598,62 @@ public abstract class BaseRefreshIndexTest {
         1L,
         spark.sql(String.format("select * from %s where id = 25", fullTable)).count(),
         "Rows must stay reachable through the compacted fragments");
+  }
+
+  /**
+   * A segment commit must not resurrect an index that was dropped after the commit handle was
+   * opened.
+   *
+   * <p>{@code RefreshIndexExec} re-resolves the index on its commit handle, which closes the wide
+   * window — the whole distributed build — but the check and the commit are still two operations.
+   * Lance's rebase treats a concurrent {@code CreateIndex} as conflicting only when the *other*
+   * transaction also carries {@code new_indices}, and a drop carries only {@code removed_indices},
+   * so a drop landing inside that window is rebased over rather than rejected. The resurrected
+   * index then holds only the segments the refresh built, i.e. partial coverage.
+   *
+   * <p>This exercises the core primitive directly, because that is where the guarantee has to come
+   * from: any connector-side check has the same race, and {@code commitExistingIndexSegments} takes
+   * no expected predecessor.
+   */
+  @Test
+  @Disabled(
+      "blocked on Lance core: rebase does not treat a concurrent same-name index drop as a"
+          + " conflict. Fixed upstream by lance-format/lance#6806; enable once that is released and"
+          + " pinned.")
+  public void testStaleSegmentCommitDoesNotResurrectDroppedIndex() {
+    createTable();
+    appendFragment(0, 10);
+    createZonemapIndex();
+    appendFragment(10, 20);
+
+    LanceSparkReadOptions readOptions = LanceSparkReadOptions.from(tableDir);
+    try (org.lance.Dataset commitDataset = Utils.openDatasetBuilder(readOptions).build()) {
+      int appendedFragmentId =
+          commitDataset.getFragments().get(commitDataset.getFragments().size() - 1).getId();
+      IndexParams indexParams =
+          IndexParams.builder()
+              .setScalarIndexParams(ScalarIndexParams.create("zonemap", "{}"))
+              .build();
+      Index segment =
+          commitDataset.createIndex(
+              IndexOptions.builder(Collections.singletonList("id"), IndexType.ZONEMAP, indexParams)
+                  .withIndexName("idx_id")
+                  .replace(true)
+                  .withFragmentIds(Collections.singletonList(appendedFragmentId))
+                  .build());
+
+      // The drop commits on its own handle, leaving the one above holding a stale manifest.
+      try (org.lance.Dataset dropDataset = Utils.openDatasetBuilder(readOptions).build()) {
+        dropDataset.dropIndex("idx_id");
+      }
+      Assertions.assertTrue(segments().isEmpty(), "The drop should have taken effect");
+
+      commitDataset.commitExistingIndexSegments("idx_id", "id", Collections.singletonList(segment));
+    }
+
+    Assertions.assertTrue(
+        segments().isEmpty(),
+        "A stale segment commit must not resurrect a concurrently dropped index");
   }
 
   private void createTable() {

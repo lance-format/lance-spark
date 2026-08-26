@@ -192,6 +192,12 @@ rebuild is the fix there.
   building it, that fragment is left out of the commit and named in a warning, and
   `fragments_indexed` counts only what was covered. Re-run the refresh to pick up whatever replaced
   it. A refresh whose fragments were *all* retired commits nothing and fails instead.
+- **Concurrent `DROP INDEX`**: do not drop an index while a refresh of it is in flight. The refresh
+  re-resolves its target immediately before committing and fails if it is gone, but the check and the
+  commit are separate transactions and Lance does not currently treat a concurrent same-name drop as
+  a conflict. A `DROP INDEX` landing in that window is undone: the index reappears covering only the
+  fragments the refresh built. Tracked upstream in
+  [lance#6806](https://github.com/lance-format/lance/pull/6806).
 - **Segment Growth**: each refresh adds segments to the index, and Lance can only compact fragments
   that are covered by the identical set of index segments. So accumulated refreshes progressively
   narrow what [OPTIMIZE](./optimize.md) can group: run `OPTIMIZE` before `REFRESH INDEX` rather than
