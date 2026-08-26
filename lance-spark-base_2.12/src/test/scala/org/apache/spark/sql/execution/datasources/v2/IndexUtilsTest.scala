@@ -346,6 +346,76 @@ class IndexUtilsTest {
       IndexUtils.batchFragments(fragments, Some(2), 4))
   }
 
+  private def workloads(batches: Seq[List[Integer]], rows: Seq[Long]): Seq[Long] =
+    batches.map(_.map(id => rows(id.intValue)).sum)
+
+  /** Smallest achievable heaviest batch over all contiguous partitions into `segmentCount` runs. */
+  private def optimalHeaviestBatch(rows: Seq[Long], segmentCount: Int): Long = {
+    def best(from: Int, runs: Int): Long =
+      if (runs == 1) {
+        rows.drop(from).sum
+      } else {
+        (from until rows.size - runs + 1).map { cut =>
+          math.max(rows.slice(from, cut + 1).sum, best(cut + 1, runs - 1))
+        }.min
+      }
+    best(0, segmentCount)
+  }
+
+  /**
+   * The heaviest batch has to be as light as a contiguous partition allows. This workload is the
+   * counter-example that sank an earlier prefix-crossing heuristic: it cut after the three
+   * indivisible leading fragments had already overshot their even shares, leaving one batch of 162
+   * where 95 is forced by fragment 0 alone.
+   */
+  @Test
+  def batchFragments_minimisesTheHeaviestBatch(): Unit = {
+    val rows = Seq(95L, 93L, 89L, 8L, 1L, 4L, 74L, 88L, 38L)
+    val fragments = rows.zipWithIndex.map { case (count, fragmentId) =>
+      FragmentWorkload(java.lang.Integer.valueOf(fragmentId), count)
+    }.toList
+
+    val batches = IndexUtils.batchFragments(fragments, Some(6), 1)
+
+    assertEquals(6, batches.size)
+    assertContiguousBatches(batches)
+    assertEquals(
+      95L,
+      workloads(batches, rows).max,
+      s"expected the optimal heaviest batch, got ${workloads(batches, rows)}")
+  }
+
+  /**
+   * Optimality is checked against every contiguous partition rather than against a fixed expected
+   * split, so the property is pinned instead of one of its consequences.
+   */
+  @Test
+  def batchFragments_matchesTheOptimalContiguousPartition(): Unit = {
+    val workloadShapes = Seq(
+      Seq(95L, 93L, 89L, 8L, 1L, 4L, 74L, 88L, 38L),
+      Seq(100L, 1L, 1L, 1L, 1L, 1L),
+      Seq(1L, 1L, 1L, 1L, 1L, 100L),
+      Seq(5L, 9L, 2L, 7L, 3L, 8L, 1L, 6L),
+      Seq(7L, 7L, 7L, 7L, 7L, 7L, 7L),
+      Seq(50L, 1L, 50L, 1L, 50L, 1L, 50L),
+      Seq(0L, 0L, 5L, 0L, 0L))
+
+    workloadShapes.foreach { rows =>
+      val fragments = rows.zipWithIndex.map { case (count, fragmentId) =>
+        FragmentWorkload(java.lang.Integer.valueOf(fragmentId), count)
+      }.toList
+      (1 to rows.size).foreach { segmentCount =>
+        val batches = IndexUtils.batchFragments(fragments, Some(segmentCount), 1)
+        assertEquals(segmentCount, batches.size, s"$rows into $segmentCount")
+        assertContiguousBatches(batches)
+        assertEquals(
+          optimalHeaviestBatch(rows, segmentCount),
+          workloads(batches, rows).max,
+          s"$rows into $segmentCount batches: got ${workloads(batches, rows)}")
+      }
+    }
+  }
+
   @Test
   def batchFragments_rejectsWorkloadOverflow(): Unit = {
     assertThrows(

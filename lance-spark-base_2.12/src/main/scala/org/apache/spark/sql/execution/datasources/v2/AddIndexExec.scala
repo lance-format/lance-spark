@@ -41,6 +41,7 @@ import org.lance.spark.write.SingleBatchArrowReader
 import java.util.{Collections, Locale, UUID}
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable.{ArrayBuffer, PriorityQueue}
 import scala.reflect.ClassTag
 
 /**
@@ -969,15 +970,17 @@ object IndexUtils extends Logging {
   }
 
   /**
-   * Splits `fragments` into `numSegments` batches, each a contiguous run of fragment ids, balanced
-   * by row count.
+   * Splits `fragments` into `numSegments` batches, each a contiguous run of fragment ids, chosen so
+   * that the heaviest batch is as light as possible.
    *
    * Contiguity is not cosmetic. Lance's compaction planner only groups fragments that are covered by
    * the identical set of index segments, so batches whose fragment ids interleave leave every
    * adjacent pair of fragments in a different group and make OPTIMIZE a no-op for the whole table.
    * Since an index accumulates one segment set per build, and REFRESH INDEX adds more over time,
    * interleaved coverage would permanently block compaction on exactly the append-heavy tables this
-   * command exists for. Row balance is therefore optimised within contiguity, not against it.
+   * command exists for. Balance is not sacrificed to get it: the optimal contiguous partition is
+   * found exactly, so a workload the previous least-loaded-first assignment balanced perfectly
+   * still is.
    *
    * Assignment is deterministic: the same fragments and segment count always produce the same
    * batches, whatever order `fragments` arrives in. Every batch holds at least one fragment, so the
@@ -1005,56 +1008,138 @@ object IndexUtils extends Logging {
     }
 
     val ordered = fragments.sortBy(_.fragmentId.intValue)
-    // Prefix sums drive the boundary search. addExact rejects a workload that cannot be summed
-    // rather than balancing against a wrapped total.
+    // Prefix sums drive the search. addExact rejects a workload that cannot be summed rather than
+    // balancing against a wrapped total.
     val rowsUpTo = new Array[Long](fragmentCount + 1)
     ordered.iterator.zipWithIndex.foreach { case (fragment, index) =>
       rowsUpTo(index + 1) = Math.addExact(rowsUpTo(index), fragment.numRows)
     }
-    val totalRows = rowsUpTo(fragmentCount)
 
-    val boundaries = new Array[Int](segmentCount + 1)
-    boundaries(segmentCount) = fragmentCount
-    var segment = 1
-    while (segment < segmentCount) {
-      val previous = boundaries(segment - 1)
-      // Where an even split would cut, floored without overflowing on a large total.
-      val target = (totalRows / segmentCount) * segment +
-        ((totalRows % segmentCount) * segment) / segmentCount
-      // Keep every batch non-empty: one fragment behind this boundary at least, and one left for
-      // each batch still ahead of it.
-      boundaries(segment) = math.max(
-        previous + 1,
-        math.min(
-          closestBoundary(rowsUpTo, previous + 1, target),
-          fragmentCount - (segmentCount - segment)))
-      segment += 1
-    }
-
-    (0 until segmentCount).map { index =>
-      ordered.slice(boundaries(index), boundaries(index + 1)).map(_.fragmentId)
+    var offset = 0
+    balancedRunLengths(rowsUpTo, segmentCount).map { length =>
+      val batch = ordered.slice(offset, offset + length).map(_.fragmentId)
+      offset += length
+      batch
     }
   }
 
   /**
-   * The cut at or after `lowerBound` whose accumulated row count comes closest to `target`.
+   * Lengths of exactly `segmentCount` contiguous runs over `rowsUpTo`, minimising the heaviest run.
    *
-   * `rowsUpTo(cut)` is the row count of the first `cut` fragments, so a cut is the boundary in front
-   * of fragment `cut`.
+   * The smallest row budget a contiguous packing can respect is found by binary search, which is
+   * exact rather than approximate: for a fixed budget, extending each run as far as it will go uses
+   * the fewest runs, so the smallest feasible budget is the optimal maximum. The floor of the search
+   * is the widest single fragment, below which no packing exists.
+   *
+   * Packing at that budget can use fewer runs than were asked for, which would cost parallelism, so
+   * the remainder are split at their own balance points. A split only ever lowers the heaviest run,
+   * so optimality survives it.
    */
-  private def closestBoundary(rowsUpTo: Array[Long], lowerBound: Int, target: Long): Int = {
+  private def balancedRunLengths(rowsUpTo: Array[Long], segmentCount: Int): Seq[Int] = {
     val fragmentCount = rowsUpTo.length - 1
-    var cut = lowerBound
-    while (cut < fragmentCount && rowsUpTo(cut) < target) {
+    def rowsOf(start: Int, length: Int): Long = rowsUpTo(start + length) - rowsUpTo(start)
+
+    var widestFragment = 0L
+    var index = 0
+    while (index < fragmentCount) {
+      widestFragment = math.max(widestFragment, rowsOf(index, 1))
+      index += 1
+    }
+
+    var low = widestFragment
+    var high = rowsUpTo(fragmentCount)
+    while (low < high) {
+      val budget = low + (high - low) / 2
+      if (runsWithin(rowsUpTo, budget) <= segmentCount) high = budget else low = budget + 1
+    }
+
+    // runLengthAt(start) is the length of the run beginning at `start`, and 0 elsewhere.
+    val runLengthAt = new Array[Int](fragmentCount)
+    var runCount = 0
+    var start = 0
+    while (start < fragmentCount) {
+      var length = 1
+      while (start + length < fragmentCount && rowsOf(start, length + 1) <= low) {
+        length += 1
+      }
+      runLengthAt(start) = length
+      runCount += 1
+      start += length
+    }
+
+    if (runCount < segmentCount) {
+      // Heaviest splittable run first, so each extra batch is spent where it helps most. Ties break
+      // on length then on the earlier run, to keep the result independent of heap internals.
+      val splittable = PriorityQueue.empty[(Long, Int, Int)](
+        Ordering.by[(Long, Int, Int), (Long, Int, Int)] {
+          case (rows, length, begin) => (rows, length, -begin)
+        })
+      var scan = 0
+      while (scan < fragmentCount) {
+        val length = runLengthAt(scan)
+        if (length > 1) {
+          splittable.enqueue((rowsOf(scan, length), length, scan))
+        }
+        scan += length
+      }
+      while (runCount < segmentCount && splittable.nonEmpty) {
+        val (_, length, begin) = splittable.dequeue()
+        val cut = balancePoint(rowsUpTo, begin, length)
+        runLengthAt(begin) = cut
+        runLengthAt(begin + cut) = length - cut
+        runCount += 1
+        if (cut > 1) {
+          splittable.enqueue((rowsOf(begin, cut), cut, begin))
+        }
+        if (length - cut > 1) {
+          splittable.enqueue((rowsOf(begin + cut, length - cut), length - cut, begin + cut))
+        }
+      }
+    }
+
+    val runs = ArrayBuffer.empty[Int]
+    var cursor = 0
+    while (cursor < fragmentCount) {
+      val length = runLengthAt(cursor)
+      runs += length
+      cursor += length
+    }
+    runs.toList
+  }
+
+  /**
+   * Fewest contiguous runs that keep every run's row count within `budget`.
+   *
+   * A fragment wider than `budget` still forms a run of its own, so callers must not search below
+   * the widest fragment or the count would understate what the budget can actually hold.
+   */
+  private def runsWithin(rowsUpTo: Array[Long], budget: Long): Int = {
+    val fragmentCount = rowsUpTo.length - 1
+    var runs = 0
+    var start = 0
+    while (start < fragmentCount) {
+      var length = 1
+      while (start + length < fragmentCount &&
+        rowsUpTo(start + length + 1) - rowsUpTo(start) <= budget) {
+        length += 1
+      }
+      runs += 1
+      start += length
+    }
+    runs
+  }
+
+  /** Where to cut a run of `length` fragments so the two halves are as even as possible. */
+  private def balancePoint(rowsUpTo: Array[Long], start: Int, length: Int): Int = {
+    val total = rowsUpTo(start + length) - rowsUpTo(start)
+    def leftOf(at: Int): Long = rowsUpTo(start + at) - rowsUpTo(start)
+    def heavierHalf(at: Int): Long = math.max(leftOf(at), total - leftOf(at))
+
+    var cut = 1
+    while (cut < length - 1 && leftOf(cut) < total - leftOf(cut)) {
       cut += 1
     }
-    // Taking the first cut that reaches the target can overshoot it by more than stopping one
-    // fragment earlier undershoots, which puts the heavier batch on the wrong side.
-    if (cut > lowerBound && (rowsUpTo(cut) - target) > (target - rowsUpTo(cut - 1))) {
-      cut - 1
-    } else {
-      cut
-    }
+    if (cut > 1 && heavierHalf(cut - 1) < heavierHalf(cut)) cut - 1 else cut
   }
 
 }
