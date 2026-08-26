@@ -25,6 +25,7 @@ import org.junit.jupiter.api.{AfterEach, BeforeEach, Test}
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.io.TempDir
 import org.lance.spark.knn.internal.Metric
+import org.lance.spark.utils.BlobUtils
 
 import java.nio.file.Path
 
@@ -41,6 +42,9 @@ import scala.collection.JavaConverters._
  *  - Direction mismatch (e.g. L2 distance with NearestBySimilarity) does NOT rewrite.
  *  - EXACT (`approx = false`) does NOT rewrite — Spark's brute-force keeps owning that path.
  *  - Non-Lance right side does NOT rewrite (right relation's table is not a `LanceDataset`).
+ *  - A variable-length `List<Float>` right vector (no fixed-size-list metadata) does NOT rewrite.
+ *  - A blob column (v1 or v2) on the right relation does NOT rewrite — even alongside a searchable
+ *    vector — so blob payloads are materialized by Spark's canonical (blob-aware) fallback reader.
  *  - Disabled by default — fires only when the gating config is set.
  *  - Prefilter pushdown: right-side `WHERE` translates to a Lance SQL filter string, or refuses
  *    the rewrite entirely when the predicate can't be pushed in full.
@@ -225,6 +229,64 @@ class IndexedNearestByJoinRuleTest {
       join,
       rewritten,
       "variable-length List<Float> lacks fixed-size-vector metadata — rule must fall through")
+  }
+
+  /**
+   * A legacy (v1) blob column on the Lance relation forces the rule to DECLINE, even though the
+   * relation ALSO carries a searchable fixed-size vector. Blob columns are late-materialized: the
+   * connector's canonical reader threads dataset-URI / column-name / row-address context into
+   * `BlobStructAccessor.setBlobReferenceContext` so a descriptor resolves to its payload. The
+   * no-shuffle probe path fetches only `_rowid` and wraps vectors WITHOUT that context, so a
+   * non-null legacy blob would resolve to an empty payload. Declining hands the query to Spark's
+   * brute-force cross-product, whose canonical (blob-aware) scan returns the true payload — so the
+   * payload parity is owned by the fallback, and this test locks in that we take it.
+   *
+   * The positive control (same schema MINUS the blob column) rewrites, proving the fixed-size-vector
+   * gate is satisfied and the blob column is the sole discriminating cause of the decline.
+   */
+  @Test def blobV1ColumnDeclinesRewrite(): Unit = {
+    spark.conf.set(IndexedNearestByJoinRule.EnabledConfKey, "true")
+    val left = trivialPlan("lid", "lvec")
+    val baseFields = Array(
+      StructField("rid", IntegerType, nullable = false),
+      fixedSizeVectorField("rvec", 8))
+    // Control: a searchable vector-only schema WITHOUT any blob column must rewrite.
+    val control = lanceRelationWithSchema(new StructType(baseFields), "blob_v1_control")
+    assertTrue(
+      IndexedNearestByJoinRule(l2Join(left, control)).isInstanceOf[Project],
+      "control: vector-only schema must rewrite (proves the vector gate passes)")
+    // Same schema + a legacy v1 blob column → decline.
+    val withBlob =
+      lanceRelationWithSchema(new StructType(baseFields :+ blobV1Field("payload")), "blob_v1")
+    val join = l2Join(left, withBlob)
+    assertSame(
+      join,
+      IndexedNearestByJoinRule(join),
+      "legacy v1 blob column must force fallback to Spark's canonical (blob-aware) reader")
+  }
+
+  /**
+   * As [[blobV1ColumnDeclinesRewrite]] but for a blob v2 column — carried as the descriptor struct
+   * with the `ARROW:extension:name = lance.blob.v2` marker. The same late-materialization reasoning
+   * applies, so the rule must decline and leave payload materialization to Spark's canonical reader.
+   */
+  @Test def blobV2ColumnDeclinesRewrite(): Unit = {
+    spark.conf.set(IndexedNearestByJoinRule.EnabledConfKey, "true")
+    val left = trivialPlan("lid", "lvec")
+    val baseFields = Array(
+      StructField("rid", IntegerType, nullable = false),
+      fixedSizeVectorField("rvec", 8))
+    val control = lanceRelationWithSchema(new StructType(baseFields), "blob_v2_control")
+    assertTrue(
+      IndexedNearestByJoinRule(l2Join(left, control)).isInstanceOf[Project],
+      "control: vector-only schema must rewrite (proves the vector gate passes)")
+    val withBlob =
+      lanceRelationWithSchema(new StructType(baseFields :+ blobV2Field("payload")), "blob_v2")
+    val join = l2Join(left, withBlob)
+    assertSame(
+      join,
+      IndexedNearestByJoinRule(join),
+      "blob v2 descriptor column must force fallback to Spark's canonical (blob-aware) reader")
   }
 
   /** Right side wrapped in SubqueryAlias still rewrites — alias unwrapping happens in the rule. */
@@ -552,6 +614,60 @@ class IndexedNearestByJoinRuleTest {
       ArrayType(FloatType, containsNull = false),
       nullable = false,
       new MetadataBuilder().putLong("arrow.fixed-size-list.size", dim.toLong).build())
+
+  /**
+   * A `StructField` shaped like the connector emits for a LEGACY (v1) blob column: a `BinaryType`
+   * carrying the `lance-encoding:blob = true` metadata that `BlobUtils.isBlobReadColumn` keys on.
+   * The marker survives into the relation's `AttributeReference.metadata`, which is what the rule's
+   * `hasBlobColumn` gate inspects.
+   */
+  private def blobV1Field(name: String): StructField =
+    StructField(
+      name,
+      BinaryType,
+      nullable = true,
+      new MetadataBuilder()
+        .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+        .build())
+
+  /**
+   * A `StructField` shaped like the connector emits for a blob v2 column at read time: the
+   * `BLOB_DESCRIPTOR_STRUCT` data type carrying the `ARROW:extension:name = lance.blob.v2` extension
+   * metadata `BlobUtils.isBlobV2SparkField` keys on. (Detection is metadata-based, so the descriptor
+   * struct is used only to faithfully mirror the real relation output.)
+   */
+  private def blobV2Field(name: String): StructField =
+    StructField(
+      name,
+      BlobUtils.BLOB_DESCRIPTOR_STRUCT,
+      nullable = true,
+      new MetadataBuilder()
+        .putString(BlobUtils.ARROW_EXTENSION_NAME_KEY, BlobUtils.ARROW_EXTENSION_BLOB_V2)
+        .build())
+
+  /** Build a Lance-backed DSv2 relation over the given schema (no I/O — `FakeLanceTable` is inert). */
+  private def lanceRelationWithSchema(schema: StructType, dirName: String): LogicalPlan = {
+    val uri = tempDir.resolve(dirName).toString
+    val table = new FakeLanceTable(schema, uri)
+    val opts = new java.util.HashMap[String, String]()
+    opts.put("path", uri)
+    val cims = new org.apache.spark.sql.util.CaseInsensitiveStringMap(opts)
+    DataSourceV2Relation.create(table, None, None, cims)
+  }
+
+  /** Build an `approx` L2 `NearestByJoin` over `left.lvec` and `right.rvec` (numResults = 5). */
+  private def l2Join(left: LogicalPlan, right: LogicalPlan): NearestByJoin = {
+    val leftVec = left.output.find(_.name == "lvec").get
+    val rightVec = right.output.find(_.name == "rvec").get
+    NearestByJoin(
+      left,
+      right,
+      Inner,
+      approx = true,
+      numResults = 5,
+      rankingExpression = VectorL2Distance(leftVec, rightVec),
+      direction = NearestByDistance)
+  }
 
   /**
    * Build a `DataSourceV2Relation` backed by a `FakeLanceTable` (a real connector `LanceDataset`

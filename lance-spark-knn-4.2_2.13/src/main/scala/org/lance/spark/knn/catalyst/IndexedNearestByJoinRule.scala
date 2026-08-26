@@ -22,7 +22,7 @@ import org.apache.spark.sql.types.{BooleanType, ByteType, DoubleType, FloatType,
 import org.apache.spark.unsafe.types.UTF8String
 import org.lance.spark.{LanceDataset, LanceSparkReadOptions}
 import org.lance.spark.knn.internal.{LanceKnnJoinStage, Metric}
-import org.lance.spark.utils.VectorUtils
+import org.lance.spark.utils.{BlobUtils, VectorUtils}
 
 /**
  * Catalyst rule that rewrites a Spark [[NearestByJoin]] (`approx = true`) over a Lance scan with
@@ -188,6 +188,7 @@ object IndexedNearestByJoinRule extends Rule[LogicalPlan] {
     for {
       (metric, leftVecAttr, rightVecCol) <- recognizeRanking(rankingExpr, direction, left, right)
       lance <- unwrapLanceScan(right)
+      if !hasBlobColumn(lance.output)
     } yield {
       val leftVecIdx = left.output.indexWhere(_.exprId == leftVecAttr.exprId)
       require(leftVecIdx >= 0, s"left vector attr not found in left.output: $leftVecAttr")
@@ -523,4 +524,29 @@ object IndexedNearestByJoinRule extends Rule[LogicalPlan] {
       VectorUtils.isVectorField(StructField(ref.name, ref.dataType, ref.nullable, ref.metadata))
     case _ => false
   }
+
+  /**
+   * True iff any column in the Lance relation output is a blob column — legacy v1
+   * (`lance-encoding:blob` metadata on a `BinaryType`) or v2 (`ARROW:extension:name = lance.blob.v2`
+   * metadata on the descriptor struct). Reuses the connector's own
+   * [[org.lance.spark.utils.BlobUtils.isBlobReadColumn]] so the marker definition lives in one place;
+   * both markers survive into the relation's `AttributeReference.metadata`.
+   *
+   * When present, the rule DECLINES the rewrite and falls through to Spark's brute-force cross-
+   * product. Blob columns are late-materialized: the connector's canonical reader
+   * ([[org.lance.spark.internal.LanceFragmentColumnarBatchScanner]]) threads the dataset URI, column
+   * name, and row addresses into `BlobStructAccessor.setBlobReferenceContext` so the descriptor can
+   * be resolved to its payload. The no-shuffle probe path fetches only `_rowid` and wraps vectors
+   * without that context, so a non-null legacy blob would resolve to an empty payload. Declining is
+   * the conservative, always-correct choice: Spark's own scan (with full blob context) returns the
+   * true payload. A non-`AttributeReference` attribute carries no field metadata and is treated as
+   * non-blob.
+   */
+  private def hasBlobColumn(output: Seq[Attribute]): Boolean =
+    output.exists {
+      case ref: AttributeReference =>
+        BlobUtils.isBlobReadColumn(
+          StructField(ref.name, ref.dataType, ref.nullable, ref.metadata))
+      case _ => false
+    }
 }
