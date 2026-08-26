@@ -167,6 +167,40 @@ class LanceKnnJoinStageTest {
     assertEquals(base.getRef, merged.getRef, "same-named branch must keep the base's pinned ref")
   }
 
+  // -- fold vs split routing: reserved-name projections must decline the fold ----------------
+
+  /**
+   * The folded one-scan path is sound only when there is no over-fetch (internalK == k) AND the
+   * payload projection does not collide with a column the nearest scan injects. A plain projection
+   * at internalK == k folds.
+   */
+  @Test def testFoldsInOneScanForCleanProjectionAtNoOverfetch(): Unit = {
+    assertTrue(
+      LanceKnnJoinStage.foldsInOneScan(internalK = 5, k = 5, projection = Seq("id", "vec")),
+      "clean projection with internalK == k should fold in one scan")
+  }
+
+  /**
+   * A projection naming ANY reserved column (`_rowid`, `_distance`, `_score`) must decline the fold
+   * even at internalK == k, so the stage routes it to the split probe → materialize path whose scan
+   * injects only `_rowid`. This is the gatekeeper's headline finding: the fold must preserve Spark's
+   * fallback for a payload column whose name collides with the injected search metadata.
+   */
+  @Test def testDoesNotFoldForReservedProjection(): Unit = {
+    LanceProbe.ReservedProjectionColumns.foreach { reserved =>
+      assertFalse(
+        LanceKnnJoinStage.foldsInOneScan(internalK = 5, k = 5, projection = Seq("id", reserved)),
+        s"projection naming reserved column '$reserved' must NOT fold; route to the split path")
+    }
+  }
+
+  /** Over-fetch (internalK > k) always takes the split path, regardless of projection. */
+  @Test def testDoesNotFoldWhenOverfetching(): Unit = {
+    assertFalse(
+      LanceKnnJoinStage.foldsInOneScan(internalK = 20, k = 5, projection = Seq("id")),
+      "over-fetch (internalK > k) must take the split probe → trim → materialize path")
+  }
+
   /** Primitives pass straight through; null stays null. */
   @Test def testCoercePrimitivesAndNullPassThrough(): Unit = {
     assertEquals("hello", LanceKnnJoinStage.coerceToSpark("hello", StringType))

@@ -18,10 +18,15 @@ import org.lance.index.DistanceType
 /**
  * Vector distance / similarity metric. Mirrors `org.lance.index.DistanceType` but exposed as a
  * Scala enumeration so callers don't have to import Lance internals. Each metric fixes the
- * "best-first" direction used during merge:
+ * "best-first" direction used during merge.
  *
- *  - L2:           smaller score is better (distance)
- *  - Cosine / Dot: larger score is better (similarity)
+ * Lance's vector search returns a DISTANCE for every metric — including the similarity-flavored
+ * ones, which it reports as `1 - cosine_similarity` and `1 - dot_product`. So smaller is better for
+ * ALL three metrics; there is no larger-is-better case:
+ *
+ *  - L2:     smaller score is better (squared L2 distance)
+ *  - Cosine: smaller score is better (`1 - cosine_similarity`)
+ *  - Dot:    smaller score is better (`1 - dot_product`)
  */
 sealed trait Metric {
 
@@ -41,12 +46,14 @@ object Metric {
 
   case object Cosine extends Metric {
     val lanceType: DistanceType = DistanceType.Cosine
-    val smallerIsBetter: Boolean = false
+    // Lance returns `1 - cosine_similarity`, a distance: smaller is better.
+    val smallerIsBetter: Boolean = true
   }
 
   case object Dot extends Metric {
     val lanceType: DistanceType = DistanceType.Dot
-    val smallerIsBetter: Boolean = false
+    // Lance returns `1 - dot_product`, a distance: smaller is better.
+    val smallerIsBetter: Boolean = true
   }
 
   /**

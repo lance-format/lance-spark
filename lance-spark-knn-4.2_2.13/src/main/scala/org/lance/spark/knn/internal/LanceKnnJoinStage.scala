@@ -217,6 +217,18 @@ object LanceKnnJoinStage {
     leftRows.flatMap(expand)
 
   /**
+   * Whether [[processRow]] may take the folded one-scan fast path. True only when there is no
+   * JVM-side over-fetch (`internalK <= k`, so every probed row is kept and no trim is needed) AND
+   * the payload projection does not name a column the nearest scan injects itself — `_rowid`,
+   * `_distance`, `_score` (see [[LanceProbe.fusesCleanly]]). A colliding projection must fall
+   * through to the split probe → materialize path, whose scan injects only `_rowid` and therefore
+   * reads any `_distance` / `_score` payload column straight from the dataset without collision.
+   * Extracted so the routing decision is unit-testable without a Lance dataset.
+   */
+  private[knn] def foldsInOneScan(internalK: Int, k: Int, projection: Seq[String]): Boolean =
+    internalK <= k && LanceProbe.fusesCleanly(projection)
+
+  /**
    * Expand one left row into its join output rows: probe R's index, trim to `k`, late-materialize
    * the surviving right rows by `_rowid`, and assemble `left ++ right ++ score`. Returns an empty
    * iterator (inner join) or a single null-right row (outer join) when there is no query vector or
@@ -231,8 +243,9 @@ object LanceKnnJoinStage {
       } else {
         Iterator.empty
       }
-    } else if (conf.internalK <= conf.k) {
-      // No JVM-side over-fetch (the SQL path: internalK == k). Every probed row is kept, so probe
+    } else if (foldsInOneScan(conf.internalK, conf.k, conf.rightProjection)) {
+      // No JVM-side over-fetch (the SQL path: internalK == k) AND the payload projection does not
+      // collide with an injected column (see [[foldsInOneScan]]). Every probed row is kept, so probe
       // and materialize in ONE native scan: Lance searches the index AND projects the payload
       // columns in a single pass. A split probe → trim → materialize would re-scan the exact rows
       // the search already found, for nothing. Lance returns them best-first, so no trim is needed.
@@ -259,10 +272,12 @@ object LanceKnnJoinStage {
         }
       }
     } else {
-      // Over-fetch path (internalK > k): fetch `internalK` cheap refs natively, trim to the final
-      // `k`, then late-materialize ONLY the survivors by `_rowid`. Not exercised by the SQL rule
-      // (which sets internalK == k) but retained for a future over-fetching caller, where deferring
-      // the payload fetch to the survivors is the win. Lance already returns refs best-first.
+      // Split probe → trim → materialize path. Taken when the caller over-fetches (internalK > k)
+      // OR when the payload projection collides with an injected column name and the fold above
+      // had to decline. Fetch `internalK` cheap refs natively, trim to the final `k`, then
+      // late-materialize ONLY the survivors by `_rowid`. With internalK == k (the SQL rule) nothing
+      // is trimmed; the split still buys collision-safety, since materialize injects only `_rowid`.
+      // Lance already returns refs best-first.
       val refs = probe
         .probe(
           conf.vectorColumn,

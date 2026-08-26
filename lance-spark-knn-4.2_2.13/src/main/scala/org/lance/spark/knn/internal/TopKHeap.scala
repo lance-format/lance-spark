@@ -51,9 +51,13 @@ final class TopKHeap(k: Int, smallerIsBetter: Boolean) {
       heap.enqueue(ref)
     } else {
       val worst = heap.head
-      val isBetter =
-        if (smallerIsBetter) ref.score < worst.score
-        else ref.score > worst.score
+      // Admission must use the SAME total ordering as the heap, not a raw float `<` / `>`. Float
+      // comparisons involving NaN are always false, so a NaN worst-survivor would never test as
+      // "beatable" and could never be evicted — a single NaN score would then pin a slot forever.
+      // `ord` is `java.lang.Float.compare`-based (NaN sorts as the largest Float, i.e. the worst
+      // for a distance), and `ord.lt(ref, worst)` means exactly "ref ranks strictly better than the
+      // current worst" in both directions — so a finite score correctly displaces a NaN worst.
+      val isBetter = ord.lt(ref, worst)
       if (isBetter) {
         heap.dequeue()
         heap.enqueue(ref)

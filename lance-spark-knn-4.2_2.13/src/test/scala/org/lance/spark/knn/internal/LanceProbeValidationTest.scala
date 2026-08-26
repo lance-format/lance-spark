@@ -122,6 +122,105 @@ class LanceProbeValidationTest {
   }
 
   /**
+   * Cosine and Dot must rank best-first the same direction L2 does. Lance returns a DISTANCE for
+   * every metric (`1 - cosine_similarity`, `1 - dot_product` for the similarity-flavored ones), so
+   * smaller is better for all three — [[Metric.smallerIsBetter]] must be `true` for each. This
+   * reproduces the gatekeeper's failure directly: run a real Lance query, then merge the results
+   * through the size-1 [[TopKHeap]] the join stage uses, keyed by the metric's own direction flag.
+   * The nearest ref (Lance returns best-first, so `refs.head`) must survive; a wrong flag (treating a
+   * Lance distance as larger-is-better) would retain the FARTHEST ref instead.
+   */
+  @Test def testMetricFlagsKeepNearestThroughHeap(): Unit = {
+    val datasetUri = writeSyntheticDataset()
+    val query = randomVector(new Random(555L), VectorDim)
+
+    val probe = new LanceProbe(datasetUri, fragmentIds = None)
+    try {
+      Seq[Metric](Metric.L2, Metric.Cosine, Metric.Dot).foreach { metric =>
+        val refs = probe.probe("vec", query, k = 5, metric)
+        assertEquals(5, refs.size, s"$metric probe should return k results")
+        // Lance returns best-first, so refs.head is the true nearest for this metric.
+        val nearest = refs.head
+        val heap = new TopKHeap(k = 1, metric.smallerIsBetter)
+        heap.offerAll(refs)
+        val survivor = heap.drain()
+        assertEquals(1, survivor.length, s"$metric: size-1 heap should retain one ref")
+        assertEquals(
+          nearest.rowAddr,
+          survivor.head.rowAddr,
+          s"$metric: size-1 heap must keep the nearest ref (rowAddr=${nearest.rowAddr}), " +
+            s"got ${survivor.head.rowAddr} — wrong smallerIsBetter direction?")
+        assertEquals(nearest.score, survivor.head.score, 1e-6f, s"$metric: kept score mismatch")
+      }
+    } finally probe.close()
+  }
+
+  /**
+   * A projected payload column WITHOUT a supplied Spark type must be preserved through the generic
+   * Arrow conversion — the same fallback [[LanceProbe.materialize]] / `readRows` apply — not silently
+   * dropped. Regression: `projection = Seq("id")` with empty `projectionFields` must return payload
+   * keys `Set("id")` (the injected `_rowid` / score columns stay out of the payload).
+   */
+  @Test def testProbeRowsPreservesUnmappedProjectedFields(): Unit = {
+    val datasetUri = writeSyntheticDataset()
+    val query = randomVector(new Random(321L), VectorDim)
+
+    val probe = new LanceProbe(datasetUri, fragmentIds = None)
+    try {
+      val hits = probe.probeRows(
+        "vec",
+        query,
+        k = 5,
+        Metric.L2,
+        projection = Seq("id"),
+        projectionFields = Seq.empty)
+      assertEquals(5, hits.size, "probeRows should return k hits")
+      hits.foreach { h =>
+        assertEquals(
+          Set("id"),
+          h.row.keySet,
+          s"unmapped projected field must be preserved (id only, no _rowid/_distance); " +
+            s"got ${h.row.keySet}")
+        assertNotNull(h.row("id"), "unmapped id payload must be populated")
+      }
+    } finally probe.close()
+  }
+
+  /**
+   * The fused [[LanceProbe.probeRows]] scan injects `_rowid` and the score column itself, so a
+   * payload projection naming one of those reserved columns would collide inside the single scan.
+   * `probeRows` must reject such a projection (so the join stage can route it through the split
+   * probe + materialize path) rather than surfacing an opaque Arrow "merge incompatible fields"
+   * error, and [[LanceProbe.fusesCleanly]] must report it as not fusible.
+   */
+  @Test def testProbeRowsRejectsReservedProjection(): Unit = {
+    val datasetUri = writeSyntheticDataset()
+    val query = randomVector(new Random(1L), VectorDim)
+
+    val probe = new LanceProbe(datasetUri, fragmentIds = None)
+    try {
+      LanceProbe.ReservedProjectionColumns.foreach { reserved =>
+        assertFalse(
+          LanceProbe.fusesCleanly(Seq("id", reserved)),
+          s"projection naming reserved column '$reserved' must not be fusible")
+        val ex = assertThrows(
+          classOf[IllegalArgumentException],
+          () =>
+            probe.probeRows(
+              "vec",
+              query,
+              k = 5,
+              Metric.L2,
+              projection = Seq("id", reserved),
+              projectionFields = Seq.empty))
+        assertTrue(
+          String.valueOf(ex.getMessage).contains(reserved),
+          s"guard message should name reserved column '$reserved'; got: ${ex.getMessage}")
+      }
+    } finally probe.close()
+  }
+
+  /**
    * The folded fast path ([[LanceProbe.probeRows]]) must be observationally identical to the split
    * probe + materialize path: the SAME (rowAddr, score) hits in the SAME order, and the SAME
    * materialized payload per row. This is the invariant the SQL join relies on when it single-scans

@@ -225,6 +225,17 @@ final class LanceProbe(
     require(vectorColumn != null && vectorColumn.nonEmpty, "vectorColumn must be non-empty")
     require(query != null && query.length > 0, "Query vector must be non-empty")
     require(k > 0, "k must be positive")
+    // The fused scan injects `_rowid` (via withRowId) and the score column (via nearest). A payload
+    // column that shares one of those names would collide with the injected column inside the SAME
+    // scan — Lance fails the scan with "merge incompatible fields". Such a schema must go through the
+    // split probe + materialize path (whose materialize scan injects no score column), so reject it
+    // here rather than let the collision surface as an opaque Arrow error. The join stage checks
+    // [[LanceProbe.fusesCleanly]] and routes accordingly.
+    require(
+      LanceProbe.fusesCleanly(projection),
+      "probeRows cannot project a column whose name collides with Lance search metadata " +
+        s"(${LanceProbe.ReservedProjectionColumns.toSeq.sorted.mkString(", ")}); the nearest scan " +
+        "injects those columns itself. Route such schemas through the split probe + materialize path.")
 
     val q = buildNearestQuery(vectorColumn, query, k, metric, nprobes, refineFactor, ef)
 
@@ -315,11 +326,13 @@ final class LanceProbe(
   /**
    * Drain a nearest-search scan that ALSO projected payload columns into `(rowId, score, payload)`
    * hits — the folded counterpart of [[readScored]] + [[readRows]]. Row-id and score are read out of
-   * the `_rowid` / `_distance` vectors directly; the payload columns (those with a Spark target type
-   * in `projectionFields`) go through the canonical [[org.lance.spark.vectorized.LanceArrowColumnVector]]
-   * adapter and back through [[CatalystTypeConverters]] to the external value the encoder expects —
-   * exactly as [[readRows]] does. `_rowid` / `_distance` are handled here, so they are deliberately
-   * excluded from the payload map (unlike [[readRows]], which surfaces `_rowid` for re-keying).
+   * the `_rowid` / score vectors directly and excluded from the payload map. Every OTHER column the
+   * scan returned is payload and follows [[readRows]]' contract exactly: a column with a Spark target
+   * type in `projectionFields` goes through the canonical
+   * [[org.lance.spark.vectorized.LanceArrowColumnVector]] adapter and back through
+   * [[CatalystTypeConverters]] to the external value the encoder expects; a projected column WITHOUT
+   * a supplied type falls back to the generic Arrow conversion ([[LanceProbe.toSparkValue]]) rather
+   * than being silently dropped.
    */
   private def readScoredRows(
       reader: ArrowReader,
@@ -336,9 +349,15 @@ final class LanceProbe(
         val addrVec: FieldVector = root.getVector(LanceProbe.RowIdColumn)
         val scoreVec: FieldVector = resolveScoreVector(root)
 
-        // Payload columns only (those with a Spark target type). `_rowid` / `_distance` are read out
-        // separately, so they are deliberately excluded from the payload map here.
-        val mapped = fields.filter(af => schemaByName.contains(af.getName))
+        // `_rowid` and the injected score column are read out-of-band (above) and excluded from the
+        // payload. Everything else the scan returned IS payload: columns with a Spark target type go
+        // through the canonical adapter, the rest fall back to the generic Arrow conversion — the
+        // same split `readRows` / `materialize` apply, so a projected column with no supplied type is
+        // surfaced (via `toSparkValue`) instead of being silently dropped.
+        val reserved = Set(LanceProbe.RowIdColumn, scoreVec.getField.getName)
+        val payloadFields = fields.filterNot(af => reserved.contains(af.getName))
+        val mapped = payloadFields.filter(af => schemaByName.contains(af.getName))
+        val unmapped = payloadFields.filterNot(af => schemaByName.contains(af.getName))
         val mappedNames: Array[String] = mapped.iterator.map(_.getName).toArray
         val mappedTypes: Array[DataType] =
           mapped.iterator.map(af => schemaByName(af.getName).dataType).toArray
@@ -364,6 +383,10 @@ final class LanceProbe(
             val internal = internalRow.get(j, mappedTypes(j))
             rowMap(mappedNames(j)) = if (internal == null) null else mappedConverters(j)(internal)
             j += 1
+          }
+          unmapped.foreach { af =>
+            val v = root.getVector(af.getName)
+            rowMap(af.getName) = if (v.isNull(i)) null else LanceProbe.toSparkValue(v.getObject(i))
           }
           out += MaterializedHit(rowAddrAt(addrVec, i), scoreAt(scoreVec, i), rowMap.toMap)
           i += 1
@@ -565,6 +588,24 @@ object LanceProbe {
    * output schema.
    */
   val ScoreColumns: Seq[String] = Seq("_distance", "_score")
+
+  /**
+   * Column names Lance's nearest scan injects itself: `_rowid` (from `withRowId`) and the score
+   * column (from `nearest`). A right-side payload column with one of these names collides with the
+   * injected column inside the fused [[LanceProbe.probeRows]] scan, which Lance rejects with a
+   * "merge incompatible fields" error. A schema that projects one of them must be served through the
+   * split [[LanceProbe.probe]] + [[LanceProbe.materialize]] path instead — the materialize scan does
+   * not inject a score column, so there is no collision. See [[fusesCleanly]].
+   */
+  val ReservedProjectionColumns: Set[String] = ScoreColumns.toSet + RowIdColumn
+
+  /**
+   * True if `projection` can be served by the fused [[LanceProbe.probeRows]] scan — i.e. it names no
+   * column the nearest scan injects (see [[ReservedProjectionColumns]]). The join stage calls this to
+   * decide between the fold and the split probe + materialize path.
+   */
+  def fusesCleanly(projection: Seq[String]): Boolean =
+    !projection.exists(ReservedProjectionColumns.contains)
 
   /**
    * Build read options from a bare dataset URI, pinning `version` on the main branch when present.
