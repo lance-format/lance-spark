@@ -75,6 +75,22 @@ class TopKHeapTest {
     assertEquals(Seq(1L, 2L), drained.map(_.rowAddr).toSeq)
   }
 
+  /**
+   * A NaN score must not pin a heap slot forever. Admission derives from the heap's total ordering
+   * (`java.lang.Float.compare`, which sorts NaN as the largest Float), not a raw float `<` — with
+   * raw `<`, `1.0f < NaN` is false, so a NaN worst-survivor would test as un-beatable and never be
+   * evicted. Regression for exactly that: offer NaN then a finite score into a size-1 distance heap;
+   * the finite score must win.
+   */
+  @Test def testNaNScoreIsEvictable(): Unit = {
+    val heap = new TopKHeap(k = 1, smallerIsBetter = true)
+    heap.offer(ref(1, Float.NaN))
+    heap.offer(ref(2, 1.0f))
+    val drained = heap.drain()
+    assertEquals(Seq(2L), drained.map(_.rowAddr).toSeq, "finite score must evict the NaN worst")
+    assertEquals(1.0f, drained.head.score, "size-1 distance heap must retain the finite minimum")
+  }
+
   /** `merge` combines two pre-sorted arrays preserving top-K. */
   @Test def testMergeCombinesTwoArrays(): Unit = {
     val a = Array(ref(1, 1f), ref(2, 3f), ref(3, 5f))
