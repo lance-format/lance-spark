@@ -6,10 +6,10 @@ Run Lance full-text search from Spark SQL using Lance namespace execution.
     `SEARCH` requires the Lance Spark SQL extension to be enabled. See [Spark SQL Extensions](../../config.md#spark-sql-extensions) for configuration details.
 
 !!! note "Namespace Tables Required"
-    `SEARCH` resolves the `table` argument through a Spark catalog and executes through the Lance namespace `queryTable` API. Use a Lance namespace catalog table such as `lance.default.documents`, not a raw Lance dataset path.
+    `SEARCH` resolves the `table` argument through a Spark catalog. Use a Lance namespace catalog table such as `lance.default.documents`, not a raw Lance dataset path.
 
-!!! note "Named Arguments"
-    Named arguments require Spark 3.5 or later. On Spark 3.4, use the positional form.
+!!! note "Named Arguments Required"
+    `search_columns` is required and has no positional slot, so `SEARCH` must be called with named arguments. Named arguments require Spark 3.5 or later, so `SEARCH` is not available on Spark 3.4.
 
 ## Basic Usage
 
@@ -42,27 +42,16 @@ Run Lance full-text search from Spark SQL using Lance namespace execution.
 
 See [CREATE INDEX](../ddl/create-index.md#full-text-search-index) for FTS index options.
 
-## Positional Form
-
-Use positional arguments for simple calls and Spark 3.4 compatibility.
-
-=== "SQL"
-    ```sql
-    SELECT *
-    FROM SEARCH('lance.default.documents', 'lance', 5);
-    ```
-
 ## Arguments
 
 | Argument | Type | Required | Description |
 |----------|------|----------|-------------|
 | `table` | String | Yes | Catalog table name to search. |
 | `query` or `search_query` | String | Yes | Full-text query string. |
-| `search_columns` | Array string literal | No | Text columns to search. When omitted, Lance uses the indexed columns configured for the FTS index. |
+| `search_columns` | Array string literal | Yes | Text columns to search. |
 | `num_results`, `limit`, or `k` | Integer | No | Number of results. Defaults to `10`. |
 | `columns` | Array string literal | No | Output table columns. `_score` is always included. Use `array('*')` or omit this argument for all table columns. |
 | `filter` | String | No | SQL filter expression evaluated by Lance. |
-| `offset` | Integer | No | Number of results to skip. |
 | `version` | Long | No | Lance table version to search. |
 | `with_row_id` | Boolean | No | Include Lance row ids in the result as `_rowid`. |
 
@@ -72,8 +61,8 @@ The result includes the requested table columns and a nullable `_score` float co
 
 ## Execution
 
-Spark plans `SEARCH` as a DataSource V2 batch read with one input partition. The partition reader calls the Lance namespace `queryTable` API. With a directory namespace the search runs in the Spark process executing that reader; with a REST namespace the REST server handles the namespace request.
+Spark plans `SEARCH` as a batch read carrying the full-text query as a scan option, wrapped in an optional filter, a projection, `ORDER BY _score DESC`, and `LIMIT k`. The scan then runs one of two ways: a single-partition server-side read through the Lance namespace `queryTable` API when the namespace supports it, or a distributed per-fragment scan for catalog-only namespaces and for reads that target a branch or tag.
 
 ## Validation
 
-The Docker integration suite covers `SEARCH` against the directory namespace and a REST namespace backed by a directory namespace. The `Spark Search Docker` GitHub Actions workflow runs both backends for pull requests.
+`SEARCH` has no passing end-to-end coverage today: the Docker integration test is marked `xfail` and the JVM test is `@Disabled`, both pending structured full-text query support in lance-core. [`VECTOR_SEARCH`](vector-search.md) and [`HYBRID_SEARCH`](hybrid-search.md) remain covered by the `Spark Search Docker` workflow.
