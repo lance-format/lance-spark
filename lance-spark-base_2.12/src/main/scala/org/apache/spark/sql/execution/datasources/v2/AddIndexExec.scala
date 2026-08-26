@@ -38,10 +38,9 @@ import org.lance.spark.arrow.LanceArrowWriter
 import org.lance.spark.utils.{CloseableUtil, FieldPathUtils, Utils}
 import org.lance.spark.write.SingleBatchArrowReader
 
-import java.util.{Locale, UUID}
+import java.util.{Collections, Locale, UUID}
 
 import scala.collection.JavaConverters._
-import scala.collection.mutable.{ArrayBuffer, PriorityQueue}
 import scala.reflect.ClassTag
 
 /**
@@ -61,10 +60,10 @@ import scala.reflect.ClassTag
  * <p><b>Deferred training ({@code WITH (train=false)})</b>: commits an empty index on the driver
  * with an empty fragment bitmap (all rows appear unindexed), skipping data processing. Supported
  * for all supported scalar index methods. Empty tables use the same path even when
- * {@code train=true}, since there are no fragments to train. Populate the index later by re-running
- * {@code CREATE INDEX} with the same name (a full distributed build that replaces the empty index)
- * or, for incremental coverage of appended fragments, by {@code Dataset.optimizeIndices} (the SQL
- * {@code OPTIMIZE} only compacts fragments). {@code num_segments} is rejected with
+ * {@code train=true}, since there are no fragments to train. Populate the index later with
+ * {@code REFRESH INDEX} (a distributed build of the fragments the index does not cover) or by
+ * re-running {@code CREATE INDEX} with the same name (a full distributed rebuild); the SQL
+ * {@code OPTIMIZE} only compacts fragments. {@code num_segments} is rejected with
  * {@code train=false}, since no segmented build occurs.
  *
  * <p>The following options are consumed at the Spark execution layer and are never forwarded
@@ -89,10 +88,10 @@ case class AddIndexExec(
     val btreeBuildMode = IndexUtils.btreeBuildMode(indexType, args)
     val scalarSegmentIndexType = IndexUtils.scalarSegmentIndexType(method)
 
-    // Plan and build against a single pinned version. Tasks open the dataset themselves, so
-    // without pinning each one resolves the latest version instead of the one the driver planned
-    // over: a concurrent OPTIMIZE can retire a planned fragment, leaving a segment whose coverage
-    // intersects to nothing at commit time while the command still reports it as indexed.
+    // Plan and build against a single pinned version. Tasks open the dataset themselves, so without
+    // pinning each one resolves the latest version independently and may see a different fragment
+    // set than the driver batched, or than its sibling tasks. Coverage the commit cannot establish is
+    // then accounted for at commit time; see IndexUtils.committedCoverage.
     val (fragmentWorkloads, canonicalColumns, buildReadOptions) = {
       val ds = Utils.openDatasetBuilder(readOptions).build()
       try {
@@ -101,9 +100,7 @@ case class AddIndexExec(
           FieldPathUtils.pathByFieldId(ds.getLanceSchema, field.getId)
         }
         (
-          ds.getFragments.asScala
-            .map(fragment => FragmentWorkload(fragment.getId, fragment.metadata().getNumRows))
-            .toList,
+          IndexUtils.fragmentWorkloads(ds),
           canonical,
           IndexUtils.pinVersion(readOptions, ds))
       } finally {
@@ -154,19 +151,22 @@ case class AddIndexExec(
     val (nsImpl, nsProps, tableId, initialStorageOpts) =
       IndexUtils.extractNamespaceInfo(catalog, lanceDataset, readOptions)
 
-    // Range-mode BTree uses preprocessed data from Spark and keeps its dedicated path.
+    // Range-mode BTree uses preprocessed data from Spark and keeps its dedicated path. It reads the
+    // table back through the catalog, so its coverage follows the scan rather than the fragment list
+    // planned above; pinning the build to the planning version would record a segment version older
+    // than the data the segment holds, which core's staleness pruning would act on.
     if (btreeBuildMode.contains("range")) {
       val segments = new RangeBasedBTreeIndexJob(
         this.copy(columns = canonicalColumns),
-        buildReadOptions,
+        readOptions,
         fragmentIds.size,
         nsImpl,
         nsProps,
         tableId,
         initialStorageOpts).run()
-      commitIndexSegments(readOptions, canonicalColumns.head, segments, fragmentIds)
+      val indexed = commitIndexSegments(readOptions, canonicalColumns.head, segments)
       return Seq(new GenericInternalRow(Array[Any](
-        fragmentIds.size.toLong,
+        indexed.toLong,
         UTF8String.fromString(indexName))))
     }
 
@@ -174,6 +174,7 @@ case class AddIndexExec(
     if (scalarSegmentIndexType.isDefined) {
       val segmentJob = new ScalarSegmentIndexJob(
         session.sparkContext,
+        indexName,
         method,
         canonicalColumns.toList,
         IndexUtils.toJson(args),
@@ -186,9 +187,9 @@ case class AddIndexExec(
         initialStorageOpts)
       val segments = segmentJob.run()
       // Atomic add+remove via Lance core; see commitIndexSegments
-      commitIndexSegments(readOptions, canonicalColumns.head, segments, fragmentIds)
+      val indexed = commitIndexSegments(readOptions, canonicalColumns.head, segments)
       return Seq(new GenericInternalRow(Array[Any](
-        fragmentIds.size.toLong,
+        indexed.toLong,
         UTF8String.fromString(indexName))))
     }
 
@@ -225,18 +226,23 @@ case class AddIndexExec(
   // Lance core's commitExistingIndexSegments handles atomic replacement:
   // it finds existing segments whose fragments overlap with incoming ones
   // and removes them in the same CreateIndex transaction.
+  //
+  // Returns the number of fragments the commit actually covers, which is what the command reports.
   private def commitIndexSegments(
       readOptions: LanceSparkReadOptions,
       column: String,
-      segments: Seq[Index],
-      plannedFragmentIds: Seq[Integer]): Unit = {
+      segments: Seq[Index]): Int = {
     val dataset = Utils.openDatasetBuilder(readOptions).build()
     try {
-      IndexUtils.requireFragmentsLive(dataset, plannedFragmentIds, indexName)
+      val covered = IndexUtils.committedCoverage(
+        IndexUtils.liveFragmentIds(dataset),
+        segments,
+        indexName)
       dataset.commitExistingIndexSegments(
         indexName,
         column,
         segments.toList.asJava)
+      covered.size
     } finally {
       dataset.close()
     }
@@ -256,7 +262,9 @@ case class AddIndexExec(
  *
  * Unlike the segmented path, coverage here is derived from the fragment ids present in the scanned
  * rows rather than from a fragment list fixed at planning time. The scan goes back through the
- * catalog, so it is not pinned to the planning version.
+ * catalog, which resolves and pins its own version, so this job is deliberately handed unpinned read
+ * options: the version an executor opens must not predate the rows it is indexing, or the segment
+ * would record a dataset version older than its own contents.
  *
  * @param addIndexExec       The AddIndexExec instance that initiated this job
  * @param readOptions        Configuration options for reading the Lance dataset
@@ -317,6 +325,7 @@ class RangeBasedBTreeIndexJob(
 
     val indexBuilder = RangeBTreeIndexBuilder(
       encode(readOptions),
+      addIndexExec.indexName,
       columns,
       zoneSize,
       nsImpl,
@@ -346,6 +355,7 @@ class RangeBasedBTreeIndexJob(
  * This class is serialized and sent to executors to build the index for a specific range of data.
  *
  * @param encodedReadOptions      Serialized configuration for Lance dataset access.
+ * @param indexName               Name of the logical index the segment will belong to.
  * @param columns                 The names of the columns to be indexed.
  * @param zoneSize                Optional size of zones within the B-tree index.
  * @param namespaceImpl           Optional implementation class for namespace operations, used for credential vending.
@@ -356,6 +366,7 @@ class RangeBasedBTreeIndexJob(
  */
 case class RangeBTreeIndexBuilder(
     encodedReadOptions: String,
+    indexName: String,
     columns: List[String],
     zoneSize: Option[Long],
     namespaceImpl: Option[String],
@@ -420,9 +431,10 @@ case class RangeBTreeIndexBuilder(
       Data.exportArrayStream(allocator, reader, stream)
 
       // Build an uncommitted BTree segment for this fragment group from the
-      // pre-sorted data. No index name or UUID is set: Lance generates the
-      // segment UUID, and the fragment ids declare the segment's coverage so
-      // the per-partition segments stay disjoint.
+      // pre-sorted data. No UUID is set: Lance generates the segment UUID, and
+      // the fragment ids declare the segment's coverage so the per-partition
+      // segments stay disjoint. See ScalarSegmentIndexTask for why the segment
+      // build names the index and sets replace.
       val btreeParamsBuilder = BTreeIndexParams.builder()
       if (zoneSize.isDefined) {
         btreeParamsBuilder.zoneSize(zoneSize.get)
@@ -433,7 +445,8 @@ case class RangeBTreeIndexBuilder(
 
       val indexOptions = IndexOptions
         .builder(columns.asJava, IndexType.BTREE, indexParams)
-        .replace(false)
+        .withIndexName(indexName)
+        .replace(true)
         .withFragmentIds(fragmentIds.toList.asJava)
         .withPreprocessedData(stream)
         .build()
@@ -459,6 +472,7 @@ case class RangeBTreeIndexBuilder(
  */
 class ScalarSegmentIndexJob(
     sc: SparkContext,
+    indexName: String,
     method: String,
     columns: List[String],
     argsJson: String,
@@ -484,6 +498,7 @@ class ScalarSegmentIndexJob(
     val tasks = fragmentBatches.map { batch =>
       ScalarSegmentIndexTask(
         encodedReadOptions,
+        indexName,
         columns,
         method,
         argsJson,
@@ -506,9 +521,18 @@ final private[v2] case class FragmentWorkload(fragmentId: Integer, numRows: Long
 
 /**
  * A task to create a scalar index segment on a batch of fragments.
+ *
+ * The segment is named after the logical index it will join, and {@code replace} is set because that
+ * index may already exist: on the uncommitted build path Lance consults {@code replace} only to
+ * reject a name that is already taken, which is precisely the normal case for a REFRESH, and for a
+ * CREATE INDEX that replaces an index of the same name. Nothing is removed here — the driver's
+ * single {@code commitExistingIndexSegments} transaction decides which existing segments to keep.
+ * Leaving the name unset instead makes Lance derive its own default (`{column}_idx`) and reject the
+ * build whenever an index of that name exists on the column.
  */
 case class ScalarSegmentIndexTask(
     encodedReadOptions: String,
+    indexName: String,
     columns: List[String],
     method: String,
     argsJson: String,
@@ -531,8 +555,9 @@ case class ScalarSegmentIndexTask(
 
     val indexOptions = IndexOptions
       .builder(java.util.Arrays.asList(columns: _*), indexType, params)
+      .withIndexName(indexName)
       .withFragmentIds(fragmentIds.asJava)
-      .replace(false)
+      .replace(true)
       .build()
 
     val dataset = Utils.openDatasetBuilder(readOptions)
@@ -655,36 +680,159 @@ object IndexUtils extends Logging {
     readOptions.withRef(Utils.pinOpenedRef(dataset, readOptions.getRef))
 
   /**
-   * Fails if any planned fragment is no longer part of `dataset`.
+   * Fragment ids and live row counts of `dataset`, in manifest order.
    *
-   * A segment declares the fragments it covers, and commit intersects that declaration with the
-   * dataset's live fragments. A fragment retired by a concurrent OPTIMIZE therefore contributes no
-   * coverage, so committing would silently drop it while the command still reported it as indexed.
+   * Reads the primitive fragment-statistics view rather than [[Dataset#getFragments]], which
+   * materializes a Java object per fragment and per data file. Both commands enumerate fragments on
+   * the driver, once to plan and once to check the commit, so on a large table that difference is
+   * the bulk of planning cost.
    */
-  def requireFragmentsLive(
-      dataset: Dataset,
-      plannedFragmentIds: Seq[Integer],
-      indexName: String): Unit =
-    requireFragmentsLive(
-      dataset.getFragments.asScala.map(_.getId).toSet,
-      plannedFragmentIds,
-      indexName)
+  def fragmentWorkloads(dataset: Dataset): List[FragmentWorkload] = {
+    val stats = dataset.getFragmentStatistics
+    val ids = stats.getIds
+    val rowCounts = stats.getRowCounts
+    List.tabulate(ids.length)(index =>
+      FragmentWorkload(Integer.valueOf(ids(index)), rowCounts(index)))
+  }
 
-  /** Dataset-free form of [[requireFragmentsLive]], for callers that already listed fragments. */
-  def requireFragmentsLive(
-      liveFragmentIds: Set[Int],
-      plannedFragmentIds: Seq[Integer],
-      indexName: String): Unit = {
-    val retired = plannedFragmentIds.filterNot(id => liveFragmentIds.contains(id.intValue))
-    if (retired.nonEmpty) {
-      val shown = retired.take(10).map(_.toString).mkString(", ")
-      val suffix = if (retired.size > 10) s", ... (${retired.size} total)" else ""
+  /** Fragment ids live in `dataset`. See [[fragmentWorkloads]] for why this avoids getFragments. */
+  def liveFragmentIds(dataset: Dataset): Set[Int] =
+    dataset.getFragmentStatistics.getIds.toSet
+
+  /**
+   * Segments of `indexName` that a segment commit will keep, resolved against `dataset` as it is now.
+   *
+   * Fails when the index is gone. A refresh resolves its target before the distributed build and
+   * commits after it, and `commitExistingIndexSegments` against a name Lance no longer knows creates
+   * that index rather than extending it: a DROP INDEX during the build would otherwise be undone,
+   * leaving the index back in place with only the coverage this build happened to plan for.
+   */
+  def resolveRetainedSegments(
+      dataset: Dataset,
+      indexName: String,
+      liveFragmentIds: Set[Int]): Seq[Index] =
+    retainedSegments(dataset.getIndexes.asScala.toSeq, indexName, liveFragmentIds)
+
+  /** Dataset-free form of [[resolveRetainedSegments]]. */
+  def retainedSegments(
+      allSegments: Seq[Index],
+      indexName: String,
+      liveFragmentIds: Set[Int]): Seq[Index] = {
+    val current = allSegments.filter(segment => indexName == segment.name())
+    if (current.isEmpty) {
       throw new IllegalStateException(
-        s"Index '$indexName' build raced a concurrent operation: fragments $shown$suffix " +
-          "were retired after the build was planned, so their segments would cover nothing. " +
-          "No index change was committed; re-run the command.")
+        s"Index '$indexName' no longer exists: it was dropped or replaced while the build was " +
+          "running. Nothing was committed; re-create it with ALTER TABLE ... CREATE INDEX.")
+    }
+    // Commit keeps an existing segment only while it still covers a live fragment, and removes the
+    // rest in the same transaction, so only these have to fit the incoming segments.
+    current.filter(segment => declaredCoverage(Seq(segment)).exists(liveFragmentIds.contains))
+  }
+
+  /** Fragment ids the given segments declare coverage of. */
+  def declaredCoverage(segments: Seq[Index]): Set[Int] =
+    segments.iterator
+      .flatMap(_.fragments().orElse(Collections.emptyList[Integer]()).asScala)
+      .map(_.intValue)
+      .toSet
+
+  /**
+   * The coverage a commit of `segments` will actually establish: what they declare, restricted to
+   * the fragments still live.
+   *
+   * Commit intersects each segment's declared coverage with the dataset's live fragments, so a
+   * fragment retired while the build ran contributes nothing. Reporting the planned count instead
+   * would claim coverage the commit did not achieve, which is the failure this guards against.
+   *
+   * Retirement alone is not a reason to discard the build. A fragment leaves the manifest either
+   * because its rows moved (compaction, an in-place rewrite) or because they are gone (every row
+   * deleted); only the first leaves data unindexed, and in both cases the segments that remain are
+   * correct for the fragments they still cover. So a partial loss is logged and the truthful count
+   * returned, and only a total loss fails: committing segments that cover nothing would replace real
+   * coverage with none.
+   *
+   * @return the fragment ids the commit will cover
+   */
+  def committedCoverage(
+      liveFragmentIds: Set[Int],
+      segments: Seq[Index],
+      indexName: String): Set[Int] = {
+    val declared = declaredCoverage(segments)
+    val committed = declared.intersect(liveFragmentIds)
+    val retired = declared.diff(liveFragmentIds)
+    if (retired.nonEmpty) {
+      if (committed.isEmpty) {
+        throw new IllegalStateException(
+          s"Index '$indexName' build raced a concurrent operation: every fragment it covers " +
+            s"(${describeFragmentIds(retired)}) was retired while the build ran, so the segments " +
+            "would cover nothing. No index change was committed; re-run the command.")
+      }
+      logWarning(
+        s"Index '$indexName' build raced a concurrent operation: fragments " +
+          s"${describeFragmentIds(retired)} were retired while the build ran, so this commit does " +
+          "not cover them. The segments for the remaining fragments are committed; re-run the " +
+          "command to cover whatever replaced them.")
+    }
+    committed
+  }
+
+  private def describeFragmentIds(ids: Set[Int]): String = {
+    val ordered = ids.toSeq.sorted
+    val shown = ordered.take(10).mkString(", ")
+    if (ordered.size > 10) s"$shown, ... (${ordered.size} total)" else shown
+  }
+
+  // Index types whose segments must all describe the same build configuration. Lance builds each
+  // segment independently and queries most of them independently too, so for those, segments built
+  // with different options differ in performance only. An inverted (FTS) index is the exception: its
+  // read path loads one set of index details for the whole logical index and rejects a set whose
+  // segments disagree, which fails every full-text query on the column. Kept explicit rather than
+  // inferred; extend it if core grows another type with the same requirement.
+  private val uniformDetailsIndexTypes: Set[IndexType] = Set(IndexType.INVERTED)
+
+  /** True when segments of this index type must all share one build configuration. */
+  def requiresUniformSegmentDetails(indexType: IndexType): Boolean =
+    indexType != null && uniformDetailsIndexTypes.contains(indexType)
+
+  /**
+   * Fails before commit when newly built segments describe a different build configuration than the
+   * segments they are about to join, for an index type that requires them to agree.
+   *
+   * Index details are the serialized build parameters, so this compares what was built rather than
+   * what was asked for, and it runs while the new segments are still uncommitted: a rejection leaves
+   * the index exactly as it was. Segments without index details predate the field, and an index
+   * being replaced wholesale has nothing to agree with; both cases defer to Lance core, which
+   * validates the segment set it is handed.
+   */
+  def requireUniformSegmentDetails(
+      indexType: IndexType,
+      indexName: String,
+      method: String,
+      retainedSegments: Seq[Index],
+      builtSegments: Seq[Index]): Unit = {
+    if (!requiresUniformSegmentDetails(indexType)) {
+      return
+    }
+    val retained = distinctIndexDetails(retainedSegments)
+    val built = distinctIndexDetails(builtSegments)
+    if (retained.isEmpty || built.isEmpty) {
+      return
+    }
+    if (retained.size > 1 || built.size > 1 || retained != built) {
+      throw new IllegalArgumentException(
+        s"Index '$indexName' uses the $method method, whose segments must all share one " +
+          "configuration, and the segments this build produced are configured differently from the " +
+          "ones they would join. Nothing was committed and the index is unchanged. Re-run with the " +
+          "options the index was created with, or rebuild it in full with " +
+          "ALTER TABLE ... CREATE INDEX.")
     }
   }
+
+  private def distinctIndexDetails(segments: Seq[Index]): Set[Seq[Byte]] =
+    segments.iterator
+      .flatMap(segment => Option(segment.indexDetails().orElse(null)))
+      .map(_.toSeq)
+      .toSet
 
   /** Namespace and storage context that tasks need to reopen the dataset on an executor. */
   def extractNamespaceInfo(
@@ -820,6 +968,21 @@ object IndexUtils extends Logging {
     }
   }
 
+  /**
+   * Splits `fragments` into `numSegments` batches, each a contiguous run of fragment ids, balanced
+   * by row count.
+   *
+   * Contiguity is not cosmetic. Lance's compaction planner only groups fragments that are covered by
+   * the identical set of index segments, so batches whose fragment ids interleave leave every
+   * adjacent pair of fragments in a different group and make OPTIMIZE a no-op for the whole table.
+   * Since an index accumulates one segment set per build, and REFRESH INDEX adds more over time,
+   * interleaved coverage would permanently block compaction on exactly the append-heavy tables this
+   * command exists for. Row balance is therefore optimised within contiguity, not against it.
+   *
+   * Assignment is deterministic: the same fragments and segment count always produce the same
+   * batches, whatever order `fragments` arrives in. Every batch holds at least one fragment, so the
+   * result always has exactly `segmentCount` entries.
+   */
   def batchFragments(
       fragments: List[FragmentWorkload],
       numSegments: Option[Int],
@@ -841,35 +1004,57 @@ object IndexUtils extends Logging {
       case None => math.max(1, math.min(fragmentCount, defaultParallelism))
     }
 
-    final class SegmentBatch(val index: Int) {
-      val fragmentIds: ArrayBuffer[Integer] = ArrayBuffer.empty
-      var numRows: Long = 0L
+    val ordered = fragments.sortBy(_.fragmentId.intValue)
+    // Prefix sums drive the boundary search. addExact rejects a workload that cannot be summed
+    // rather than balancing against a wrapped total.
+    val rowsUpTo = new Array[Long](fragmentCount + 1)
+    ordered.iterator.zipWithIndex.foreach { case (fragment, index) =>
+      rowsUpTo(index + 1) = Math.addExact(rowsUpTo(index), fragment.numRows)
+    }
+    val totalRows = rowsUpTo(fragmentCount)
 
-      def add(fragment: FragmentWorkload): Unit = {
-        numRows = Math.addExact(numRows, fragment.numRows)
-        fragmentIds += fragment.fragmentId
-      }
+    val boundaries = new Array[Int](segmentCount + 1)
+    boundaries(segmentCount) = fragmentCount
+    var segment = 1
+    while (segment < segmentCount) {
+      val previous = boundaries(segment - 1)
+      // Where an even split would cut, floored without overflowing on a large total.
+      val target = (totalRows / segmentCount) * segment +
+        ((totalRows % segmentCount) * segment) / segmentCount
+      // Keep every batch non-empty: one fragment behind this boundary at least, and one left for
+      // each batch still ahead of it.
+      boundaries(segment) = math.max(
+        previous + 1,
+        math.min(
+          closestBoundary(rowsUpTo, previous + 1, target),
+          fragmentCount - (segmentCount - segment)))
+      segment += 1
     }
 
-    val segmentOrdering: Ordering[SegmentBatch] =
-      Ordering
-        .by[SegmentBatch, (Long, Int, Int)](segment =>
-          (segment.numRows, segment.fragmentIds.size, segment.index))
-        .reverse
-
-    val segments = PriorityQueue.empty[SegmentBatch](segmentOrdering)
-    (0 until segmentCount).foreach(index => segments.enqueue(new SegmentBatch(index)))
-
-    val sortedFragments = fragments.sortBy(fragment => (-fragment.numRows, fragment.fragmentId))
-    sortedFragments.foreach { fragment =>
-      val segment = segments.dequeue()
-      segment.add(fragment)
-      segments.enqueue(segment)
+    (0 until segmentCount).map { index =>
+      ordered.slice(boundaries(index), boundaries(index + 1)).map(_.fragmentId)
     }
+  }
 
-    segments.toSeq
-      .sortBy(_.index)
-      .map(segment => segment.fragmentIds.sortBy(_.intValue()).toList)
+  /**
+   * The cut at or after `lowerBound` whose accumulated row count comes closest to `target`.
+   *
+   * `rowsUpTo(cut)` is the row count of the first `cut` fragments, so a cut is the boundary in front
+   * of fragment `cut`.
+   */
+  private def closestBoundary(rowsUpTo: Array[Long], lowerBound: Int, target: Long): Int = {
+    val fragmentCount = rowsUpTo.length - 1
+    var cut = lowerBound
+    while (cut < fragmentCount && rowsUpTo(cut) < target) {
+      cut += 1
+    }
+    // Taking the first cut that reaches the target can overshoot it by more than stopping one
+    // fragment earlier undershoots, which puts the heavier batch on the wrong side.
+    if (cut > lowerBound && (rowsUpTo(cut) - target) > (target - rowsUpTo(cut - 1))) {
+      cut - 1
+    } else {
+      cut
+    }
   }
 
 }

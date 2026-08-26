@@ -16,7 +16,9 @@ package org.apache.spark.sql.execution.datasources.v2
 import org.apache.spark.sql.catalyst.plans.logical.LanceNamedArgument
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.Test
-import org.lance.index.IndexType
+import org.lance.index.{Index, IndexType}
+
+import scala.collection.JavaConverters._
 
 /**
  * Unit tests for [[IndexUtils]] helper methods.
@@ -26,13 +28,42 @@ import org.lance.index.IndexType
  */
 class IndexUtilsTest {
 
-  private def fragmentIds(ids: Int*): Seq[Integer] =
-    ids.map(java.lang.Integer.valueOf)
-
   private def fragmentWorkloads(rows: Long*): List[FragmentWorkload] =
     rows.zipWithIndex.map { case (rowCount, fragmentId) =>
       FragmentWorkload(java.lang.Integer.valueOf(fragmentId), rowCount)
     }.toList
+
+  /** An index segment carrying only the metadata these helpers read. */
+  private def segment(
+      fragmentIds: Option[Seq[Int]],
+      indexDetails: Option[Array[Byte]] = None): Index = {
+    val builder = Index
+      .builder()
+      .uuid(java.util.UUID.randomUUID())
+      .name("idx_id")
+      .indexType(IndexType.INVERTED)
+    fragmentIds.foreach(ids =>
+      builder.fragments(ids.map(java.lang.Integer.valueOf).asJava))
+    indexDetails.foreach(builder.indexDetails)
+    builder.build()
+  }
+
+  private def coveringSegment(fragmentIds: Int*): Index = segment(Some(fragmentIds))
+
+  /**
+   * Asserts the batches partition the fragments into contiguous runs of the id order.
+   *
+   * Concatenating the batches in order and getting an ascending id sequence back is exactly that
+   * property: any partition whose concatenation is sorted consists of consecutive slices.
+   */
+  private def assertContiguousBatches(batches: Seq[List[Integer]]): Unit = {
+    val flattened = batches.flatten.map(_.intValue)
+    assertEquals(
+      flattened.sorted,
+      flattened,
+      s"batches must partition the fragments in id order, got $batches")
+    batches.foreach(batch => assertFalse(batch.isEmpty, s"no batch may be empty, got $batches"))
+  }
 
   // ── extractTrain ──────────────────────────────────────────────────────────
 
@@ -231,15 +262,60 @@ class IndexUtilsTest {
     assertEquals(Seq.empty, IndexUtils.batchFragments(Nil, None, 4))
   }
 
+  /**
+   * Interleaved coverage makes Lance's compaction planner treat every adjacent fragment pair as
+   * ungroupable, so OPTIMIZE stops coalescing the table entirely. Batches must be contiguous runs.
+   */
+  @Test
+  def batchFragments_producesContiguousRuns(): Unit = {
+    Seq(
+      fragmentWorkloads(1, 1, 1, 1, 1, 1),
+      fragmentWorkloads(100, 1, 1, 1),
+      fragmentWorkloads(1, 1, 1, 100),
+      fragmentWorkloads(5, 9, 2, 7, 3, 8, 1, 6),
+      fragmentWorkloads(0, 0, 0, 0, 0)).foreach { fragments =>
+      (1 to fragments.size).foreach { segments =>
+        val batches = IndexUtils.batchFragments(fragments, Some(segments), 4)
+        assertEquals(
+          segments,
+          batches.size,
+          s"expected $segments batches for ${fragments.size} fragments, got $batches")
+        assertContiguousBatches(batches)
+        assertEquals(
+          fragments.map(_.fragmentId),
+          batches.flatten,
+          "every fragment must be assigned exactly once")
+      }
+    }
+  }
+
   @Test
   def batchFragments_balancesRowsDeterministically(): Unit = {
     val fragments = fragmentWorkloads(80, 50, 30, 20)
+    // Splitting after fragment 0 gives 80 / 100; the contiguous alternative gives 130 / 50.
     val expected = Seq(
-      List(java.lang.Integer.valueOf(0), java.lang.Integer.valueOf(3)),
-      List(java.lang.Integer.valueOf(1), java.lang.Integer.valueOf(2)))
+      List(java.lang.Integer.valueOf(0)),
+      List(
+        java.lang.Integer.valueOf(1),
+        java.lang.Integer.valueOf(2),
+        java.lang.Integer.valueOf(3)))
 
     assertEquals(expected, IndexUtils.batchFragments(fragments, Some(2), 4))
     assertEquals(expected, IndexUtils.batchFragments(fragments.reverse, Some(2), 4))
+  }
+
+  /** A single dominant fragment must not collapse the requested parallelism. */
+  @Test
+  def batchFragments_keepsRequestedParallelismUnderSkew(): Unit = {
+    val batches = IndexUtils.batchFragments(fragmentWorkloads(100, 1, 1, 1), Some(4), 4)
+
+    assertEquals(
+      Seq(
+        List(java.lang.Integer.valueOf(0)),
+        List(java.lang.Integer.valueOf(1)),
+        List(java.lang.Integer.valueOf(2)),
+        List(java.lang.Integer.valueOf(3))),
+      batches)
   }
 
   @Test
@@ -248,10 +324,26 @@ class IndexUtilsTest {
 
     assertEquals(
       Seq(
-        List(java.lang.Integer.valueOf(0), java.lang.Integer.valueOf(3)),
+        List(java.lang.Integer.valueOf(0)),
         List(java.lang.Integer.valueOf(1)),
-        List(java.lang.Integer.valueOf(2))),
+        List(java.lang.Integer.valueOf(2), java.lang.Integer.valueOf(3))),
       IndexUtils.batchFragments(fragments, Some(3), 4))
+  }
+
+  /** Fragment ids are not necessarily dense or zero-based once a table has been compacted. */
+  @Test
+  def batchFragments_keepsSparseFragmentIdsContiguousByPosition(): Unit = {
+    val fragments = List(
+      FragmentWorkload(java.lang.Integer.valueOf(17), 10L),
+      FragmentWorkload(java.lang.Integer.valueOf(4), 10L),
+      FragmentWorkload(java.lang.Integer.valueOf(9), 10L),
+      FragmentWorkload(java.lang.Integer.valueOf(31), 10L))
+
+    assertEquals(
+      Seq(
+        List(java.lang.Integer.valueOf(4), java.lang.Integer.valueOf(9)),
+        List(java.lang.Integer.valueOf(17), java.lang.Integer.valueOf(31))),
+      IndexUtils.batchFragments(fragments, Some(2), 4))
   }
 
   @Test
@@ -314,36 +406,199 @@ class IndexUtilsTest {
     assertFalse(IndexUtils.isSystemIndex(null))
   }
 
-  // ── requireFragmentsLive ──────────────────────────────────────────────────
+  // ── declaredCoverage / committedCoverage ──────────────────────────────────
 
   @Test
-  def requireFragmentsLive_acceptsPlanCoveredByLiveFragments(): Unit = {
-    IndexUtils.requireFragmentsLive(Set(0, 1, 2), fragmentIds(0, 2), "idx_id")
+  def declaredCoverage_unionsSegmentBitmaps(): Unit = {
+    assertEquals(
+      Set(0, 1, 4),
+      IndexUtils.declaredCoverage(Seq(coveringSegment(0, 1), coveringSegment(4))))
   }
 
   @Test
-  def requireFragmentsLive_acceptsEmptyPlan(): Unit = {
-    IndexUtils.requireFragmentsLive(Set.empty[Int], Seq.empty, "idx_id")
+  def declaredCoverage_treatsAbsentBitmapAsNoCoverage(): Unit = {
+    assertEquals(Set(2), IndexUtils.declaredCoverage(Seq(segment(None), coveringSegment(2))))
+    assertEquals(Set.empty[Int], IndexUtils.declaredCoverage(Seq.empty))
   }
 
   @Test
-  def requireFragmentsLive_rejectsRetiredFragmentAndNamesIt(): Unit = {
+  def committedCoverage_returnsDeclaredCoverageWhenEverythingIsLive(): Unit = {
+    assertEquals(
+      Set(0, 2),
+      IndexUtils.committedCoverage(
+        Set(0, 1, 2),
+        Seq(coveringSegment(0), coveringSegment(2)),
+        "idx_id"))
+  }
+
+  /**
+   * A fragment can leave the manifest because its rows moved or because they were all deleted. Only
+   * the first leaves data unindexed, and either way the segments covering what remains are correct,
+   * so the command reports the coverage it achieved rather than discarding the whole build.
+   */
+  @Test
+  def committedCoverage_dropsRetiredFragmentsAndKeepsTheRest(): Unit = {
+    assertEquals(
+      Set(1),
+      IndexUtils.committedCoverage(Set(1, 5), Seq(coveringSegment(0, 1)), "idx_id"))
+  }
+
+  @Test
+  def committedCoverage_failsWhenNothingWouldBeCovered(): Unit = {
     val error = assertThrows(
       classOf[IllegalStateException],
-      () => IndexUtils.requireFragmentsLive(Set(0, 1), fragmentIds(0, 7), "idx_id"))
+      () => IndexUtils.committedCoverage(Set(5), Seq(coveringSegment(0, 7)), "idx_id"))
 
     assertTrue(error.getMessage.contains("idx_id"), error.getMessage)
-    assertTrue(error.getMessage.contains("7"), error.getMessage)
+    assertTrue(error.getMessage.contains("0, 7"), error.getMessage)
     assertTrue(error.getMessage.contains("re-run"), error.getMessage)
   }
 
   @Test
-  def requireFragmentsLive_summarizesLargeRetiredSets(): Unit = {
+  def committedCoverage_summarizesLargeRetiredSets(): Unit = {
     val error = assertThrows(
       classOf[IllegalStateException],
-      () => IndexUtils.requireFragmentsLive(Set.empty[Int], fragmentIds((0 to 20): _*), "idx_id"))
+      () =>
+        IndexUtils.committedCoverage(Set.empty[Int], Seq(coveringSegment(0 to 20: _*)), "idx_id"))
 
     assertTrue(error.getMessage.contains("21 total"), error.getMessage)
+  }
+
+  // ── retainedSegments ──────────────────────────────────────────────────────
+
+  private def namedSegment(name: String, fragmentIds: Int*): Index =
+    Index
+      .builder()
+      .uuid(java.util.UUID.randomUUID())
+      .name(name)
+      .indexType(IndexType.ZONEMAP)
+      .fragments(fragmentIds.map(java.lang.Integer.valueOf).asJava)
+      .build()
+
+  @Test
+  def retainedSegments_keepsOnlySegmentsOfTheNamedIndexThatStillCoverLiveFragments(): Unit = {
+    val kept = namedSegment("idx_id", 0, 1)
+    val allRetired = namedSegment("idx_id", 7)
+    val otherIndex = namedSegment("idx_other", 0)
+
+    assertEquals(
+      Seq(kept),
+      IndexUtils.retainedSegments(Seq(kept, allRetired, otherIndex), "idx_id", Set(0, 1)))
+  }
+
+  /**
+   * A commit against a name Lance no longer knows creates that index instead of extending it, so a
+   * DROP INDEX during the build would otherwise be undone with only the planned coverage.
+   */
+  @Test
+  def retainedSegments_failsWhenTheIndexIsGone(): Unit = {
+    val error = assertThrows(
+      classOf[IllegalStateException],
+      () => IndexUtils.retainedSegments(Seq(namedSegment("idx_other", 0)), "idx_id", Set(0)))
+
+    assertTrue(error.getMessage.contains("idx_id"), error.getMessage)
+    assertTrue(error.getMessage.contains("no longer exists"), error.getMessage)
+    assertTrue(error.getMessage.contains("CREATE INDEX"), error.getMessage)
+  }
+
+  @Test
+  def retainedSegments_matchesIndexNameExactly(): Unit = {
+    assertThrows(
+      classOf[IllegalStateException],
+      () => IndexUtils.retainedSegments(Seq(namedSegment("IDX_ID", 0)), "idx_id", Set(0)))
+  }
+
+  // ── requireUniformSegmentDetails ──────────────────────────────────────────
+
+  @Test
+  def requiresUniformSegmentDetails_onlyForInverted(): Unit = {
+    assertTrue(IndexUtils.requiresUniformSegmentDetails(IndexType.INVERTED))
+    Seq(
+      IndexType.BTREE,
+      IndexType.ZONEMAP,
+      IndexType.BITMAP,
+      IndexType.LABEL_LIST,
+      IndexType.NGRAM,
+      IndexType.BLOOM_FILTER,
+      IndexType.RTREE,
+      IndexType.VECTOR).foreach { indexType =>
+      assertFalse(IndexUtils.requiresUniformSegmentDetails(indexType), indexType.name())
+    }
+    assertFalse(IndexUtils.requiresUniformSegmentDetails(null))
+  }
+
+  @Test
+  def requireUniformSegmentDetails_acceptsMatchingDetails(): Unit = {
+    val details = Array[Byte](1, 2, 3)
+    IndexUtils.requireUniformSegmentDetails(
+      IndexType.INVERTED,
+      "idx_id",
+      "fts",
+      Seq(segment(Some(Seq(0)), Some(details.clone()))),
+      Seq(segment(Some(Seq(1)), Some(details.clone()))))
+  }
+
+  /**
+   * An inverted index loads one set of details for the whole logical index, so segments built with
+   * different options fail every full-text query. Rejecting before the commit leaves it untouched.
+   */
+  @Test
+  def requireUniformSegmentDetails_rejectsDifferingDetails(): Unit = {
+    val error = assertThrows(
+      classOf[IllegalArgumentException],
+      () =>
+        IndexUtils.requireUniformSegmentDetails(
+          IndexType.INVERTED,
+          "idx_id",
+          "fts",
+          Seq(segment(Some(Seq(0)), Some(Array[Byte](1, 2, 3)))),
+          Seq(segment(Some(Seq(1)), Some(Array[Byte](1, 2, 4))))))
+
+    assertTrue(error.getMessage.contains("idx_id"), error.getMessage)
+    assertTrue(error.getMessage.contains("fts"), error.getMessage)
+    assertTrue(error.getMessage.contains("CREATE INDEX"), error.getMessage)
+  }
+
+  @Test
+  def requireUniformSegmentDetails_rejectsDisagreementWithinEitherSide(): Unit = {
+    val a = Array[Byte](1)
+    val b = Array[Byte](2)
+    assertThrows(
+      classOf[IllegalArgumentException],
+      () =>
+        IndexUtils.requireUniformSegmentDetails(
+          IndexType.INVERTED,
+          "idx_id",
+          "fts",
+          Seq(segment(Some(Seq(0)), Some(a)), segment(Some(Seq(1)), Some(b))),
+          Seq(segment(Some(Seq(2)), Some(a)))))
+  }
+
+  @Test
+  def requireUniformSegmentDetails_ignoresIndexTypesWithoutTheRequirement(): Unit = {
+    IndexUtils.requireUniformSegmentDetails(
+      IndexType.ZONEMAP,
+      "idx_id",
+      "zonemap",
+      Seq(segment(Some(Seq(0)), Some(Array[Byte](1)))),
+      Seq(segment(Some(Seq(1)), Some(Array[Byte](2)))))
+  }
+
+  /** Nothing to compare against: a segment predating index details, or a wholesale replacement. */
+  @Test
+  def requireUniformSegmentDetails_defersWhenEitherSideHasNoDetails(): Unit = {
+    IndexUtils.requireUniformSegmentDetails(
+      IndexType.INVERTED,
+      "idx_id",
+      "fts",
+      Seq(segment(Some(Seq(0)))),
+      Seq(segment(Some(Seq(1)), Some(Array[Byte](1)))))
+    IndexUtils.requireUniformSegmentDetails(
+      IndexType.INVERTED,
+      "idx_id",
+      "fts",
+      Seq.empty,
+      Seq(segment(Some(Seq(1)), Some(Array[Byte](1)))))
   }
 
   // ── parseNumSegments ──────────────────────────────────────────────────────

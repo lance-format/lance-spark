@@ -19,12 +19,24 @@ import org.apache.spark.sql.catalyst.parser.{ParseException, ParserInterface}
 import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, LanceCreateBranch, LanceCreateTag, LanceDropBranch, LanceDropIndex, LanceDropTag, LanceNamedArgument, LanceShowBranches, LanceShowTags, LogicalPlan, Optimize, RefreshIndex, SetUnenforcedPrimaryKey, ShowIndexes, UpdateColumnsBackfill, Vacuum}
 import org.lance.spark.utils.{FieldPathUtils, ParserUtils}
 
+import java.util.Locale
+
 import scala.jdk.CollectionConverters._
 
 class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
   extends LanceSqlExtensionsBaseVisitor[AnyRef] {
 
   private def cleanIdentifier(text: String): String = ParserUtils.cleanIdentifier(text)
+
+  /**
+   * A WITH-clause option name, normalized to lower case.
+   *
+   * ANTLR reports identifier text as written, and every command matches its option names against
+   * lower-case literals, so without normalizing here `WITH (NUM_SEGMENTS = 4)` parses into an option
+   * no command recognizes: it is silently ignored, and forwarded to Lance as an index parameter.
+   */
+  private def normalizedOptionName(text: String): String =
+    cleanIdentifier(text).toLowerCase(Locale.ROOT)
 
   override def visitSingleStatement(ctx: LanceSqlExtensionsParser.SingleStatementContext)
       : LogicalPlan = {
@@ -73,7 +85,7 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
     val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
     val args = ctx.namedArgument().asScala.map(a =>
       LanceNamedArgument(
-        cleanIdentifier(a.identifier().getText),
+        normalizedOptionName(a.identifier().getText),
         a.constant().accept(this)))
       .toSeq
 
@@ -84,7 +96,7 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
     val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
     val args = ctx.namedArgument().asScala.map(a =>
       LanceNamedArgument(
-        cleanIdentifier(a.identifier().getText),
+        normalizedOptionName(a.identifier().getText),
         a.constant().accept(this)))
       .toSeq
 
@@ -98,7 +110,7 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
     val columns = visitFieldPathList(ctx.fieldPathList())
     val args = ctx.namedArgument().asScala.map(a =>
       LanceNamedArgument(
-        cleanIdentifier(a.identifier().getText),
+        normalizedOptionName(a.identifier().getText),
         a.constant().accept(this)))
       .toSeq
 
@@ -122,7 +134,7 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
     val indexName = cleanIdentifier(ctx.indexName.getText)
     val args = ctx.namedArgument().asScala.map(a =>
       LanceNamedArgument(
-        cleanIdentifier(a.identifier().getText),
+        normalizedOptionName(a.identifier().getText),
         a.constant().accept(this)))
       .toSeq
 

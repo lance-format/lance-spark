@@ -157,7 +157,10 @@ public class LanceSqlExtensionsAstBuilderTest {
         List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
     assertEquals("my-idx", plan.indexName());
     assertEquals(1, plan.args().size());
-    assertEquals("NUM_SEGMENTS", plan.args().apply(0).name());
+    // Option names are normalized at parse time: commands match lower-case literals, so an
+    // upper-case spelling must reach them as the option they recognize rather than as an unknown
+    // one.
+    assertEquals("num_segments", plan.args().apply(0).name());
     assertEquals(4L, plan.args().apply(0).value());
   }
 

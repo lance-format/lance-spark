@@ -19,6 +19,7 @@ import org.apache.spark.sql.catalyst.plans.logical.{LanceNamedArgument, RefreshI
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.unsafe.types.UTF8String
 import org.lance.Dataset
+import org.lance.index.IndexType
 import org.lance.spark.{LanceDataset, LanceSparkReadOptions}
 import org.lance.spark.utils.{FieldPathUtils, Utils}
 
@@ -43,10 +44,13 @@ import scala.collection.JavaConverters._
  * <p>Because a deferred index ({@code WITH (train=false)}) covers no fragments, refreshing one
  * indexes the whole table through the same distributed path.
  *
- * <p>Index build parameters are taken from the {@code WITH} clause, defaulting to the index type's
- * defaults. Lance does not expose an already-built index's parameters as metadata, so they cannot
- * be recovered from the existing segments; pass the original options to keep new segments
- * configured like the old ones.
+ * <p>Index build parameters are taken from the {@code WITH} clause, falling back to the index type's
+ * defaults rather than to the existing index's configuration: Lance records a built index's
+ * parameters inside the index rather than as table metadata a command can read back. For index types
+ * whose segments are queried independently that only changes performance, so the caller is asked to
+ * pass the original options. For a type whose segments must agree — see
+ * {@code IndexUtils.requiresUniformSegmentDetails} — the mismatch is detected against the built
+ * segments and rejected before anything is committed.
  */
 case class RefreshIndexExec(
     catalog: TableCatalog,
@@ -81,6 +85,7 @@ case class RefreshIndexExec(
 
     val segments = new ScalarSegmentIndexJob(
       session.sparkContext,
+      plan.resolvedName,
       plan.method,
       List(plan.column),
       IndexUtils.toJson(args),
@@ -94,19 +99,31 @@ case class RefreshIndexExec(
 
     // Lance core's commitExistingIndexSegments keeps existing segments that are disjoint from the
     // incoming fragments and removes the ones they supersede, all in one CreateIndex transaction.
+    //
+    // The index is re-resolved here rather than carried over from planning: the whole distributed
+    // build sits between the two, so the state the commit has to fit is the state now, not the state
+    // the plan saw.
     val dataset = Utils.openDatasetBuilder(readOptions).build()
-    try {
-      IndexUtils.requireFragmentsLive(
-        dataset,
-        plan.unindexedFragments.map(_.fragmentId),
-        plan.resolvedName)
-      dataset.commitExistingIndexSegments(plan.resolvedName, plan.column, segments.toList.asJava)
-    } finally {
-      dataset.close()
-    }
+    val fragmentsIndexed =
+      try {
+        val liveFragmentIds = IndexUtils.liveFragmentIds(dataset)
+        val retainedSegments =
+          IndexUtils.resolveRetainedSegments(dataset, plan.resolvedName, liveFragmentIds)
+        IndexUtils.requireUniformSegmentDetails(
+          plan.indexType,
+          plan.resolvedName,
+          plan.method,
+          retainedSegments,
+          segments)
+        val covered = IndexUtils.committedCoverage(liveFragmentIds, segments, plan.resolvedName)
+        dataset.commitExistingIndexSegments(plan.resolvedName, plan.column, segments.toList.asJava)
+        covered.size
+      } finally {
+        dataset.close()
+      }
 
     Seq(new GenericInternalRow(Array[Any](
-      plan.unindexedFragments.size.toLong,
+      fragmentsIndexed.toLong,
       segments.size.toLong,
       UTF8String.fromString(plan.resolvedName))))
   }
@@ -205,16 +222,16 @@ case class RefreshIndexExec(
       .map(_.intValue)
       .toSet
 
-    val unindexed = ds.getFragments.asScala
-      .filterNot(fragment => covered.contains(fragment.getId))
-      .map(fragment => FragmentWorkload(fragment.getId, fragment.metadata().getNumRows))
-      .toList
+    val unindexed = IndexUtils
+      .fragmentWorkloads(ds)
+      .filterNot(fragment => covered.contains(fragment.fragmentId.intValue))
 
     // Commit under the name the manifest actually stores. The parser lowercases the requested name,
     // so an index created elsewhere with mixed case is matched case-insensitively above; committing
     // under the lowercased spelling would fork a second logical index with overlapping coverage.
     RefreshPlan(
       segments.head.name(),
+      indexType,
       method,
       column,
       unindexed,
@@ -226,6 +243,7 @@ case class RefreshIndexExec(
  * The driver-side plan for one refresh.
  *
  * @param resolvedName       index name as stored in the manifest, which the commit must reuse
+ * @param indexType          type of the existing index, which the rebuilt segments must match
  * @param method             SQL index method resolved from the existing index's type
  * @param column             canonical path of the column the index is keyed on
  * @param unindexedFragments fragments the index does not cover, with their row counts
@@ -233,6 +251,7 @@ case class RefreshIndexExec(
  */
 final private[v2] case class RefreshPlan(
     resolvedName: String,
+    indexType: IndexType,
     method: String,
     column: String,
     unindexedFragments: List[FragmentWorkload],

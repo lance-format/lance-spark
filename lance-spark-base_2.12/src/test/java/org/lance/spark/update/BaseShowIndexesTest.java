@@ -149,6 +149,22 @@ public abstract class BaseShowIndexesTest {
     Assertions.assertTrue(row.getLong(9) > 0L, "size_bytes should be positive");
   }
 
+  /**
+   * With no rows to divide, coverage is undefined rather than complete: reporting 100 would tell an
+   * operator polling for staleness that an index covering nothing is up to date.
+   */
+  @Test
+  public void testShowIndexesReportsNullPercentForEmptyTable() {
+    spark.sql(String.format("create table %s (id int, text string) using lance;", fullTable));
+    spark.sql(String.format("alter table %s create index test_index using btree (id)", fullTable));
+
+    Row row = spark.sql(String.format("show indexes from %s", fullTable)).collectAsList().get(0);
+
+    Assertions.assertTrue(row.isNullAt(7), "indexed_percent should be null for an empty table");
+    Assertions.assertEquals(0L, row.getLong(4), "no rows can be indexed");
+    Assertions.assertEquals(0L, row.getLong(6), "no rows can be unindexed");
+  }
+
   @Test
   public void testShowIndexesFiltersMemWalIndex() {
     spark.sql(

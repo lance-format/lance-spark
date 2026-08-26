@@ -53,7 +53,13 @@ The distributed build used by `zonemap`, `bitmap`, `label_list`, `ngram`, `bloom
 
 | Option         | Type    | Description                                                                                                                                                                                                                        |
 |----------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `num_segments` | Integer | Target number of parallel build tasks (upper bound; clamped to fragment count when larger). Fragments are assigned by row count to balance estimated task workloads. Defaults to `min(fragment_count, spark.default.parallelism)`. |
+| `num_segments` | Integer | Number of parallel build tasks, and so of index segments created (clamped to fragment count when larger). Each task takes a contiguous run of fragments, sized to balance estimated workloads by row count. Defaults to `min(fragment_count, spark.default.parallelism)`. |
+
+Option names are case-insensitive: `WITH (NUM_SEGMENTS = 8)` and `WITH (num_segments = 8)` are the same option.
+
+Contiguous coverage matters beyond parallelism: [OPTIMIZE](./optimize.md) can only group fragments
+that the identical set of index segments covers, so segments whose fragment ids interleave leave it
+nothing to coalesce.
 
 ### ZoneMap Options
 
@@ -254,7 +260,8 @@ to scanning the data until it is populated. There are two ways to populate it:
 
 - **[REFRESH INDEX](./refresh-index.md) (recommended):** builds only the fragments the index does not
   cover, distributed across Spark tasks. For a deferred index that is the whole table; afterwards it
-  is whatever has been appended since:
+  is whatever has been appended since. Repeat any method options here, since a deferred index holds
+  no built data to inherit them from:
 
     ```sql
     ALTER TABLE lance.db.users REFRESH INDEX idx_id;

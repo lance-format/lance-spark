@@ -1247,6 +1247,75 @@ class TestDDLIndex:
         assert populated["num_unindexed_rows"] == 0
         assert populated["indexed_percent"] == 100.0
 
+    def test_refresh_index_named_after_its_column(self, spark):
+        """Test REFRESH INDEX works for an index named like Lance's own default, <column>_idx."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING,
+                value DOUBLE
+            )
+        """)
+
+        def append(start, end):
+            data = [(i, f"Name{i}", float(i * 10)) for i in range(start, end)]
+            df = spark.createDataFrame(data, ["id", "name", "value"])
+            df.coalesce(1).writeTo("default.test_table").append()
+
+        append(0, 50)
+        spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX id_idx USING zonemap (id)
+        """)
+        append(50, 100)
+
+        result = spark.sql("""
+            ALTER TABLE default.test_table REFRESH INDEX id_idx
+        """).collect()
+        assert result[0]["fragments_indexed"] == 1
+        assert result[0]["index_name"] == "id_idx"
+
+        refreshed = spark.sql("SHOW INDEXES IN default.test_table").collect()[0]
+        assert refreshed["num_unindexed_fragments"] == 0
+        query_result = spark.sql("""
+            SELECT * FROM default.test_table WHERE id = 75
+        """).collect()
+        assert len(query_result) == 1
+
+    def test_refresh_index_option_names_are_case_insensitive(self, spark):
+        """Test an upper-case option name takes effect instead of being silently ignored."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING,
+                value DOUBLE
+            )
+        """)
+
+        def append(start, end):
+            data = [(i, f"Name{i}", float(i * 10)) for i in range(start, end)]
+            df = spark.createDataFrame(data, ["id", "name", "value"])
+            df.coalesce(1).writeTo("default.test_table").append()
+
+        append(0, 10)
+        spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX idx_id USING zonemap (id)
+        """)
+        for start in range(10, 50, 10):
+            append(start, start + 10)
+
+        result = spark.sql("""
+            ALTER TABLE default.test_table REFRESH INDEX idx_id WITH (NUM_SEGMENTS = 2)
+        """).collect()
+        assert result[0]["fragments_indexed"] == 4
+        assert result[0]["segments_added"] == 2
+
+        with pytest.raises(Exception, match="not supported for REFRESH INDEX"):
+            spark.sql("""
+                ALTER TABLE default.test_table REFRESH INDEX idx_id WITH (TRAIN = false)
+            """).collect()
+
     def test_refresh_index_rejects_unknown_index(self, spark):
         """Test REFRESH INDEX fails with an actionable message for a missing index."""
         spark.sql("""
@@ -3648,6 +3717,65 @@ class TestDQLFullTextSearch:
         assert 1 in ids
         assert 4 in ids
         assert 6 in ids
+
+    # The fixture's index uses non-default tokenizer options, so a refresh that omits them builds
+    # segments the read path cannot combine with the existing ones. REFRESH INDEX must refuse that
+    # rather than commit an index that reports full coverage and answers nothing.
+    FTS_INDEX_OPTIONS = (
+        "base_tokenizer = 'simple', language = 'English', "
+        "max_token_length = 40, lower_case = true, "
+        "stem = false, remove_stop_words = false, "
+        "ascii_folding = false, with_position = true"
+    )
+
+    def _append_fts_doc(self, spark):
+        df = spark.createDataFrame(
+            [(7, "Refreshed Doc", "Apache Spark refreshed segment body")],
+            ["id", "title", "body"],
+        )
+        df.coalesce(1).writeTo("default.fts_docs").append()
+
+    def test_refresh_fts_index_rejects_mismatched_options(self, spark):
+        """REFRESH INDEX refuses to mix FTS segments built with different options."""
+        self._append_fts_doc(spark)
+
+        with pytest.raises(Exception, match="share one configuration"):
+            spark.sql(
+                "ALTER TABLE default.fts_docs REFRESH INDEX fts_body"
+            ).collect()
+
+        # Nothing was committed, so the index still answers exactly as before.
+        rows = spark.sql(
+            "SELECT id FROM default.fts_docs WHERE lance_match(body, 'spark')"
+        ).collect()
+        ids = sorted([r.id for r in rows])
+        assert 1 in ids
+        assert 4 in ids
+
+    def test_refresh_fts_index_with_matching_options(self, spark):
+        """Repeating the original options lets the refresh commit and keeps queries complete."""
+        self._append_fts_doc(spark)
+
+        result = spark.sql(
+            "ALTER TABLE default.fts_docs REFRESH INDEX fts_body "
+            f"WITH ({self.FTS_INDEX_OPTIONS})"
+        ).collect()
+        assert result[0]["fragments_indexed"] >= 1
+
+        stats = spark.sql("SHOW INDEXES IN default.fts_docs").collect()
+        body = [r for r in stats if r["name"] == "fts_body"][0]
+        assert body["num_unindexed_fragments"] == 0
+
+        rows = spark.sql(
+            "SELECT id FROM default.fts_docs WHERE lance_match(body, 'refreshed')"
+        ).collect()
+        assert [r.id for r in rows] == [7]
+        # Positions survive, so phrase queries keep working across the new segment.
+        rows = spark.sql(
+            "SELECT id FROM default.fts_docs "
+            "WHERE lance_match_phrase(body, 'refreshed segment')"
+        ).collect()
+        assert [r.id for r in rows] == [7]
 
     def test_show_functions_lists_fts(self, spark):
         """SHOW FUNCTIONS returns all three FTS function names."""

@@ -60,14 +60,21 @@ The `SHOW INDEXES` command returns the following columns:
 
 ## Interpreting the Output
 
-An `indexed_percent` below 100 means rows have been appended since the index was last built, and
-queries filtering on the indexed column fall back to scanning those fragments. Use
-[REFRESH INDEX](./refresh-index.md) to index just the uncovered fragments.
+An `indexed_percent` below 100 means part of the table is not covered — either rows were appended
+since the index was last built, or [OPTIMIZE](./optimize.md) rewrote fragments a `zonemap` or
+`bloomfilter` index had covered. Use [REFRESH INDEX](./refresh-index.md) to index just the uncovered
+fragments.
+
+Do not treat partial coverage as merely slower. For most methods the uncovered fragments are scanned
+and results stay complete, but a partially covered `zonemap` index prunes them instead, so a
+predicate on the indexed column can return fewer rows than the table holds. Refresh before relying on
+filters over a `zonemap` index that reports less than 100.
 
 `num_segments` reflects how the index was built: a distributed build produces one segment per
 parallel task, and each [REFRESH INDEX](./refresh-index.md) adds more, since a refresh appends
-coverage rather than rewriting existing segments. Queries search every segment, so rebuilding with
-[CREATE INDEX](./create-index.md) consolidates them when the count gets high.
+coverage rather than rewriting existing segments. Queries search every segment, and Lance can only
+compact fragments covered by the identical set of segments, so a high count costs both query time and
+`OPTIMIZE`'s ability to coalesce. Rebuilding with [CREATE INDEX](./create-index.md) consolidates them.
 
 ## Notes
 
