@@ -90,11 +90,29 @@ final class LanceProbe(
   }
 
   private def openDataset(): Dataset = {
+    // Apply the connector's exact worker-open namespace policy (`LanceFragmentScanner.create`):
+    // touch the namespace ONLY when a namespace impl is configured AND executor credential refresh
+    // is enabled. When refresh is on, either rebuild the namespace client (impls that must run on
+    // workers) or clear it (impls that must not, so the open falls back to the URI + initial storage
+    // options). When refresh is OFF we leave the read options' namespace exactly as shipped — this
+    // is the whole point of `executor_credential_refresh=false`, and forcing a rebuild here would
+    // turn that policy into a namespace class-load / RPC that can fail before the dataset even opens.
+    //
+    // Notably this does NOT call `builder.runtimeNamespace(namespaceImpl, ...)` unconditionally
+    // (which always loads the namespace impl class) — matching the fragment scanner, which reaches
+    // the namespace only through the guarded `setNamespace` path above.
+    if (namespaceImpl != null && readOptions.isExecutorCredentialRefresh()) {
+      if (LanceRuntime.useNamespaceOnWorkers(namespaceImpl)) {
+        readOptions.setNamespace(
+          LanceRuntime.getOrCreateNamespace(namespaceImpl, namespaceProperties))
+      } else {
+        readOptions.setNamespace(null)
+      }
+    }
     val builder = Utils.openDatasetBuilder(readOptions)
     if (initialStorageOptions != null) {
       builder.initialStorageOptions(initialStorageOptions)
     }
-    builder.runtimeNamespace(namespaceImpl, namespaceProperties, readOptions.getTableId())
     builder.build()
   }
 

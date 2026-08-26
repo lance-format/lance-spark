@@ -26,6 +26,51 @@ vector index directly.
     shape is not supported), the query falls through to Spark's built-in brute-force
     `APPROX NEAREST` rewrite, so results are unchanged either way.
 
+## Installation
+
+The indexed rewrite ships in its own module, **separate** from the base connector artifacts — it is
+built only for Spark 4.2 / Scala 2.13 (the Spark release where `APPROX NEAREST` exists). Add it
+alongside the connector.
+
+| Artifact                          | Coordinate                                      |
+|-----------------------------------|-------------------------------------------------|
+| KNN SQL extension (Spark 4.2)     | `org.lance:lance-spark-knn-4.2_2.13:<version>`  |
+| Lance connector (Spark 4.2)       | `org.lance:lance-spark-bundle-4.2_2.13:<version>` |
+
+Use the same `<version>` as the connector release.
+
+=== "Maven"
+    ```xml
+    <dependency>
+        <groupId>org.lance</groupId>
+        <artifactId>lance-spark-knn-4.2_2.13</artifactId>
+        <version>VERSION</version>
+    </dependency>
+    ```
+
+=== "Gradle"
+    ```gradle
+    dependencies {
+        implementation 'org.lance:lance-spark-knn-4.2_2.13:VERSION'
+    }
+    ```
+
+=== "sbt"
+    ```scala
+    libraryDependencies += "org.lance" % "lance-spark-knn-4.2_2.13" % "VERSION"
+    ```
+
+To supply it to a running cluster, add the coordinate to `--packages` (comma-separated, together
+with the Lance connector bundle):
+
+```shell
+spark-submit \
+  --packages org.lance:lance-spark-bundle-4.2_2.13:VERSION,org.lance:lance-spark-knn-4.2_2.13:VERSION \
+  --conf spark.sql.extensions=org.lance.spark.knn.extensions.LanceKnnSparkSessionExtensions \
+  --conf spark.lance.knn.indexedNearestByJoin.enabled=true \
+  your-application.jar
+```
+
 ## Enabling the Extension
 
 === "Scala"

@@ -18,9 +18,10 @@ import org.apache.spark.sql.types._
 import org.junit.jupiter.api.{AfterEach, BeforeEach, Test}
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.io.TempDir
+import org.lance.spark.LanceSparkReadOptions
 
 import java.nio.file.Path
-import java.util.Random
+import java.util.{Collections, Random}
 
 import scala.collection.JavaConverters._
 
@@ -148,6 +149,39 @@ class LanceProbeValidationTest {
       val results = probe.probe("vec", randomVector(new Random(1L), VectorDim), 5, Metric.L2)
       assertTrue(results.isEmpty, s"empty fragmentIds should yield no results, got ${results.size}")
     } finally probe.close()
+  }
+
+  /**
+   * When `executor_credential_refresh = false`, the probe must NOT rebuild (or even load) the
+   * runtime namespace on the worker — exactly the policy `LanceFragmentScanner.create` applies.
+   * Regression against the earlier `openDataset` that called `builder.runtimeNamespace(impl, ...)`
+   * unconditionally, which forced the namespace impl class to load regardless of the refresh flag.
+   *
+   * We pass a namespace impl that does not exist on the classpath and point the probe at a
+   * non-existent dataset URI. The open must fail because the DATASET is missing — not because it
+   * tried to load the bogus namespace class. Asserting the failure message does not mention the
+   * namespace class proves the namespace path was skipped.
+   */
+  @Test def testExecutorCredentialRefreshFalseSkipsNamespaceRebuild(): Unit = {
+    val missingUri = tempDir.resolve("does_not_exist").toString
+    val readOptions = LanceSparkReadOptions
+      .builder()
+      .datasetUri(missingUri)
+      .executorCredentialRefresh(false)
+      .build()
+    val ex = assertThrows(
+      classOf[RuntimeException],
+      () =>
+        new LanceProbe(
+          readOptions,
+          null,
+          "example.namespace.MustNotBeLoaded",
+          Collections.emptyMap[String, String](),
+          None))
+    assertFalse(
+      String.valueOf(ex.getMessage).contains("MustNotBeLoaded"),
+      s"namespace impl must not be loaded when executor credential refresh is off; got: " +
+        ex.getMessage)
   }
 
   // -- helpers ------------------------------------------------------------------------------

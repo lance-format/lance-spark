@@ -122,7 +122,8 @@ object IndexedNearestByJoinRule extends Rule[LogicalPlan] {
     val nprobes = optInt(NprobesConfKey)
     val refineFactor = optInt(RefineFactorConfKey)
     plan.transformDown {
-      case j @ NearestByJoin(left, right, joinType, true, k, rankingExpr, direction) =>
+      case j @ NearestByJoin(left, right, joinType, true, k, rankingExpr, direction)
+          if preservesAnalysisGuards(left, right) =>
         rewriteIfApplicable(
           j,
           left,
@@ -135,6 +136,24 @@ object IndexedNearestByJoinRule extends Rule[LogicalPlan] {
           refineFactor).getOrElse(j)
     }
   }
+
+  /**
+   * This rule runs as a `postHocResolutionRule`, i.e. BEFORE the optimizer's `FinishAnalysis` batch
+   * (which lowers `NearestByJoin` into a Cartesian product + `MaxMinByK`) and BEFORE the checks that
+   * batch relies on. Replacing a `NearestByJoin` that one of those checks would REJECT would let an
+   * illegal query succeed silently. So we decline the rewrite — leaving the original `NearestByJoin`
+   * in place for Spark's own path to reject with the exact error the user expects — whenever a
+   * standard analysis guard would fire:
+   *
+   *   - `spark.sql.crossJoin.enabled = false`: a `NearestByJoin` carries no equi-condition, so its
+   *     default lowering is a Cartesian product, which `CheckCartesianProducts` rejects with
+   *     `CROSS_JOIN_NOT_ENABLED`. Reading `conf.crossJoinEnabled` here uses the same value (and
+   *     default) that check uses.
+   *   - a streaming child: `NearestByJoin` over a streaming input is unsupported
+   *     (`STREAMING_NOT_SUPPORTED`); leave it for Spark's unsupported-operation check to reject.
+   */
+  private def preservesAnalysisGuards(left: LogicalPlan, right: LogicalPlan): Boolean =
+    conf.crossJoinEnabled && !left.isStreaming && !right.isStreaming
 
   private def optInt(key: String): Option[Int] =
     Option(conf.getConfString(key, null)).map(_.toInt)
@@ -385,16 +404,22 @@ object IndexedNearestByJoinRule extends Rule[LogicalPlan] {
   }
 
   /**
-   * Render a column identifier for a Lance (DataFusion-flavored) filter. A plain identifier
-   * (`[A-Za-z_][A-Za-z0-9_]*`) is emitted bare so the common case stays readable; anything else —
-   * spaces, punctuation, a leading digit, an embedded quote — is double-quoted with embedded quotes
-   * doubled. Without this, a column named e.g. `my col` renders as a bare `my col` and produces a
-   * malformed / mis-parsed filter string. Applied per dotted-path segment, so `outer.inner field`
-   * becomes `outer."inner field"`.
+   * Render a column identifier for a Lance filter by ALWAYS back-quoting it (any embedded backtick
+   * doubled). A bare identifier is not merely a readability question — it is ambiguous with SQL
+   * keywords and literals: a column literally named `true`, `null`, or `select` emitted bare parses
+   * as the keyword/literal, not a column reference (`true = true` is a tautology, not `col = true`),
+   * silently corrupting the prefilter. A "quote only the non-word identifiers" exception cannot
+   * enumerate every such reserved word, so we quote unconditionally — a delimited identifier is
+   * unambiguous for every name.
+   *
+   * The quote character is a BACKTICK, not a double-quote. Lance's filter dialect is MySQL-flavored:
+   * a double-quoted token is a STRING LITERAL, so `"category" = 'A'` parses as the constant
+   * comparison `'category' = 'A'` (always false) and silently prefilters to zero rows — verified
+   * against a real Lance dataset. Backticks delimit an identifier. Applied per dotted-path segment,
+   * so a nested field `outer.inner` becomes `` `outer`.`inner` ``.
    */
   private def quoteIdentifier(name: String): String =
-    if (name.matches("[A-Za-z_][A-Za-z0-9_]*")) name
-    else "\"" + name.replace("\"", "\"\"") + "\""
+    "`" + name.replace("`", "``") + "`"
 
   /**
    * Render a Spark literal as a Lance SQL literal. Dispatch is by `dataType`, NOT by the boxed

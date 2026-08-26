@@ -13,7 +13,7 @@
  */
 package org.lance.spark.knn.catalyst
 
-import org.apache.spark.sql.{DataFrame, Row, RowFactory, SparkSession}
+import org.apache.spark.sql.{AnalysisException, DataFrame, Row, RowFactory, SparkSession}
 import org.apache.spark.sql.types._
 import org.junit.jupiter.api.{AfterEach, BeforeEach, Test}
 import org.junit.jupiter.api.Assertions._
@@ -275,6 +275,40 @@ class IndexedNearestByJoinSqlTest {
       assertTrue(
         rids.contains(DupIdBase + lid),
         s"latest result for lid=$lid should contain its duplicate ${DupIdBase + lid}; got $rids")
+    }
+  }
+
+  /**
+   * The rewrite runs as a `postHocResolutionRule`, BEFORE Spark's `FinishAnalysis` /
+   * `CheckCartesianProducts`. It must NOT let a query that Spark would reject slip through: with
+   * `spark.sql.crossJoin.enabled = false`, an `APPROX NEAREST` join (which lowers to a Cartesian
+   * product) must still fail with the standard `CROSS_JOIN_NOT_ENABLED` analysis error, exactly as
+   * it would without the extension. The rule declines the rewrite in this case, leaving the
+   * `NearestByJoin` for Spark's own path to reject.
+   */
+  @Test def testIndexedRewritePreservesCrossJoinAnalysisGuard(): Unit = {
+    spark.conf.set("spark.sql.crossJoin.enabled", "false")
+    try {
+      val leftVecs = generateUniform(ExactLeft, ExactDim, Seed + 400)
+      val (leftDf, _, _) = buildLeftDf(leftVecs, ExactDim)
+      val rightVecs = generateUniform(ExactRight, ExactDim, Seed + 401)
+      val (rightUri, _, _) = writeRightDf(rightVecs, ExactDim, idBase = 1000)
+      val (q, d) = registerViews(leftDf, rightUri)
+      val ex = assertThrows(
+        classOf[AnalysisException],
+        () => {
+          val df = spark.sql(
+            s"""SELECT q.lid, d.rid
+               |FROM $q q INNER JOIN $d d
+               |APPROX NEAREST 5 BY DISTANCE vector_l2_distance(q.lvec, d.rvec)""".stripMargin)
+          // Force optimization — the Cartesian-product check runs in the optimizer, not analysis.
+          df.queryExecution.optimizedPlan
+        })
+      assertTrue(
+        String.valueOf(ex.getMessage).toUpperCase.contains("CROSS"),
+        s"expected a cross-join analysis error; got: ${ex.getMessage}")
+    } finally {
+      spark.conf.set("spark.sql.crossJoin.enabled", "true")
     }
   }
 

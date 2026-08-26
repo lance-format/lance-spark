@@ -59,6 +59,11 @@ class IndexedNearestByJoinRuleTest {
       .master("local[2]")
       .config("spark.driver.bindAddress", "127.0.0.1")
       .config("spark.driver.host", "127.0.0.1")
+      // A `NearestByJoin` lowers to a Cartesian product, so the rule (like a real query) only fires
+      // when cross joins are permitted — otherwise `preservesAnalysisGuards` declines the rewrite so
+      // Spark can reject the query itself. Enable it here so these rewrite-shape tests exercise the
+      // rewrite path; the crossJoin-guard behavior is covered end-to-end in the SQL test.
+      .config("spark.sql.crossJoin.enabled", "true")
       .getOrCreate()
   }
 
@@ -323,28 +328,50 @@ class IndexedNearestByJoinRuleTest {
       makeAttr("meta", new StructType().add("category", StringType).add("bucket", IntegerType))
     val attrs = AttributeSet(Seq(rid, category, bucket, meta))
 
+    // Every column identifier is back-quoted (see `quoteIdentifier`): a delimited identifier is
+    // unambiguous with SQL keywords/literals, so a column named e.g. `true` can't collapse into a
+    // tautology. Backticks (not double-quotes) delimit an identifier in Lance's filter dialect —
+    // a double-quoted token is a string literal there. Literals are unquoted; string values keep
+    // single-quote escaping.
     val cases: Seq[(Expression, String)] = Seq(
-      EqualTo(category, lit("A")) -> "category = 'A'",
-      Not(EqualTo(category, lit("A"))) -> "category != 'A'",
-      GreaterThan(bucket, lit(5)) -> "bucket > 5",
-      LessThanOrEqual(bucket, lit(5)) -> "bucket <= 5",
-      IsNull(category) -> "category IS NULL",
-      IsNotNull(category) -> "category IS NOT NULL",
-      In(bucket, Seq(lit(1), lit(2), lit(3))) -> "bucket IN (1, 2, 3)",
+      EqualTo(category, lit("A")) -> "`category` = 'A'",
+      Not(EqualTo(category, lit("A"))) -> "`category` != 'A'",
+      GreaterThan(bucket, lit(5)) -> "`bucket` > 5",
+      LessThanOrEqual(bucket, lit(5)) -> "`bucket` <= 5",
+      IsNull(category) -> "`category` IS NULL",
+      IsNotNull(category) -> "`category` IS NOT NULL",
+      In(bucket, Seq(lit(1), lit(2), lit(3))) -> "`bucket` IN (1, 2, 3)",
       And(EqualTo(category, lit("A")), GreaterThan(bucket, lit(5))) ->
-        "(category = 'A') AND (bucket > 5)",
+        "(`category` = 'A') AND (`bucket` > 5)",
       Or(EqualTo(category, lit("A")), EqualTo(category, lit("B"))) ->
-        "(category = 'A') OR (category = 'B')",
+        "(`category` = 'A') OR (`category` = 'B')",
       // String-literal escape — single quotes inside the value get doubled.
-      EqualTo(category, lit("O'Brien")) -> "category = 'O''Brien'",
+      EqualTo(category, lit("O'Brien")) -> "`category` = 'O''Brien'",
       // literal-on-left flip
-      EqualTo(lit(5), bucket) -> "5 = bucket",
-      // nested struct field access -> dotted path (distinct from the top-level `category` attr)
-      EqualTo(GetStructField(meta, 0, Some("category")), lit("A")) -> "meta.category = 'A'")
+      EqualTo(lit(5), bucket) -> "5 = `bucket`",
+      // nested struct field access -> dotted path, each segment quoted independently
+      EqualTo(GetStructField(meta, 0, Some("category")), lit("A")) ->
+        "`meta`.`category` = 'A'")
     cases.foreach { case (expr, expected) =>
       val got = IndexedNearestByJoinRule.translateFilter(expr, attrs)
       assertEquals(Some(expected), got, s"translation mismatch for: $expr")
     }
+  }
+
+  /**
+   * A column whose name collides with a SQL keyword/literal (`true`, `null`, `select`, …) must be
+   * emitted as a delimited identifier, NOT bare — otherwise `col = true` on a Boolean column named
+   * `true` would render as the tautology `true = true`, matching every row. This is the exact
+   * failure a "quote only non-word identifiers" exception cannot cover, so `quoteIdentifier` quotes
+   * unconditionally.
+   */
+  @Test def testTranslatorQuotesSqlLiteralIdentifier(): Unit = {
+    val boolCol = makeAttr("true", BooleanType)
+    val attrs = AttributeSet(Seq(boolCol))
+    assertEquals(
+      Some("`true` = true"),
+      IndexedNearestByJoinRule.translateFilter(EqualTo(boolCol, Literal(true)), attrs),
+      "a column named `true` must be quoted, not collapsed into a tautology")
   }
 
   /** Translator must return None for unsupported expressions so the rule refuses pushdown. */
@@ -377,23 +404,24 @@ class IndexedNearestByJoinRuleTest {
   }
 
   /**
-   * Identifiers that aren't plain `[A-Za-z_][A-Za-z0-9_]*` — spaces, punctuation — must be
-   * double-quoted (embedded quotes doubled) so the Lance filter string is well-formed rather than
-   * malformed. Plain identifiers stay bare (covered by the shapes test above). Applies per
-   * dotted-path segment for nested struct fields.
+   * Identifiers with spaces, punctuation, or an embedded backtick must be back-quoted (an embedded
+   * backtick doubled) so the Lance filter string is well-formed rather than malformed. Every segment
+   * is quoted — including a nested struct field's own segments, independently — so `outer.inner
+   * field` becomes `` `outer`.`inner field` ``.
    */
   @Test def testTranslatorQuotesUnsafeIdentifiers(): Unit = {
     val spaced = makeAttr("weird col", StringType)
-    val quoteName = makeAttr("has\"quote", IntegerType)
+    val tickName = makeAttr("has`tick", IntegerType)
     val outer = makeAttr("outer", new StructType().add("inner field", StringType))
-    val attrs = AttributeSet(Seq(spaced, quoteName, outer))
+    val attrs = AttributeSet(Seq(spaced, tickName, outer))
 
     val cases: Seq[(Expression, String)] = Seq(
-      EqualTo(spaced, lit("A")) -> "\"weird col\" = 'A'",
-      GreaterThan(quoteName, lit(5)) -> "\"has\"\"quote\" > 5",
-      // nested field with a space -> only the unsafe segment gets quoted
+      EqualTo(spaced, lit("A")) -> "`weird col` = 'A'",
+      // embedded backtick in the identifier is doubled inside the delimiters
+      GreaterThan(tickName, lit(5)) -> "`has``tick` > 5",
+      // nested field with a space -> every segment quoted independently
       EqualTo(GetStructField(outer, 0, Some("inner field")), lit("A")) ->
-        "outer.\"inner field\" = 'A'")
+        "`outer`.`inner field` = 'A'")
     cases.foreach { case (expr, expected) =>
       assertEquals(
         Some(expected),

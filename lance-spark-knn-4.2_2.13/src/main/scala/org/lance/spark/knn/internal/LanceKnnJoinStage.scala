@@ -17,7 +17,7 @@ import org.apache.spark.TaskContext
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.types.{ArrayType, DataType, MapType, StructField, StructType}
 import org.lance.Dataset
-import org.lance.spark.LanceSparkReadOptions
+import org.lance.spark.{LanceRef, LanceSparkReadOptions}
 import org.lance.spark.utils.Utils
 
 /**
@@ -117,22 +117,29 @@ object LanceKnnJoinStage {
    * any stale `version` / `branch` keys are stripped from the base first so the relation's ref is
    * not shadowed by a leftover storage entry. An empty relation returns the base options untouched.
    *
-   * The connector additionally guards against combining an incompatible pre-pinned table ref with a
-   * relation-specified branch / version; that guard only fires when the base options already carry
-   * a ref (a catalog table time-travelled at load), which does not happen on the DataFrame-relation
-   * path this rule matches, so it is intentionally omitted here.
+   * Preserves the connector's incompatible-ref guard: if the base options already carry a pinned
+   * `ref` (e.g. a catalog table time-travelled at load) and the relation ALSO sets `version` /
+   * `branch`, a same-named branch keeps the table ref while an incompatible combination is rejected
+   * with an `IllegalArgumentException` rather than silently letting the relation value win. On the
+   * plain DataFrame-relation path this rule usually matches, the base carries no ref and the guard
+   * is inert — but keeping it makes the merge behave identically to `LanceDataset.mergeScanOptions`
+   * for a pinned base, so a caller cannot smuggle a conflicting snapshot past the merge.
    */
-  private def mergeReadOptions(
+  private[knn] def mergeReadOptions(
       base: LanceSparkReadOptions,
       relationOptions: java.util.Map[String, String]): LanceSparkReadOptions = {
     if (relationOptions == null || relationOptions.isEmpty) {
       return base
     }
+    val tableRef = base.getRef
+    val scanSetsBranchOrVersion =
+      relationOptions.containsKey(LanceSparkReadOptions.CONFIG_VERSION) ||
+        relationOptions.containsKey(LanceSparkReadOptions.CONFIG_BRANCH)
     val merged = new java.util.HashMap[String, String](base.getStorageOptions)
     merged.remove(LanceSparkReadOptions.CONFIG_VERSION)
     merged.remove(LanceSparkReadOptions.CONFIG_BRANCH)
     merged.putAll(relationOptions)
-    LanceSparkReadOptions
+    val scanOptions = LanceSparkReadOptions
       .builder()
       .datasetUri(base.getDatasetUri)
       .namespace(base.getNamespace)
@@ -140,10 +147,28 @@ object LanceKnnJoinStage {
       .catalogName(base.getCatalogName)
       .indexCacheBackend(base.getIndexCacheBackend)
       .metadataCacheBackend(base.getMetadataCacheBackend)
-      .ref(base.getRef)
+      .ref(tableRef)
       .fromOptions(merged)
       .build()
+    if (tableRef != null && scanSetsBranchOrVersion) {
+      val scanRef = scanOptions.getRef
+      if (sameNamedBranch(tableRef, scanRef)) {
+        // Same named branch, different version → keep the table's pinned ref (snapshot isolation).
+        return scanOptions.withRef(tableRef)
+      }
+      require(
+        tableRef == scanRef,
+        s"Cannot combine $tableRef with $scanRef")
+    }
+    scanOptions
   }
+
+  /** Same-named-branch check, mirroring the connector's `LanceDataset.sameNamedBranch`. */
+  private def sameNamedBranch(tableRef: LanceRef, scanRef: LanceRef): Boolean =
+    tableRef.isBranch &&
+      scanRef != null &&
+      scanRef.isBranch &&
+      tableRef.getBranchName.equals(scanRef.getBranchName)
 
   /**
    * Run the join for one partition of left rows. Opens the probe once, then streams the output: each
@@ -349,9 +374,35 @@ object LanceKnnJoinStage {
         value match {
           case m: scala.collection.Map[_, _] =>
             m.map { case (k, v) => coerceToSpark(k, keyType) -> coerceToSpark(v, valueType) }
+          case entries: scala.collection.Seq[_] =>
+            // The shape a real Arrow map cell actually arrives in. Arrow represents a `MapType`
+            // cell as a LIST of `{key, value}` entry structs, so `LanceProbe.toSparkValue` turns it
+            // into a `Seq(Map("key" -> …, "value" -> …), …)` — NOT a Scala map. Left uncoerced the
+            // encoder would see a sequence where a `MapType` slot is expected and either fail or
+            // materialize garbage. Rebuild a real map from the entries. (The `Map` case above stays
+            // for direct-map payloads and JVM-only tests.)
+            entries.iterator.map { entry =>
+              val (k, v) = mapEntryKeyValue(entry)
+              coerceToSpark(k, keyType) -> coerceToSpark(v, valueType)
+            }.toMap
           case _ => value
         }
       case _ => value
     }
+  }
+
+  /**
+   * Pull `(key, value)` out of a single Arrow map entry. `LanceProbe.toSparkValue` renders each
+   * entry as a `Map("key" -> …, "value" -> …)` (Arrow's `MapVector` names the entry-struct children
+   * `key` / `value`); a positional `Row(key, value)` is tolerated defensively.
+   */
+  private def mapEntryKeyValue(entry: Any): (Any, Any) = entry match {
+    case m: scala.collection.Map[_, _] =>
+      val byName = m.asInstanceOf[scala.collection.Map[String, Any]]
+      (byName.getOrElse("key", null), byName.getOrElse("value", null))
+    case r: Row if r.length >= 2 => (r.get(0), r.get(1))
+    case other =>
+      throw new IllegalStateException(
+        s"Unexpected Arrow map-entry representation: ${other.getClass.getName}")
   }
 }

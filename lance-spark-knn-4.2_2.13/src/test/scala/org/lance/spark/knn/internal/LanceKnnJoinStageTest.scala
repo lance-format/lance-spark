@@ -17,6 +17,7 @@ import org.apache.spark.sql.Row
 import org.apache.spark.sql.types.{ArrayType, IntegerType, MapType, StringType, StructType}
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.Test
+import org.lance.spark.{LanceRef, LanceSparkReadOptions}
 
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -110,6 +111,60 @@ class LanceKnnJoinStageTest {
     val out =
       LanceKnnJoinStage.coerceToSpark(value, dt).asInstanceOf[scala.collection.Map[String, Any]]
     assertEquals(9, out("k").asInstanceOf[Row].getInt(0))
+  }
+
+  /**
+   * The shape a REAL Arrow map cell actually arrives in. Arrow encodes a `MapType` cell as a LIST
+   * of `{key, value}` entry structs, so [[LanceProbe.toSparkValue]] hands `coerceToSpark` a
+   * `Seq(Map("key" -> …, "value" -> …), …)` — a sequence, not a Scala map. Coercion must rebuild a
+   * real Spark map keyed/valued by type; leaving it a sequence is the exact bug the reviewer flagged
+   * (a `MapType` slot filled with a `Seq` fails the encoder or materializes garbage).
+   */
+  @Test def testCoerceMapFromArrowEntryList(): Unit = {
+    val dt = MapType(StringType, IntegerType)
+    val arrowShape = Seq(
+      Map[String, Any]("key" -> "a", "value" -> Integer.valueOf(1)),
+      Map[String, Any]("key" -> "b", "value" -> Integer.valueOf(2)))
+    val out =
+      LanceKnnJoinStage.coerceToSpark(arrowShape, dt).asInstanceOf[scala.collection.Map[
+        String,
+        Any]]
+    assertEquals(2, out.size, "both entries should survive")
+    assertEquals(1, out("a"))
+    assertEquals(2, out("b"))
+  }
+
+  // -- fix #2: merge must reject a conflicting pinned ref -----------------------------------
+
+  /**
+   * When the base read options already carry a pinned `ref` and the relation options ALSO pin a
+   * different `version` / `branch`, the merge must REJECT the combination (as
+   * `LanceDataset.mergeScanOptions` does) rather than silently letting the relation value win — that
+   * would read a different snapshot than the caller pinned. Here base = `main@1`, relation =
+   * `version=2` (`main@2`), which is neither the same ref nor the same named branch, so the merge
+   * throws `IllegalArgumentException`.
+   */
+  @Test def testMergeRejectsConflictingPinnedRef(): Unit = {
+    val base = LanceSparkReadOptions.from("/tmp/knn_merge_guard").withRef(LanceRef.ofMain(1L))
+    val relation = new java.util.HashMap[String, String]()
+    relation.put(LanceSparkReadOptions.CONFIG_VERSION, "2")
+    assertThrows(
+      classOf[IllegalArgumentException],
+      () => LanceKnnJoinStage.mergeReadOptions(base, relation))
+  }
+
+  /**
+   * The same-named-branch case is allowed and keeps the table's pinned ref: base pinned to branch
+   * `dev` (version 1), relation re-specifies `branch=dev` — the merge must NOT throw and must retain
+   * the base ref for snapshot isolation.
+   */
+  @Test def testMergeKeepsPinnedRefForSameNamedBranch(): Unit = {
+    val base =
+      LanceSparkReadOptions.from("/tmp/knn_merge_branch").withRef(LanceRef.ofBranch("dev", 1L))
+    val relation = new java.util.HashMap[String, String]()
+    relation.put(LanceSparkReadOptions.CONFIG_BRANCH, "dev")
+    val merged = LanceKnnJoinStage.mergeReadOptions(base, relation)
+    assertEquals(base.getRef, merged.getRef, "same-named branch must keep the base's pinned ref")
   }
 
   /** Primitives pass straight through; null stays null. */
