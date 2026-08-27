@@ -167,37 +167,26 @@ class LanceKnnJoinStageTest {
     assertEquals(base.getRef, merged.getRef, "same-named branch must keep the base's pinned ref")
   }
 
-  // -- fold vs split routing: reserved-name projections must decline the fold ----------------
+  // -- fold vs split routing: purely an over-fetch decision ----------------------------------
+  // Reserved-name collisions (a right schema owning `_rowid` / `_distance` / `_score`) are NOT this
+  // helper's concern: such a table is declined upstream by the Catalyst rule and by LanceProbe's
+  // schema backstop (see LanceProbe.schemaSupportsNearest / LanceProbeValidationTest), so by the
+  // time routing runs the projection is always fusible.
 
   /**
-   * The folded one-scan path is sound only when there is no over-fetch (internalK == k) AND the
-   * payload projection does not collide with a column the nearest scan injects. A plain projection
-   * at internalK == k folds.
+   * No over-fetch (internalK == k) folds probe + materialize into one scan: every probed row is
+   * kept, so a split path would just re-scan the exact rows the search already found.
    */
-  @Test def testFoldsInOneScanForCleanProjectionAtNoOverfetch(): Unit = {
+  @Test def testFoldsInOneScanAtNoOverfetch(): Unit = {
     assertTrue(
-      LanceKnnJoinStage.foldsInOneScan(internalK = 5, k = 5, projection = Seq("id", "vec")),
-      "clean projection with internalK == k should fold in one scan")
+      LanceKnnJoinStage.foldsInOneScan(internalK = 5, k = 5),
+      "internalK == k should fold in one scan")
   }
 
-  /**
-   * A projection naming ANY reserved column (`_rowid`, `_distance`, `_score`) must decline the fold
-   * even at internalK == k, so the stage routes it to the split probe → materialize path whose scan
-   * injects only `_rowid`. This is the gatekeeper's headline finding: the fold must preserve Spark's
-   * fallback for a payload column whose name collides with the injected search metadata.
-   */
-  @Test def testDoesNotFoldForReservedProjection(): Unit = {
-    LanceProbe.ReservedProjectionColumns.foreach { reserved =>
-      assertFalse(
-        LanceKnnJoinStage.foldsInOneScan(internalK = 5, k = 5, projection = Seq("id", reserved)),
-        s"projection naming reserved column '$reserved' must NOT fold; route to the split path")
-    }
-  }
-
-  /** Over-fetch (internalK > k) always takes the split path, regardless of projection. */
+  /** Over-fetch (internalK > k) takes the split probe → trim → materialize path. */
   @Test def testDoesNotFoldWhenOverfetching(): Unit = {
     assertFalse(
-      LanceKnnJoinStage.foldsInOneScan(internalK = 20, k = 5, projection = Seq("id")),
+      LanceKnnJoinStage.foldsInOneScan(internalK = 20, k = 5),
       "over-fetch (internalK > k) must take the split probe → trim → materialize path")
   }
 

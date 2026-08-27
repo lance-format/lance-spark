@@ -21,7 +21,7 @@ import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.types.{BooleanType, ByteType, DoubleType, FloatType, IntegerType, LongType, ShortType, StringType, StructField, StructType}
 import org.apache.spark.unsafe.types.UTF8String
 import org.lance.spark.{LanceDataset, LanceSparkReadOptions}
-import org.lance.spark.knn.internal.{LanceKnnJoinStage, Metric}
+import org.lance.spark.knn.internal.{LanceKnnJoinStage, LanceProbe, Metric}
 import org.lance.spark.utils.{BlobUtils, VectorUtils}
 
 /**
@@ -189,6 +189,7 @@ object IndexedNearestByJoinRule extends Rule[LogicalPlan] {
       (metric, leftVecAttr, rightVecCol) <- recognizeRanking(rankingExpr, direction, left, right)
       lance <- unwrapLanceScan(right)
       if !hasBlobColumn(lance.output)
+      if !hasReservedColumn(lance.output)
     } yield {
       val leftVecIdx = left.output.indexWhere(_.exprId == leftVecAttr.exprId)
       require(leftVecIdx >= 0, s"left vector attr not found in left.output: $leftVecAttr")
@@ -549,4 +550,20 @@ object IndexedNearestByJoinRule extends Rule[LogicalPlan] {
           StructField(ref.name, ref.dataType, ref.nullable, ref.metadata))
       case _ => false
     }
+
+  /**
+   * True iff the Lance relation output has a column whose name collides with the metadata a nearest
+   * scan injects — `_rowid`, `_distance`, `_score` (see [[LanceProbe.schemaSupportsNearest]]).
+   *
+   * When present, the rule DECLINES the rewrite and falls through to Spark's brute-force cross-
+   * product. Every indexed route runs a `nearest` scan that injects those columns, so the injected
+   * metadata would shadow the physical column: an all-columns fused scan reads the user's `_distance`
+   * out-of-band as the ranking score and silently drops it from the payload, and an explicit
+   * projection of it collides outright. No fold-vs-split routing recovers it — the eligibility is
+   * schema-level. Declining is the conservative, always-correct choice: Spark's own nearest-by
+   * rewrite returns the true payload including that column. [[LanceProbe]] enforces the same contract
+   * defensively at probe time.
+   */
+  private def hasReservedColumn(output: Seq[Attribute]): Boolean =
+    !LanceProbe.schemaSupportsNearest(output.map(_.name))
 }

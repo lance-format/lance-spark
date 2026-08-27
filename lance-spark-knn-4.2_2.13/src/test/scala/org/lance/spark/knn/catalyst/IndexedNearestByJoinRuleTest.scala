@@ -24,7 +24,7 @@ import org.apache.spark.unsafe.types.UTF8String
 import org.junit.jupiter.api.{AfterEach, BeforeEach, Test}
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.io.TempDir
-import org.lance.spark.knn.internal.Metric
+import org.lance.spark.knn.internal.{LanceProbe, Metric}
 import org.lance.spark.utils.BlobUtils
 
 import java.nio.file.Path
@@ -287,6 +287,45 @@ class IndexedNearestByJoinRuleTest {
       join,
       IndexedNearestByJoinRule(join),
       "blob v2 descriptor column must force fallback to Spark's canonical (blob-aware) reader")
+  }
+
+  /**
+   * A right-side schema owning a column whose name collides with the metadata a nearest scan injects
+   * (`_rowid` / `_distance` / `_score`) forces the rule to DECLINE, even though the relation ALSO
+   * carries a searchable fixed-size vector. Every indexed route runs a `nearest` scan that injects
+   * those columns, so the injected metadata shadows the physical column — an all-columns fused scan
+   * reads the user's `_distance` out-of-band as the ranking score and silently drops it from the
+   * payload. No fold-vs-split routing recovers it (both scans inject `_rowid`), so the eligibility is
+   * schema-level: decline and hand the query to Spark's brute-force cross-product, whose canonical
+   * scan returns the true payload including that column. `LanceProbe` enforces the same contract
+   * defensively at probe time (see `LanceProbeValidationTest`).
+   *
+   * The positive control (same schema MINUS the reserved column) rewrites, proving the fixed-size-
+   * vector gate is satisfied and the reserved column is the sole discriminating cause of the decline.
+   * Exercised for each reserved name.
+   */
+  @Test def reservedColumnDeclinesRewrite(): Unit = {
+    spark.conf.set(IndexedNearestByJoinRule.EnabledConfKey, "true")
+    val left = trivialPlan("lid", "lvec")
+    val baseFields = Array(
+      StructField("rid", IntegerType, nullable = false),
+      fixedSizeVectorField("rvec", 8))
+    // Control: a searchable vector-only schema WITHOUT any reserved column must rewrite.
+    val control = lanceRelationWithSchema(new StructType(baseFields), "reserved_control")
+    assertTrue(
+      IndexedNearestByJoinRule(l2Join(left, control)).isInstanceOf[Project],
+      "control: vector-only schema must rewrite (proves the vector gate passes)")
+    // Same schema + a column named like injected search metadata → decline, one name at a time.
+    LanceProbe.ReservedProjectionColumns.foreach { reserved =>
+      val withReserved = lanceRelationWithSchema(
+        new StructType(baseFields :+ StructField(reserved, FloatType, nullable = false)),
+        s"reserved_${reserved.stripPrefix("_")}")
+      val join = l2Join(left, withReserved)
+      assertSame(
+        join,
+        IndexedNearestByJoinRule(join),
+        s"reserved column '$reserved' must force fallback to Spark's brute-force nearest-by")
+    }
   }
 
   /** Right side wrapped in SubqueryAlias still rewrites — alias unwrapping happens in the rule. */

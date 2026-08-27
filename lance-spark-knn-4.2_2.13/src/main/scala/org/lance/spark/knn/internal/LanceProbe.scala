@@ -125,6 +125,33 @@ final class LanceProbe(
     builder.build()
   }
 
+  // The dataset's own top-level column names, read once from the open handle. Used by the schema
+  // eligibility backstop below; cheap (metadata only) and stable for the probe's lifetime.
+  private lazy val datasetColumnNames: Seq[String] =
+    dataset.getSchema.getFields.asScala.map(_.getName).toSeq
+
+  /**
+   * Reject a dataset whose own schema collides with a column the nearest scan injects
+   * (`_rowid` / `_distance` / `_score`). Every probe route ([[probe]] and [[probeRows]], fused or
+   * split) runs a `nearest` scan that injects those columns, so such a table cannot be served by ANY
+   * indexed route: the injected metadata shadows the physical column and it is read out-of-band as
+   * the ranking score (silently dropped from an all-columns payload) or collides outright when
+   * projected. There is no fold-vs-split routing that recovers it. The Catalyst rule is expected to
+   * DECLINE the indexed rewrite for such a table via [[LanceProbe.schemaSupportsNearest]] and fall
+   * back to the engine's default nearest-by execution; this is the defensive backstop for any caller
+   * that reached the probe anyway.
+   */
+  private def requireNearestCompatibleSchema(): Unit = {
+    val collisions = LanceProbe.reservedSchemaColumns(datasetColumnNames)
+    require(
+      collisions.isEmpty,
+      s"Lance dataset schema has column(s) ${collisions.toSeq.sorted.mkString(", ")} whose name(s) " +
+        "collide with the metadata a nearest scan injects (_rowid, _distance, _score). No indexed " +
+        "probe can serve this table — the injected metadata shadows the physical column. Decline the " +
+        "indexed rewrite (see LanceProbe.schemaSupportsNearest) and fall back to default nearest-by " +
+        "execution.")
+  }
+
   /**
    * Run a single nearest-neighbor query. Returns up to `k` row references for the configured
    * fragments, ordered best-first by `metric`.
@@ -159,6 +186,7 @@ final class LanceProbe(
     require(vectorColumn != null && vectorColumn.nonEmpty, "vectorColumn must be non-empty")
     require(query != null && query.length > 0, "Query vector must be non-empty")
     require(k > 0, "k must be positive")
+    requireNearestCompatibleSchema()
 
     val q = buildNearestQuery(vectorColumn, query, k, metric, nprobes, refineFactor, ef)
 
@@ -225,17 +253,15 @@ final class LanceProbe(
     require(vectorColumn != null && vectorColumn.nonEmpty, "vectorColumn must be non-empty")
     require(query != null && query.length > 0, "Query vector must be non-empty")
     require(k > 0, "k must be positive")
-    // The fused scan injects `_rowid` (via withRowId) and the score column (via nearest). A payload
-    // column that shares one of those names would collide with the injected column inside the SAME
-    // scan — Lance fails the scan with "merge incompatible fields". Such a schema must go through the
-    // split probe + materialize path (whose materialize scan injects no score column), so reject it
-    // here rather than let the collision surface as an opaque Arrow error. The join stage checks
-    // [[LanceProbe.fusesCleanly]] and routes accordingly.
-    require(
-      LanceProbe.fusesCleanly(projection),
-      "probeRows cannot project a column whose name collides with Lance search metadata " +
-        s"(${LanceProbe.ReservedProjectionColumns.toSeq.sorted.mkString(", ")}); the nearest scan " +
-        "injects those columns itself. Route such schemas through the split probe + materialize path.")
+    // The nearest scan injects `_rowid` (via withRowId) and the score columns (via nearest). If the
+    // dataset's own schema has a column by one of those names the injected metadata shadows it, and
+    // NO projection shape recovers the physical column: an empty (all-columns) projection reads it
+    // out-of-band as the ranking score and silently drops it from the payload, while an explicit
+    // projection of it collides inside the scan. Routing to the split path does not help — its scan
+    // also injects `_rowid`. So the eligibility is schema-level, not projection-level: reject the
+    // whole table. The Catalyst rule declines such a table up front via
+    // [[LanceProbe.schemaSupportsNearest]]; this is the defensive backstop.
+    requireNearestCompatibleSchema()
 
     val q = buildNearestQuery(vectorColumn, query, k, metric, nprobes, refineFactor, ef)
 
@@ -591,21 +617,36 @@ object LanceProbe {
 
   /**
    * Column names Lance's nearest scan injects itself: `_rowid` (from `withRowId`) and the score
-   * column (from `nearest`). A right-side payload column with one of these names collides with the
-   * injected column inside the fused [[LanceProbe.probeRows]] scan, which Lance rejects with a
-   * "merge incompatible fields" error. A schema that projects one of them must be served through the
-   * split [[LanceProbe.probe]] + [[LanceProbe.materialize]] path instead — the materialize scan does
-   * not inject a score column, so there is no collision. See [[fusesCleanly]].
+   * columns (from `nearest`). These are metadata a nearest scan always produces; a right-side
+   * table column sharing one of these names collides with the injected column. See
+   * [[reservedSchemaColumns]] / [[schemaSupportsNearest]].
    */
   val ReservedProjectionColumns: Set[String] = ScoreColumns.toSet + RowIdColumn
 
   /**
-   * True if `projection` can be served by the fused [[LanceProbe.probeRows]] scan — i.e. it names no
-   * column the nearest scan injects (see [[ReservedProjectionColumns]]). The join stage calls this to
-   * decide between the fold and the split probe + materialize path.
+   * The subset of `schemaColumnNames` that collide with a column the nearest scan injects
+   * (`_rowid` / `_distance` / `_score`). Empty means the table is nearest-compatible.
    */
-  def fusesCleanly(projection: Seq[String]): Boolean =
-    !projection.exists(ReservedProjectionColumns.contains)
+  def reservedSchemaColumns(schemaColumnNames: Iterable[String]): Set[String] =
+    schemaColumnNames.iterator.filter(ReservedProjectionColumns.contains).toSet
+
+  /**
+   * Whether an indexed nearest scan can run against a right-side table with these column names.
+   *
+   * Lance's nearest scan ALWAYS injects `_rowid` and the `_distance` / `_score` metadata. If the
+   * table's own schema already has a column by one of those names, the injected metadata shadows
+   * it and no projection shape recovers the physical column: the fused scan reads it out-of-band as
+   * the ranking score and silently drops it from the payload (observed with an empty / all-columns
+   * projection), and an explicit projection of it collides outright. There is no safe fold-vs-split
+   * routing around this — every indexed route runs the same nearest scan. The indexed rewrite must
+   * therefore DECLINE such a table and fall back to the engine's default nearest-by execution.
+   *
+   * This is the shared eligibility contract the Catalyst rule consults before intercepting; the
+   * probe enforces it defensively too (see the schema guard in [[LanceProbe.probe]] /
+   * [[LanceProbe.probeRows]]).
+   */
+  def schemaSupportsNearest(schemaColumnNames: Iterable[String]): Boolean =
+    reservedSchemaColumns(schemaColumnNames).isEmpty
 
   /**
    * Build read options from a bare dataset URI, pinning `version` on the main branch when present.

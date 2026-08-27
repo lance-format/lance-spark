@@ -217,16 +217,19 @@ object LanceKnnJoinStage {
     leftRows.flatMap(expand)
 
   /**
-   * Whether [[processRow]] may take the folded one-scan fast path. True only when there is no
-   * JVM-side over-fetch (`internalK <= k`, so every probed row is kept and no trim is needed) AND
-   * the payload projection does not name a column the nearest scan injects itself — `_rowid`,
-   * `_distance`, `_score` (see [[LanceProbe.fusesCleanly]]). A colliding projection must fall
-   * through to the split probe → materialize path, whose scan injects only `_rowid` and therefore
-   * reads any `_distance` / `_score` payload column straight from the dataset without collision.
-   * Extracted so the routing decision is unit-testable without a Lance dataset.
+   * Whether [[processRow]] may take the folded one-scan fast path. True when there is no JVM-side
+   * over-fetch (`internalK <= k`, so every probed row is kept and no trim is needed), so probe and
+   * materialize collapse into a single native scan; false when the caller over-fetches candidates
+   * (`internalK > k`) and must trim before paying to materialize only the survivors.
+   *
+   * This decision is ONLY about over-fetch. Reserved-column collisions (a right schema owning
+   * `_rowid` / `_distance` / `_score`) are handled upstream: the Catalyst rule declines the indexed
+   * rewrite for such a table (see [[LanceProbe.schemaSupportsNearest]]) and [[LanceProbe]] enforces
+   * the same contract defensively — so by the time a row reaches here the projection is always
+   * fusible. Extracted so the routing decision is unit-testable without a Lance dataset.
    */
-  private[knn] def foldsInOneScan(internalK: Int, k: Int, projection: Seq[String]): Boolean =
-    internalK <= k && LanceProbe.fusesCleanly(projection)
+  private[knn] def foldsInOneScan(internalK: Int, k: Int): Boolean =
+    internalK <= k
 
   /**
    * Expand one left row into its join output rows: probe R's index, trim to `k`, late-materialize
@@ -243,10 +246,10 @@ object LanceKnnJoinStage {
       } else {
         Iterator.empty
       }
-    } else if (foldsInOneScan(conf.internalK, conf.k, conf.rightProjection)) {
-      // No JVM-side over-fetch (the SQL path: internalK == k) AND the payload projection does not
-      // collide with an injected column (see [[foldsInOneScan]]). Every probed row is kept, so probe
-      // and materialize in ONE native scan: Lance searches the index AND projects the payload
+    } else if (foldsInOneScan(conf.internalK, conf.k)) {
+      // No JVM-side over-fetch (the SQL path: internalK == k); see [[foldsInOneScan]]. Every probed
+      // row is kept, so probe and materialize in ONE native scan: Lance searches the index AND
+      // projects the payload
       // columns in a single pass. A split probe → trim → materialize would re-scan the exact rows
       // the search already found, for nothing. Lance returns them best-first, so no trim is needed.
       val hits = probe.probeRows(
@@ -272,12 +275,10 @@ object LanceKnnJoinStage {
         }
       }
     } else {
-      // Split probe → trim → materialize path. Taken when the caller over-fetches (internalK > k)
-      // OR when the payload projection collides with an injected column name and the fold above
-      // had to decline. Fetch `internalK` cheap refs natively, trim to the final `k`, then
-      // late-materialize ONLY the survivors by `_rowid`. With internalK == k (the SQL rule) nothing
-      // is trimmed; the split still buys collision-safety, since materialize injects only `_rowid`.
-      // Lance already returns refs best-first.
+      // Split probe → trim → materialize path. Taken when the caller over-fetches (internalK > k):
+      // fetch `internalK` cheap refs natively, trim to the final `k` with the top-K heap, then
+      // late-materialize ONLY the survivors by `_rowid` — so the payload fetch is paid for just the
+      // rows that make the cut. Lance already returns refs best-first.
       val refs = probe
         .probe(
           conf.vectorColumn,

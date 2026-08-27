@@ -330,6 +330,58 @@ class IndexedNearestByJoinSqlTest {
   }
 
   /**
+   * Real-Lance end-to-end: a right table whose schema OWNS a `_distance` column (a name the nearest
+   * scan injects) must DECLINE the indexed rewrite and fall through to Spark's brute-force nearest-by,
+   * whose ordinary scan returns the true stored `_distance` value. This is the gatekeeper's headline
+   * finding executed end-to-end: the indexed path would read that physical column out-of-band as the
+   * ranking score and silently drop it, so the only correct behavior is to decline and let Spark's
+   * canonical scan own the payload.
+   *
+   * Asserts: (a) the optimized plan has NO `LanceKnnJoinLogicalPlan` — the rule declined; (b) the
+   * query returns `k` hits per left row; (c) every joined row's `_distance` equals the value an
+   * ordinary Spark Lance read produces for that `rid` (proving the stored column is preserved, not
+   * clobbered by the search score).
+   */
+  @Test def sqlUserDistanceColumnDeclinesAndReturnsStoredPayload(): Unit = {
+    val leftVecs = generateUniform(ExactLeft, ExactDim, Seed + 700)
+    val (leftDf, _, _) = buildLeftDf(leftVecs, ExactDim)
+    val (_, _, rightUri) = writeRightWithDistanceColumn(ExactRight, ExactDim, Seed + 701)
+
+    // Oracle: ordinary Spark Lance read of the physical `_distance` column, per rid.
+    val oracle: Map[Int, Float] =
+      spark.read.format("lance").load(rightUri).select("rid", "_distance").collect().map { r =>
+        r.getAs[Int]("rid") -> r.getAs[Float]("_distance")
+      }.toMap
+
+    val k = 5
+    val (q, d) = registerViews(leftDf, rightUri)
+    val df = spark.sql(
+      s"""SELECT q.lid, d.rid, d.`_distance`
+         |FROM $q q INNER JOIN $d d
+         |APPROX NEAREST $k BY DISTANCE vector_l2_distance(q.lvec, d.rvec)""".stripMargin)
+
+    // (a) The rule must decline — a `_distance` column is present, so no indexed rewrite.
+    assertTrue(
+      df.queryExecution.optimizedPlan.collect { case p: LanceKnnJoinLogicalPlan => p }.isEmpty,
+      s"a user `_distance` column must force fallback (no LanceKnnJoinLogicalPlan); optimized plan:" +
+        s"\n${df.queryExecution.optimizedPlan}")
+
+    // (b) + (c) The fallback runs and returns the true stored `_distance`, not the ranking score.
+    val rows = df.collect()
+    assertEquals(ExactLeft * k, rows.length, "expected k results per left row")
+    rows.foreach { r =>
+      val rid = r.getAs[Int]("rid")
+      val actual = r.getAs[Float]("_distance")
+      assertEquals(
+        oracle(rid),
+        actual,
+        1e-6f,
+        s"stored `_distance` payload must survive the fallback for rid=$rid " +
+          "(indexed path would have clobbered it with the ranking score)")
+    }
+  }
+
+  /**
    * The rewrite runs as a `postHocResolutionRule`, BEFORE Spark's `FinishAnalysis` /
    * `CheckCartesianProducts`. It must NOT let a query that Spark would reject slip through: with
    * `spark.sql.crossJoin.enabled = false`, an `APPROX NEAREST` join (which lowers to a Cartesian
@@ -621,6 +673,31 @@ class IndexedNearestByJoinSqlTest {
       fixedSizeVec("rvec", dim)))
     val df = spark.createDataFrame(rows.toSeq.asJava, schema)
     val out = tempDir.resolve(s"right_dt_${System.nanoTime()}").toString
+    df.write.format("lance").save(out)
+    (vectors, ids, out)
+  }
+
+  /**
+   * Write a right Lance dataset whose schema OWNS a `_distance` column — a name Lance's nearest scan
+   * injects. Each row's `_distance` is a deterministic payload value (NOT a ranking score). Used to
+   * prove the indexed rule DECLINES such a table and Spark's fallback returns the true stored value.
+   */
+  private def writeRightWithDistanceColumn(
+      n: Int,
+      dim: Int,
+      seed: Long): (Array[Array[Float]], Array[Int], String) = {
+    val vectors = generateUniform(n, dim, seed)
+    val ids = vectors.indices.map(_ + 4000).toArray
+    val rows = ids.zip(vectors).map { case (id, v) =>
+      // Stored payload distinct from any plausible ranking score, so a clobber would be visible.
+      RowFactory.create(Integer.valueOf(id), v, java.lang.Float.valueOf(id.toFloat * 0.25f))
+    }
+    val schema = new StructType(Array(
+      StructField("rid", IntegerType, nullable = false),
+      fixedSizeVec("rvec", dim),
+      StructField("_distance", FloatType, nullable = false)))
+    val df = spark.createDataFrame(rows.toSeq.asJava, schema)
+    val out = tempDir.resolve(s"right_reserved_${System.nanoTime()}").toString
     df.write.format("lance").save(out)
     (vectors, ids, out)
   }
