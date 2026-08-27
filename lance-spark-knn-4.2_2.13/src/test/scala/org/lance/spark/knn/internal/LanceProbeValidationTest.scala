@@ -187,37 +187,82 @@ class LanceProbeValidationTest {
   }
 
   /**
-   * The fused [[LanceProbe.probeRows]] scan injects `_rowid` and the score column itself, so a
-   * payload projection naming one of those reserved columns would collide inside the single scan.
-   * `probeRows` must reject such a projection (so the join stage can route it through the split
-   * probe + materialize path) rather than surfacing an opaque Arrow "merge incompatible fields"
-   * error, and [[LanceProbe.fusesCleanly]] must report it as not fusible.
+   * The eligibility contract is SCHEMA-level, not projection-level. Lance's nearest scan always
+   * injects `_rowid` and the `_distance` / `_score` metadata; if the dataset's OWN schema has a
+   * column by one of those names, the injected metadata shadows it and no probe route recovers the
+   * physical column. Empirically, a physical `_distance` column writes fine and probes silently drop
+   * it: an all-columns fused scan reads it out-of-band as the ranking score, so its payload comes
+   * back without `_distance`. That silent data loss is why the indexed rewrite must DECLINE such a
+   * table (see [[LanceProbe.schemaSupportsNearest]]) rather than pick a materialization shape.
+   *
+   * This regression writes a real dataset WITH a `_distance` column and asserts (a) the schema is
+   * reported non-nearest-compatible, and (b) BOTH probe entry points — `probe` and the all-columns
+   * `probeRows(projection = empty)` — fail fast with a clear error naming the offending column,
+   * instead of returning results that silently omit it.
    */
-  @Test def testProbeRowsRejectsReservedProjection(): Unit = {
-    val datasetUri = writeSyntheticDataset()
+  @Test def testReservedSchemaColumnIsDeclinedNotSilentlyDropped(): Unit = {
+    val datasetUri = writeDatasetWithReservedColumn()
     val query = randomVector(new Random(1L), VectorDim)
+
+    // (a) schema eligibility primitive reports the collision.
+    assertFalse(
+      LanceProbe.schemaSupportsNearest(Seq("id", "vec", "_distance")),
+      "a schema owning a reserved column (_distance) must not be nearest-compatible")
 
     val probe = new LanceProbe(datasetUri, fragmentIds = None)
     try {
-      LanceProbe.ReservedProjectionColumns.foreach { reserved =>
-        assertFalse(
-          LanceProbe.fusesCleanly(Seq("id", reserved)),
-          s"projection naming reserved column '$reserved' must not be fusible")
-        val ex = assertThrows(
-          classOf[IllegalArgumentException],
-          () =>
-            probe.probeRows(
-              "vec",
-              query,
-              k = 5,
-              Metric.L2,
-              projection = Seq("id", reserved),
-              projectionFields = Seq.empty))
-        assertTrue(
-          String.valueOf(ex.getMessage).contains(reserved),
-          s"guard message should name reserved column '$reserved'; got: ${ex.getMessage}")
-      }
+      // (b) probe() declines with a clear error naming the offending column.
+      val probeEx = assertThrows(
+        classOf[IllegalArgumentException],
+        () => probe.probe("vec", query, k = 5, Metric.L2))
+      assertTrue(
+        String.valueOf(probeEx.getMessage).contains("_distance"),
+        s"probe guard message should name the offending column '_distance'; got: ${probeEx.getMessage}")
+
+      // (b) all-columns probeRows — the exact path that used to SILENTLY drop the physical
+      // `_distance` — declines with the same clear error rather than returning a lossy payload.
+      val probeRowsEx = assertThrows(
+        classOf[IllegalArgumentException],
+        () =>
+          probe.probeRows(
+            "vec",
+            query,
+            k = 5,
+            Metric.L2,
+            projection = Seq.empty,
+            projectionFields = Seq.empty))
+      assertTrue(
+        String.valueOf(probeRowsEx.getMessage).contains("_distance"),
+        s"probeRows guard message should name the offending column '_distance'; " +
+          s"got: ${probeRowsEx.getMessage}")
     } finally probe.close()
+  }
+
+  /**
+   * Pure eligibility primitive: [[LanceProbe.schemaSupportsNearest]] is false iff the schema names
+   * any column the nearest scan injects, and [[LanceProbe.reservedSchemaColumns]] returns exactly
+   * that colliding set. No backend needed — this is the contract the Catalyst rule consults.
+   */
+  @Test def testSchemaSupportsNearestContract(): Unit = {
+    assertTrue(
+      LanceProbe.schemaSupportsNearest(Seq("id", "vec", "payload")),
+      "a schema with no reserved column names must be nearest-compatible")
+    assertTrue(
+      LanceProbe.schemaSupportsNearest(Seq.empty),
+      "an empty schema must be nearest-compatible")
+    LanceProbe.ReservedProjectionColumns.foreach { reserved =>
+      assertFalse(
+        LanceProbe.schemaSupportsNearest(Seq("id", reserved, "vec")),
+        s"a schema owning reserved column '$reserved' must not be nearest-compatible")
+      assertEquals(
+        Set(reserved),
+        LanceProbe.reservedSchemaColumns(Seq("id", reserved, "vec")),
+        s"reservedSchemaColumns must report exactly the colliding column '$reserved'")
+    }
+    assertEquals(
+      LanceProbe.ReservedProjectionColumns,
+      LanceProbe.reservedSchemaColumns(Seq("id") ++ LanceProbe.ReservedProjectionColumns.toSeq),
+      "reservedSchemaColumns must report every reserved column present")
   }
 
   /**
@@ -350,6 +395,31 @@ class LanceProbeValidationTest {
     val df = spark.createDataFrame(rows.asJava, schema)
 
     val outDir = tempDir.resolve(s"probe_test_${System.nanoTime()}").toString
+    df.write.format("lance").save(outDir)
+    outDir
+  }
+
+  /**
+   * Write a dataset whose OWN schema carries a `_distance` column — a name Lance's nearest scan
+   * injects. Used to prove the schema eligibility backstop declines such a table. The `_distance`
+   * values are arbitrary payload; the point is that the physical column exists in the stored schema.
+   */
+  private def writeDatasetWithReservedColumn(): String = {
+    val rng = new Random(Seed)
+    val (baseRows, _) = generateRows(rng, NumRows, VectorDim)
+    val rows = baseRows.zipWithIndex.map { case (r, idx) =>
+      RowFactory.create(r.get(0), r.get(1), java.lang.Float.valueOf(idx.toFloat))
+    }
+    val schema = new StructType(Array(
+      StructField("id", IntegerType, nullable = false),
+      StructField(
+        "vec",
+        ArrayType(FloatType, containsNull = false),
+        nullable = false,
+        new MetadataBuilder().putLong("arrow.fixed-size-list.size", VectorDim.toLong).build()),
+      StructField("_distance", FloatType, nullable = false)))
+    val df = spark.createDataFrame(rows.asJava, schema)
+    val outDir = tempDir.resolve(s"reserved_col_test_${System.nanoTime()}").toString
     df.write.format("lance").save(outDir)
     outDir
   }
