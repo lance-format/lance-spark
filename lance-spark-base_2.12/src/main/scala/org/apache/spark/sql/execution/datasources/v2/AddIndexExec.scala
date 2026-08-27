@@ -91,10 +91,11 @@ case class AddIndexExec(
     // Plan and build against a single pinned version. Tasks open the dataset themselves, so without
     // pinning each one resolves the latest version independently. The driver's batches fix which
     // fragments a segment covers either way, but not the version each segment records, and that
-    // version is what core checks: it validates a segment's coverage only when the stamp predates
-    // the commit, so a task that opens after a concurrent rewrite of the indexed column stamps the
-    // current version over keys it read earlier and the stale keys are trusted. Coverage the commit
-    // cannot establish is accounted for at commit time; see IndexUtils.establishedCoverage.
+    // version is what core checks against. It revalidates a segment's coverage of a fragment only
+    // when the recorded version predates the commit and the fragment already existed at it, so a
+    // task opening after a concurrent rewrite of the indexed column stamps the current version over
+    // keys it read earlier and those keys are trusted unchecked. Coverage the commit cannot
+    // establish is accounted for at commit time; see IndexUtils.establishedCoverage.
     val (fragmentWorkloads, canonicalColumns, buildReadOptions) = {
       val ds = Utils.openDatasetBuilder(readOptions).build()
       try {
@@ -171,9 +172,9 @@ case class AddIndexExec(
 
     // Range-mode BTree uses preprocessed data from Spark and keeps its dedicated path: its coverage
     // follows the fragment ids in the scanned rows rather than the fragment list planned above. The
-    // build is pinned like the segmented one all the same. The scan resolves its own version through
-    // the catalog, so an unpinned executor can open a version newer than the rows it was handed and
-    // stamp the segment with it, and core only validates segments stamped older than the commit.
+    // pinned options drive both halves of that path, the producer scan and the builder, so the rows a
+    // segment holds and the version it is stamped with describe the same snapshot; the job explains
+    // why both are needed.
     if (btreeBuildMode.contains("range")) {
       val segments = new RangeBasedBTreeIndexJob(
         this.copy(columns = canonicalColumns),
@@ -302,11 +303,11 @@ case class AddIndexExec(
  * can be committed directly as a single logical index.
  *
  * Unlike the segmented path, coverage here is derived from the fragment ids present in the scanned
- * rows rather than from a fragment list fixed at planning time. The read options are pinned even so.
- * The scan resolves its own version through the catalog, which is at or after the pinned one, so a
- * segment can end up stamped older than the rows it holds and lose its coverage to core's staleness
- * pruning; leaving the build unpinned instead lets an executor stamp the current version over rows
- * read earlier, and core validates a segment only when its stamp predates the commit.
+ * rows rather than from a fragment list fixed at planning time, so the producer scan is pinned to the
+ * same version as the build. Both halves have to describe one snapshot: the segment records the
+ * version the builder opened, and core validates a segment's coverage against that version only for
+ * a fragment that existed at it. A scan left to resolve its own version could hand the builder rows
+ * from a fragment appended afterwards, whose keys would then be committed unvalidated.
  *
  * @param addIndexExec       The AddIndexExec instance that initiated this job
  * @param readOptions        Configuration options for reading the Lance dataset
@@ -326,6 +327,26 @@ class RangeBasedBTreeIndexJob(
     initialStorageOpts: Option[Map[String, String]]) extends Serializable {
 
   private val VALUE_COLUMN_NAME = "value"
+
+  /**
+   * The version [[readOptions]] is pinned to.
+   *
+   * The caller pins these options with [[IndexUtils.pinVersion]], and CREATE INDEX only runs against
+   * a writable table, so the ref names a version on main; a branch or tag target is rejected before
+   * this point by `LanceDataset.ensureWritable`. Anything else cannot be expressed as a scan option
+   * at all, since branch and version are mutually exclusive there, so it would leave the scan
+   * unpinned and reading a different snapshot than the build stamps. That is the defect this pin
+   * exists to prevent, and it is silent, so refuse rather than fall through to it.
+   */
+  private def pinnedVersion: Long = {
+    val ref = readOptions.getRef
+    if (ref == null || !ref.isMain || !ref.getVersionNumber.isPresent) {
+      throw new IllegalStateException(
+        "Range-mode BTree builds need read options pinned to a version on main so the scan and the " +
+          "segment stamp describe one snapshot; got a ref that names none")
+    }
+    ref.getVersionNumber.get.longValue()
+  }
 
   def run(): Seq[Index] = {
     if (addIndexExec.columns.size != 1) {
@@ -348,9 +369,19 @@ class RangeBasedBTreeIndexJob(
     }
     val fullTableName = parts.mkString(".")
 
-    // Read the indexed column with the row id and fragment id metadata columns.
+    // Read the indexed column with the row id and fragment id metadata columns, at the version the
+    // build is pinned to. The scan otherwise resolves its own version through the catalog, which is
+    // at or after the pinned one, and coverage here comes from the fragment ids in the scanned rows:
+    // a fragment appended after planning would be declared covered by a segment stamped with a
+    // version that predates it, and core skips staleness validation for a fragment absent at the
+    // stamped version, so its keys would be trusted however they changed afterwards. Pinning the
+    // scan keeps the rows and the stamp describing one snapshot. Fragments appended after planning
+    // are simply not part of this build, exactly as in the segmented path, whose fragment list is
+    // fixed at planning time too; Dataset.optimizeIndices covers them incrementally.
     val fragmentColumn = LanceDataset.FRAGMENT_ID_COLUMN.name
-    val df = session.table(fullTableName)
+    val df = session.read
+      .option(LanceSparkReadOptions.CONFIG_VERSION, pinnedVersion)
+      .table(fullTableName)
     val selectDf = df.select(
       df.col(columns.head).as(VALUE_COLUMN_NAME),
       df.col(LanceDataset.ROW_ID_COLUMN.name),

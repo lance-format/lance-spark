@@ -590,6 +590,28 @@ public abstract class BaseBranchDDLTest {
     Assertions.assertTrue(conflictMessages.contains("version"));
   }
 
+  /**
+   * The version option has to pin the scan itself, not merely be accepted. Distributed index builds
+   * rely on it to read the same snapshot the build is stamped with, and a silently ignored option
+   * would put the scan back on the latest version without any visible failure.
+   */
+  @Test
+  public void testVersionOptionPinsTheScanToThatVersion() {
+    DatasetVersions versions = prepareDatasetWithHistory();
+    Assertions.assertNotEquals(versions.firstInsertVersion, versions.latestVersion);
+
+    Assertions.assertEquals(
+        5,
+        spark
+            .read()
+            .option("version", Long.toString(versions.firstInsertVersion))
+            .table(fullTable)
+            .count(),
+        "reading with the version option must see only the rows present at that version");
+    Assertions.assertEquals(
+        10, spark.table(fullTable).count(), "the unpinned read still sees the latest version");
+  }
+
   @Test
   public void testBranchIdentifierRejectsVersionAsOf() {
     DatasetVersions versions = prepareDatasetWithHistory();
