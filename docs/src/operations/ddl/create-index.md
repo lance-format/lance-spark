@@ -56,8 +56,9 @@ The distributed build used by `zonemap`, `bitmap`, `label_list`, `ngram`, `bloom
 | `num_segments` | Integer | Number of parallel build tasks, and so of index segments created (clamped to fragment count when larger). Each task takes a contiguous run of fragments, and the runs are chosen so the heaviest task is as light as any contiguous split allows. Defaults to `min(fragment_count, spark.default.parallelism)`. |
 
 Contiguous coverage matters beyond parallelism: [OPTIMIZE](./optimize.md) can only group fragments
-that the identical set of index segments covers, so segments whose fragment ids interleave leave it
-nothing to coalesce.
+that the identical set of index segments covers. Interleaved segments leave it nothing to coalesce at
+all, while contiguous ones let it coalesce within each segment's run. A segment boundary is still a
+boundary, so `num_segments` also bounds how far compaction can get.
 
 ### ZoneMap Options
 

@@ -40,7 +40,7 @@ import org.lance.spark.write.SingleBatchArrowReader
 import java.util.{Collections, Locale, UUID}
 
 import scala.collection.JavaConverters._
-import scala.collection.mutable.{ArrayBuffer, PriorityQueue}
+import scala.collection.mutable.ArrayBuffer
 import scala.reflect.ClassTag
 
 /**
@@ -735,13 +735,14 @@ object IndexUtils extends Logging {
 
   /**
    * Splits `fragments` into `numSegments` batches, each a contiguous run of fragment ids, chosen so
-   * that the heaviest batch is as light as possible.
+   * that the heaviest batch is as light as any contiguous split allows.
    *
    * Contiguity is not cosmetic. Lance's compaction planner only groups fragments that are covered by
    * the identical set of index segments, so batches whose fragment ids interleave leave every
    * adjacent pair of fragments in a different group and make OPTIMIZE a no-op for the whole table.
-   * Balance is not sacrificed to get it: the optimal contiguous partition is found exactly, so a
-   * workload that the previous least-loaded-first assignment balanced perfectly still is.
+   * It does cost some balance. `[10, 9, 8, 7]` into two batches is 19/15 here, where the previous
+   * least-loaded-first assignment reached 17/17 by interleaving. Optimal among contiguous splits is
+   * the guarantee, not optimal overall.
    *
    * Assignment is deterministic: the same fragments and segment count always produce the same
    * batches, whatever order `fragments` arrives in. Every batch holds at least one fragment, so the
@@ -793,8 +794,9 @@ object IndexUtils extends Logging {
    * is the widest single fragment, below which no packing exists.
    *
    * Packing at that budget can use fewer runs than were asked for, which would cost parallelism, so
-   * the remainder are split at their own balance points. A split only ever lowers the heaviest run,
-   * so optimality survives it.
+   * runs are divided until the count is reached. Which run gets divided does not matter: every run
+   * already fits the budget, so both halves of any split fit it too, and the budget is minimal, so
+   * the heaviest run cannot fall below it either.
    */
   private def balancedRunLengths(rowsUpTo: Array[Long], segmentCount: Int): Seq[Int] = {
     val fragmentCount = rowsUpTo.length - 1
@@ -828,33 +830,18 @@ object IndexUtils extends Logging {
       start += length
     }
 
-    if (runCount < segmentCount) {
-      // Heaviest splittable run first, so each extra batch is spent where it helps most. Ties break
-      // on length then on the earlier run, to keep the result independent of heap internals.
-      val splittable = PriorityQueue.empty[(Long, Int, Int)](
-        Ordering.by[(Long, Int, Int), (Long, Int, Int)] {
-          case (rows, length, begin) => (rows, length, -begin)
-        })
-      var scan = 0
-      while (scan < fragmentCount) {
-        val length = runLengthAt(scan)
-        if (length > 1) {
-          splittable.enqueue((rowsOf(scan, length), length, scan))
-        }
-        scan += length
-      }
-      while (runCount < segmentCount && splittable.nonEmpty) {
-        val (_, length, begin) = splittable.dequeue()
-        val cut = balancePoint(rowsUpTo, begin, length)
-        runLengthAt(begin) = cut
-        runLengthAt(begin + cut) = length - cut
+    // Divide from the left until the count is reached. Splitting the heaviest run first would be no
+    // better, since the budget already bounds every run.
+    var splitAt = 0
+    while (runCount < segmentCount && splitAt < fragmentCount) {
+      val length = runLengthAt(splitAt)
+      if (length > 1) {
+        val cut = balancePoint(rowsUpTo, splitAt, length)
+        runLengthAt(splitAt) = cut
+        runLengthAt(splitAt + cut) = length - cut
         runCount += 1
-        if (cut > 1) {
-          splittable.enqueue((rowsOf(begin, cut), cut, begin))
-        }
-        if (length - cut > 1) {
-          splittable.enqueue((rowsOf(begin + cut, length - cut), length - cut, begin + cut))
-        }
+      } else {
+        splitAt += length
       }
     }
 
