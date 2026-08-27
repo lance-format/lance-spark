@@ -23,6 +23,10 @@ import org.apache.spark.sql.execution.{SparkPlan, SparkStrategy}
 case class LanceDataSourceV2Strategy(session: SparkSession) extends SparkStrategy
   with PredicateHelper {
 
+  // Index names are lower-cased for a case-insensitive SQL contract, using Locale.ROOT so
+  // normalization is independent of the JVM default locale (see LanceSystemIndex.normalizeName).
+  private def normalizeIndexName(name: String): String = LanceSystemIndex.normalizeName(name)
+
   override def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
     case AddColumnsBackfill(ResolvedIdentifier(catalog, ident), columnNames, source) =>
       AddColumnsBackfillExec(asTableCatalog(catalog), ident, columnNames, source) :: Nil
@@ -40,7 +44,7 @@ case class LanceDataSourceV2Strategy(session: SparkSession) extends SparkStrateg
       AddIndexExec(
         asTableCatalog(catalog),
         ident,
-        indexName.toLowerCase,
+        normalizeIndexName(indexName),
         method,
         columns,
         args) :: Nil
@@ -49,7 +53,14 @@ case class LanceDataSourceV2Strategy(session: SparkSession) extends SparkStrateg
       ShowIndexesExec(asTableCatalog(catalog), ident) :: Nil
 
     case LanceDropIndex(ResolvedIdentifier(catalog, ident), indexName) =>
-      LanceDropIndexExec(asTableCatalog(catalog), ident, indexName.toLowerCase) :: Nil
+      LanceDropIndexExec(asTableCatalog(catalog), ident, normalizeIndexName(indexName)) :: Nil
+
+    case OptimizeIndex(ResolvedIdentifier(catalog, ident), indexName, args) =>
+      OptimizeIndexExec(
+        asTableCatalog(catalog),
+        ident,
+        indexName.map(normalizeIndexName),
+        args) :: Nil
 
     case LanceCreateBranch(ResolvedIdentifier(catalog, ident), branchName, ref, ifNotExists) =>
       LanceCreateBranchExec(asTableCatalog(catalog), ident, branchName, ref, ifNotExists) :: Nil

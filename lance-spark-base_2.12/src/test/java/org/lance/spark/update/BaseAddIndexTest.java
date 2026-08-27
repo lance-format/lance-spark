@@ -801,6 +801,186 @@ public abstract class BaseAddIndexTest {
   }
 
   /**
+   * A deferred ZONEMAP can be populated incrementally through the SQL {@code OPTIMIZE INDEX}
+   * command, which merges the unindexed fragments into the existing index.
+   */
+  @Test
+  public void testDeferredZonemapPopulatedByOptimizeIndexSql() {
+    prepareDataset();
+
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_oi using zonemap (id) with (train=false)", fullTable));
+
+    // Incrementally populate the deferred index via SQL (not the SDK).
+    Dataset<Row> result =
+        spark.sql(String.format("alter table %s optimize index idx_oi", fullTable));
+    Row row = result.collectAsList().get(0);
+    Assertions.assertEquals("idx_oi", row.getString(0));
+    Assertions.assertEquals("optimized", row.getString(1));
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int fragmentCount = lanceDataset.getFragments().size();
+      Assertions.assertTrue(fragmentCount >= 2, "Expected multiple fragments");
+      int coveredFragments =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> "idx_oi".equals(index.name()))
+              .map(index -> index.fragments().orElse(Collections.emptyList()).size())
+              .mapToInt(Integer::intValue)
+              .sum();
+      Assertions.assertEquals(
+          fragmentCount,
+          coveredFragments,
+          "Expected OPTIMIZE INDEX to populate the deferred zonemap over all fragments");
+    } finally {
+      lanceDataset.close();
+    }
+
+    // Query remains correct after the index is populated.
+    Dataset<Row> afterOptimize =
+        spark.sql(String.format("select * from %s where id=15", fullTable));
+    Assertions.assertEquals(1L, afterOptimize.count());
+    Assertions.assertEquals("text_15", afterOptimize.collectAsList().get(0).getString(1));
+  }
+
+  /**
+   * OPTIMIZE INDEX on a non-existent index name fails instead of silently reporting success (which
+   * would make a typo indistinguishable from completed maintenance).
+   */
+  @Test
+  public void testOptimizeIndexMissingNameFails() {
+    prepareDataset();
+
+    Assertions.assertThrows(
+        Exception.class,
+        () ->
+            spark
+                .sql(String.format("alter table %s optimize index missing_idx", fullTable))
+                .collect());
+  }
+
+  /**
+   * OPTIMIZE INDEX option names are normalized locale-independently and matched case-insensitively:
+   * an unquoted (upper-cased) option name is recognized rather than rejected as unknown.
+   */
+  @Test
+  public void testOptimizeIndexOptionNameCaseInsensitive() {
+    prepareDataset();
+
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_ci using zonemap (id) with (train=false)", fullTable));
+
+    // NUM_INDICES_TO_MERGE (unquoted -> upper-cased by the parser) must be recognized, not
+    // rejected.
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s optimize index idx_ci with (NUM_INDICES_TO_MERGE = 1)", fullTable));
+    Assertions.assertEquals("optimized", result.collectAsList().get(0).getString(1));
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      int fragmentCount = lanceDataset.getFragments().size();
+      int coveredFragments =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> "idx_ci".equals(index.name()))
+              .map(index -> index.fragments().orElse(Collections.emptyList()).size())
+              .mapToInt(Integer::intValue)
+              .sum();
+      Assertions.assertEquals(
+          fragmentCount, coveredFragments, "Expected OPTIMIZE INDEX to cover all fragments");
+    } finally {
+      lanceDataset.close();
+    }
+  }
+
+  /** OPTIMIZE INDEX rejects unknown WITH options rather than silently ignoring them. */
+  @Test
+  public void testOptimizeIndexUnknownOptionFails() {
+    prepareDataset();
+
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_uk using zonemap (id) with (train=false)", fullTable));
+
+    Assertions.assertThrows(
+        Exception.class,
+        () ->
+            spark
+                .sql(
+                    String.format(
+                        "alter table %s optimize index idx_uk with (bogus = true)", fullTable))
+                .collect());
+  }
+
+  /**
+   * OPTIMIZE INDEX rejects the {@code retrain} option: it is a vector-index rebuild in lance-core
+   * and is not exposed through this incremental SQL command.
+   */
+  @Test
+  public void testOptimizeIndexRetrainOptionRejected() {
+    prepareDataset();
+
+    spark.sql(
+        String.format(
+            "alter table %s create index idx_rt using zonemap (id) with (train=false)", fullTable));
+
+    Assertions.assertThrows(
+        Exception.class,
+        () ->
+            spark
+                .sql(
+                    String.format(
+                        "alter table %s optimize index idx_rt with (retrain = true)", fullTable))
+                .collect());
+  }
+
+  /**
+   * OPTIMIZE INDEX on a Lance system index (e.g. {@code __lance_frag_reuse}) fails instead of
+   * silently reporting success. lance-core filters system indexes before optimizing, so without
+   * this guard the executor would emit {@code optimized} for a no-op.
+   */
+  @Test
+  public void testOptimizeIndexSystemIndexRejected() {
+    prepareDataset();
+
+    // Create one full-coverage segment, then OPTIMIZE with deferred remap to produce the
+    // __lance_frag_reuse system index (mirrors testShowIndexesFiltersFragmentReuseIndex).
+    org.lance.index.IndexParams indexParams =
+        org.lance.index.IndexParams.builder()
+            .setScalarIndexParams(org.lance.index.scalar.ScalarIndexParams.create("BTREE"))
+            .build();
+    try (org.lance.Dataset dataset = org.lance.Dataset.open().uri(tableDir).build()) {
+      dataset.createIndex(
+          org.lance.index.IndexOptions.builder(List.of("id"), IndexType.BTREE, indexParams)
+              .replace(true)
+              .train(true)
+              .withIndexName("test_index")
+              .build());
+    }
+    spark.sql(
+        String.format(
+            "optimize %s with (target_rows_per_fragment=20000, defer_index_remap=true)",
+            fullTable));
+
+    try (org.lance.Dataset dataset = org.lance.Dataset.open().uri(tableDir).build()) {
+      Assertions.assertTrue(
+          dataset.getIndexes().stream()
+              .anyMatch(index -> "__lance_frag_reuse".equalsIgnoreCase(index.name())),
+          "Expected a fragment-reuse system index to exist for this test");
+    }
+
+    Assertions.assertThrows(
+        Exception.class,
+        () ->
+            spark
+                .sql(String.format("alter table %s optimize index __lance_frag_reuse", fullTable))
+                .collect());
+  }
+
+  /**
    * A deferred ZONEMAP can be populated by re-running CREATE INDEX (eager): the distributed segment
    * build replaces the empty index and covers all fragments.
    */
