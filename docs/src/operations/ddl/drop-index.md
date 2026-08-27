@@ -29,5 +29,5 @@ The `DROP INDEX` command removes the named index from the dataset manifest. Phys
 
 - Dropping a non-existent index results in an error.
 - Index names are case-insensitive (stored as lowercase).
-- To recreate an index after dropping, use [`CREATE INDEX`](create-index.md).
+- To recreate an index after dropping, use [`CREATE SCALAR INDEX`](create-scalar-index.md) or [`CREATE VECTOR INDEX`](create-vector-index.md).
 - To list existing indexes before dropping, use [`SHOW INDEXES`](show-indexes.md).

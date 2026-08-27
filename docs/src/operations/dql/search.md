@@ -40,7 +40,7 @@ Run Lance full-text search from Spark SQL using Lance namespace execution.
     ORDER BY _score DESC;
     ```
 
-See [CREATE INDEX](../ddl/create-index.md#full-text-search-index) for FTS index options.
+See [CREATE SCALAR INDEX](../ddl/create-scalar-index.md#full-text-search-index) for FTS index options.
 
 ## Positional Form
 

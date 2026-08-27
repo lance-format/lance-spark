@@ -331,9 +331,14 @@ public abstract class BaseUpdateColumnsBackfillTest {
   /**
    * UPDATE COLUMNS FROM on a stable-row-id table must preserve {@code _row_created_at_version} for
    * every row, advance {@code _row_last_updated_at_version} only for the matched row, and leave
-   * unmatched rows' last-updated version unchanged. The connector passes matched physical row
-   * offsets on commit so Lance can partially refresh last-updated metadata (see
-   * lance-format/lance#6734 and the Java {@code Update.updatedFragmentOffsets} API).
+   * unmatched rows' last-updated version unchanged.
+   *
+   * <p>Historically, UPDATE COLUMNS went through Lance's {@code Update} operation, which (unlike
+   * ADD COLUMNS via {@code Merge} and unlike row-level UPDATE) did <strong>not</strong> bump {@code
+   * _row_last_updated_at_version}, so CDF consumers could not detect column-level rewrites via the
+   * version columns. This was fixed by https://github.com/lance-format/lance/issues/6734: the
+   * connector now passes matched physical row offsets on commit (the Java {@code
+   * Update.updatedFragmentOffsets} API) so Lance can partially refresh last-updated metadata.
    */
   @Test
   public void testUpdateColumnsPreservesCreatedAtAndAdvancesLastUpdatedWithStableRowIds() {

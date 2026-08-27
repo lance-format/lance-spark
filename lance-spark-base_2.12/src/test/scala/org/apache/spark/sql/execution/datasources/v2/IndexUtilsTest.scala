@@ -19,10 +19,12 @@ import org.junit.jupiter.api.Test
 import org.lance.index.IndexType
 
 /**
- * Unit tests for [[IndexUtils]] helper methods.
+ * Pure unit tests for [[IndexUtils]] helper methods.
  *
- * These tests are pure (no SparkSession, no Lance native library) and execute on the JVM only,
- * so they can run in any CI environment without native dependencies.
+ * Written with JUnit 5 (not ScalaTest) so surefire actually executes them: this
+ * project's surefire is configured for the JUnit Platform Provider only; classes
+ * extending AnyFunSuite silently run zero tests. See VectorIndexParamsResolverTest
+ * and LargeBinaryWriterTest for the same pattern.
  */
 class IndexUtilsTest {
 
@@ -81,8 +83,6 @@ class IndexUtilsTest {
       classOf[IllegalArgumentException],
       () => IndexUtils.extractTrain(args))
   }
-
-  // ── toJson — SparkOnlyOptions filtering ───────────────────────────────────
 
   @Test
   def toJson_emptyArgsReturnsEmptyObject(): Unit = {
@@ -155,13 +155,29 @@ class IndexUtilsTest {
     assertTrue(json.contains("64"))
   }
 
-  // ── buildIndexType ─────────────────────────────────────────────────────────
-
   @Test
-  def buildIndexType_btreeCaseInsensitive(): Unit = {
+  def buildIndexTypeMapsScalarMethodsCaseInsensitive(): Unit = {
     assertEquals(IndexType.BTREE, IndexUtils.buildIndexType("btree"))
     assertEquals(IndexType.BTREE, IndexUtils.buildIndexType("BTREE"))
     assertEquals(IndexType.BTREE, IndexUtils.buildIndexType("BTree"))
+    assertEquals(IndexType.INVERTED, IndexUtils.buildIndexType("fts"))
+    assertEquals(IndexType.INVERTED, IndexUtils.buildIndexType("FTS"))
+    assertEquals(IndexType.ZONEMAP, IndexUtils.buildIndexType("zonemap"))
+    assertEquals(IndexType.ZONEMAP, IndexUtils.buildIndexType("ZONEMAP"))
+  }
+
+  @Test
+  def buildIndexTypeMapsFiveIvfMethodsCaseInsensitive(): Unit = {
+    val pairs = Seq(
+      "ivf_flat" -> IndexType.IVF_FLAT,
+      "IVF_FLAT" -> IndexType.IVF_FLAT,
+      "ivf_pq" -> IndexType.IVF_PQ,
+      "ivf_sq" -> IndexType.IVF_SQ,
+      "ivf_hnsw_pq" -> IndexType.IVF_HNSW_PQ,
+      "ivf_hnsw_sq" -> IndexType.IVF_HNSW_SQ)
+    pairs.foreach { case (method, expected) =>
+      assertEquals(expected, IndexUtils.buildIndexType(method), s"method=$method")
+    }
   }
 
   @Test
@@ -178,6 +194,9 @@ class IndexUtilsTest {
     assertEquals("inverted", IndexUtils.buildScalarIndexParamType("inverted"))
   }
 
+  // Exercises every scalar-segment method's mapping to IndexType
+  // AND the core scalar-plugin param-type name (which uses "labellist" / "bloomfilter"
+  // spellings that don't match either the SQL method names or the enum names).
   @Test
   def scalarSegmentIndexType_mapsAllSupportedMethods(): Unit = {
     val expected = Seq(
@@ -213,7 +232,48 @@ class IndexUtilsTest {
   def buildIndexType_throwsOnUnknown(): Unit = {
     assertThrows(
       classOf[UnsupportedOperationException],
-      () => IndexUtils.buildIndexType("ivf_pq"))
+      () => IndexUtils.buildIndexType("unknown_index"))
+  }
+
+  @Test
+  def buildIndexType_throwsClearErrorForIvfHnswFlat(): Unit = {
+    val ex = assertThrows(
+      classOf[UnsupportedOperationException],
+      () => IndexUtils.buildIndexType("ivf_hnsw_flat"))
+    assertTrue(ex.getMessage.contains("IVF_HNSW_FLAT"), ex.getMessage)
+    assertTrue(ex.getMessage.contains("ivf_hnsw_pq"), ex.getMessage)
+    assertTrue(ex.getMessage.contains("ivf_hnsw_sq"), ex.getMessage)
+  }
+
+  @Test
+  def useLogicalSegmentCommitTrueForScalarSegmentAndSupportedIvf(): Unit = {
+    Seq(
+      IndexType.BTREE,
+      IndexType.ZONEMAP,
+      IndexType.BITMAP,
+      IndexType.LABEL_LIST,
+      IndexType.NGRAM,
+      IndexType.BLOOM_FILTER,
+      IndexType.RTREE,
+      IndexType.INVERTED,
+      IndexType.IVF_FLAT,
+      IndexType.IVF_PQ,
+      IndexType.IVF_SQ,
+      IndexType.IVF_HNSW_PQ,
+      IndexType.IVF_HNSW_SQ).foreach { indexType =>
+      assertTrue(
+        IndexUtils.useLogicalSegmentCommit(indexType),
+        s"$indexType should use logical-segment commit")
+    }
+  }
+
+  @Test
+  def useLogicalSegmentCommitFalseForUnsupported(): Unit = {
+    // BTREE now goes through the shared scalar-segment path — it is no longer
+    // an exception to logical-segment commit. Only IVF_HNSW_FLAT stays unsupported in the
+    // first pass: lance-core Java VectorIndexParams.Builder.build() rejects HNSW without a
+    // PQ/SQ quantizer.
+    assertFalse(IndexUtils.useLogicalSegmentCommit(IndexType.IVF_HNSW_FLAT))
   }
 
   @Test

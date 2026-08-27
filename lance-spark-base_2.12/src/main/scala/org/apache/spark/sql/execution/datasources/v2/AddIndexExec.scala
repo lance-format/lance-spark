@@ -27,10 +27,9 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.LanceArrowUtils
 import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
 import org.apache.spark.unsafe.types.UTF8String
-import org.lance.{CommitBuilder, Dataset, Transaction}
+import org.lance.Dataset
 import org.lance.index.{Index, IndexOptions, IndexParams, IndexType}
 import org.lance.index.scalar.{BTreeIndexParams, ScalarIndexParams}
-import org.lance.operation.{CreateIndex => AddIndexOperation}
 import org.lance.schema.{LanceField, LanceSchema}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceRuntime, LanceSparkReadOptions}
 import org.lance.spark.arrow.LanceArrowWriter
@@ -42,6 +41,12 @@ import java.util.{Collections, Locale, UUID}
 import scala.collection.JavaConverters._
 import scala.collection.mutable.{ArrayBuffer, PriorityQueue}
 import scala.reflect.ClassTag
+
+private case class AddIndexTableSnapshot(
+    readOptions: LanceSparkReadOptions,
+    fragmentWorkloads: List[FragmentWorkload],
+    canonicalColumns: Seq[String],
+    vectorPlan: Option[VectorIndexPlan])
 
 /**
  * Physical execution of distributed CREATE INDEX (ALTER TABLE ... CREATE INDEX ...) for Lance datasets.
@@ -59,11 +64,15 @@ import scala.reflect.ClassTag
  *
  * <p><b>Deferred training ({@code WITH (train=false)})</b>: commits an empty index on the driver
  * with an empty fragment bitmap (all rows appear unindexed), skipping data processing. Supported
- * for all supported scalar index methods. Empty tables use the same path even when
- * {@code train=true}, since there are no fragments to train. Populate the index later by re-running
- * {@code CREATE INDEX} with the same name (a full distributed build that replaces the empty index)
- * or, for incremental coverage of appended fragments, by {@code Dataset.optimizeIndices} (the SQL
- * {@code OPTIMIZE} only compacts fragments). {@code num_segments} is rejected with
+ * for all scalar index methods ({@code btree}, {@code fts}, and the scalar-segment methods —
+ * {@code zonemap}, {@code bitmap}, {@code label_list}, {@code ngram}, {@code bloomfilter},
+ * {@code rtree}). Rejected for {@code IVF_*} vector index types because Lance does not currently
+ * expose a vector-aware empty-index commit path. Empty scalar tables use the same path even when
+ * {@code train=true}; empty tables with an {@code IVF_*} method are rejected with a clear message
+ * because there are no vectors to train the centroids on. Populate the index later by re-running
+ * {@code CREATE INDEX} with the same name (a full distributed build that replaces the empty
+ * index) or, for incremental coverage of appended fragments, by {@code Dataset.optimizeIndices}
+ * (the SQL {@code OPTIMIZE} only compacts fragments). {@code num_segments} is rejected with
  * {@code train=false}, since no segmented build occurs.
  *
  * <p>The following options are consumed at the Spark execution layer and are never forwarded
@@ -76,49 +85,45 @@ case class AddIndexExec(
     indexName: String,
     method: String,
     columns: Seq[String],
-    args: Seq[LanceNamedArgument]) extends LeafV2CommandExec {
+    args: Seq[LanceNamedArgument]) extends LeafV2CommandExec
+  with Logging {
 
   override def output: Seq[Attribute] = AddIndexOutputType.SCHEMA
 
   override protected def run(): Seq[InternalRow] = {
     val lanceDataset = LanceDataset.requireWritable(catalog.loadTable(ident), "AddIndex")
 
-    val readOptions = lanceDataset.readOptions()
-    val indexType = IndexUtils.buildIndexType(method)
-    val btreeBuildMode = IndexUtils.btreeBuildMode(indexType, args)
-    val scalarSegmentIndexType = IndexUtils.scalarSegmentIndexType(method)
-
-    val (fragmentWorkloads, canonicalColumns) = {
-      val ds = Utils.openDatasetBuilder(readOptions).build()
-      try {
-        val canonical = columns.map { column =>
-          val field = IndexUtils.resolveIndexField(ds.getLanceSchema, indexType, column)
-          FieldPathUtils.pathByFieldId(ds.getLanceSchema, field.getId)
-        }
-        (
-          ds.getFragments.asScala
-            .map(fragment => FragmentWorkload(fragment.getId, fragment.metadata().getNumRows))
-            .toList,
-          canonical)
-      } finally {
-        ds.close()
-      }
-    }
-    val fragmentIds = fragmentWorkloads.map(_.fragmentId)
+    val baseReadOptions = lanceDataset.readOptions()
+    val (nsImpl, nsProps, tableId, initialStorageOpts) =
+      extractNamespaceInfo(lanceDataset, baseReadOptions)
 
     val train = IndexUtils.extractTrain(args)
+    val indexType = IndexUtils.buildIndexType(method)
+    val scalarSegmentIndexType = IndexUtils.scalarSegmentIndexType(method)
+    val btreeBuildMode = IndexUtils.btreeBuildMode(indexType, args)
 
-    if (canonicalColumns.size != 1) {
-      throw new UnsupportedOperationException(
-        s"${indexType.name()} indexes currently support a single column only")
+    // Deferred training (train=false) is only supported for scalar index methods today.
+    // commitEmptyIndex(...) below builds ScalarIndexParams via buildScalarIndexParamType,
+    // which has no IVF_* path. Until lance-core exposes an empty IndexOptions builder for
+    // vector indices, reject the combination up front so the user sees a clear message instead
+    // of "Unsupported index method: ivf_pq" coming out of the commit-empty path.
+    if (!train && IndexUtils.isIvfIndexType(indexType)) {
+      throw new IllegalArgumentException(
+        s"train=false is not supported for $indexType. Run CREATE INDEX without train=false " +
+          "(full distributed build) or use Dataset.optimizeIndices for incremental coverage of " +
+          "appended fragments.")
     }
 
     val numSegmentsOpt = args.find(_.name == "num_segments")
+    // BTREE range-mode preprocesses data through Spark and does not fan out
+    // into per-fragment segments, so num_segments has no meaning there. Rejected up front
+    // with a specific message so the user knows to switch to build_mode='fragment' — the
+    // generic "not supported for BTREE" message below would be misleading.
     if (numSegmentsOpt.isDefined && btreeBuildMode.contains("range")) {
       throw new IllegalArgumentException(
         "num_segments is only supported for BTREE indexes with build_mode='fragment'")
     }
-    if (numSegmentsOpt.isDefined && scalarSegmentIndexType.isEmpty) {
+    if (numSegmentsOpt.isDefined && !IndexUtils.useLogicalSegmentCommit(indexType)) {
       throw new IllegalArgumentException(
         s"num_segments is not supported for ${indexType.name()} indexes")
     }
@@ -126,7 +131,7 @@ case class AddIndexExec(
       throw new IllegalArgumentException(
         "num_segments is not supported with train=false: a deferred index performs no segmented build")
     }
-    val validatedNumSegments: Option[Int] = numSegmentsOpt.map { arg =>
+    val parsedNumSegments: Option[Int] = numSegmentsOpt.map { arg =>
       arg.value match {
         case null =>
           throw new IllegalArgumentException(
@@ -143,11 +148,111 @@ case class AddIndexExec(
       }
     }
 
-    // train=false, or an empty table: commit an empty index on the driver and skip data
-    // processing. Index and option validation above still applies to empty tables.
+    // SQ-quantized IVF variants (IVF_SQ, IVF_HNSW_SQ) must be built as a single segment.
+    // lance-core trains the ScalarQuantizer per createIndex call, and
+    // commit_existing_index_segments does NOT reconcile per-shard SQ bounds — it keeps the
+    // first shard's ScalarQuantizationMetadata and concatenates u8 codes byte-for-byte
+    // (rust/lance-index/src/vector/distributed/index_merger.rs IVF_SQ branch). Different
+    // bounds across segments => silently corrupt distance computation. Force-clamp to 1
+    // until lance-core exposes a driver-side SQ trainer (tracked in the SQ-shared-artifact
+    // follow-up issue against lance-format/lance).
+    val validatedNumSegments: Option[Int] =
+      if (IndexUtils.isSqIvfIndexType(indexType)) {
+        parsedNumSegments match {
+          case Some(req) if req > 1 =>
+            logWarning(
+              s"$indexType: num_segments=$req requested, but SQ-quantized IVF builds are " +
+                "currently forced to a single segment because lance-core does not reconcile " +
+                "per-segment ScalarQuantizer bounds across shards (see follow-up issue). " +
+                "Downgrading to num_segments=1.")
+          case _ =>
+            logInfo(
+              s"$indexType: forcing single-segment build (lance-core does not yet support " +
+                "shared SQ bounds across segments).")
+        }
+        Some(1)
+      } else {
+        parsedNumSegments
+      }
+
+    // Resolve canonical columns + fragment ids + (optional) vector plan against a pinned
+    // dataset version. Uses IndexUtils.resolveIndexField so leaf-only methods
+    // (BTREE / BITMAP / NGRAM / BLOOM_FILTER) validate against Lance Core's
+    // container-field rejection, while container-tolerant methods (LABEL_LIST / RTREE / IVF_*
+    // etc.) resolve directly.
+    val snapshot: AddIndexTableSnapshot = {
+      val ds = IndexUtils.openDataset(baseReadOptions, initialStorageOpts, nsImpl, nsProps, tableId)
+      try {
+        val canonical = columns.map { column =>
+          val field = IndexUtils.resolveIndexField(ds.getLanceSchema, indexType, column)
+          FieldPathUtils.pathByFieldId(ds.getLanceSchema, field.getId)
+        }
+        // Single-column check: no index type currently supports more than one column.
+        // Centralising here avoids per-type checks scattered further down (ZONEMAP, IVF, FTS).
+        // The range-based BTree path re-validates on its own args-derived list; that separate
+        // check stays local to that job. Wording matches BaseAddIndexTest's substring assertion
+        // (see testIndexesRejectMultipleColumns).
+        if (canonical.size != 1) {
+          throw new UnsupportedOperationException(
+            s"${indexType.name()} indexes currently support a single column only")
+        }
+        val vectorPlan = if (IndexUtils.isIvfIndexType(indexType)) {
+          val arrowSchema = ds.getLanceSchema.asArrowSchema()
+          val arrowField =
+            try {
+              arrowSchema.findField(canonical.head)
+            } catch {
+              case _: IllegalArgumentException => null
+            }
+          if (arrowField == null) {
+            val available = arrowSchema.getFields.asScala.map(_.getName).mkString(", ")
+            throw new IllegalArgumentException(
+              s"Column '${canonical.head}' not found. Available: $available")
+          }
+          val dim = VectorIndexParamsResolver.validateVectorFieldForIndex(
+            canonical.head,
+            arrowField)
+          Some(VectorIndexParamsResolver.parseAndValidate(
+            indexType,
+            args,
+            dim,
+            ds.countRows()))
+        } else None
+        AddIndexTableSnapshot(
+          readOptions = baseReadOptions.withRef(
+            Utils.pinOpenedRef(ds, baseReadOptions.getRef)),
+          fragmentWorkloads = ds.getFragments.asScala
+            .map(fragment => FragmentWorkload(fragment.getId, fragment.metadata().getNumRows))
+            .toList,
+          canonicalColumns = canonical,
+          vectorPlan = vectorPlan)
+      } finally {
+        ds.close()
+      }
+    }
+
+    val readOptions = snapshot.readOptions
+    val fragmentWorkloads = snapshot.fragmentWorkloads
+    val fragmentIds = fragmentWorkloads.map(_.fragmentId)
+    val canonicalColumns = snapshot.canonicalColumns
+
+    // Empty-table CREATE INDEX: scalar methods fall through to commitEmptyIndex below and
+    // register a zero-fragment index visible to SHOW INDEXES. IVF_* is rejected up front —
+    // Lance cannot train IVF centroids without vectors, and commitEmptyIndex resolves
+    // scalar params only.
+    if (fragmentIds.isEmpty && IndexUtils.isIvfIndexType(indexType)) {
+      throw new IllegalArgumentException(
+        s"CREATE INDEX $indexType on an empty table is not supported: there are no vectors " +
+          "to train IVF centroids. Insert data before running CREATE INDEX, or use " +
+          "Dataset.optimizeIndices to build incrementally after appending fragments.")
+    }
+
+    // train=false, or an empty scalar table: commit an empty index on the driver and skip
+    // data processing. Index and option validation above still applies to empty tables.
     if (!train || fragmentIds.isEmpty) {
       val uuid = UUID.randomUUID()
-      val dataset = Utils.openDatasetBuilder(readOptions).build()
+      val dataset =
+        IndexUtils.openDataset(readOptions, initialStorageOpts, nsImpl, nsProps, tableId)
       try {
         return commitEmptyIndex(
           dataset,
@@ -160,10 +265,9 @@ case class AddIndexExec(
       }
     }
 
-    val (nsImpl, nsProps, tableId, initialStorageOpts) =
-      extractNamespaceInfo(lanceDataset, readOptions)
-
-    // Range-mode BTree uses preprocessed data from Spark and keeps its dedicated path.
+    // Range-mode BTree preprocesses data through Spark's shuffle and does not go through
+    // the logical-segment fan-out. Runs before the useLogicalSegmentCommit dispatch below
+    // so BTREE-range never reaches ScalarSegmentIndexJob.
     if (btreeBuildMode.contains("range")) {
       val segments = new RangeBasedBTreeIndexJob(
         this.copy(columns = canonicalColumns),
@@ -179,18 +283,44 @@ case class AddIndexExec(
         UTF8String.fromString(indexName))))
     }
 
-    // Scalar segment indexes use the logical segment commit path.
-    if (scalarSegmentIndexType.isDefined) {
-      val segmentJob = new ScalarSegmentIndexJob(
-        this.copy(columns = canonicalColumns),
-        readOptions,
-        fragmentWorkloads,
-        validatedNumSegments,
-        nsImpl,
-        nsProps,
-        tableId,
-        initialStorageOpts)
-      val segments = segmentJob.run()
+    // Logical segment commit path: scalar-segment methods (BTREE fragment-mode / ZONEMAP /
+    // BITMAP / LABEL_LIST / NGRAM / BLOOM_FILTER / RTREE / INVERTED) go through
+    // ScalarSegmentIndexJob; IVF_* goes through VectorIndexJob.
+    if (IndexUtils.useLogicalSegmentCommit(indexType)) {
+      val segments: Seq[Index] = indexType match {
+        case scalar if scalarSegmentIndexType.isDefined =>
+          val scalarSegmentJob = new ScalarSegmentIndexJob(
+            this.copy(columns = canonicalColumns),
+            readOptions,
+            fragmentWorkloads,
+            validatedNumSegments,
+            nsImpl,
+            nsProps,
+            tableId,
+            initialStorageOpts)
+          scalarSegmentJob.run()
+
+        case vectorType if IndexUtils.isIvfIndexType(vectorType) =>
+          val plan = snapshot.vectorPlan.getOrElse {
+            throw new IllegalStateException(s"Vector plan was not resolved for $vectorType")
+          }
+          val vectorJob = new VectorIndexJob(
+            this.copy(columns = canonicalColumns),
+            readOptions,
+            fragmentWorkloads,
+            plan,
+            indexName,
+            canonicalColumns,
+            validatedNumSegments,
+            nsImpl,
+            nsProps,
+            tableId,
+            initialStorageOpts)
+          vectorJob.runSegments()
+
+        case other =>
+          throw new IllegalStateException(s"Unexpected logical-segment type: $other")
+      }
       // Atomic add+remove via Lance core; see commitIndexSegments
       commitIndexSegments(readOptions, canonicalColumns.head, segments)
       return Seq(new GenericInternalRow(Array[Any](
@@ -549,19 +679,13 @@ case class ScalarSegmentIndexTask(
       .replace(false)
       .build()
 
-    val dataset = Utils.openDatasetBuilder(readOptions)
-      .initialStorageOptions(initialStorageOptions.map(_.asJava).orNull)
-      .runtimeNamespace(
-        namespaceImpl.orNull,
-        namespaceProperties.map(_.asJava).orNull,
-        tableId.map(_.asJava).orNull)
-      .build()
-
-    try {
-      encode(dataset.createIndex(indexOptions))
-    } finally {
-      dataset.close()
-    }
+    IndexUtils.createIndexSegment(
+      readOptions,
+      initialStorageOptions,
+      namespaceImpl,
+      namespaceProperties,
+      tableId,
+      indexOptions)
   }
 }
 
@@ -572,6 +696,26 @@ object IndexUtils extends Logging {
 
   private val jsonMapper = new ObjectMapper()
 
+  private[datasources] val IvfIndexTypes: Set[IndexType] = Set(
+    IndexType.IVF_FLAT,
+    IndexType.IVF_PQ,
+    IndexType.IVF_SQ,
+    IndexType.IVF_HNSW_PQ,
+    IndexType.IVF_HNSW_SQ)
+
+  // SQ-quantized IVF variants. These are forced to a single segment build because lance-core
+  // does not currently expose a driver-side ScalarQuantizer trainer; per-segment workers
+  // would each train their own per-dimension SQ bounds against only that worker's fragments,
+  // and `commit_existing_index_segments` does NOT reconcile bounds across segments — it
+  // keeps the first shard's `ScalarQuantizationMetadata` (see lance Rust
+  // `rust/lance-index/src/vector/distributed/index_merger.rs` IVF_SQ branch). Mixing
+  // segments built with different bounds silently corrupts query distance computation.
+  // Tracked as the SQ-shared-artifact follow-up; will be lifted once lance-core exposes
+  // shared-bounds training similar to IVF centroids / PQ codebook.
+  private[datasources] val SqIvfIndexTypes: Set[IndexType] = Set(
+    IndexType.IVF_SQ,
+    IndexType.IVF_HNSW_SQ)
+
   private val methodToIndexTypes: Map[String, IndexType] = Map(
     "btree" -> IndexType.BTREE,
     "zonemap" -> IndexType.ZONEMAP,
@@ -581,8 +725,15 @@ object IndexUtils extends Logging {
     "bloomfilter" -> IndexType.BLOOM_FILTER,
     "rtree" -> IndexType.RTREE,
     "fts" -> IndexType.INVERTED,
-    "inverted" -> IndexType.INVERTED)
+    "inverted" -> IndexType.INVERTED,
+    "ivf_flat" -> IndexType.IVF_FLAT,
+    "ivf_pq" -> IndexType.IVF_PQ,
+    "ivf_sq" -> IndexType.IVF_SQ,
+    "ivf_hnsw_pq" -> IndexType.IVF_HNSW_PQ,
+    "ivf_hnsw_sq" -> IndexType.IVF_HNSW_SQ)
 
+  // Scalar-segment methods use the shared ScalarSegmentIndexJob path (uncommitted segments
+  // built in parallel across fragment batches, then committed atomically on the driver).
   private val scalarSegmentIndexTypes: Set[IndexType] = Set(
     IndexType.BTREE,
     IndexType.ZONEMAP,
@@ -614,6 +765,28 @@ object IndexUtils extends Logging {
     IndexType.RTREE -> "rtree",
     IndexType.INVERTED -> "inverted")
 
+  // All index types whose commit goes through the logical-segment path:
+  // scalar-segment methods (zonemap / bitmap / label_list / ngram / bloomfilter / rtree)
+  // plus the IVF_* vector family. Excludes BTree and FTS which use their own paths.
+  private val logicalSegmentIndexTypes: Set[IndexType] =
+    scalarSegmentIndexTypes ++ IvfIndexTypes
+
+  def isIvfIndexType(indexType: IndexType): Boolean = IvfIndexTypes.contains(indexType)
+
+  /**
+   * True when `indexType` is an IVF variant whose quantizer (Scalar Quantizer) is currently
+   * trained per-segment by lance-core. AddIndexExec downgrades these to a single-segment
+   * build because lance-core's `commit_existing_index_segments` does not reconcile per-segment
+   * SQ bounds across shards, which would otherwise silently corrupt query results. Tracked as
+   * the SQ-shared-artifact follow-up against lance-format/lance.
+   */
+  def isSqIvfIndexType(indexType: IndexType): Boolean = SqIvfIndexTypes.contains(indexType)
+
+  /**
+   * Returns the [[IndexType]] for a scalar-segment method (zonemap / bitmap / label_list /
+   * ngram / bloomfilter / rtree). Returns None for any other method — including BTree, FTS,
+   * and IVF_*.
+   */
   def scalarSegmentIndexType(method: String): Option[IndexType] =
     methodToIndexTypes
       .get(method.toLowerCase(Locale.ROOT))
@@ -654,9 +827,16 @@ object IndexUtils extends Logging {
    */
   def buildIndexType(method: String): IndexType = {
     val normalized = method.toLowerCase(Locale.ROOT)
-    methodToIndexTypes.getOrElse(
-      normalized,
-      throw new UnsupportedOperationException(s"Unsupported index method: $normalized"))
+    normalized match {
+      case "ivf_hnsw_flat" =>
+        throw new UnsupportedOperationException(
+          "IVF_HNSW_FLAT is not currently supported because Lance requires a PQ or SQ " +
+            "quantizer for HNSW vector indexes. Use ivf_hnsw_pq or ivf_hnsw_sq instead.")
+      case other =>
+        methodToIndexTypes.getOrElse(
+          other,
+          throw new UnsupportedOperationException(s"Unsupported index method: $other"))
+    }
   }
 
   def buildScalarIndexParamType(method: String): String = {
@@ -678,6 +858,60 @@ object IndexUtils extends Logging {
         case Some(unknown) =>
           throw new IllegalArgumentException(
             s"Unrecognized build_mode: '$unknown'. Supported values are 'fragment' and 'range'.")
+      }
+    }
+  }
+
+  def useLogicalSegmentCommit(indexType: IndexType): Boolean =
+    logicalSegmentIndexTypes.contains(indexType)
+
+  def openDataset(
+      readOptions: LanceSparkReadOptions,
+      initialStorageOptions: Option[Map[String, String]],
+      namespaceImpl: Option[String],
+      namespaceProperties: Option[Map[String, String]],
+      tableId: Option[List[String]]): Dataset = {
+    Utils.openDatasetBuilder(readOptions)
+      .initialStorageOptions(initialStorageOptions.map(_.asJava).orNull)
+      .runtimeNamespace(
+        namespaceImpl.orNull,
+        namespaceProperties.map(_.asJava).orNull,
+        tableId.map(_.asJava).orNull)
+      .build()
+  }
+
+  def createIndexSegment(
+      readOptions: LanceSparkReadOptions,
+      initialStorageOptions: Option[Map[String, String]],
+      namespaceImpl: Option[String],
+      namespaceProperties: Option[Map[String, String]],
+      tableId: Option[List[String]],
+      indexOptions: IndexOptions): String = {
+    val dataset =
+      openDataset(readOptions, initialStorageOptions, namespaceImpl, namespaceProperties, tableId)
+    try {
+      encode(dataset.createIndex(indexOptions))
+    } finally {
+      dataset.close()
+    }
+  }
+
+  def runSegmentTasks[T <: Serializable: ClassTag](
+      sc: org.apache.spark.SparkContext,
+      tasks: Seq[T],
+      failureMessage: String)(execute: T => String): Seq[Index] = {
+    if (tasks.isEmpty) {
+      Seq.empty
+    } else {
+      try {
+        sc.parallelize(tasks, tasks.size)
+          .map(execute)
+          .collect()
+          .map(encoded => decode[Index](encoded))
+          .toSeq
+      } catch {
+        case e: Exception =>
+          throw new RuntimeException(failureMessage, e)
       }
     }
   }
@@ -714,24 +948,21 @@ object IndexUtils extends Logging {
     }
   }
 
-  def runSegmentTasks[T <: Serializable: ClassTag](
-      sc: org.apache.spark.SparkContext,
-      tasks: Seq[T],
-      failureMessage: String)(execute: T => String): Seq[Index] = {
-    if (tasks.isEmpty) {
-      Seq.empty
-    } else {
-      try {
-        sc.parallelize(tasks, tasks.size)
-          .map(execute)
-          .collect()
-          .map(encoded => decode[Index](encoded))
-          .toSeq
-      } catch {
-        case e: Exception => throw new RuntimeException(failureMessage, e)
-      }
-    }
-  }
+  /**
+   * Split fragments into row-count-balanced batches for parallel index segment
+   * builds. Used by the scalar-segment (zonemap / bitmap / label_list / ngram /
+   * bloomfilter / rtree) and IVF_* logical-segment commit paths.
+   *
+   * <p>Batches are balanced by fragment row counts (largest-first into the
+   * least-loaded segment), so a batch may cover non-contiguous fragment ids.
+   * Assignment is deterministic; each batch's ids are sorted ascending.
+   *
+   * @param fragments          fragment workloads (id + row count) to split
+   * @param numSegments        caller-supplied N; clamped to [1, fragments.size]
+   *                           and emits a warn when clamping happens
+   * @param defaultParallelism fallback when numSegments is None
+   * @return non-empty batches; sum of sizes equals fragments.size
+   */
 
   def batchFragments(
       fragments: List[FragmentWorkload],
