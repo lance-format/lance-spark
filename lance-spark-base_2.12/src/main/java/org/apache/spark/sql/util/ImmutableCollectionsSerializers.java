@@ -48,7 +48,11 @@ import java.util.Set;
  * rebuild the collection through its public factory ({@code List.copyOf}/{@code Set.copyOf}/{@code
  * Map.copyOf}), preserving immutability. No {@code java.base}-internal reflection is used, so no
  * {@code --add-opens} is required, and immutable sub-lists are handled too because the collection
- * is rebuilt by iteration rather than reconstructed in place.
+ * is rebuilt by iteration rather than reconstructed in place. A valid immutable collection never
+ * holds {@code null}, and a {@code null} smuggled in by a malformed payload is rejected by the
+ * {@code ArrayDeque} staging buffer and by {@code copyOf}, so no Kryo element-null flag is set (it
+ * would be inert here anyway: with no per-element serializer, Kryo takes its {@code
+ * writeClassAndObject}/{@code readClassAndObject} path, which never consults those flags).
  *
  * <p><b>Reference identity.</b> Rebuilding a collection means the value returned to callers (the
  * immutable copy) is not the object Kryo registered while reading (a mutable staging buffer). Left
@@ -97,7 +101,6 @@ public final class ImmutableCollectionsSerializers {
 
     ImmutableListSerializer(ImmutableAwareReferenceResolver resolver) {
       this.resolver = resolver;
-      setElementsCanBeNull(false);
     }
 
     @Override
@@ -125,7 +128,6 @@ public final class ImmutableCollectionsSerializers {
 
     ImmutableSetSerializer(ImmutableAwareReferenceResolver resolver) {
       this.resolver = resolver;
-      setElementsCanBeNull(false);
     }
 
     @Override
@@ -151,8 +153,6 @@ public final class ImmutableCollectionsSerializers {
 
     ImmutableMapSerializer(ImmutableAwareReferenceResolver resolver) {
       this.resolver = resolver;
-      setKeysCanBeNull(false);
-      setValuesCanBeNull(false);
     }
 
     @Override

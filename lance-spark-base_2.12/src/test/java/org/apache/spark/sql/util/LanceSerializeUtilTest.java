@@ -52,11 +52,17 @@ public class LanceSerializeUtilTest {
     }
   }
 
+  // Set.of(1-2 elems)/Map.of(1 entry) select the Set12/Map1 backing classes; the empty and larger
+  // variants select SetN/MapN. All extend the abstract base the serializers register on, so both
+  // shapes are exercised here rather than assumed.
   @Test
   public void roundtripsImmutableSetAndMap() {
     assertTrue(roundtrip(java.util.Set.of()).isEmpty());
+    assertEquals(java.util.Set.of("x"), roundtrip(java.util.Set.of("x")));
+    assertEquals(java.util.Set.of("x", "y"), roundtrip(java.util.Set.of("x", "y")));
     assertEquals(java.util.Set.of("a", "b", "c"), roundtrip(java.util.Set.of("a", "b", "c")));
     assertTrue(roundtrip(java.util.Map.of()).isEmpty());
+    assertEquals(java.util.Map.of("k", "v"), roundtrip(java.util.Map.of("k", "v")));
     assertEquals(
         java.util.Map.of("a", "b", "c", "d"), roundtrip(java.util.Map.of("a", "b", "c", "d")));
   }
