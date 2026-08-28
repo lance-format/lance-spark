@@ -35,8 +35,8 @@ public class LanceSerializeUtilTest {
 
   // The JDK immutable collections (List.of/copyOf, Set.of, Map.of) have no no-arg constructor and
   // keep their storage in a java.base-internal field, so the codec's Objenesis instantiator could
-  // not reconstruct them: a decoded collection threw on first use. The size()/contents assertions
-  // below fail on the pre-fix codec and pass once the immutable classes delegate to JavaSerializer.
+  // not reconstruct them. The assertions below pass once dedicated Kryo serializers rebuild the
+  // collections through their public copyOf factories without invoking Java serialization.
   @Test
   public void roundtripsImmutableListOfEveryBackingShape() {
     List<List<Long>> cases =

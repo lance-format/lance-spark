@@ -21,7 +21,6 @@ import com.esotericsoftware.kryo.serializers.MapSerializer;
 import com.esotericsoftware.kryo.util.MapReferenceResolver;
 
 import java.util.ArrayDeque;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Deque;
@@ -54,9 +53,9 @@ import java.util.Set;
  * <p><b>Reference identity.</b> Rebuilding a collection means the value returned to callers (the
  * immutable copy) is not the object Kryo registered while reading (a mutable staging buffer). Left
  * alone -- as in Kryo 5's own port -- a back-reference to an aliased collection would resolve to
- * that throwaway buffer, so a decoded alias could be a mutable {@code ArrayList} (or the wrong type
- * for a set/map). {@link ImmutableAwareReferenceResolver} closes that gap: each serializer arms the
- * resolver immediately before delegating to {@code super.read}, which lets the resolver capture the
+ * that throwaway buffer, so a decoded alias could be a mutable staging collection (or the wrong
+ * type for a set/map). {@link ImmutableAwareReferenceResolver} closes that gap: each serializer
+ * arms the resolver immediately before delegating to {@code super.read}, which lets it capture the
  * id Kryo assigns to the collection and, once the immutable copy exists, swap it in so every later
  * back-reference resolves to the immutable value. Aliased collections therefore round-trip to the
  * same immutable instance.
@@ -103,7 +102,11 @@ public final class ImmutableCollectionsSerializers {
 
     @Override
     protected Collection create(Kryo kryo, Input input, Class<Collection> type) {
-      return new ArrayList<>();
+      // ArrayDeque, not ArrayList: CollectionSerializer.read calls ArrayList.ensureCapacity
+      // with the wire-supplied length before any element is read, so a malformed huge length
+      // would eagerly allocate a giant array. decode() is reachable from caller-controlled write
+      // options, so a non-ArrayList buffer avoids that pre-allocation; ArrayDeque keeps order.
+      return new ArrayDeque<>();
     }
 
     @Override
@@ -127,7 +130,9 @@ public final class ImmutableCollectionsSerializers {
 
     @Override
     protected Collection create(Kryo kryo, Input input, Class<Collection> type) {
-      return new ArrayList<>();
+      // ArrayDeque for the same reason as the list serializer: avoid ArrayList.ensureCapacity
+      // pre-allocating from a hostile wire length. Element order is irrelevant to a set.
+      return new ArrayDeque<>();
     }
 
     @Override
