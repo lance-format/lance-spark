@@ -16,7 +16,6 @@ package org.apache.spark.sql.execution.datasources.v2
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.node.ObjectNode
 import org.apache.arrow.c.{ArrowArrayStream, Data}
-import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.arrow.vector.ipc.ArrowReader
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
@@ -24,7 +23,6 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
 import org.apache.spark.sql.catalyst.plans.logical.{AddIndexOutputType, LanceNamedArgument}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.util.LanceArrowUtils
 import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
 import org.apache.spark.unsafe.types.UTF8String
 import org.lance.{CommitBuilder, Dataset, Transaction}
@@ -33,9 +31,8 @@ import org.lance.index.scalar.{BTreeIndexParams, ScalarIndexParams}
 import org.lance.operation.{CreateIndex => AddIndexOperation}
 import org.lance.schema.{LanceField, LanceSchema}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceRuntime, LanceSparkReadOptions}
-import org.lance.spark.arrow.LanceArrowWriter
 import org.lance.spark.utils.{CloseableUtil, FieldPathUtils, Utils}
-import org.lance.spark.write.SingleBatchArrowReader
+import org.lance.spark.write.{ArrowBatchChunker, ChunkedArrowReader}
 
 import java.util.{Collections, Locale, UUID}
 
@@ -390,31 +387,31 @@ case class RangeBTreeIndexBuilder(
     val fragmentIdOrdinal = 2
 
     val allocator = LanceRuntime.allocator()
-    val data =
-      VectorSchemaRoot.create(LanceArrowUtils.toArrowSchema(streamSchema, "UTC", false), allocator)
-    val writer = LanceArrowWriter.create(data, streamSchema)
-
+    // Accumulate (value, row id) into narrow Arrow batches, each kept under Arrow's 2 GiB
+    // 32-bit-offset cap. A fragment group whose value column exceeds 2 GiB would overflow a
+    // single VarChar/VarBinary vector; chunking into multiple batches avoids that, and lance-core
+    // re-zones the multi-batch stream into an index identical to a single-batch handoff.
+    val chunker = new ArrowBatchChunker(streamSchema, allocator)
     val fragmentIds = scala.collection.mutable.LinkedHashSet[java.lang.Integer]()
 
-    // Write the indexed value and row id of each row to the Arrow stream.
-    try {
-      while (rowsIter.hasNext) {
-        val row = rowsIter.next()
-        writer.field(0).write(row, 0)
-        writer.field(1).write(row, 1)
-        fragmentIds += java.lang.Integer.valueOf(row.getInt(fragmentIdOrdinal))
+    // Write the indexed value and row id of each row; collect fragment ids for the segment's
+    // coverage in the same pass so they are known before the stream is handed to lance-core.
+    val batches =
+      try {
+        while (rowsIter.hasNext) {
+          val row = rowsIter.next()
+          chunker.write(row)
+          fragmentIds += java.lang.Integer.valueOf(row.getInt(fragmentIdOrdinal))
+        }
+        chunker.finish()
+      } catch {
+        case e: Throwable =>
+          chunker.close()
+          throw e
       }
 
-      writer.finish()
-    } catch {
-      case e: Throwable =>
-        CloseableUtil.closeQuietly(data)
-        throw e
-    }
-
     // No rows are written
-    if (data.getRowCount == 0) {
-      data.close()
+    if (batches.isEmpty) {
       return Iterator(encode(None: Option[Index]))
     }
 
@@ -424,7 +421,7 @@ case class RangeBTreeIndexBuilder(
 
     try {
       stream = ArrowArrayStream.allocateNew(allocator)
-      reader = new SingleBatchArrowReader(allocator, data)
+      reader = new ChunkedArrowReader(allocator, chunker.arrowSchema, batches)
 
       dataset = Utils.openDatasetBuilder(
         decode[LanceSparkReadOptions](encodedReadOptions))
@@ -461,7 +458,7 @@ case class RangeBTreeIndexBuilder(
     } finally {
       CloseableUtil.closeQuietly(stream)
       CloseableUtil.closeQuietly(reader)
-      CloseableUtil.closeQuietly(data)
+      batches.foreach(b => CloseableUtil.closeQuietly(b))
       CloseableUtil.closeQuietly(dataset)
     }
   }
