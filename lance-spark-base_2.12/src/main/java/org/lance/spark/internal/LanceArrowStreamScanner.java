@@ -18,7 +18,7 @@ import org.lance.spark.read.LanceInputPartition;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.vector.types.pojo.Field;
-import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.util.LanceArrowUtils;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -119,27 +119,64 @@ public final class LanceArrowStreamScanner {
    * synthesizing {@code _fragid}, dropping the {@code _score} a full-text query auto-projects,
    * stripping the {@code _rowaddr} added for blobs, surfacing {@code _rowid} for an empty
    * projection, reordering row-version columns — but this zero-copy export cannot, so any mismatch
-   * in field names or order must fall back to the columnar reader.
+   * must fall back to the columnar reader.
+   *
+   * <p>The comparison covers field names, order, Arrow types, and nullability. The declared Spark
+   * schema is converted to Arrow through {@link LanceArrowUtils} — the same adapter the read path
+   * uses — so it carries the Arrow type distinctions a Spark {@code DataType} alone cannot express
+   * (e.g. {@code LargeUtf8} vs {@code Utf8}, {@code LargeBinary}, {@code Date(MILLISECOND)}, {@code
+   * FixedSizeBinary}, {@code Float16}), which {@code fromArrowSchema} recorded in field metadata
+   * and {@code toArrowSchema} restores here. Checking the {@code ArrowType} (not just the name)
+   * stops a column whose native type differs from the declared one — e.g. a narrower/wider int or a
+   * different time-zone timestamp — from being streamed to the native consumer as if it matched.
    */
   private static void checkNativeSchemaMatchesPartition(
       LanceFragmentScanner fragmentScanner, LanceInputPartition inputPartition) {
-    List<String> declared = new ArrayList<>();
-    for (StructField field : inputPartition.getSchema().fields()) {
-      declared.add(field.name());
-    }
-    List<String> nativeColumns = new ArrayList<>();
-    for (Field field : fragmentScanner.schema().getFields()) {
-      nativeColumns.add(field.getName());
-    }
-    if (!declared.equals(nativeColumns)) {
+    List<Field> declared =
+        LanceArrowUtils.toArrowSchema(inputPartition.getSchema(), "UTC", true).getFields();
+    List<Field> nativeFields = fragmentScanner.schema().getFields();
+    if (!fieldsMatch(declared, nativeFields)) {
       throw new UnsupportedOperationException(
-          "Arrow C stream export requires the native scan schema to match the partition schema, "
-              + "which this zero-copy export cannot re-project or reorder. Declared "
-              + declared
+          "Arrow C stream export requires the native scan schema to match the partition schema "
+              + "(field names, order, Arrow types, and nullability), which this zero-copy export "
+              + "cannot re-project, reorder, or cast. Declared "
+              + describe(declared)
               + " but the native scan produced "
-              + nativeColumns
+              + describe(nativeFields)
               + ". Fall back to the columnar reader for this partition.");
     }
+  }
+
+  /**
+   * Compares two Arrow field lists by name, order, {@code ArrowType} (value equality over width,
+   * precision, time zone, etc.), and nullability, recursing into children so nested list/struct
+   * element types are checked too. Field-level metadata and dictionary encodings are intentionally
+   * ignored: they carry lance-internal markers, not a difference the raw stream cannot reproduce.
+   */
+  private static boolean fieldsMatch(List<Field> declared, List<Field> actual) {
+    if (declared.size() != actual.size()) {
+      return false;
+    }
+    for (int i = 0; i < declared.size(); i++) {
+      Field d = declared.get(i);
+      Field a = actual.get(i);
+      if (!d.getName().equals(a.getName())
+          || d.isNullable() != a.isNullable()
+          || !d.getType().equals(a.getType())
+          || !fieldsMatch(d.getChildren(), a.getChildren())) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static String describe(List<Field> fields) {
+    List<String> parts = new ArrayList<>(fields.size());
+    for (Field field : fields) {
+      String nullability = field.isNullable() ? " null" : " notnull";
+      parts.add(field.getName() + " " + field.getType() + nullability);
+    }
+    return parts.toString();
   }
 
   private static void closeQuietly(AutoCloseable closeable) {

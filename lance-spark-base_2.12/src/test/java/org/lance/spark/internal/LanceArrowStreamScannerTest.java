@@ -83,6 +83,30 @@ public class LanceArrowStreamScannerTest {
   }
 
   /**
+   * A fragment scan that matches no rows must still export its full declared schema and drain
+   * cleanly with zero batches — the schema-match check and the native consumer both rely on the
+   * schema being present up front, and the empty stream must release without leaking under the
+   * leak-checking allocator. An always-false filter ({@code x < 0}; every {@code x} is 0..3) yields
+   * the {@code x, y, b, c} schema with no rows.
+   */
+  @Test
+  public void exportsEmptyFragmentScanPreservingSchema() throws Exception {
+    int rows = 0;
+    try (LanceArrowStreamScanner.LanceArrowStream handle =
+            LanceArrowStreamScanner.export(0, partitionMatchingNoRows());
+        ArrowReader reader = Data.importArrayStream(LanceRuntime.allocator(), handle.stream())) {
+
+      // The full schema is available before (and without) any batch.
+      assertEquals(4, reader.getVectorSchemaRoot().getSchema().getFields().size());
+
+      while (reader.loadNextBatch()) {
+        rows += reader.getVectorSchemaRoot().getRowCount();
+      }
+    }
+    assertEquals(0, rows);
+  }
+
+  /**
    * A native consumer receives {@link LanceArrowStreamScanner.LanceArrowStream#streamAddress()} and
    * may abandon or only partially consume the raw C stream. Closing the handle with no Java-side
    * import must still run the stream's release callback and free the struct — under the
@@ -143,6 +167,24 @@ public class LanceArrowStreamScannerTest {
         Optional.empty() /* offset */,
         Optional.empty() /* topNSortOrders */,
         Optional.of(pushedAggregation),
+        "gate-probe" /* scanId */,
+        null /* initialStorageOptions */,
+        null /* namespaceImpl */,
+        null /* namespaceProperties */,
+        null /* partitionKeyRow */);
+  }
+
+  private static LanceInputPartition partitionMatchingNoRows() {
+    return new LanceInputPartition(
+        TestUtils.TestTable1Config.inputPartition.getSchema(),
+        0 /* partitionId */,
+        new LanceSplit(Arrays.asList(0, 1)),
+        TestUtils.TestTable1Config.readOptions,
+        Optional.of("x < 0") /* whereCondition: matches no row */,
+        Optional.empty() /* limit */,
+        Optional.empty() /* offset */,
+        Optional.empty() /* topNSortOrders */,
+        Optional.empty() /* pushedAggregation */,
         "gate-probe" /* scanId */,
         null /* initialStorageOptions */,
         null /* namespaceImpl */,
