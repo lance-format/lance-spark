@@ -98,8 +98,10 @@ public class Float16UtilsTest {
   @Test
   public void testUnderflowToZero() {
     // Magnitudes below the midpoint 2^-25 flush to zero; 2^-25 itself ties to even and also
-    // lands on zero. See testRoundingBelowSmallestSubnormal for the band just above it.
-    // Smallest float16 subnormal: 2^-24 ~= 5.96e-8
+    // lands on zero. Smallest float16 subnormal: 2^-24 ~= 5.96e-8.
+    // 1.0e-10f has exponent -34, where the subnormal shift would wrap `1 << 32` to 1. That is a
+    // different failure than the exponent -33 case pinned in testRoundingBelowSmallestSubnormal,
+    // so neither test replaces the other.
     short halfBits = Float16Utils.floatToHalf(1.0e-10f);
     float result = Float16Utils.halfToFloat(halfBits);
     assertEquals(0.0f, result, "Very small values should flush to zero");
@@ -109,15 +111,19 @@ public class Float16UtilsTest {
   public void testRoundingBelowSmallestSubnormal() {
     // 2^-25 (0x1p-25f == 2.98023e-8) is the midpoint between zero and the smallest
     // float16 subnormal 2^-24. Round-to-nearest-even sends the midpoint itself to
-    // zero, but everything above it must round up to 2^-24 rather than flush.
+    // zero, but values in (2^-25, 2^-24) must round up to 2^-24 rather than flush.
     assertEquals(
         0x0000, Float16Utils.floatToHalf(0x1p-25f) & 0xFFFF, "2^-25 is a tie and rounds to zero");
     assertEquals(
-        0x8000, Float16Utils.floatToHalf(-0x1p-25f) & 0xFFFF, "-2^-25 is a tie and rounds to zero");
+        0x8000,
+        Float16Utils.floatToHalf(-0x1p-25f) & 0xFFFF,
+        "-2^-25 is a tie and rounds to negative zero");
     assertEquals(
         0x0001, Float16Utils.floatToHalf(4.0e-8f) & 0xFFFF, "Above 2^-25 rounds up to 2^-24");
     assertEquals(
-        0x8001, Float16Utils.floatToHalf(-4.0e-8f) & 0xFFFF, "Below -2^-25 rounds up to -2^-24");
+        0x8001,
+        Float16Utils.floatToHalf(-4.0e-8f) & 0xFFFF,
+        "Below -2^-25 rounds away from zero to -2^-24");
     // Exponent -33 is where the subnormal shift would reach 32 and Java would mask the `>>>`
     // count, so pin an input in that band: it must still reach zero.
     assertEquals(
