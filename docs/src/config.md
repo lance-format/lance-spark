@@ -58,7 +58,79 @@ The following features require the Lance Spark SQL extension to be enabled:
 - [OPTIMIZE](operations/ddl/optimize.md) - Compact table fragments for improved query performance
 - [VACUUM](operations/ddl/vacuum.md) - Remove old versions and reclaim storage space
 
-## Basic Setup
+## Catalog Modes
+
+Lance provides two catalog implementations:
+
+- **Named Catalog** (`LanceNamespaceSparkCatalog`): Registers as a separate catalog alongside Spark's default. Tables are accessed as `catalog_name.namespace.table`.
+- **Session Catalog** (`LanceNamespaceSparkSessionCatalog`): Replaces Spark's built-in `spark_catalog`, allowing Lance tables to coexist with Hive/Parquet tables in the default catalog. Tables are accessed as `namespace.table` without a catalog prefix.
+
+### Session Catalog Setup
+
+Use the session catalog when you want Lance tables accessible without a catalog prefix and coexisting with existing Hive/Parquet tables:
+
+=== "PySpark"
+    ```python
+    spark = SparkSession.builder \
+        .appName("lance-session-catalog") \
+        .config("spark.sql.catalog.spark_catalog", "org.lance.spark.LanceNamespaceSparkSessionCatalog") \
+        .config("spark.sql.catalog.spark_catalog.impl", "dir") \
+        .config("spark.sql.catalog.spark_catalog.root", "/path/to/lance/database") \
+        .config("spark.sql.extensions", "org.lance.spark.extensions.LanceSparkSessionExtensions") \
+        .getOrCreate()
+
+    # Lance tables
+    spark.sql("CREATE TABLE default.my_lance_table (id INT, name STRING) USING lance")
+
+    # Non-Lance tables still work via the delegate catalog
+    spark.sql("CREATE TABLE default.my_parquet_table (id INT, name STRING) USING parquet")
+    ```
+
+=== "Scala"
+    ```scala
+    val spark = SparkSession.builder()
+        .appName("lance-session-catalog")
+        .config("spark.sql.catalog.spark_catalog", "org.lance.spark.LanceNamespaceSparkSessionCatalog")
+        .config("spark.sql.catalog.spark_catalog.impl", "dir")
+        .config("spark.sql.catalog.spark_catalog.root", "/path/to/lance/database")
+        .config("spark.sql.extensions", "org.lance.spark.extensions.LanceSparkSessionExtensions")
+        .getOrCreate()
+    ```
+
+=== "Java"
+    ```java
+    SparkSession spark = SparkSession.builder()
+        .appName("lance-session-catalog")
+        .config("spark.sql.catalog.spark_catalog", "org.lance.spark.LanceNamespaceSparkSessionCatalog")
+        .config("spark.sql.catalog.spark_catalog.impl", "dir")
+        .config("spark.sql.catalog.spark_catalog.root", "/path/to/lance/database")
+        .config("spark.sql.extensions", "org.lance.spark.extensions.LanceSparkSessionExtensions")
+        .getOrCreate();
+    ```
+
+All SQL extensions (OPTIMIZE, VACUUM, CREATE INDEX) work through the session catalog — no additional configuration needed beyond `spark.sql.extensions`.
+
+#### Session Catalog Configuration Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `spark.sql.catalog.spark_catalog` | String | ✓ | — | Set to `org.lance.spark.LanceNamespaceSparkSessionCatalog` |
+| `spark.sql.catalog.spark_catalog.impl` | String | ✓ | — | Namespace implementation (`dir`, `rest`, `hive3`, `glue`, etc.) |
+| `spark.sql.catalog.spark_catalog.default-provider` | String | ✗ | `delegate` | Controls routing when `USING` clause is omitted. See below. |
+
+#### `default-provider` Options
+
+When the v2 catalog's `createTable` API is called without a provider (e.g., via programmatic catalog access), the `default-provider` setting determines which catalog handles the operation.
+
+**Note:** `CREATE TABLE t(id INT)` via SQL (without `USING`) may go through Spark's v1 Hive code path before reaching the v2 catalog, in which case this setting has no effect. Always use `USING lance` explicitly in SQL statements to ensure Lance table creation.
+
+| Value | Behavior | Use Case |
+|-------|----------|----------|
+| `delegate` (default) | Routes to the original session catalog (e.g., Hive). Preserves existing behavior. | Safe default for mixed environments |
+| `lance` | Creates a Lance table. Logs a warning for visibility. | Environments fully committed to Lance |
+| `error` | Throws an error requiring an explicit `USING` clause. | Active migration periods — forces explicit provider choice |
+
+## Basic Setup (Named Catalog)
 
 Configure Spark with the `LanceNamespaceSparkCatalog` by setting the appropriate Spark catalog implementation
 and namespace-specific options:
