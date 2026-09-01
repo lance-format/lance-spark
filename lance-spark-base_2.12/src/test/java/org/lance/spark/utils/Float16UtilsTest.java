@@ -97,7 +97,8 @@ public class Float16UtilsTest {
 
   @Test
   public void testUnderflowToZero() {
-    // Values too small for float16 subnormal should flush to zero
+    // Magnitudes at or below the midpoint 2^-25 flush to zero; see
+    // testRoundingBelowSmallestSubnormal for the band just above it.
     // Smallest float16 subnormal: 2^-24 ~= 5.96e-8
     short halfBits = Float16Utils.floatToHalf(1.0e-10f);
     float result = Float16Utils.halfToFloat(halfBits);

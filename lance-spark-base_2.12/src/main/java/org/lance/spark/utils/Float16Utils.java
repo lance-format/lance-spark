@@ -171,8 +171,9 @@ public class Float16Utils {
   /**
    * Convert a single-precision (32-bit) float to IEEE 754 half-precision (16-bit) float.
    *
-   * <p>Handles overflow (clamps to +/-Infinity), underflow (flushes to zero), NaN propagation, and
-   * round-to-nearest-even.
+   * <p>Handles overflow (clamps to +/-Infinity), NaN propagation, and round-to-nearest-even.
+   * Magnitudes at or below the midpoint 2^-25 flush to zero; above it round-to-nearest-even
+   * applies, so the band (2^-25, 2^-24) reaches the smallest subnormal instead of zero.
    *
    * @param value the single-precision float
    * @return the 16-bit half-precision float as a short
@@ -210,8 +211,11 @@ public class Float16Utils {
     }
 
     if (unbiasedExponent < -25) {
-      // Below the midpoint between zero and the smallest subnormal (2^-25): flush to zero.
+      // Below the midpoint (2^-25) between zero and the smallest subnormal 2^-24: flush to zero.
       // Exponent -25 itself falls through to the subnormal path, which ties to even.
+      // This branch also bounds the subnormal shift to 24 and so cannot be folded away: `shift`
+      // below is -1 - unbiasedExponent, which reaches 32 at exponent -33, where Java masks the
+      // `>>>` count to 5 bits and `roundBit = 1 << (shift - 1)` wraps.
       return (short) halfSign;
     }
 
