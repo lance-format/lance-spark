@@ -38,6 +38,8 @@ The following index methods are supported:
 
 The `CREATE INDEX` command supports options via the `WITH` clause to control index creation. These options are specific to the chosen index method.
 
+Option names are case-insensitive: `WITH (TRAIN = false)` and `WITH (train = false)` are the same option.
+
 ### Common Options
 
 These options apply to all index methods:
@@ -53,7 +55,12 @@ The distributed build used by `zonemap`, `bitmap`, `label_list`, `ngram`, `bloom
 
 | Option         | Type    | Description                                                                                                                                                                                                                        |
 |----------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `num_segments` | Integer | Target number of parallel build tasks (upper bound; clamped to fragment count when larger). Fragments are assigned by row count to balance estimated task workloads. Defaults to `min(fragment_count, spark.default.parallelism)`. |
+| `num_segments` | Integer | Number of parallel build tasks, and so of index segments created (clamped to fragment count when larger). Each task takes a contiguous run of fragments, and the runs are chosen so the heaviest task is as light as any contiguous split allows. Defaults to `min(fragment_count, spark.default.parallelism)`. |
+
+Contiguous coverage matters beyond parallelism: [OPTIMIZE](./optimize.md) can only group fragments
+that the identical set of index segments covers. Interleaved segments leave it nothing to coalesce at
+all, while contiguous ones let it coalesce within each segment's run. A segment boundary is still a
+boundary, so `num_segments` also bounds how far compaction can get.
 
 ### ZoneMap Options
 

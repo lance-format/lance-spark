@@ -167,6 +167,26 @@ public class LanceSqlExtensionsAstBuilderTest {
   }
 
   @Test
+  public void testCreateIndexNormalizesOptionNames() {
+    // Keywords must be uppercase here: the grammar's LETTER fragment is [A-Z], and this test
+    // feeds the lexer a raw stream rather than the UpperCaseCharStream the session parser uses.
+    LanceSqlExtensionsParser parser =
+        createParser(
+            "ALTER TABLE DB.T CREATE INDEX IDX USING ZONEMAP (ID) "
+                + "WITH (TRAIN = FALSE, ROWS_PER_ZONE = 4)");
+    AddIndex plan = (AddIndex) astBuilder.visitSingleStatement(parser.singleStatement());
+
+    // Option names are normalized at parse time: the commands match lower-case literals, so an
+    // upper-case spelling must reach them as the option it looks like rather than an unknown one
+    // that is silently ignored and forwarded to Lance as an index parameter.
+    assertEquals(2, plan.args().size());
+    assertEquals("train", plan.args().apply(0).name());
+    assertEquals(Boolean.FALSE, plan.args().apply(0).value());
+    assertEquals("rows_per_zone", plan.args().apply(1).name());
+    assertEquals(4L, plan.args().apply(1).value());
+  }
+
+  @Test
   public void testOptimizeWithBacktickedTableName() {
     LanceSqlExtensionsParser parser = createParser("OPTIMIZE `my-catalog`.`my-table`");
     Optimize plan = (Optimize) astBuilder.visitSingleStatement(parser.singleStatement());
@@ -174,6 +194,16 @@ public class LanceSqlExtensionsAstBuilderTest {
     UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
     assertEquals(
         List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+  }
+
+  @Test
+  public void testOptimizeNormalizesOptionNames() {
+    LanceSqlExtensionsParser parser =
+        createParser("OPTIMIZE DB.T WITH (TARGET_ROWS_PER_FRAGMENT = 100)");
+    Optimize plan = (Optimize) astBuilder.visitSingleStatement(parser.singleStatement());
+
+    assertEquals(1, plan.args().size());
+    assertEquals("target_rows_per_fragment", plan.args().apply(0).name());
   }
 
   @Test
@@ -212,6 +242,15 @@ public class LanceSqlExtensionsAstBuilderTest {
     UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
     assertEquals(
         List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+  }
+
+  @Test
+  public void testVacuumNormalizesOptionNames() {
+    LanceSqlExtensionsParser parser = createParser("VACUUM DB.T WITH (BEFORE_VERSION = 3)");
+    Vacuum plan = (Vacuum) astBuilder.visitSingleStatement(parser.singleStatement());
+
+    assertEquals(1, plan.args().size());
+    assertEquals("before_version", plan.args().apply(0).name());
   }
 
   @Test

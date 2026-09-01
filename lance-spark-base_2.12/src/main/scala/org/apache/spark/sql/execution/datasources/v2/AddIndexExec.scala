@@ -40,7 +40,7 @@ import org.lance.spark.write.SingleBatchArrowReader
 import java.util.{Collections, Locale, UUID}
 
 import scala.collection.JavaConverters._
-import scala.collection.mutable.{ArrayBuffer, PriorityQueue}
+import scala.collection.mutable.ArrayBuffer
 import scala.reflect.ClassTag
 
 /**
@@ -733,6 +733,21 @@ object IndexUtils extends Logging {
     }
   }
 
+  /**
+   * Splits `fragments` into `numSegments` batches, each a contiguous run of fragment ids, chosen so
+   * that the heaviest batch is as light as any contiguous split allows.
+   *
+   * Contiguity is not cosmetic. Lance's compaction planner only groups fragments that are covered by
+   * the identical set of index segments, so batches whose fragment ids interleave leave every
+   * adjacent pair of fragments in a different group and make OPTIMIZE a no-op for the whole table.
+   * It does cost some balance. `[10, 9, 8, 7]` into two batches is 19/15 here, where the previous
+   * least-loaded-first assignment reached 17/17 by interleaving. Optimal among contiguous splits is
+   * the guarantee, not optimal overall.
+   *
+   * Assignment is deterministic: the same fragments and segment count always produce the same
+   * batches, whatever order `fragments` arrives in. Every batch holds at least one fragment, so the
+   * result always has exactly `segmentCount` entries.
+   */
   def batchFragments(
       fragments: List[FragmentWorkload],
       numSegments: Option[Int],
@@ -754,35 +769,125 @@ object IndexUtils extends Logging {
       case None => math.max(1, math.min(fragmentCount, defaultParallelism))
     }
 
-    final class SegmentBatch(val index: Int) {
-      val fragmentIds: ArrayBuffer[Integer] = ArrayBuffer.empty
-      var numRows: Long = 0L
+    val ordered = fragments.sortBy(_.fragmentId.intValue)
+    // Prefix sums drive the search. addExact rejects a workload that cannot be summed rather than
+    // balancing against a wrapped total.
+    val rowsUpTo = new Array[Long](fragmentCount + 1)
+    ordered.iterator.zipWithIndex.foreach { case (fragment, index) =>
+      rowsUpTo(index + 1) = Math.addExact(rowsUpTo(index), fragment.numRows)
+    }
 
-      def add(fragment: FragmentWorkload): Unit = {
-        numRows = Math.addExact(numRows, fragment.numRows)
-        fragmentIds += fragment.fragmentId
+    var offset = 0
+    balancedRunLengths(rowsUpTo, segmentCount).map { length =>
+      val batch = ordered.slice(offset, offset + length).map(_.fragmentId)
+      offset += length
+      batch
+    }
+  }
+
+  /**
+   * Lengths of exactly `segmentCount` contiguous runs over `rowsUpTo`, minimising the heaviest run.
+   *
+   * The smallest row budget a contiguous packing can respect is found by binary search, which is
+   * exact rather than approximate: for a fixed budget, extending each run as far as it will go uses
+   * the fewest runs, so the smallest feasible budget is the optimal maximum. The floor of the search
+   * is the widest single fragment, below which no packing exists.
+   *
+   * Packing at that budget can use fewer runs than were asked for, which would cost parallelism, so
+   * runs are divided until the count is reached. Which run gets divided does not matter: every run
+   * already fits the budget, so both halves of any split fit it too, and the budget is minimal, so
+   * the heaviest run cannot fall below it either.
+   */
+  private def balancedRunLengths(rowsUpTo: Array[Long], segmentCount: Int): Seq[Int] = {
+    val fragmentCount = rowsUpTo.length - 1
+    def rowsOf(start: Int, length: Int): Long = rowsUpTo(start + length) - rowsUpTo(start)
+
+    var widestFragment = 0L
+    var index = 0
+    while (index < fragmentCount) {
+      widestFragment = math.max(widestFragment, rowsOf(index, 1))
+      index += 1
+    }
+
+    var low = widestFragment
+    var high = rowsUpTo(fragmentCount)
+    while (low < high) {
+      val budget = low + (high - low) / 2
+      if (runsWithin(rowsUpTo, budget) <= segmentCount) high = budget else low = budget + 1
+    }
+
+    // runLengthAt(start) is the length of the run beginning at `start`, and 0 elsewhere.
+    val runLengthAt = new Array[Int](fragmentCount)
+    var runCount = 0
+    var start = 0
+    while (start < fragmentCount) {
+      var length = 1
+      while (start + length < fragmentCount && rowsOf(start, length + 1) <= low) {
+        length += 1
+      }
+      runLengthAt(start) = length
+      runCount += 1
+      start += length
+    }
+
+    // Divide from the left until the count is reached. Splitting the heaviest run first would be no
+    // better, since the budget already bounds every run.
+    var splitAt = 0
+    while (runCount < segmentCount && splitAt < fragmentCount) {
+      val length = runLengthAt(splitAt)
+      if (length > 1) {
+        val cut = balancePoint(rowsUpTo, splitAt, length)
+        runLengthAt(splitAt) = cut
+        runLengthAt(splitAt + cut) = length - cut
+        runCount += 1
+      } else {
+        splitAt += length
       }
     }
 
-    val segmentOrdering: Ordering[SegmentBatch] =
-      Ordering
-        .by[SegmentBatch, (Long, Int, Int)](segment =>
-          (segment.numRows, segment.fragmentIds.size, segment.index))
-        .reverse
-
-    val segments = PriorityQueue.empty[SegmentBatch](segmentOrdering)
-    (0 until segmentCount).foreach(index => segments.enqueue(new SegmentBatch(index)))
-
-    val sortedFragments = fragments.sortBy(fragment => (-fragment.numRows, fragment.fragmentId))
-    sortedFragments.foreach { fragment =>
-      val segment = segments.dequeue()
-      segment.add(fragment)
-      segments.enqueue(segment)
+    val runs = ArrayBuffer.empty[Int]
+    var cursor = 0
+    while (cursor < fragmentCount) {
+      val length = runLengthAt(cursor)
+      runs += length
+      cursor += length
     }
+    runs.toList
+  }
 
-    segments.toSeq
-      .sortBy(_.index)
-      .map(segment => segment.fragmentIds.sortBy(_.intValue()).toList)
+  /**
+   * Fewest contiguous runs that keep every run's row count within `budget`.
+   *
+   * A fragment wider than `budget` still forms a run of its own, so callers must not search below
+   * the widest fragment or the count would understate what the budget can actually hold.
+   */
+  private def runsWithin(rowsUpTo: Array[Long], budget: Long): Int = {
+    val fragmentCount = rowsUpTo.length - 1
+    var runs = 0
+    var start = 0
+    while (start < fragmentCount) {
+      var length = 1
+      while (start + length < fragmentCount &&
+        rowsUpTo(start + length + 1) - rowsUpTo(start) <= budget) {
+        length += 1
+      }
+      runs += 1
+      start += length
+    }
+    runs
+  }
+
+  /** Where to cut a run of `length` fragments so the two halves are as even as possible. */
+  private def balancePoint(rowsUpTo: Array[Long], start: Int, length: Int): Int = {
+    val total = rowsUpTo(start + length) - rowsUpTo(start)
+    def leftOf(at: Int): Long = rowsUpTo(start + at) - rowsUpTo(start)
+    def heavierHalf(at: Int): Long = math.max(leftOf(at), total - leftOf(at))
+
+    var cut = 1
+    while (cut < length - 1 && leftOf(cut) < total - leftOf(cut)) {
+      cut += 1
+    }
+    if (cut > 1 && heavierHalf(cut - 1) < heavierHalf(cut)) cut - 1 else cut
   }
 
 }

@@ -16,13 +16,10 @@ package org.lance.spark.read;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.ManifestSummary;
-import org.lance.index.IndexCriteria;
-import org.lance.index.IndexDescription;
 import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.memwal.ShardingField;
 import org.lance.memwal.ShardingSpec;
-import org.lance.schema.LanceField;
 import org.lance.schema.LanceSchema;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRef;
@@ -195,9 +192,10 @@ public class LanceScanBuilder
         columnsToLoad.add(SparkLanceShardingUtils.columnName(field, lanceSchema));
       }
 
-      // Load zonemap stats for all requested columns in one pass.
-      Map<String, List<ZoneStats>> zonemapStats =
-          loadZonemapStats(getOrOpenDataset(), columnsToLoad);
+      // Load zonemap stats for all requested columns in one pass, along with each
+      // column's index coverage.
+      ZonemapLoadResult zonemapLoad = loadZonemapStats(getOrOpenDataset(), columnsToLoad);
+      Map<String, List<ZoneStats>> zonemapStats = zonemapLoad.stats;
 
       // Detect sharding-compatible fragments from zonemap stats. Each field checks its column's
       // zones; if every fragment has a single sharding value, we get a fragment-to-key map.
@@ -234,7 +232,9 @@ public class LanceScanBuilder
       Set<Integer> survivingFragmentIds = null;
       if (pushedPredicates.length > 0 && !zonemapStats.isEmpty()) {
         survivingFragmentIds =
-            ZonemapFragmentPruner.pruneFragments(pushedPredicates, zonemapStats).orElse(null);
+            ZonemapFragmentPruner.pruneFragments(
+                    pushedPredicates, zonemapStats, zonemapLoad.uncoveredByColumn)
+                .orElse(null);
       }
 
       // Scale rows and full size by the zonemap fragment-pruning ratio first, then let
@@ -281,7 +281,6 @@ public class LanceScanBuilder
           pushedAggregation,
           pushedPredicates,
           statistics,
-          zonemapStats,
           survivingFragmentIds,
           scanPlan.getSplits(),
           scanPlan.getFragmentRowCounts(),
@@ -490,66 +489,77 @@ public class LanceScanBuilder
     }
   }
 
-  /**
-   * Loads zonemap statistics for the requested columns. Only loads stats for columns that have a
-   * zonemap index.
-   */
-  private Map<String, List<ZoneStats>> loadZonemapStats(Dataset dataset, Set<String> columns) {
-    if (columns.isEmpty()) {
-      return Collections.emptyMap();
-    }
-
-    Set<String> zonemapColumns = findZonemapIndexedColumns(dataset);
-    LOG.debug("zonemapColumns={}, requested columns={}", zonemapColumns, columns);
-
+  /** Loads zone stats for every requested column, without consulting index coverage. */
+  private Map<String, List<ZoneStats>> loadStatsForColumns(Dataset dataset, Set<String> columns) {
     Map<String, List<ZoneStats>> result = new HashMap<>();
     for (String col : columns) {
-      if (zonemapColumns.isEmpty() || zonemapColumns.contains(col)) {
-        try {
-          List<ZoneStats> stats = dataset.getZonemapStats(col);
-          LOG.debug("getZonemapStats('{}') returned {} zones", col, stats.size());
-          if (!stats.isEmpty()) {
-            result.put(col, stats);
-            LOG.debug("Loaded {} zonemap zones for column '{}'", stats.size(), col);
-          }
-        } catch (Exception e) {
-          LOG.debug("Failed to load zonemap stats for column" + " '{}': {}", col, e.getMessage());
+      try {
+        List<ZoneStats> stats = dataset.getZonemapStats(col);
+        if (!stats.isEmpty()) {
+          result.put(col, stats);
         }
+      } catch (Exception e) {
+        LOG.debug("Failed to load zonemap stats for column '{}': {}", col, e.getMessage());
       }
     }
-
-    if (!result.isEmpty()) {
-      LOG.debug("Loaded zonemap stats for {} columns: {}", result.size(), result.keySet());
-    }
-
     return result;
   }
 
-  private Set<String> findZonemapIndexedColumns(Dataset dataset) {
-    Set<String> columns = new HashSet<>();
-    try {
-      Map<Integer, String> fieldIdToName = new HashMap<>();
-      for (LanceField field : dataset.getLanceSchema().fields()) {
-        fieldIdToName.put(field.getId(), field.getName());
-      }
+  /** Zone stats plus, per column, the dataset fragments those stats do not describe. */
+  private static final class ZonemapLoadResult {
+    final Map<String, List<ZoneStats>> stats;
+    final Map<String, Set<Integer>> uncoveredByColumn;
 
-      IndexCriteria criteria = new IndexCriteria.Builder().build();
-      for (IndexDescription idx : dataset.describeIndices(criteria)) {
-        LOG.debug(
-            "Index '{}' type='{}' fields={}", idx.getName(), idx.getIndexType(), idx.getFieldIds());
-        if ("ZONEMAP".equalsIgnoreCase(idx.getIndexType())) {
-          for (int fieldId : idx.getFieldIds()) {
-            String name = fieldIdToName.get(fieldId);
-            if (name != null) {
-              columns.add(name);
-            }
-          }
-        }
-      }
-    } catch (Exception e) {
-      LOG.warn("Failed to query zonemap indexes: {}", e.getMessage());
+    ZonemapLoadResult(Map<String, List<ZoneStats>> stats, Map<String, Set<Integer>> uncovered) {
+      this.stats = stats;
+      this.uncoveredByColumn = uncovered;
     }
-    return columns;
+  }
+
+  /**
+   * Loads zone stats for the requested columns, plus the fragments each column's zones do not
+   * describe.
+   *
+   * <p>Coverage comes from the zones themselves: a column can carry several zonemap indexes and
+   * {@code getZonemapStats} returns the zones of only one, so index metadata would claim coverage
+   * for fragments those zones never saw.
+   */
+  private ZonemapLoadResult loadZonemapStats(Dataset dataset, Set<String> columns) {
+    if (columns.isEmpty()) {
+      return new ZonemapLoadResult(Collections.emptyMap(), Collections.emptyMap());
+    }
+
+    Map<String, List<ZoneStats>> stats = loadStatsForColumns(dataset, columns);
+    if (stats.isEmpty()) {
+      return new ZonemapLoadResult(stats, Collections.emptyMap());
+    }
+
+    Set<Integer> allFragments = new HashSet<>();
+    for (Fragment fragment : dataset.getFragments()) {
+      allFragments.add(fragment.getId());
+    }
+
+    Map<String, Set<Integer>> uncoveredByColumn = new HashMap<>();
+    for (Map.Entry<String, List<ZoneStats>> entry : stats.entrySet()) {
+      Set<Integer> described = new HashSet<>();
+      for (ZoneStats zone : entry.getValue()) {
+        described.add(zone.getFragmentId());
+      }
+      Set<Integer> uncovered = new HashSet<>(allFragments);
+      uncovered.removeAll(described);
+      uncoveredByColumn.put(entry.getKey(), uncovered);
+      if (!uncovered.isEmpty()) {
+        LOG.info(
+            "Zonemap zones for '{}' describe {} of {} fragments;"
+                + " retaining {} unindexed fragment(s) in the scan",
+            entry.getKey(),
+            allFragments.size() - uncovered.size(),
+            allFragments.size(),
+            uncovered.size());
+      }
+    }
+
+    return new ZonemapLoadResult(stats, uncoveredByColumn);
   }
 
   private static Set<String> extractReferencedColumns(Predicate[] predicates) {
