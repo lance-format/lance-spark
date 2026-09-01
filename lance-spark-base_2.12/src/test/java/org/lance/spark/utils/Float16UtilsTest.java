@@ -97,8 +97,8 @@ public class Float16UtilsTest {
 
   @Test
   public void testUnderflowToZero() {
-    // Magnitudes at or below the midpoint 2^-25 flush to zero; see
-    // testRoundingBelowSmallestSubnormal for the band just above it.
+    // Magnitudes below the midpoint 2^-25 flush to zero; 2^-25 itself ties to even and also
+    // lands on zero. See testRoundingBelowSmallestSubnormal for the band just above it.
     // Smallest float16 subnormal: 2^-24 ~= 5.96e-8
     short halfBits = Float16Utils.floatToHalf(1.0e-10f);
     float result = Float16Utils.halfToFloat(halfBits);
@@ -118,6 +118,16 @@ public class Float16UtilsTest {
         0x0001, Float16Utils.floatToHalf(4.0e-8f) & 0xFFFF, "Above 2^-25 rounds up to 2^-24");
     assertEquals(
         0x8001, Float16Utils.floatToHalf(-4.0e-8f) & 0xFFFF, "Below -2^-25 rounds up to -2^-24");
+    // Exponent -33 is where the subnormal shift would reach 32 and Java would mask the `>>>`
+    // count, so pin an input in that band: it must still reach zero.
+    assertEquals(
+        0x0000,
+        Float16Utils.floatToHalf(Math.nextUp(0x1p-33f)) & 0xFFFF,
+        "Just above 2^-33 flushes to zero");
+    assertEquals(
+        0x8000,
+        Float16Utils.floatToHalf(-Math.nextUp(0x1p-33f)) & 0xFFFF,
+        "Just below -2^-33 flushes to negative zero");
   }
 
   @Test
