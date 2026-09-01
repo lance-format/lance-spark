@@ -137,6 +137,25 @@ public class Float16UtilsTest {
   }
 
   @Test
+  public void testRoundToNearestEvenCarries() {
+    // Exact midpoints on the normal path: the tie goes to the even mantissa, and when that
+    // carries out of the 10-bit mantissa it must bump the exponent rather than wrap.
+    assertEquals(
+        0x3C00,
+        Float16Utils.floatToHalf(1.00048828125f) & 0xFFFF,
+        "1 + 2^-11 is an exact midpoint and ties down to 1.0");
+    assertEquals(
+        0x4000,
+        Float16Utils.floatToHalf(0x1.ffep0f) & 0xFFFF,
+        "A mantissa carry must bump the exponent, not wrap");
+    // The carry may also push the exponent past the half range, which clamps to infinity.
+    assertEquals(
+        0x7BFF, Float16Utils.floatToHalf(65519.0f) & 0xFFFF, "65519 stays the largest finite half");
+    assertEquals(
+        0x7C00, Float16Utils.floatToHalf(65520.0f) & 0xFFFF, "65520 carries into +Infinity");
+  }
+
+  @Test
   public void testSubnormals() {
     // Smallest positive float16 subnormal: 2^-24 ~= 5.96e-8
     float smallestSubnormal = Float16Utils.halfToFloat((short) 0x0001);
@@ -152,6 +171,13 @@ public class Float16UtilsTest {
     assertTrue(largestSubnormal > 0);
     short rt2 = Float16Utils.floatToHalf(largestSubnormal);
     assertEquals(0x03FF, rt2 & 0xFFFF, "Largest subnormal should round-trip");
+
+    // A subnormal that rounds up past the largest subnormal must land on the smallest
+    // normal 2^-14, so the carry out of the subnormal mantissa must not be masked off.
+    assertEquals(
+        0x0400,
+        Float16Utils.floatToHalf(0x1.ffcp-15f) & 0xFFFF,
+        "A subnormal that rounds up must reach the smallest normal");
   }
 
   @Test
