@@ -19,6 +19,7 @@ import org.lance.namespace.LanceNamespace;
 import org.lance.spark.utils.FullTextQueryUtils;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableSet;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
@@ -28,6 +29,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Read-specific options for Lance Spark connector.
@@ -97,6 +99,27 @@ public class LanceSparkReadOptions implements Serializable {
   public static final String CONFIG_EXECUTOR_CREDENTIAL_REFRESH = "executor_credential_refresh";
 
   public static final String LANCE_FILE_SUFFIX = ".lance";
+
+  /**
+   * Option keys that {@link Builder#parseTypedFlags(Map)} promotes into dedicated typed fields on
+   * the builder. After promotion these keys are removed from {@link #getStorageOptions()} so that
+   * connector-level knobs do not leak into the Rust-side {@code storage_options} map (which is
+   * reserved for object-store credentials and endpoint config — {@code aws_*}, {@code gcs_*},
+   * {@code allow_http}, etc.). Rust silently drops unknown keys, so this stripping is a debug-
+   * hygiene fix, not a correctness fix.
+   */
+  static final Set<String> RECOGNIZED_TYPED_KEYS =
+      ImmutableSet.of(
+          CONFIG_DATASET_URI,
+          CONFIG_PUSH_DOWN_FILTERS,
+          CONFIG_BLOCK_SIZE,
+          CONFIG_VERSION,
+          CONFIG_INDEX_CACHE_SIZE,
+          CONFIG_METADATA_CACHE_SIZE,
+          CONFIG_BATCH_SIZE,
+          CONFIG_TOP_N_PUSH_DOWN,
+          CONFIG_NEAREST,
+          CONFIG_EXECUTOR_CREDENTIAL_REFRESH);
 
   private static final boolean DEFAULT_PUSH_DOWN_FILTERS = true;
   // Changed from 512 to 8192 for better OLAP scan performance (33x improvement)
@@ -628,6 +651,15 @@ public class LanceSparkReadOptions implements Serializable {
     public LanceSparkReadOptions build() {
       if (datasetUri == null) {
         throw new IllegalArgumentException("datasetUri is required");
+      }
+      // Strip recognized typed flags from storageOptions at build time, not inside
+      // parseTypedFlags. parseTypedFlags may be called more than once on the same builder
+      // (e.g. fromOptions followed by withCatalogDefaults), and later calls re-read from
+      // this.storageOptions; removing too early would cause per-read overrides to disappear
+      // when catalog defaults are merged on top. Stripping here keeps storageOptions clean
+      // for the final consumer (Rust storage_options map) without breaking merge semantics.
+      for (String key : RECOGNIZED_TYPED_KEYS) {
+        this.storageOptions.remove(key);
       }
       return new LanceSparkReadOptions(this);
     }

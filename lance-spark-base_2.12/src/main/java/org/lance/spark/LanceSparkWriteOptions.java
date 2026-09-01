@@ -18,12 +18,14 @@ import org.lance.WriteParams.WriteMode;
 import org.lance.namespace.LanceNamespace;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableSet;
 
 import java.io.Serializable;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Write-specific options for Lance Spark connector.
@@ -61,6 +63,31 @@ public class LanceSparkWriteOptions implements Serializable {
   public static final String CONFIG_USE_LARGE_VAR_TYPES = "use_large_var_types";
   public static final String CONFIG_MAX_BATCH_BYTES = "max_batch_bytes";
   public static final String CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD = "blob_pack_file_size_threshold";
+
+  /**
+   * Option keys that {@link Builder#fromOptions(Map)} promotes into dedicated typed fields on the
+   * builder. After promotion these keys are removed from {@link #getStorageOptions()} so that
+   * connector-level knobs do not leak into the Rust-side {@code storage_options} map (which is
+   * reserved for object-store credentials and endpoint config — {@code aws_*}, {@code gcs_*},
+   * {@code allow_http}, etc.). Rust silently drops unknown keys, so this stripping is a debug-
+   * hygiene fix, not a correctness fix. See {@link LanceSparkReadOptions#RECOGNIZED_TYPED_KEYS} for
+   * the read-side counterpart.
+   */
+  static final Set<String> RECOGNIZED_TYPED_KEYS =
+      ImmutableSet.of(
+          CONFIG_DATASET_URI,
+          CONFIG_WRITE_MODE,
+          CONFIG_MAX_ROWS_PER_FILE,
+          CONFIG_MAX_ROWS_PER_GROUP,
+          CONFIG_MAX_BYTES_PER_FILE,
+          CONFIG_FILE_FORMAT_VERSION,
+          CONFIG_USE_QUEUED_WRITE_BUFFER,
+          CONFIG_QUEUE_DEPTH,
+          CONFIG_BATCH_SIZE,
+          CONFIG_ENABLE_STABLE_ROW_IDS,
+          CONFIG_USE_LARGE_VAR_TYPES,
+          CONFIG_MAX_BATCH_BYTES,
+          CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD);
 
   private static final WriteMode DEFAULT_WRITE_MODE = WriteMode.APPEND;
   private static final boolean DEFAULT_USE_QUEUED_WRITE_BUFFER = false;
@@ -598,6 +625,11 @@ public class LanceSparkWriteOptions implements Serializable {
     public LanceSparkWriteOptions build() {
       if (datasetUri == null) {
         throw new IllegalArgumentException("datasetUri is required");
+      }
+      // Strip recognized typed flags from storageOptions at build time. Mirror of the read-side
+      // fix in LanceSparkReadOptions.Builder.build(); see RECOGNIZED_TYPED_KEYS for rationale.
+      for (String key : RECOGNIZED_TYPED_KEYS) {
+        this.storageOptions.remove(key);
       }
       return new LanceSparkWriteOptions(this);
     }
