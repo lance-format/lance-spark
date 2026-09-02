@@ -24,6 +24,13 @@ import org.lance.spark.utils.{FieldPathUtils, Utils}
 
 import scala.collection.JavaConverters._
 
+object ShowIndexesExec {
+  private val SystemIndexNames = Set("__lance_frag_reuse", "__lance_mem_wal")
+
+  private def isSystemIndex(indexName: String): Boolean =
+    indexName != null && SystemIndexNames.exists(_.equalsIgnoreCase(indexName))
+}
+
 /**
  * Physical execution of SHOW INDEXES for Lance datasets.
  *
@@ -47,7 +54,7 @@ case class ShowIndexesExec(
     val dataset = Utils.openDatasetBuilder(readOptions).build()
     try {
       val indexes = dataset.getIndexes.asScala.toSeq
-        .filterNot(idx => LanceIndexNames.isSystem(idx.name()))
+        .filterNot(idx => ShowIndexesExec.isSystemIndex(idx.name()))
         .groupBy(_.name())
         .toSeq
         .sortBy(_._1)

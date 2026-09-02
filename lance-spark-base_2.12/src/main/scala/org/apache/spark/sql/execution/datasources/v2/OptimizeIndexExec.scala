@@ -27,6 +27,13 @@ import java.util.{Collections, Locale, Map => JMap}
 
 import scala.collection.JavaConverters._
 
+object LanceOptimizeIndexExec {
+  private val SystemIndexNames = Set("__lance_frag_reuse", "__lance_mem_wal")
+
+  private def isSystemIndex(indexName: String): Boolean =
+    indexName != null && SystemIndexNames.exists(_.equalsIgnoreCase(indexName))
+}
+
 /** Driver-side execution of ALTER TABLE ... OPTIMIZE INDEX. */
 case class LanceOptimizeIndexExec(
     catalog: TableCatalog,
@@ -97,7 +104,7 @@ case class LanceOptimizeIndexExec(
 
   override protected def run(): Seq[InternalRow] = {
     val lanceDataset = LanceDataset.requireWritable(catalog.loadTable(ident), "OptimizeIndex")
-    if (LanceIndexNames.isSystem(indexName)) {
+    if (LanceOptimizeIndexExec.isSystemIndex(indexName)) {
       throw new IllegalArgumentException(s"Cannot optimize system index '$indexName'")
     }
     val options = buildOptions()
