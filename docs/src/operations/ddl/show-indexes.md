@@ -61,15 +61,8 @@ The `SHOW INDEXES` command returns the following columns:
 ## Interpreting the Output
 
 An `indexed_percent` below 100 means part of the table is not covered — either rows were appended
-since the index was last built, or [OPTIMIZE](./optimize.md) rewrote fragments a `zonemap` or
-`bloomfilter` index had covered. Rebuild with [CREATE INDEX](./create-index.md) to restore full
-coverage.
-
-Do not treat partial coverage as merely slower. On the pinned Lance version a partially covered
-`zonemap` index prunes the fragments it does not cover, so a predicate on the indexed column can
-return fewer rows than the table actually holds, while a `COUNT(*)` over the same table still
-reports every row. Nothing in the query plan flags the discrepancy, which is why this column is
-worth checking before trusting filters over a `zonemap` index that reports less than 100.
+since the index was last built, or [OPTIMIZE](./optimize.md) rewrote fragments an index had
+covered. Rebuild with [CREATE INDEX](./create-index.md) to restore full coverage.
 
 `num_segments` reflects how the index was built: a distributed build produces one segment per
 parallel task. Queries search every segment, and Lance can only compact fragments covered by the

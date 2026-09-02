@@ -100,10 +100,7 @@ case class ShowIndexesExec(
         val numUnindexedFragments = getLong("num_unindexed_fragments")
         val numUnindexedRows = getLong("num_unindexed_rows")
 
-        // Share of rows the index covers, truncated to two decimals. Truncating rather than
-        // rounding keeps the value from ever overstating coverage: a table one row short of being
-        // fully indexed reads as 99.99, not as 100. Null rather than 100 for an empty table, so
-        // "no rows" is not reported as fully indexed either.
+        // Truncated (not rounded) so it never overstates coverage. Null for empty tables.
         val indexedPercent: java.lang.Double =
           if (numIndexedRows == null || numUnindexedRows == null) {
             null

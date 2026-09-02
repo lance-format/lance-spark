@@ -149,12 +149,6 @@ public abstract class BaseShowIndexesTest {
     Assertions.assertTrue(row.getLong(9) > 0L, "size_bytes should be positive");
   }
 
-  /**
-   * num_segments and size_bytes describe the whole logical index, so they have to aggregate every
-   * physical segment. A single-segment index cannot tell a sum from a first element, and reading
-   * the count from the statistics blob while summing sizes over the grouped segments means the two
-   * can only be trusted together if something checks they agree.
-   */
   @Test
   public void testShowIndexesAggregatesAcrossSegments() {
     spark.sql(String.format("create table %s (id int, name string) using lance", fullTable));
@@ -197,10 +191,6 @@ public abstract class BaseShowIndexesTest {
         100.0d, row.getDouble(7), 1e-9, "a freshly built index covers every row");
   }
 
-  /**
-   * With no rows to divide, coverage is undefined rather than complete: reporting 100 would tell an
-   * operator polling for staleness that an index covering nothing is up to date.
-   */
   @Test
   public void testShowIndexesReportsNullPercentForEmptyTable() {
     spark.sql(String.format("create table %s (id int, text string) using lance;", fullTable));
