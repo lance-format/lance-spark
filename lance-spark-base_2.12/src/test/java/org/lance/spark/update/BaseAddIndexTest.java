@@ -108,17 +108,6 @@ public abstract class BaseAddIndexTest {
     }
   }
 
-  /**
-   * Pins the two Lance behaviours the coverage report rests on: a segment commit returns the
-   * metadata of the index as committed, and the handle it was made on advances to the manifest it
-   * wrote.
-   *
-   * <p>Together they are what make the reported count truthful. A check taken before the commit
-   * reads the manifest its handle was opened at, so a fragment retired in between is still counted;
-   * intersecting the returned metadata with the fragments live <em>after</em> the commit is what
-   * excludes it. This asserts the contract rather than the connector code consuming it, because a
-   * change on either side would silently make the count overstate again.
-   */
   @Test
   public void testSegmentCommitReportsCoverageAsCommitted() {
     spark.sql(String.format("create table %s (id int) using lance", fullTable));

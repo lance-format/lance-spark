@@ -277,8 +277,6 @@ class IndexUtilsTest {
       () => IndexUtils.batchFragments(fragmentWorkloads(Long.MaxValue, 1), Some(1), 1))
   }
 
-  // ── declaredCoverage / committedCoverage ───────────────────────
-
   @Test
   def declaredCoverage_unionsSegmentBitmaps(): Unit = {
     assertEquals(
@@ -337,8 +335,6 @@ class IndexUtilsTest {
     assertTrue(error.getMessage.contains("21 total"), error.getMessage)
   }
 
-  // ── establishedCoverage ───────────────────────────────────────────────────
-
   @Test
   def establishedCoverage_reportsWhatTheCommitReturned(): Unit = {
     val built = Seq(coveringSegment(0, 1), coveringSegment(2))
@@ -348,11 +344,6 @@ class IndexUtilsTest {
       IndexUtils.establishedCoverage(built, built, Set(0, 1, 2), "idx_id"))
   }
 
-  /**
-   * Lance prunes a fragment whose indexed field was rewritten under the same id, so the committed
-   * bitmap can be narrower than the one handed in while every fragment is still live. No comparison
-   * of fragment ids can see that, which is why the report has to come from what the commit returned.
-   */
   @Test
   def establishedCoverage_followsAPrunedCommitEvenWhileEveryFragmentIsLive(): Unit = {
     val built = coveringSegment(0, 1)
@@ -375,7 +366,6 @@ class IndexUtilsTest {
       IndexUtils.establishedCoverage(Seq(built), Seq(built), Set(1, 5), "idx_id"))
   }
 
-  /** Existing segments survive a commit they are disjoint from; their coverage is not ours. */
   @Test
   def establishedCoverage_countsOnlyTheSegmentsThisBuildProduced(): Unit = {
     val built = coveringSegment(2)

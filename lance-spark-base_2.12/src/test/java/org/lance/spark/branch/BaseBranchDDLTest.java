@@ -590,11 +590,6 @@ public abstract class BaseBranchDDLTest {
     Assertions.assertTrue(conflictMessages.contains("version"));
   }
 
-  /**
-   * The version option has to pin the scan itself, not merely be accepted. Distributed index builds
-   * rely on it to read the same snapshot the build is stamped with, and a silently ignored option
-   * would put the scan back on the latest version without any visible failure.
-   */
   @Test
   public void testVersionOptionPinsTheScanToThatVersion() {
     DatasetVersions versions = prepareDatasetWithHistory();

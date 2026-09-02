@@ -88,14 +88,7 @@ case class AddIndexExec(
     val btreeBuildMode = IndexUtils.btreeBuildMode(indexType, args)
     val scalarSegmentIndexType = IndexUtils.scalarSegmentIndexType(method)
 
-    // Plan and build against a single pinned version. Tasks open the dataset themselves, so without
-    // pinning each one resolves the latest version independently. The driver's batches fix which
-    // fragments a segment covers either way, but not the version each segment records, and that
-    // version is what core checks against. It revalidates a segment's coverage of a fragment only
-    // when the recorded version predates the commit and the fragment already existed at it, so a
-    // task opening after a concurrent rewrite of the indexed column stamps the current version over
-    // keys it read earlier and those keys are trusted unchecked. Coverage the commit cannot
-    // establish is accounted for at commit time; see IndexUtils.establishedCoverage.
+    // Plan and build at one pinned version; the commit opens the live dataset.
     val (fragmentWorkloads, canonicalColumns, buildReadOptions) = {
       val ds = Utils.openDatasetBuilder(readOptions).build()
       try {
@@ -170,11 +163,6 @@ case class AddIndexExec(
     val (nsImpl, nsProps, tableId, initialStorageOpts) =
       extractNamespaceInfo(lanceDataset, readOptions)
 
-    // Range-mode BTree uses preprocessed data from Spark and keeps its dedicated path: its coverage
-    // follows the fragment ids in the scanned rows rather than the fragment list planned above. The
-    // pinned options drive both halves of that path, the producer scan and the builder, so the rows a
-    // segment holds and the version it is stamped with describe the same snapshot; the job explains
-    // why both are needed.
     if (btreeBuildMode.contains("range")) {
       val segments = new RangeBasedBTreeIndexJob(
         this.copy(columns = canonicalColumns),
@@ -302,13 +290,6 @@ case class AddIndexExec(
  * covering exactly those fragments, so the resulting segments have disjoint fragment coverage and
  * can be committed directly as a single logical index.
  *
- * Unlike the segmented path, coverage here is derived from the fragment ids present in the scanned
- * rows rather than from a fragment list fixed at planning time, so the producer scan is pinned to the
- * same version as the build. Both halves have to describe one snapshot: the segment records the
- * version the builder opened, and core validates a segment's coverage against that version only for
- * a fragment that existed at it. A scan left to resolve its own version could hand the builder rows
- * from a fragment appended afterwards, whose keys would then be committed unvalidated.
- *
  * @param addIndexExec       The AddIndexExec instance that initiated this job
  * @param readOptions        Configuration options for reading the Lance dataset
  * @param numFragments       Number of fragments in the dataset, used to bound shuffle partitions
@@ -328,16 +309,7 @@ class RangeBasedBTreeIndexJob(
 
   private val VALUE_COLUMN_NAME = "value"
 
-  /**
-   * The version [[readOptions]] is pinned to.
-   *
-   * The caller pins these options with [[IndexUtils.pinVersion]], and CREATE INDEX only runs against
-   * a writable table, so the ref names a version on main; a branch or tag target is rejected before
-   * this point by `LanceDataset.ensureWritable`. Anything else cannot be expressed as a scan option
-   * at all, since branch and version are mutually exclusive there, so it would leave the scan
-   * unpinned and reading a different snapshot than the build stamps. That is the defect this pin
-   * exists to prevent, and it is silent, so refuse rather than fall through to it.
-   */
+  /** Version `readOptions` is pinned to. Throws if the ref is not a version on main. */
   private def pinnedVersion: Long = {
     val ref = readOptions.getRef
     if (ref == null || !ref.isMain || !ref.getVersionNumber.isPresent) {
@@ -369,15 +341,6 @@ class RangeBasedBTreeIndexJob(
     }
     val fullTableName = parts.mkString(".")
 
-    // Read the indexed column with the row id and fragment id metadata columns, at the version the
-    // build is pinned to. The scan otherwise resolves its own version through the catalog, which is
-    // at or after the pinned one, and coverage here comes from the fragment ids in the scanned rows:
-    // a fragment appended after planning would be declared covered by a segment stamped with a
-    // version that predates it, and core skips staleness validation for a fragment absent at the
-    // stamped version, so its keys would be trusted however they changed afterwards. Pinning the
-    // scan keeps the rows and the stamp describing one snapshot. Fragments appended after planning
-    // are simply not part of this build, exactly as in the segmented path, whose fragment list is
-    // fixed at planning time too; Dataset.optimizeIndices covers them incrementally.
     val fragmentColumn = LanceDataset.FRAGMENT_ID_COLUMN.name
     val df = session.read
       .option(LanceSparkReadOptions.CONFIG_VERSION, pinnedVersion)
@@ -682,13 +645,7 @@ object IndexUtils extends Logging {
       .get(method.toLowerCase(Locale.ROOT))
       .filter(scalarSegmentIndexTypes.contains)
 
-  /**
-   * Pins `readOptions` to the version `dataset` is open at.
-   *
-   * Distributed index builds hand read options to tasks that open the dataset themselves. Pinning
-   * makes every task observe the fragment set the driver planned over instead of resolving the
-   * latest version independently.
-   */
+  /** Pins `readOptions` to the version `dataset` is open at. */
   def pinVersion(
       readOptions: LanceSparkReadOptions,
       dataset: Dataset): LanceSparkReadOptions =
@@ -722,21 +679,10 @@ object IndexUtils extends Logging {
       .toSet
 
   /**
-   * Refuses to publish a segment set that would establish no coverage at all.
-   *
-   * Commit intersects each segment's declared coverage with the dataset's live fragments, so a
-   * fragment retired while the build ran contributes nothing. Lance accepts such a set: an empty
-   * fragment bitmap is valid metadata, and an existing segment is trivially disjoint from it and so
-   * survives. Nothing is corrupted, but the transaction would publish segments that index no data and
-   * report a build that achieved nothing, and this is the last point at which it can still be
-   * declined.
-   *
-   * Partial loss is not refused. A fragment leaves the manifest either because its rows moved
-   * (compaction, an in-place rewrite) or because they were all deleted; only the first leaves data
-   * unindexed, and either way the segments covering what remains are correct. Discarding a finished
-   * distributed build over that would be the wrong response, and it would make a routine concurrent
-   * DELETE fatal on a long one. What the commit actually established is reported afterwards, by
-   * [[establishedCoverage]].
+   * Refuses a segment set that declares coverage but intersects no live fragment. Partial loss is
+   * accepted: fragments can be retired by compaction or deletion during the build, and the segments
+   * covering what remains are still correct. [[establishedCoverage]] reports what was actually
+   * committed.
    */
   def requireCommittableCoverage(
       liveFragmentIds: Set[Int],
@@ -752,18 +698,9 @@ object IndexUtils extends Logging {
   }
 
   /**
-   * The coverage a commit established, read back from the metadata the commit returned.
-   *
-   * A check taken before the commit cannot answer this, for two reasons. It reads the manifest its
-   * handle was opened at, while the commit lands on whatever version is current by then. And Lance
-   * prunes an incoming segment's coverage not only for a fragment that is gone but also for one whose
-   * indexed field was rewritten under the same id, which no comparison of fragment ids can see. The
-   * returned metadata is post-pruning, so it is the only truthful account of what was indexed.
-   *
-   * Only the segments this build produced are counted. Existing segments that were disjoint from them
-   * survive the commit, and their coverage is not this command's to report.
-   *
-   * @return the fragment ids the commit covered with these segments
+   * Committed fragment ids from the segments this build produced, intersected with what is still
+   * live. Only segments whose UUID matches `builtSegments` are counted; pre-existing survivors are
+   * not this command's coverage.
    */
   def establishedCoverage(
       builtSegments: Seq[Index],
