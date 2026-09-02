@@ -46,7 +46,7 @@ case class LanceOptimizeIndexExec(
     }
 
     val argsMap = normalizedArgs.toMap
-    val supported = Set("num_indices_to_merge", "retrain")
+    val supported = Set("num_indices_to_merge")
     val unsupported = argsMap.keySet.diff(supported).toSeq.sorted
     if (unsupported.nonEmpty) {
       throw new IllegalArgumentException(
@@ -68,14 +68,6 @@ case class LanceOptimizeIndexExec(
           s"num_indices_to_merge must be between 0 and ${Int.MaxValue}, got: $value")
       }
       builder.numIndicesToMerge(value.toInt)
-    }
-
-    argsMap.get("retrain").foreach { arg =>
-      arg.value match {
-        case value: java.lang.Boolean => builder.retrain(value.booleanValue())
-        case other =>
-          throw new IllegalArgumentException(s"retrain must be a boolean, got: $other")
-      }
     }
 
     builder.build()

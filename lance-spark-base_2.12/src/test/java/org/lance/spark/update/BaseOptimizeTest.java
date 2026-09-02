@@ -155,8 +155,7 @@ public abstract class BaseOptimizeTest {
     Dataset<Row> result =
         spark.sql(
             String.format(
-                "alter table %s optimize index idx_id "
-                    + "with (num_indices_to_merge=0, retrain=false)",
+                "alter table %s optimize index idx_id " + "with (num_indices_to_merge=0)",
                 fullTable));
 
     Assertions.assertEquals(

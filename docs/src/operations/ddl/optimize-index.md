@@ -10,8 +10,7 @@ Incrementally maintains an existing named Lance index.
 ```sql
 ALTER TABLE table_name OPTIMIZE INDEX index_name
 [WITH (
-    num_indices_to_merge = non_negative_integer,
-    retrain = boolean
+    num_indices_to_merge = non_negative_integer
 )];
 ```
 
@@ -23,9 +22,8 @@ named index and may merge existing index segments according to the supplied opti
 | Option | Type | Description |
 |--------|------|-------------|
 | `num_indices_to_merge` | Integer | Number of existing index segments Lance should merge during maintenance. When omitted, Lance chooses its default. Set to `0` to add coverage without requesting a merge of existing segments. |
-| `retrain` | Boolean | Whether Lance should retrain the index. Default `false`. Support depends on the index type and format; unsupported combinations are rejected by Lance. |
 
-Both options are passed directly to Lance's `OptimizeOptions`. The target index name is passed as
+The option is passed directly to Lance's `OptimizeOptions`. The target index name is passed as
 the sole entry in `indexNames`, so other indexes on the table are not maintained by this command.
 
 ## Examples
@@ -40,8 +38,7 @@ Build coverage for new fragments without requesting a merge of existing segments
 
 ```sql
 ALTER TABLE lance.db.users OPTIMIZE INDEX idx_user_id WITH (
-    num_indices_to_merge = 0,
-    retrain = false
+    num_indices_to_merge = 0
 );
 ```
 

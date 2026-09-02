@@ -934,7 +934,7 @@ class TestDDLIndex:
 
         result = spark.sql("""
             ALTER TABLE default.test_table OPTIMIZE INDEX idx_id
-            WITH (num_indices_to_merge = 0, retrain = false)
+            WITH (num_indices_to_merge = 0)
         """).first()
 
         assert result.index_name == "idx_id"

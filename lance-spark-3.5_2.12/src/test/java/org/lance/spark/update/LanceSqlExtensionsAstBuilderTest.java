@@ -213,7 +213,7 @@ public class LanceSqlExtensionsAstBuilderTest {
     LanceSqlExtensionsParser parser =
         createParser(
             "ALTER TABLE `my-catalog`.`my-table` OPTIMIZE INDEX `my-idx` "
-                + "WITH (NUM_INDICES_TO_MERGE = 2, RETRAIN = FALSE)");
+                + "WITH (NUM_INDICES_TO_MERGE = 2)");
     LanceOptimizeIndex plan =
         (LanceOptimizeIndex) astBuilder.visitSingleStatement(parser.singleStatement());
 
@@ -223,11 +223,9 @@ public class LanceSqlExtensionsAstBuilderTest {
     assertEquals("my-idx", plan.indexName());
 
     List<LanceNamedArgument> args = JavaConverters.seqAsJavaList(plan.args());
-    assertEquals(2, args.size());
+    assertEquals(1, args.size());
     assertEquals("NUM_INDICES_TO_MERGE", args.get(0).name());
     assertEquals(2L, args.get(0).value());
-    assertEquals("RETRAIN", args.get(1).name());
-    assertEquals(false, args.get(1).value());
   }
 
   @Test
