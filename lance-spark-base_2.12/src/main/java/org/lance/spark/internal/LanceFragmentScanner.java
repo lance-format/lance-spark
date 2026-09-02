@@ -26,6 +26,7 @@ import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.vector.ipc.ArrowReader;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
@@ -184,6 +185,28 @@ public class LanceFragmentScanner implements AutoCloseable {
    */
   public ArrowReader getArrowReader() {
     return scanner.scanBatches();
+  }
+
+  /**
+   * Exports this fragment scan into a caller-owned Arrow C Data Interface stream. The Lance native
+   * side populates the {@code ArrowArrayStream} at {@code streamAddress} directly, so only the
+   * C-struct address crosses the JVM/native boundary. The caller owns the stream and must close it
+   * (which releases the native scan via the stream's release callback); the scanner and dataset
+   * held by this object are released separately by {@link #close()}.
+   *
+   * @param streamAddress the memory address of a freshly-allocated, empty {@code ArrowArrayStream}
+   */
+  public void exportArrowStream(long streamAddress) throws IOException {
+    scanner.exportArrowStream(streamAddress);
+  }
+
+  /**
+   * @return the Arrow schema the native scan produces, including any columns Lance auto-projects
+   *     that are not in the requested projection (e.g. {@code _rowid}, {@code _rowaddr}, or the
+   *     {@code _score} of a full-text query)
+   */
+  public Schema schema() {
+    return scanner.schema();
   }
 
   @Override
