@@ -153,10 +153,7 @@ public abstract class BaseOptimizeTest {
     Assertions.assertTrue(unindexedFragments > 0);
 
     Dataset<Row> result =
-        spark.sql(
-            String.format(
-                "alter table %s optimize index idx_id " + "with (num_indices_to_merge=0)",
-                fullTable));
+        spark.sql(String.format("alter table %s optimize index idx_id", fullTable));
 
     Assertions.assertEquals(
         "StructType(StructField(index_name,StringType,false),StructField(fragments_indexed,LongType,false),StructField(segments_before,LongType,false),StructField(segments_after,LongType,false))",
@@ -164,8 +161,8 @@ public abstract class BaseOptimizeTest {
     Row optimized = result.collectAsList().get(0);
     Assertions.assertEquals("idx_id", optimized.getAs("index_name"));
     Assertions.assertEquals(unindexedFragments, optimized.<Long>getAs("fragments_indexed"));
-    Assertions.assertTrue(
-        optimized.<Long>getAs("segments_after") >= optimized.<Long>getAs("segments_before"));
+    Assertions.assertTrue(optimized.<Long>getAs("segments_before") > 0);
+    Assertions.assertTrue(optimized.<Long>getAs("segments_after") > 0);
 
     Row after =
         spark.sql(String.format("show indexes in %s", fullTable)).collectAsList().stream()

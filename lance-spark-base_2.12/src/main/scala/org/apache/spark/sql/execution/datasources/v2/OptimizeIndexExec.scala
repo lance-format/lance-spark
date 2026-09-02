@@ -43,7 +43,7 @@ case class LanceOptimizeIndexExec(
 
   override def output: Seq[Attribute] = LanceOptimizeIndexOutputType.SCHEMA
 
-  private case class IndexState(unindexedFragments: Long, segmentCount: Long)
+  private case class IndexState(indexedFragments: Long, segmentCount: Long)
 
   private def buildOptions(): OptimizeOptions = {
     val normalizedArgs = args.map(arg => arg.name.toLowerCase(Locale.ROOT) -> arg)
@@ -98,7 +98,7 @@ case class LanceOptimizeIndexExec(
       .getOrElse(throw new IllegalArgumentException(s"Index '$indexName' does not exist"))
     val stats = dataset.getIndexStatistics(indexName)
     IndexState(
-      requiredLong(stats, "num_unindexed_fragments"),
+      requiredLong(stats, "num_indexed_fragments"),
       description.getSegments.size().toLong)
   }
 
@@ -116,12 +116,12 @@ case class LanceOptimizeIndexExec(
       val before = indexState(dataset)
       dataset.optimizeIndices(options)
       val after = indexState(dataset)
-      if (after.unindexedFragments > before.unindexedFragments) {
+      if (after.indexedFragments < before.indexedFragments) {
         throw new IllegalStateException(
-          s"Index '$indexName' has more unindexed fragments after optimization: " +
-            s"${before.unindexedFragments} -> ${after.unindexedFragments}")
+          s"Index '$indexName' covers fewer fragments after optimization: " +
+            s"${before.indexedFragments} -> ${after.indexedFragments}")
       }
-      val fragmentsIndexed = before.unindexedFragments - after.unindexedFragments
+      val fragmentsIndexed = after.indexedFragments - before.indexedFragments
 
       Seq(new GenericInternalRow(Array[Any](
         UTF8String.fromString(indexName),
