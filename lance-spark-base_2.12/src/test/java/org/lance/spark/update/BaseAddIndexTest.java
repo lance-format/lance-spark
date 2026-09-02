@@ -670,11 +670,6 @@ public abstract class BaseAddIndexTest {
     }
   }
 
-  /**
-   * {@code id_idx} is the name Lance itself gives an index created on {@code id} without one, so it
-   * is the name a segment build that sets no name of its own lands on. Recreating an index under
-   * that name used to fail every executor task on a name collision with the index already there.
-   */
   @ParameterizedTest(name = "{0}")
   @MethodSource("segmentBuildIndexMethods")
   public void testRepeatedCreateIndexUnderLanceDefaultName(

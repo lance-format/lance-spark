@@ -443,8 +443,8 @@ case class RangeBTreeIndexBuilder(
       // Build an uncommitted BTree segment for this fragment group from the
       // pre-sorted data. No UUID is set: Lance generates the segment UUID, and
       // the fragment ids declare the segment's coverage so the per-partition
-      // segments stay disjoint. See ScalarSegmentIndexTask for why the segment
-      // build names the index and sets replace.
+      // segments stay disjoint. Named and replace-flagged to suppress Lance's
+      // collision pre-check against the existing index.
       val btreeParamsBuilder = BTreeIndexParams.builder()
       if (zoneSize.isDefined) {
         btreeParamsBuilder.zoneSize(zoneSize.get)
@@ -525,15 +525,9 @@ class ScalarSegmentIndexJob(
 final private[v2] case class FragmentWorkload(fragmentId: Integer, numRows: Long)
 
 /**
- * A task to create a scalar index segment on a batch of fragments.
- *
- * The segment is named after the logical index it will join, and {@code replace} is set because that
- * index may already exist: on the uncommitted build path Lance consults {@code replace} only to
- * reject a name that is already taken, which is precisely the normal case for a CREATE INDEX that
- * replaces an index of the same name. Nothing is removed here — the driver's single
- * {@code commitExistingIndexSegments} transaction decides which existing segments to keep. Leaving
- * the name unset instead makes Lance derive its own default (`{column}_idx`) and reject the build
- * whenever an index of that name exists on the column.
+ * A task to create a scalar index segment on a batch of fragments. Named after the logical index
+ * and replace-flagged to suppress Lance's collision pre-check against the existing index; actual
+ * replacement is handled by the driver's {@code commitExistingIndexSegments} transaction.
  */
 case class ScalarSegmentIndexTask(
     encodedReadOptions: String,
