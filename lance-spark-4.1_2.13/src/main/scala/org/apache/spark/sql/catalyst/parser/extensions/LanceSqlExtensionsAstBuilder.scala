@@ -99,7 +99,7 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
     val indexName = cleanIdentifier(ctx.indexName.getText)
     val args = ctx.namedArgument().asScala.map(a =>
       LanceNamedArgument(
-        cleanIdentifier(a.identifier().getText),
+        normalizedOptionName(a.identifier().getText),
         a.constant().accept(this)))
       .toSeq
 

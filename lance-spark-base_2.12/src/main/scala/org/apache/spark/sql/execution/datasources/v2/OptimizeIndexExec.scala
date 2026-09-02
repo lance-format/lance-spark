@@ -18,11 +18,12 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
 import org.apache.spark.sql.catalyst.plans.logical.{LanceNamedArgument, LanceOptimizeIndexOutputType}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.unsafe.types.UTF8String
-import org.lance.index.{Index, OptimizeOptions}
+import org.lance.Dataset
+import org.lance.index.OptimizeOptions
 import org.lance.spark.LanceDataset
 import org.lance.spark.utils.Utils
 
-import java.util.{Collections, Locale}
+import java.util.{Collections, Locale, Map => JMap}
 
 import scala.collection.JavaConverters._
 
@@ -34,6 +35,8 @@ case class LanceOptimizeIndexExec(
     args: Seq[LanceNamedArgument]) extends LeafV2CommandExec {
 
   override def output: Seq[Attribute] = LanceOptimizeIndexOutputType.SCHEMA
+
+  private case class IndexState(unindexedFragments: Long, segmentCount: Long)
 
   private def buildOptions(): OptimizeOptions = {
     val normalizedArgs = args.map(arg => arg.name.toLowerCase(Locale.ROOT) -> arg)
@@ -73,45 +76,51 @@ case class LanceOptimizeIndexExec(
     builder.build()
   }
 
-  private def indexesByName(indexes: Seq[Index]): Seq[Index] = {
-    indexes.filter(_.name() == indexName)
+  private def requiredLong(stats: JMap[String, Object], key: String): Long = {
+    stats.get(key) match {
+      case number: java.lang.Number => number.longValue()
+      case value =>
+        throw new IllegalStateException(
+          s"Lance index statistics for '$indexName' have invalid '$key': $value")
+    }
   }
 
-  private def coveredLiveFragments(indexes: Seq[Index], liveFragments: Set[Int]): Set[Int] = {
-    indexes
-      .flatMap(index => index.fragments().orElse(Collections.emptyList[Integer]()).asScala)
-      .map(_.intValue())
-      .toSet
-      .intersect(liveFragments)
+  private def indexState(dataset: Dataset): IndexState = {
+    val description = dataset.describeIndices().asScala
+      .find(_.getName == indexName)
+      .getOrElse(throw new IllegalArgumentException(s"Index '$indexName' does not exist"))
+    val stats = dataset.getIndexStatistics(indexName)
+    IndexState(
+      requiredLong(stats, "num_unindexed_fragments"),
+      description.getSegments.size().toLong)
   }
 
   override protected def run(): Seq[InternalRow] = {
-    val lanceDataset = catalog.loadTable(ident) match {
-      case dataset: LanceDataset => dataset
-      case _ =>
-        throw new UnsupportedOperationException("OptimizeIndex only supports LanceDataset")
+    val lanceDataset = LanceDataset.requireWritable(catalog.loadTable(ident), "OptimizeIndex")
+    if (LanceIndexNames.isSystem(indexName)) {
+      throw new IllegalArgumentException(s"Cannot optimize system index '$indexName'")
     }
+    val options = buildOptions()
 
-    val dataset = Utils.openDatasetBuilder(lanceDataset.readOptions()).build()
+    val dataset = Utils.openDatasetBuilder(lanceDataset.readOptions())
+      .initialStorageOptions(lanceDataset.getInitialStorageOptions)
+      .build()
     try {
-      val liveFragments = dataset.getFragments.asScala.map(_.getId).toSet
-      val before = indexesByName(dataset.getIndexes.asScala.toSeq)
-      if (before.isEmpty) {
-        throw new IllegalArgumentException(s"Index '$indexName' does not exist")
+      val before = indexState(dataset)
+      dataset.optimizeIndices(options)
+      val after = indexState(dataset)
+      if (after.unindexedFragments > before.unindexedFragments) {
+        throw new IllegalStateException(
+          s"Index '$indexName' has more unindexed fragments after optimization: " +
+            s"${before.unindexedFragments} -> ${after.unindexedFragments}")
       }
-
-      val coveredBefore = coveredLiveFragments(before, liveFragments)
-      dataset.optimizeIndices(buildOptions())
-
-      val after = indexesByName(dataset.getIndexes.asScala.toSeq)
-      val coveredAfter = coveredLiveFragments(after, liveFragments)
-      val fragmentsIndexed = (coveredAfter -- coveredBefore).size.toLong
+      val fragmentsIndexed = before.unindexedFragments - after.unindexedFragments
 
       Seq(new GenericInternalRow(Array[Any](
         UTF8String.fromString(indexName),
         fragmentsIndexed,
-        before.size.toLong,
-        after.size.toLong)))
+        before.segmentCount,
+        after.segmentCount)))
     } finally {
       dataset.close()
     }

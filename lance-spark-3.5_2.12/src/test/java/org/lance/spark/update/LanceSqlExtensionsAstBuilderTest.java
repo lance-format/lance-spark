@@ -224,7 +224,7 @@ public class LanceSqlExtensionsAstBuilderTest {
 
     List<LanceNamedArgument> args = JavaConverters.seqAsJavaList(plan.args());
     assertEquals(1, args.size());
-    assertEquals("NUM_INDICES_TO_MERGE", args.get(0).name());
+    assertEquals("num_indices_to_merge", args.get(0).name());
     assertEquals(2L, args.get(0).value());
   }
 

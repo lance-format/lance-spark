@@ -179,10 +179,64 @@ public abstract class BaseOptimizeTest {
   public void testOptimizeMissingIndex() {
     prepareDataset();
 
+    assertOptimizeIndexFails("missing", "", "Index 'missing' does not exist");
+  }
+
+  @Test
+  public void testOptimizeRejectsSystemIndex() {
+    prepareDataset();
+
+    assertOptimizeIndexFails(
+        "__lance_frag_reuse", "", "Cannot optimize system index '__lance_frag_reuse'");
+  }
+
+  @Test
+  public void testOptimizeIndexValidatesOptions() {
+    prepareDataset();
+    spark.sql(String.format("alter table %s create index idx_id using zonemap (id)", fullTable));
+
+    assertOptimizeIndexFails(
+        "idx_id", "with (unknown_option=1)", "Unsupported OPTIMIZE INDEX options: unknown_option");
+    assertOptimizeIndexFails(
+        "idx_id",
+        "with (num_indices_to_merge=0, NUM_INDICES_TO_MERGE=1)",
+        "Duplicate OPTIMIZE INDEX options: num_indices_to_merge");
+    assertOptimizeIndexFails(
+        "idx_id",
+        "with (num_indices_to_merge='two')",
+        "num_indices_to_merge must be a non-negative integer");
+    assertOptimizeIndexFails(
+        "idx_id",
+        "with (num_indices_to_merge=-1)",
+        "num_indices_to_merge must be between 0 and 2147483647");
+    assertOptimizeIndexFails(
+        "idx_id",
+        "with (num_indices_to_merge=2147483648)",
+        "num_indices_to_merge must be between 0 and 2147483647");
+  }
+
+  private void assertOptimizeIndexFails(String indexName, String options, String expectedMessage) {
     Exception error =
         Assertions.assertThrows(
             Exception.class,
-            () -> spark.sql(String.format("alter table %s optimize index missing", fullTable)));
-    Assertions.assertTrue(error.toString().contains("Index 'missing' does not exist"));
+            () ->
+                spark
+                    .sql(
+                        String.format(
+                            "alter table %s optimize index %s %s", fullTable, indexName, options))
+                    .collectAsList());
+    Assertions.assertTrue(
+        exceptionChainMessages(error).contains(expectedMessage),
+        () -> "Expected error containing '" + expectedMessage + "', got: " + error);
+  }
+
+  private static String exceptionChainMessages(Throwable throwable) {
+    StringBuilder messages = new StringBuilder();
+    for (Throwable current = throwable; current != null; current = current.getCause()) {
+      if (current.getMessage() != null) {
+        messages.append(current.getMessage()).append('\n');
+      }
+    }
+    return messages.toString();
   }
 }
