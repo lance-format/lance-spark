@@ -13,6 +13,7 @@
  */
 package org.lance.spark.update;
 
+import org.lance.index.Index;
 import org.lance.index.IndexOptions;
 import org.lance.index.IndexParams;
 import org.lance.index.IndexType;
@@ -168,12 +169,12 @@ public abstract class BaseShowIndexesTest {
     try (org.lance.Dataset dataset =
         Utils.openDatasetBuilder(LanceSparkReadOptions.builder().datasetUri(tableDir).build())
             .build()) {
-      List<org.lance.index.Index> segments =
+      List<Index> segments =
           dataset.getIndexes().stream()
               .filter(index -> "test_index".equals(index.name()))
-              .collect(java.util.stream.Collectors.toList());
+              .collect(Collectors.toList());
       segmentCount = segments.size();
-      for (org.lance.index.Index segment : segments) {
+      for (Index segment : segments) {
         expectedSize += segment.getSizeBytes().orElse(0L);
       }
     }

@@ -110,7 +110,7 @@ case class ShowIndexesExec(
               null
             } else {
               val percent = 100.0 * numIndexedRows.longValue() / total
-              java.lang.Double.valueOf(math.floor(percent * 100.0) / 100.0)
+              math.floor(percent * 100.0) / 100.0
             }
           }
 
@@ -127,7 +127,7 @@ case class ShowIndexesExec(
           if (perSegment.exists(!_.isPresent)) {
             null
           } else {
-            java.lang.Long.valueOf(perSegment.map(_.get.longValue()).sum)
+            perSegment.map(_.get.longValue()).sum
           }
         }
 
