@@ -19,11 +19,12 @@ import org.apache.spark.sql.catalyst.plans.logical.{LanceNamedArgument, LanceOpt
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.unsafe.types.UTF8String
 import org.lance.Dataset
-import org.lance.index.OptimizeOptions
+import org.lance.index.{Index, OptimizeOptions}
+import org.lance.operation.CreateIndex
 import org.lance.spark.LanceDataset
 import org.lance.spark.utils.Utils
 
-import java.util.{Collections, Locale, Map => JMap}
+import java.util.{Collections, Locale}
 
 import scala.collection.JavaConverters._
 
@@ -43,7 +44,12 @@ case class LanceOptimizeIndexExec(
 
   override def output: Seq[Attribute] = LanceOptimizeIndexOutputType.SCHEMA
 
-  private case class IndexState(indexedFragments: Long, segmentCount: Long)
+  private case class IndexState(segmentCount: Long)
+
+  private case class IndexDelta(
+      fragmentsIndexed: Long,
+      segmentsAdded: Long,
+      segmentsRemoved: Long)
 
   private def buildOptions(): OptimizeOptions = {
     val normalizedArgs = args.map(arg => arg.name.toLowerCase(Locale.ROOT) -> arg)
@@ -83,23 +89,60 @@ case class LanceOptimizeIndexExec(
     builder.build()
   }
 
-  private def requiredLong(stats: JMap[String, Object], key: String): Long = {
-    stats.get(key) match {
-      case number: java.lang.Number => number.longValue()
-      case value =>
-        throw new IllegalStateException(
-          s"Lance index statistics for '$indexName' have invalid '$key': $value")
-    }
-  }
-
   private def indexState(dataset: Dataset): IndexState = {
     val description = dataset.describeIndices().asScala
       .find(_.getName == indexName)
       .getOrElse(throw new IllegalArgumentException(s"Index '$indexName' does not exist"))
-    val stats = dataset.getIndexStatistics(indexName)
-    IndexState(
-      requiredLong(stats, "num_indexed_fragments"),
-      description.getSegments.size().toLong)
+    IndexState(description.getSegments.size().toLong)
+  }
+
+  private def requiredFragments(index: Index): Set[Integer] = {
+    val fragments = index.fragments()
+    if (!fragments.isPresent) {
+      throw new IllegalStateException(
+        s"Lance index segment '${index.uuid()}' for '$indexName' has no fragment metadata")
+    }
+    fragments.get().asScala.toSet
+  }
+
+  private def indexDelta(dataset: Dataset, beforeVersion: Long, afterVersion: Long): IndexDelta = {
+    if (afterVersion <= beforeVersion) {
+      throw new IllegalStateException(
+        s"OPTIMIZE INDEX '$indexName' produced invalid dataset version change: " +
+          s"$beforeVersion -> $afterVersion")
+    }
+
+    val maybeTransaction = dataset.readTransaction()
+    if (!maybeTransaction.isPresent) {
+      throw new IllegalStateException(
+        s"Dataset version $afterVersion has no transaction for OPTIMIZE INDEX '$indexName'")
+    }
+
+    val transaction = maybeTransaction.get()
+    try {
+      transaction.operation() match {
+        case operation: CreateIndex =>
+          val added = operation.getNewIndices.asScala.filter(_.name() == indexName)
+          val removed = operation.getRemovedIndices.asScala.filter(_.name() == indexName)
+          if (added.isEmpty && removed.isEmpty) {
+            throw new IllegalStateException(
+              s"Dataset version $afterVersion did not change index '$indexName'")
+          }
+
+          val addedFragments = added.flatMap(requiredFragments).toSet
+          val removedFragments = removed.flatMap(requiredFragments).toSet
+          IndexDelta(
+            addedFragments.diff(removedFragments).size.toLong,
+            added.size.toLong,
+            removed.size.toLong)
+        case operation =>
+          throw new IllegalStateException(
+            s"Dataset version $afterVersion was created by '${operation.name()}', " +
+              s"not OPTIMIZE INDEX '$indexName'")
+      }
+    } finally {
+      transaction.close()
+    }
   }
 
   override protected def run(): Seq[InternalRow] = {
@@ -114,18 +157,32 @@ case class LanceOptimizeIndexExec(
       .build()
     try {
       val before = indexState(dataset)
+      val beforeVersion = dataset.version()
       dataset.optimizeIndices(options)
+      val afterVersion = dataset.version()
       val after = indexState(dataset)
-      if (after.indexedFragments < before.indexedFragments) {
-        throw new IllegalStateException(
-          s"Index '$indexName' covers fewer fragments after optimization: " +
-            s"${before.indexedFragments} -> ${after.indexedFragments}")
+
+      val delta = if (afterVersion == beforeVersion) {
+        if (after != before) {
+          throw new IllegalStateException(
+            s"Index '$indexName' changed without a new dataset version")
+        }
+        IndexDelta(0L, 0L, 0L)
+      } else {
+        indexDelta(dataset, beforeVersion, afterVersion)
       }
-      val fragmentsIndexed = after.indexedFragments - before.indexedFragments
+      val expectedSegmentsAfter =
+        before.segmentCount - delta.segmentsRemoved + delta.segmentsAdded
+      if (expectedSegmentsAfter != after.segmentCount) {
+        throw new IllegalStateException(
+          s"OPTIMIZE INDEX '$indexName' reported an inconsistent segment change: " +
+            s"${before.segmentCount} - ${delta.segmentsRemoved} + ${delta.segmentsAdded} != " +
+            s"${after.segmentCount}")
+      }
 
       Seq(new GenericInternalRow(Array[Any](
         UTF8String.fromString(indexName),
-        fragmentsIndexed,
+        delta.fragmentsIndexed,
         before.segmentCount,
         after.segmentCount)))
     } finally {

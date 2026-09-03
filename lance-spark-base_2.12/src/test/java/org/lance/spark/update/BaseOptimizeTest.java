@@ -170,6 +170,16 @@ public abstract class BaseOptimizeTest {
             .findFirst()
             .orElseThrow(() -> new AssertionError("Index not found: idx_id"));
     Assertions.assertEquals(0L, after.<Long>getAs("num_unindexed_fragments"));
+
+    Row noOp =
+        spark
+            .sql(String.format("alter table %s optimize index idx_id", fullTable))
+            .collectAsList()
+            .get(0);
+    Assertions.assertEquals(0L, noOp.<Long>getAs("fragments_indexed"));
+    Assertions.assertEquals(
+        noOp.<Long>getAs("segments_before").longValue(),
+        noOp.<Long>getAs("segments_after").longValue());
   }
 
   @Test
