@@ -13,6 +13,7 @@
  */
 package org.lance.spark.read;
 
+import org.lance.ipc.FragmentSlice;
 import org.lance.ipc.FullTextQuery;
 import org.lance.memwal.ShardingField;
 import org.lance.spark.LanceSparkReadOptions;
@@ -40,7 +41,9 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -147,6 +150,50 @@ public class LanceScanTest {
     assertTrue(
         partitions.length <= allPartitions.length,
         "Limit-pruned partitions should not exceed total partitions");
+  }
+
+  @Test
+  public void testZonemapPlanAttachesSlicesAndDisablesFullFragmentLimitPruning() {
+    List<LanceSplit> splits =
+        java.util.Arrays.asList(
+            new LanceSplit(Collections.singletonList(0)),
+            new LanceSplit(Collections.singletonList(1)));
+    Map<Integer, Long> rowCounts = new HashMap<>();
+    rowCounts.put(0, 100L);
+    rowCounts.put(1, 100L);
+    Map<Integer, List<FragmentSlice>> slices = new HashMap<>();
+    slices.put(0, Collections.singletonList(new FragmentSlice(0, 10, 1)));
+    slices.put(1, Collections.singletonList(new FragmentSlice(1, 20, 1)));
+
+    LanceScan scan =
+        new LanceScan(
+            TEST_SCHEMA,
+            TestUtils.TestTable1Config.readOptions,
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.of(2),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            new Predicate[0],
+            null,
+            null,
+            splits,
+            rowCounts,
+            null,
+            null,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            new ZonemapScanPlan(Set.of(), slices));
+
+    InputPartition[] partitions = scan.planInputPartitions();
+    assertEquals(2, partitions.length, "slice scans must not use full-fragment rows for LIMIT");
+    assertEquals(
+        Collections.singletonList(new FragmentSlice(0, 10, 1)),
+        ((LanceInputPartition) partitions[0]).getLanceSplit().getFragmentSlices());
+    assertEquals(
+        Collections.singletonList(new FragmentSlice(1, 20, 1)),
+        ((LanceInputPartition) partitions[1]).getLanceSplit().getFragmentSlices());
   }
 
   // --- outputPartitioning ---
