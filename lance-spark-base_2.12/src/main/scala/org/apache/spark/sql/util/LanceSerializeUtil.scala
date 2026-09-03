@@ -28,6 +28,13 @@ object LanceSerializeUtil {
       val kryo = new Kryo()
       kryo.setInstantiatorStrategy(new DefaultInstantiatorStrategy(new StdInstantiatorStrategy()))
       kryo.setClassLoader(Utils.getContextOrSparkClassLoader)
+      // The JDK immutable collections (List.of/copyOf, Set.of, Map.of) cannot be rebuilt by the
+      // Objenesis instantiator above -- they have no no-arg constructor and hold their storage in a
+      // java.base-internal field -- so a decoded collection would throw on first use. See
+      // ImmutableCollectionsSerializers for why these stay on the Kryo path rather than delegating
+      // to JavaSerializer (which would expose a deserialization gadget at this caller-controlled
+      // decode boundary).
+      ImmutableCollectionsSerializers.register(kryo)
       kryo
     }
   }

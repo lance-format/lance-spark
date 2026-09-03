@@ -2269,6 +2269,175 @@ class TestDMLMerge:
 class TestDMLAddColumn:
     """Test DML ADD COLUMN FROM operations for schema evolution with backfill."""
 
+    def test_add_blob_v2_binary_column(self, spark):
+        """Test adding a BINARY column with blob v2 encoding."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING
+            )
+            TBLPROPERTIES (
+                'file_format_version' = '2.2'
+            )
+        """)
+
+        spark.sql("""
+            ALTER TABLE default.test_table
+            SET TBLPROPERTIES (
+                'content.lance.encoding' = 'blob',
+                'invalid_content.lance.encoding' = 'blob'
+            )
+        """)
+
+        first_content = b"alpha"
+        second_content = b"bravo-charlie"
+
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (1, 'alpha')
+        """)
+
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (2, 'bravo-charlie')
+        """)
+
+        spark.sql("""
+            CREATE TEMPORARY VIEW tmp_view AS
+            SELECT _rowaddr, _fragid, CAST(name AS BINARY) AS content
+            FROM default.test_table
+        """)
+
+        spark.sql("""
+            ALTER TABLE default.test_table ADD COLUMNS content FROM tmp_view
+        """)
+
+        content_field = next(
+            row
+            for row in spark.sql("DESCRIBE default.test_table").collect()
+            if row.col_name == "content"
+        )
+        content_type = content_field.data_type.lower()
+        assert "struct" in content_type
+        assert "kind" in content_type
+        assert "blob_uri" in content_type
+
+        rows = spark.sql("""
+            SELECT id, content.size, content.kind
+            FROM default.test_table
+            ORDER BY id
+        """).collect()
+
+        assert [(row.id, row.size, row.kind) for row in rows] == [
+            (1, len(first_content), 0),
+            (2, len(second_content), 0),
+        ]
+
+        spark.sql("""
+            CREATE OR REPLACE TEMPORARY VIEW tmp_view AS
+            SELECT _rowaddr, _fragid, name AS invalid_content
+            FROM default.test_table
+        """)
+
+        with pytest.raises(Exception, match="must have BINARY type"):
+            spark.sql("""
+                ALTER TABLE default.test_table
+                ADD COLUMNS invalid_content FROM tmp_view
+            """)
+
+        field_names = [field.name for field in spark.table("default.test_table").schema.fields]
+        assert "invalid_content" not in field_names
+
+    def test_add_blob_column_without_encoding_property_stays_binary(self, spark, test_table):
+        """Test that a blob column added without its encoding property stays BINARY."""
+        spark.sql(f"""
+            CREATE TABLE {test_table} (
+                id INT,
+                name STRING
+            )
+            TBLPROPERTIES (
+                'file_format_version' = '2.2'
+            )
+        """)
+
+        spark.sql(f"""
+            INSERT INTO {test_table} VALUES
+            (1, 'alpha'),
+            (2, 'bravo')
+        """)
+
+        spark.sql(f"""
+            CREATE TEMPORARY VIEW no_property_backfill AS
+            SELECT _rowaddr, _fragid, CAST(name AS BINARY) AS content
+            FROM {test_table}
+        """)
+
+        spark.sql(f"""
+            ALTER TABLE {test_table} ADD COLUMNS content FROM no_property_backfill
+        """)
+
+        content_type = next(
+            row.data_type
+            for row in spark.sql(f"DESCRIBE {test_table}").collect()
+            if row.col_name == "content"
+        )
+        assert content_type == "binary"
+
+        spark.sql(f"""
+            ALTER TABLE {test_table}
+            SET TBLPROPERTIES ('content.lance.encoding' = 'blob')
+        """)
+
+        content_type_after_property = next(
+            row.data_type
+            for row in spark.sql(f"DESCRIBE {test_table}").collect()
+            if row.col_name == "content"
+        )
+        assert content_type_after_property == "binary"
+
+    def test_add_blob_column_with_mismatched_encoding_property_stays_binary(
+        self, spark, test_table
+    ):
+        """Test that an encoding property must exactly match the added column name."""
+        spark.sql(f"""
+            CREATE TABLE {test_table} (
+                id INT,
+                name STRING
+            )
+            TBLPROPERTIES (
+                'file_format_version' = '2.2'
+            )
+        """)
+
+        spark.sql(f"""
+            ALTER TABLE {test_table}
+            SET TBLPROPERTIES ('content.lance.encoding' = 'blob')
+        """)
+
+        spark.sql(f"""
+            INSERT INTO {test_table} VALUES
+            (1, 'alpha'),
+            (2, 'bravo')
+        """)
+
+        spark.sql(f"""
+            CREATE TEMPORARY VIEW mismatched_property_backfill AS
+            SELECT _rowaddr, _fragid, CAST(name AS BINARY) AS content_bytes
+            FROM {test_table}
+        """)
+
+        spark.sql(f"""
+            ALTER TABLE {test_table}
+            ADD COLUMNS content_bytes FROM mismatched_property_backfill
+        """)
+
+        content_bytes_type = next(
+            row.data_type
+            for row in spark.sql(f"DESCRIBE {test_table}").collect()
+            if row.col_name == "content_bytes"
+        )
+        assert content_bytes_type == "binary"
+
     def test_add_column_from_view(self, spark):
         """Test ALTER TABLE ADD COLUMNS FROM with single column."""
         spark.sql("""

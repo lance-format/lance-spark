@@ -17,8 +17,11 @@ import org.lance.Fragment;
 import org.lance.index.Index;
 import org.lance.index.IndexCriteria;
 import org.lance.index.IndexDescription;
+import org.lance.index.IndexOptions;
+import org.lance.index.IndexParams;
 import org.lance.index.IndexType;
 import org.lance.index.OptimizeOptions;
+import org.lance.index.scalar.ScalarIndexParams;
 import org.lance.ipc.FullTextQuery;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
@@ -105,6 +108,64 @@ public abstract class BaseAddIndexTest {
     }
   }
 
+  @Test
+  public void testSegmentCommitReportsCoverageAsCommitted() {
+    spark.sql(String.format("create table %s (id int) using lance", fullTable));
+    spark.sql(String.format("insert into %s values (0), (1), (2)", fullTable));
+    spark.sql(String.format("insert into %s values (3), (4), (5)", fullTable));
+
+    try (org.lance.Dataset committer =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build()) {
+      List<Fragment> fragments = committer.getFragments();
+      int coveredFragmentId = fragments.get(fragments.size() - 1).getId();
+
+      IndexParams indexParams =
+          IndexParams.builder()
+              .setScalarIndexParams(ScalarIndexParams.create("zonemap", "{}"))
+              .build();
+      Index built =
+          committer.createIndex(
+              IndexOptions.builder(Collections.singletonList("id"), IndexType.ZONEMAP, indexParams)
+                  .withIndexName("idx_committed_coverage")
+                  .replace(true)
+                  .withFragmentIds(Collections.singletonList(coveredFragmentId))
+                  .build());
+      Assertions.assertEquals(
+          Collections.singletonList(coveredFragmentId),
+          built.fragments().orElse(Collections.emptyList()),
+          "the uncommitted segment should declare the fragment it was built for");
+
+      // Retire every fragment from another handle, leaving the committer on a stale manifest.
+      spark.sql(String.format("delete from %s where id >= 0", fullTable));
+
+      List<Index> committed =
+          committer.commitExistingIndexSegments(
+              "idx_committed_coverage", "id", Collections.singletonList(built));
+
+      Set<UUID> ours = Collections.singleton(built.uuid());
+      Assertions.assertTrue(
+          committed.stream().anyMatch(index -> ours.contains(index.uuid())),
+          "the commit must return the metadata of the segments it was handed");
+
+      Set<Integer> liveAfter =
+          committer.getFragments().stream().map(Fragment::getId).collect(Collectors.toSet());
+      Assertions.assertFalse(
+          liveAfter.contains(coveredFragmentId),
+          "the committing handle must advance to the manifest the commit wrote");
+
+      Set<Integer> established =
+          committed.stream()
+              .filter(index -> ours.contains(index.uuid()))
+              .flatMap(index -> index.fragments().orElse(Collections.emptyList()).stream())
+              .filter(liveAfter::contains)
+              .collect(Collectors.toSet());
+      Assertions.assertEquals(
+          Collections.emptySet(),
+          established,
+          "coverage read from the committed state must not count a fragment retired in between");
+    }
+  }
+
   private void prepareDataset() {
     spark.sql(String.format("create table %s (id int, text string) using lance;", fullTable));
     // First insert to create initial fragments
@@ -145,6 +206,33 @@ public abstract class BaseAddIndexTest {
               .collect(Collectors.toList());
       spark.createDataFrame(rows, schema).coalesce(1).writeTo(fullTable).append();
       nextId += rowCount;
+    }
+  }
+
+  /** Four equal single-fragment appends: the shape a least-loaded batcher deals out round-robin. */
+  private void prepareEvenFragmentDataset() throws Exception {
+    spark.sql(String.format("create table %s (id int, text string) using lance;", fullTable));
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.IntegerType, false),
+              DataTypes.createStructField("text", DataTypes.StringType, false)
+            });
+    for (int batch = 0; batch < 4; batch++) {
+      int startId = batch * 5;
+      List<Row> rows =
+          IntStream.range(startId, startId + 5)
+              .boxed()
+              .map(i -> RowFactory.create(i, String.format("text_%d", i)))
+              .collect(Collectors.toList());
+      spark.createDataFrame(rows, schema).coalesce(1).writeTo(fullTable).append();
+    }
+  }
+
+  private int liveFragmentCount() {
+    try (org.lance.Dataset lanceDataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build()) {
+      return lanceDataset.getFragments().size();
     }
   }
 
@@ -448,6 +536,56 @@ public abstract class BaseAddIndexTest {
           "Expected row-count batching to avoid the 130/50 workload split produced by count batching");
       Assertions.assertEquals(fragmentRows.keySet(), coveredFragments);
     }
+  }
+
+  /**
+   * A multi-segment index must not freeze the table against OPTIMIZE. Lance's compaction planner
+   * groups fragments only when the identical set of index metadata entries covers them, and every
+   * segment is its own entry, so segment coverage that interleaves fragment ids leaves no adjacent
+   * pair of fragments in the same group and compaction finds nothing to coalesce.
+   *
+   * <p>btree rather than zonemap: on this Lance version a zonemap index that covers only part of
+   * the table prunes the fragments it does not cover, which would break the row assertions for a
+   * reason unrelated to compaction.
+   */
+  @Test
+  public void testOptimizeCompactsTableCoveredByMultiSegmentIndex() throws Exception {
+    prepareEvenFragmentDataset();
+
+    spark
+        .sql(
+            String.format(
+                "alter table %s create index idx_contiguous using btree (id) "
+                    + "with (num_segments = 2)",
+                fullTable))
+        .collectAsList();
+    Assertions.assertEquals(
+        4, liveFragmentCount(), "Expected each of the four appends to land in its own fragment");
+
+    spark
+        .sql(String.format("optimize %s with (target_rows_per_fragment = 1000)", fullTable))
+        .collectAsList();
+
+    Assertions.assertTrue(
+        liveFragmentCount() < 4,
+        "Expected OPTIMIZE to coalesce fragments covered by a two-segment index, "
+            + "but the live fragment count did not drop");
+
+    Assertions.assertEquals(
+        IntStream.range(0, 20)
+            .mapToObj(i -> String.format("[%d,text_%d]", i, i))
+            .collect(Collectors.toList()),
+        spark
+            .sql(String.format("select id, text from %s order by id", fullTable))
+            .collectAsList()
+            .stream()
+            .map(Row::toString)
+            .collect(Collectors.toList()),
+        "Compaction under a multi-segment index must not change what the table returns");
+    Assertions.assertEquals(
+        1L,
+        spark.sql(String.format("select * from %s where id = 13", fullTable)).count(),
+        "The index must still answer point lookups after compaction");
   }
 
   @ParameterizedTest(name = "{0}")
@@ -798,6 +936,46 @@ public abstract class BaseAddIndexTest {
         spark.sql(String.format("select * from %s where id=15", fullTable));
     Assertions.assertEquals(1L, afterOptimize.count());
     Assertions.assertEquals("text_15", afterOptimize.collectAsList().get(0).getString(1));
+  }
+
+  /**
+   * WITH-clause option names are normalized at parse time, so an upper-case {@code TRAIN} defers
+   * the build exactly as the lower-case spelling does. Without that normalization the option is not
+   * the one any command recognizes: the index is trained anyway, and the name reaches Lance as an
+   * index parameter.
+   */
+  @Test
+  public void testCreateZonemapIndexDeferredWithUpperCaseOptionName() {
+    prepareDataset();
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "alter table %s create index idx_upper_defer using zonemap (id) "
+                    + "with (TRAIN = false)",
+                fullTable));
+
+    Row row = result.collectAsList().get(0);
+    Assertions.assertEquals(0L, row.getLong(0), "Deferred create should index zero fragments");
+    Assertions.assertEquals("idx_upper_defer", row.getString(1));
+
+    org.lance.Dataset lanceDataset = org.lance.Dataset.open().uri(tableDir).build();
+    try {
+      List<Index> deferred =
+          lanceDataset.getIndexes().stream()
+              .filter(index -> "idx_upper_defer".equals(index.name()))
+              .collect(Collectors.toList());
+
+      Assertions.assertEquals(
+          1, deferred.size(), "Deferred zonemap should commit a single empty index");
+      Assertions.assertEquals(IndexType.ZONEMAP, deferred.get(0).indexType());
+      Assertions.assertEquals(
+          0,
+          deferred.get(0).fragments().orElse(Collections.emptyList()).size(),
+          "Deferred zonemap should cover no fragments");
+    } finally {
+      lanceDataset.close();
+    }
   }
 
   /**

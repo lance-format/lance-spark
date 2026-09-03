@@ -51,7 +51,7 @@
 
     <properties>
         <lance-spark.version>0.8.0-beta.1</lance-spark.version>
-        <lance.version>11.0.0-beta.10</lance.version>
+        <lance.version>11.0.0-beta.21</lance.version>
         <lance-namespace.version>0.8.6</lance-namespace.version>
         <lance-namespace-impl.version>0.4.0</lance-namespace-impl.version>
 

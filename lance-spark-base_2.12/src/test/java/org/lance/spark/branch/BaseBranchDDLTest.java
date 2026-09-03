@@ -591,6 +591,23 @@ public abstract class BaseBranchDDLTest {
   }
 
   @Test
+  public void testVersionOptionPinsTheScanToThatVersion() {
+    DatasetVersions versions = prepareDatasetWithHistory();
+    Assertions.assertNotEquals(versions.firstInsertVersion, versions.latestVersion);
+
+    Assertions.assertEquals(
+        5,
+        spark
+            .read()
+            .option("version", Long.toString(versions.firstInsertVersion))
+            .table(fullTable)
+            .count(),
+        "reading with the version option must see only the rows present at that version");
+    Assertions.assertEquals(
+        10, spark.table(fullTable).count(), "the unpinned read still sees the latest version");
+  }
+
+  @Test
   public void testBranchIdentifierRejectsVersionAsOf() {
     DatasetVersions versions = prepareDatasetWithHistory();
     spark.sql(

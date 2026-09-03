@@ -97,11 +97,62 @@ public class Float16UtilsTest {
 
   @Test
   public void testUnderflowToZero() {
-    // Values too small for float16 subnormal should flush to zero
-    // Smallest float16 subnormal: 2^-24 ~= 5.96e-8
+    // Magnitudes below the midpoint 2^-25 flush to zero; 2^-25 itself ties to even and also
+    // lands on zero. Smallest float16 subnormal: 2^-24 ~= 5.96e-8.
+    // 1.0e-10f has exponent -34, where the subnormal shift would wrap `1 << 32` to 1. That is a
+    // different failure than the exponent -33 case pinned in testRoundingBelowSmallestSubnormal,
+    // so neither test replaces the other.
     short halfBits = Float16Utils.floatToHalf(1.0e-10f);
     float result = Float16Utils.halfToFloat(halfBits);
     assertEquals(0.0f, result, "Very small values should flush to zero");
+  }
+
+  @Test
+  public void testRoundingBelowSmallestSubnormal() {
+    // 2^-25 (0x1p-25f == 2.98023e-8) is the midpoint between zero and the smallest
+    // float16 subnormal 2^-24. Round-to-nearest-even sends the midpoint itself to
+    // zero, but values in (2^-25, 2^-24) must round up to 2^-24 rather than flush.
+    assertEquals(
+        0x0000, Float16Utils.floatToHalf(0x1p-25f) & 0xFFFF, "2^-25 is a tie and rounds to zero");
+    assertEquals(
+        0x8000,
+        Float16Utils.floatToHalf(-0x1p-25f) & 0xFFFF,
+        "-2^-25 is a tie and rounds to negative zero");
+    assertEquals(
+        0x0001, Float16Utils.floatToHalf(4.0e-8f) & 0xFFFF, "Above 2^-25 rounds up to 2^-24");
+    assertEquals(
+        0x8001,
+        Float16Utils.floatToHalf(-4.0e-8f) & 0xFFFF,
+        "Below -2^-25 rounds away from zero to -2^-24");
+    // Exponent -33 is where the subnormal shift would reach 32 and Java would mask the `>>>`
+    // count, so pin an input in that band: it must still reach zero.
+    assertEquals(
+        0x0000,
+        Float16Utils.floatToHalf(Math.nextUp(0x1p-33f)) & 0xFFFF,
+        "Just above 2^-33 flushes to zero");
+    assertEquals(
+        0x8000,
+        Float16Utils.floatToHalf(-Math.nextUp(0x1p-33f)) & 0xFFFF,
+        "Just below -2^-33 flushes to negative zero");
+  }
+
+  @Test
+  public void testRoundToNearestEvenCarries() {
+    // Exact midpoints on the normal path: the tie goes to the even mantissa, and when that
+    // carries out of the 10-bit mantissa it must bump the exponent rather than wrap.
+    assertEquals(
+        0x3C00,
+        Float16Utils.floatToHalf(1.00048828125f) & 0xFFFF,
+        "1 + 2^-11 is an exact midpoint and ties down to 1.0");
+    assertEquals(
+        0x4000,
+        Float16Utils.floatToHalf(0x1.ffep0f) & 0xFFFF,
+        "A mantissa carry must bump the exponent, not wrap");
+    // The carry may also push the exponent past the half range, which clamps to infinity.
+    assertEquals(
+        0x7BFF, Float16Utils.floatToHalf(65519.0f) & 0xFFFF, "65519 stays the largest finite half");
+    assertEquals(
+        0x7C00, Float16Utils.floatToHalf(65520.0f) & 0xFFFF, "65520 carries into +Infinity");
   }
 
   @Test
@@ -120,6 +171,13 @@ public class Float16UtilsTest {
     assertTrue(largestSubnormal > 0);
     short rt2 = Float16Utils.floatToHalf(largestSubnormal);
     assertEquals(0x03FF, rt2 & 0xFFFF, "Largest subnormal should round-trip");
+
+    // A subnormal that rounds up past the largest subnormal must land on the smallest
+    // normal 2^-14, so the carry out of the subnormal mantissa must not be masked off.
+    assertEquals(
+        0x0400,
+        Float16Utils.floatToHalf(0x1.ffcp-15f) & 0xFFFF,
+        "A subnormal that rounds up must reach the smallest normal");
   }
 
   @Test
