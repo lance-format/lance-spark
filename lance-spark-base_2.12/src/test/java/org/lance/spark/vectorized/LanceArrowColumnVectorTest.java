@@ -16,6 +16,7 @@ package org.lance.spark.vectorized;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.DecimalVector;
+import org.apache.arrow.vector.UInt8Vector;
 import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
@@ -25,12 +26,38 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 import java.util.Arrays;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class LanceArrowColumnVectorTest {
+
+  @Test
+  public void uint64ValuesAboveLongMaxValueWrapInsteadOfThrowing() {
+    Field field = Field.nullable("id", new ArrowType.Int(64, false));
+    try (BufferAllocator allocator = new RootAllocator();
+        UInt8Vector vector = (UInt8Vector) field.createVector(allocator)) {
+      vector.allocateNew(3);
+      // 2^63 and 2^64-1 are ordinary uint64 values. LongType carries them as their
+      // two's-complement bits, which is the wrap behaviour this accessor documents.
+      vector.setSafe(0, Long.MIN_VALUE);
+      vector.setSafe(1, -1L);
+      vector.setNull(2);
+      vector.setValueCount(3);
+
+      LanceArrowColumnVector columnVector = new LanceArrowColumnVector(vector, false);
+
+      assertEquals(Long.MIN_VALUE, columnVector.getLong(0));
+      assertEquals(-1L, columnVector.getLong(1));
+      assertTrue(columnVector.isNullAt(2));
+      // getLongs is Spark's default loop over getLong, so it has to survive the null slot too.
+      assertArrayEquals(new long[] {Long.MIN_VALUE, -1L, 0L}, columnVector.getLongs(0, 3));
+
+      columnVector.close();
+    }
+  }
 
   @Test
   public void nonOwningCloseKeepsArrowReaderOwnedStructVectorsReusable() {
