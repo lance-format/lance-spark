@@ -440,11 +440,7 @@ case class RangeBTreeIndexBuilder(
 
       Data.exportArrayStream(allocator, reader, stream)
 
-      // Build an uncommitted BTree segment for this fragment group from the
-      // pre-sorted data. No UUID is set: Lance generates the segment UUID, and
-      // the fragment ids declare the segment's coverage so the per-partition
-      // segments stay disjoint. Named and replace-flagged to suppress Lance's
-      // collision pre-check against the existing index.
+      // replace is for Lance's name check, and the driver commit still publishes.
       val btreeParamsBuilder = BTreeIndexParams.builder()
       if (zoneSize.isDefined) {
         btreeParamsBuilder.zoneSize(zoneSize.get)
@@ -525,9 +521,7 @@ class ScalarSegmentIndexJob(
 final private[v2] case class FragmentWorkload(fragmentId: Integer, numRows: Long)
 
 /**
- * A task to create a scalar index segment on a batch of fragments. Named after the logical index
- * and replace-flagged to suppress Lance's collision pre-check against the existing index; actual
- * replacement is handled by the driver's {@code commitExistingIndexSegments} transaction.
+ * A task to create a scalar index segment on a batch of fragments.
  */
 case class ScalarSegmentIndexTask(
     encodedReadOptions: String,
