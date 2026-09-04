@@ -35,6 +35,8 @@ import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.execution.CommandResultExec;
+import org.apache.spark.sql.execution.metric.SQLMetric;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.MetadataBuilder;
@@ -49,6 +51,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import scala.collection.JavaConverters;
 
 import java.io.IOException;
 import java.nio.file.FileSystems;
@@ -1555,6 +1558,20 @@ public abstract class BaseAddIndexTest {
 
     Row output = result.collectAsList().get(0);
     Assertions.assertEquals("body_fts_segments", output.getString(1));
+
+    CommandResultExec commandResult = (CommandResultExec) result.queryExecution().executedPlan();
+    Map<String, SQLMetric> progressMetrics =
+        JavaConverters.mapAsJavaMap(commandResult.commandPhysicalPlan().metrics());
+    SQLMetric progressUpdates = progressMetrics.get("indexBuildProgressUpdates");
+    SQLMetric completedStages = progressMetrics.get("indexBuildCompletedStages");
+    Assertions.assertNotNull(progressUpdates, "FTS should expose callback progress activity");
+    Assertions.assertNotNull(completedStages, "FTS should expose completed-stage activity");
+    Assertions.assertTrue(
+        progressUpdates.value() > 0L,
+        "A real distributed FTS build should report forward progress from Lance callbacks");
+    Assertions.assertTrue(
+        completedStages.value() > 0L,
+        "A real distributed FTS build should report completed Lance stages");
 
     try (org.lance.Dataset dataset = org.lance.Dataset.open().uri(tableDir).build()) {
       int fragmentCount = dataset.getFragments().size();

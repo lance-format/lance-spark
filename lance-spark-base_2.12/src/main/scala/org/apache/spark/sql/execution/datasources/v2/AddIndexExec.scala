@@ -18,17 +18,19 @@ import com.fasterxml.jackson.databind.node.ObjectNode
 import org.apache.arrow.c.{ArrowArrayStream, Data}
 import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.arrow.vector.ipc.ArrowReader
+import org.apache.spark.TaskContext
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
 import org.apache.spark.sql.catalyst.plans.logical.{AddIndexOutputType, LanceNamedArgument}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
+import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.LanceArrowUtils
 import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
 import org.apache.spark.unsafe.types.UTF8String
 import org.lance.{CommitBuilder, Dataset, Transaction}
-import org.lance.index.{Index, IndexOptions, IndexParams, IndexType}
+import org.lance.index.{Index, IndexBuildProgress, IndexOptions, IndexParams, IndexType}
 import org.lance.index.scalar.{BTreeIndexParams, ScalarIndexParams}
 import org.lance.operation.{CreateIndex => AddIndexOperation}
 import org.lance.schema.{LanceField, LanceSchema}
@@ -37,11 +39,13 @@ import org.lance.spark.arrow.LanceArrowWriter
 import org.lance.spark.utils.{CloseableUtil, FieldPathUtils, Utils}
 import org.lance.spark.write.SingleBatchArrowReader
 
-import java.util.{Collections, Locale, UUID}
+import java.util.{Collections, Locale, Optional, UUID}
+import java.util.concurrent.TimeUnit
 
 import scala.collection.JavaConverters._
-import scala.collection.mutable.ArrayBuffer
+import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
 import scala.reflect.ClassTag
+import scala.util.control.NonFatal
 
 /**
  * Physical execution of distributed CREATE INDEX (ALTER TABLE ... CREATE INDEX ...) for Lance datasets.
@@ -79,6 +83,11 @@ case class AddIndexExec(
     args: Seq[LanceNamedArgument]) extends LeafV2CommandExec {
 
   override def output: Seq[Attribute] = AddIndexOutputType.SCHEMA
+
+  override lazy val metrics: Map[String, SQLMetric] =
+    AddIndexExec.indexBuildMetricDefinitions(method, args).map { case (name, description) =>
+      name -> SQLMetrics.createMetric(sparkContext, description)
+    }.toMap
 
   override protected def run(): Seq[InternalRow] = {
     val lanceDataset = LanceDataset.requireWritable(catalog.loadTable(ident), "AddIndex")
@@ -188,7 +197,8 @@ case class AddIndexExec(
         nsImpl,
         nsProps,
         tableId,
-        initialStorageOpts)
+        initialStorageOpts,
+        indexBuildProgressMetrics())
       val segments = segmentJob.run()
       // Atomic add+remove via Lance core; see commitIndexSegments
       val indexed = commitIndexSegments(readOptions, canonicalColumns.head, segments)
@@ -199,6 +209,12 @@ case class AddIndexExec(
 
     throw new UnsupportedOperationException(s"Unsupported index type: $indexType")
   }
+
+  private def indexBuildProgressMetrics(): Option[IndexBuildProgressMetrics] =
+    for {
+      progressUpdates <- metrics.get(AddIndexExec.INDEX_BUILD_PROGRESS_UPDATES)
+      completedStages <- metrics.get(AddIndexExec.INDEX_BUILD_COMPLETED_STAGES)
+    } yield IndexBuildProgressMetrics(progressUpdates, completedStages)
 
   /** Commits an empty (untrained) index on the driver, with an empty fragment bitmap. */
   private def commitEmptyIndex(
@@ -278,6 +294,241 @@ case class AddIndexExec(
     }
   }
 
+}
+
+private[datasources] object AddIndexExec {
+  private[datasources] val INDEX_BUILD_PROGRESS_UPDATES = "indexBuildProgressUpdates"
+  private[datasources] val INDEX_BUILD_COMPLETED_STAGES = "indexBuildCompletedStages"
+
+  private[datasources] def indexBuildMetricDefinitions(
+      method: String,
+      args: Seq[LanceNamedArgument]): Map[String, String] = {
+    val usesCallbackProgress =
+      try {
+        val indexType = IndexUtils.buildIndexType(method)
+        IndexUtils.extractTrain(args) &&
+        indexType == IndexType.INVERTED &&
+        IndexUtils.scalarSegmentIndexType(method).contains(IndexType.INVERTED) &&
+        !IndexUtils.btreeBuildMode(indexType, args).contains("range")
+      } catch {
+        case NonFatal(_) => false
+      }
+
+    if (usesCallbackProgress) {
+      Map(
+        INDEX_BUILD_PROGRESS_UPDATES -> "index build forward progress updates",
+        INDEX_BUILD_COMPLETED_STAGES -> "index build completed stages")
+    } else {
+      Map.empty
+    }
+  }
+}
+
+final private[datasources] case class IndexBuildProgressMetrics(
+    progressUpdates: SQLMetric,
+    completedStages: SQLMetric) extends Serializable
+
+private[datasources] object SparkIndexBuildProgress extends Logging {
+  private[datasources] val DefaultProgressLogIntervalNanos: Long = TimeUnit.SECONDS.toNanos(5)
+
+  def forCurrentTask(
+      indexName: String,
+      metrics: IndexBuildProgressMetrics): SparkIndexBuildProgress = {
+    val context = TaskContext.get()
+    val partitionId = if (context == null) -1 else context.partitionId()
+    val taskAttemptId = if (context == null) -1L else context.taskAttemptId()
+
+    new SparkIndexBuildProgress(
+      indexName,
+      partitionId,
+      taskAttemptId,
+      () => metrics.progressUpdates.add(1L),
+      () => metrics.completedStages.add(1L),
+      message => logInfo(message),
+      (message, cause) => logWarning(message, cause),
+      () => System.nanoTime(),
+      DefaultProgressLogIntervalNanos)
+  }
+}
+
+/**
+ * Best-effort adapter from Lance's absolute, stage-specific progress callbacks to Spark activity
+ * counters. Work units are intentionally kept in logs instead of being summed across stages.
+ */
+private[datasources] class SparkIndexBuildProgress(
+    indexName: String,
+    partitionId: Int,
+    taskAttemptId: Long,
+    addProgressUpdate: () => Unit,
+    addCompletedStage: () => Unit,
+    logStatus: String => Unit,
+    logWarningStatus: (String, Throwable) => Unit,
+    nanoTime: () => Long,
+    progressLogIntervalNanos: Long) extends IndexBuildProgress {
+
+  private case class StageState(
+      total: Option[Long],
+      unit: String,
+      startedAtNanos: Long,
+      greatestCompleted: Long,
+      lastProgressLogNanos: Option[Long])
+
+  private val stages = HashMap.empty[String, StageState]
+  private val completedStages = HashSet.empty[String]
+  // SQLMetric.add performs an unsynchronized read-modify-write. Lance may call this adapter from
+  // multiple native runtime threads, so serialize both metric sinks independently of stage state.
+  private val metricUpdateLock = new Object
+
+  override def stageStart(stage: String, total: Optional[java.lang.Long], unit: String): Unit = {
+    val now = currentTimeNanos()
+    val normalizedStage = normalize(stage, "unknown")
+    val normalizedUnit = normalize(unit, "unknown")
+    val normalizedTotal = Option(total)
+      .filter(_.isPresent)
+      .map(_.get().longValue())
+
+    synchronized {
+      stages.put(
+        normalizedStage,
+        StageState(normalizedTotal, normalizedUnit, now, 0L, None))
+    }
+    logEvent(
+      "start",
+      normalizedStage,
+      0L,
+      normalizedTotal,
+      normalizedUnit,
+      elapsedMillis(now, now))
+  }
+
+  override def stageProgress(stage: String, completed: Long): Unit = {
+    val now = currentTimeNanos()
+    val normalizedStage = normalize(stage, "unknown")
+    var accepted = false
+    var shouldLog = false
+    var snapshot: StageState = null
+
+    synchronized {
+      val current = stages.getOrElse(
+        normalizedStage,
+        StageState(None, "unknown", now, 0L, None))
+      if (completed > current.greatestCompleted) {
+        accepted = true
+        val reachedKnownTotal = current.total.exists(completed >= _)
+        shouldLog = current.lastProgressLogNanos.isEmpty || reachedKnownTotal ||
+          now - current.lastProgressLogNanos.get >= progressLogIntervalNanos
+        snapshot = current.copy(
+          greatestCompleted = completed,
+          lastProgressLogNanos = if (shouldLog) Some(now) else current.lastProgressLogNanos)
+        stages.put(normalizedStage, snapshot)
+      }
+    }
+
+    if (accepted) {
+      updateMetric("update index build forward progress metric") {
+        addProgressUpdate()
+      }
+      if (shouldLog) {
+        logEvent(
+          "progress",
+          normalizedStage,
+          completed,
+          snapshot.total,
+          snapshot.unit,
+          elapsedMillis(snapshot.startedAtNanos, now))
+      }
+    }
+  }
+
+  override def stageComplete(stage: String): Unit = {
+    val now = currentTimeNanos()
+    val normalizedStage = normalize(stage, "unknown")
+    var firstCompletion = false
+    var snapshot: StageState = null
+
+    synchronized {
+      snapshot = stages.getOrElse(
+        normalizedStage,
+        StageState(None, "unknown", now, 0L, None))
+      stages.put(normalizedStage, snapshot)
+      firstCompletion = completedStages.add(normalizedStage)
+    }
+
+    if (firstCompletion) {
+      updateMetric("update index build completed stages metric") {
+        addCompletedStage()
+      }
+    }
+    logEvent(
+      "complete",
+      normalizedStage,
+      snapshot.greatestCompleted,
+      snapshot.total,
+      snapshot.unit,
+      elapsedMillis(snapshot.startedAtNanos, now))
+  }
+
+  private def currentTimeNanos(): Long = {
+    try {
+      nanoTime()
+    } catch {
+      case NonFatal(e) =>
+        warn("Ignoring failure to read index build progress clock", e)
+        System.nanoTime()
+    }
+  }
+
+  private def elapsedMillis(startedAtNanos: Long, nowNanos: Long): Long =
+    math.max(0L, TimeUnit.NANOSECONDS.toMillis(nowNanos - startedAtNanos))
+
+  private def logEvent(
+      event: String,
+      stage: String,
+      completed: Long,
+      total: Option[Long],
+      unit: String,
+      elapsedMillis: Long): Unit = {
+    val message =
+      s"index_build_stage_$event index=${quote(indexName)} partitionId=$partitionId " +
+        s"taskAttemptId=$taskAttemptId stage=${quote(stage)} completed=$completed " +
+        s"total=${total.map(_.toString).getOrElse("unknown")} unit=${quote(unit)} " +
+        s"elapsedMs=$elapsedMillis"
+    observe("log index build progress") {
+      logStatus(message)
+    }
+  }
+
+  private def quote(value: String): String = {
+    val escaped = normalize(value, "unknown")
+      .replace("\\", "\\\\")
+      .replace("\"", "\\\"")
+    "\"" + escaped + "\""
+  }
+
+  private def normalize(value: String, default: String): String =
+    Option(value).filter(_.nonEmpty).getOrElse(default)
+
+  private def observe(action: String)(callback: => Unit): Unit = {
+    try {
+      callback
+    } catch {
+      case NonFatal(e) =>
+        warn(s"Ignoring failure to $action for index '$indexName'", e)
+    }
+  }
+
+  private def updateMetric(action: String)(callback: => Unit): Unit =
+    metricUpdateLock.synchronized {
+      observe(action)(callback)
+    }
+
+  private def warn(message: String, cause: Throwable): Unit = {
+    try {
+      logWarningStatus(message, cause)
+    } catch {
+      case NonFatal(_) =>
+    }
+  }
 }
 
 /**
@@ -507,7 +758,8 @@ class ScalarSegmentIndexJob(
     nsImpl: Option[String],
     nsProps: Option[Map[String, String]],
     tableId: Option[List[String]],
-    initialStorageOpts: Option[Map[String, String]]) {
+    initialStorageOpts: Option[Map[String, String]],
+    progressMetrics: Option[IndexBuildProgressMetrics]) {
 
   def run(): Seq[Index] = {
     val indexType = IndexUtils.scalarSegmentIndexType(addIndexExec.method).getOrElse {
@@ -533,7 +785,8 @@ class ScalarSegmentIndexJob(
         nsImpl,
         nsProps,
         tableId,
-        initialStorageOpts)
+        initialStorageOpts,
+        progressMetrics)
     }.toSeq
 
     IndexUtils.runSegmentTasks(
@@ -559,7 +812,8 @@ case class ScalarSegmentIndexTask(
     namespaceImpl: Option[String],
     namespaceProperties: Option[Map[String, String]],
     tableId: Option[List[String]],
-    initialStorageOptions: Option[Map[String, String]]) extends Serializable {
+    initialStorageOptions: Option[Map[String, String]],
+    progressMetrics: Option[IndexBuildProgressMetrics]) extends Serializable {
 
   def execute(): String = {
     val readOptions = decode[LanceSparkReadOptions](encodedReadOptions)
@@ -588,7 +842,13 @@ case class ScalarSegmentIndexTask(
       .build()
 
     try {
-      encode(dataset.createIndex(indexOptions))
+      val createdIndex = progressMetrics match {
+        case Some(metrics) =>
+          val progress = SparkIndexBuildProgress.forCurrentTask(indexName, metrics)
+          dataset.createIndex(indexOptions, progress)
+        case None => dataset.createIndex(indexOptions)
+      }
+      encode(createdIndex)
     } finally {
       dataset.close()
     }

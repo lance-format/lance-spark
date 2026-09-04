@@ -291,6 +291,25 @@ The `CREATE INDEX` command returns the following information about the operation
 | `fragments_indexed` | Long   | The number of fragments that were indexed. |
 | `index_name`        | String | The name of the created index.         |
 
+For eager distributed `fts` / `inverted` builds, Lance Spark exposes Lance's internal build activity
+through two Spark SQL metrics:
+
+| Executed-plan key | Spark UI description | Meaning |
+|-------------------|----------------------|---------|
+| `indexBuildProgressUpdates` | `index build forward progress updates` | Strictly increasing `stageProgress` observations from Lance. |
+| `indexBuildCompletedStages` | `index build completed stages` | Distinct Lance stages completed by successful Spark task attempts. |
+
+These are activity counters, not completed row counts or percentages. Lance stages can measure
+different units, such as rows, partitions, or files, and some stages do not know their total in
+advance. Executor logs retain the exact stage-specific values and include the index name, Spark
+partition ID, task-attempt ID, stage, completed value, optional total, unit, and elapsed time.
+
+Executor heartbeats can make metric changes visible while a task is still building its segment.
+Retries or speculative attempts can appear transiently in the live UI; final metric values use
+Spark's successful-attempt accumulator semantics. An unchanged counter means only that Lance has
+reported no new callback activity—it does not prove that the native operation is stuck. Progress
+reporting is informational and does not change command output or atomic segment publication.
+
 ## When to Use an Index
 
 Consider creating an index when:
