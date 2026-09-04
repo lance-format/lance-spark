@@ -190,11 +190,7 @@ public class BlobReferenceResolver implements AutoCloseable {
   @Override
   public void close() {
     for (Dataset dataset : datasetCache.values()) {
-      try {
-        dataset.close();
-      } catch (Exception e) {
-        // Best effort cleanup
-      }
+      CloseableUtil.closeQuietly(dataset);
     }
     datasetCache.clear();
   }
