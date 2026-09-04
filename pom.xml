@@ -149,6 +149,7 @@
         <module>lance-spark-bundle-4.1_2.13</module>
         <module>lance-spark-4.2_2.13</module>
         <module>lance-spark-bundle-4.2_2.13</module>
+        <module>lance-spark-knn-4.2_2.13</module>
     </modules>
 
     <dependencyManagement>

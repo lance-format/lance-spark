@@ -58,6 +58,27 @@ The following features require the Lance Spark SQL extension to be enabled:
 - [OPTIMIZE](operations/ddl/optimize.md) - Compact table fragments for improved query performance
 - [VACUUM](operations/ddl/vacuum.md) - Remove old versions and reclaim storage space
 
+### Indexed Nearest-Neighbor Join Extension
+
+The `APPROX NEAREST` join (Spark 4.2 `APPROX NEAREST ... BY DISTANCE` / `BY SIMILARITY` syntax) can
+be rewritten to probe the Lance vector index instead of running a brute-force cross product. This is
+a **separate** extension, packaged in the `lance-spark-knn-4.2` module, and requires Spark 4.2 or
+later. Enable it alongside (or instead of) the connector extension:
+
+```
+spark.sql.extensions          = org.lance.spark.knn.extensions.LanceKnnSparkSessionExtensions
+spark.lance.knn.indexedNearestByJoin.enabled = true
+```
+
+| Configuration                                    | Type    | Description                                                                     |
+|--------------------------------------------------|---------|---------------------------------------------------------------------------------|
+| `spark.lance.knn.indexedNearestByJoin.enabled`   | Boolean | Enable the indexed rewrite. Default `false` (falls through to Spark brute force). |
+| `spark.lance.knn.nprobes`                         | Integer | IVF partitions to probe per query. Higher improves recall at more compute.      |
+| `spark.lance.knn.refineFactor`                    | Integer | IVF-PQ refine factor — fetch `k * refineFactor` candidates and re-rank exactly.  |
+
+See [APPROX NEAREST Join](operations/dql/nearest-neighbor-join.md) for usage, supported ranking
+functions, and `WHERE` pushdown.
+
 ## Basic Setup
 
 Configure Spark with the `LanceNamespaceSparkCatalog` by setting the appropriate Spark catalog implementation
