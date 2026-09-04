@@ -47,6 +47,9 @@ object ShowIndexesOutputType {
       StructField("num_indexed_fragments", DataTypes.LongType, nullable = true),
       StructField("num_indexed_rows", DataTypes.LongType, nullable = true),
       StructField("num_unindexed_fragments", DataTypes.LongType, nullable = true),
-      StructField("num_unindexed_rows", DataTypes.LongType, nullable = true)))
+      StructField("num_unindexed_rows", DataTypes.LongType, nullable = true),
+      StructField("indexed_percent", DataTypes.DoubleType, nullable = true),
+      StructField("num_segments", DataTypes.LongType, nullable = true),
+      StructField("size_bytes", DataTypes.LongType, nullable = true)))
     .map(field => AttributeReference(field.name, field.dataType, field.nullable, field.metadata)())
 }

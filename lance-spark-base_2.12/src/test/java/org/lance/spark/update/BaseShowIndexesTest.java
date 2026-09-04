@@ -13,6 +13,7 @@
  */
 package org.lance.spark.update;
 
+import org.lance.index.Index;
 import org.lance.index.IndexOptions;
 import org.lance.index.IndexParams;
 import org.lance.index.IndexType;
@@ -112,7 +113,7 @@ public abstract class BaseShowIndexesTest {
     Dataset<Row> result = spark.sql(String.format("show indexes from %s", fullTable));
 
     Assertions.assertEquals(
-        "StructType(StructField(name,StringType,true),StructField(fields,ArrayType(StringType,true),true),StructField(index_type,StringType,true),StructField(num_indexed_fragments,LongType,true),StructField(num_indexed_rows,LongType,true),StructField(num_unindexed_fragments,LongType,true),StructField(num_unindexed_rows,LongType,true))",
+        "StructType(StructField(name,StringType,true),StructField(fields,ArrayType(StringType,true),true),StructField(index_type,StringType,true),StructField(num_indexed_fragments,LongType,true),StructField(num_indexed_rows,LongType,true),StructField(num_unindexed_fragments,LongType,true),StructField(num_unindexed_rows,LongType,true),StructField(indexed_percent,DoubleType,true),StructField(num_segments,LongType,true),StructField(size_bytes,LongType,true))",
         result.schema().toString());
 
     List<Row> rows = result.collectAsList();
@@ -138,6 +139,69 @@ public abstract class BaseShowIndexesTest {
     // num_indexed_rows should be at least 1
     long numIndexedRows = row.getLong(4);
     Assertions.assertTrue(numIndexedRows >= 1L, "num_indexed_rows should be at least 1");
+
+    // a freshly created index covers every row
+    Assertions.assertEquals(100.0d, row.getDouble(7), 1e-9, "indexed_percent should be 100");
+
+    // one logical index backed by at least one physical segment
+    Assertions.assertTrue(row.getLong(8) >= 1L, "num_segments should be at least 1");
+
+    // a built index occupies storage
+    Assertions.assertTrue(row.getLong(9) > 0L, "size_bytes should be positive");
+  }
+
+  @Test
+  public void testShowIndexesAggregatesAcrossSegments() {
+    spark.sql(String.format("create table %s (id int, name string) using lance", fullTable));
+    for (int batch = 0; batch < 4; batch++) {
+      spark.sql(
+          String.format(
+              "insert into %s values (%d, 'n%d'), (%d, 'n%d')",
+              fullTable, batch * 2, batch * 2, batch * 2 + 1, batch * 2 + 1));
+    }
+    spark.sql(
+        String.format(
+            "alter table %s create index test_index using btree (id) with (num_segments = 2)",
+            fullTable));
+
+    long expectedSize = 0L;
+    int segmentCount;
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.builder().datasetUri(tableDir).build())
+            .build()) {
+      List<Index> segments =
+          dataset.getIndexes().stream()
+              .filter(index -> "test_index".equals(index.name()))
+              .collect(Collectors.toList());
+      segmentCount = segments.size();
+      for (Index segment : segments) {
+        expectedSize += segment.getSizeBytes().orElse(0L);
+      }
+    }
+    Assertions.assertEquals(
+        2, segmentCount, "num_segments = 2 should have produced two physical segments");
+
+    Row row = spark.sql(String.format("show indexes from %s", fullTable)).collectAsList().get(0);
+
+    Assertions.assertEquals(2L, row.getLong(8), "num_segments must count every physical segment");
+    Assertions.assertEquals(
+        expectedSize,
+        row.getLong(9),
+        "size_bytes must sum every segment's files, not just the first");
+    Assertions.assertEquals(
+        100.0d, row.getDouble(7), 1e-9, "a freshly built index covers every row");
+  }
+
+  @Test
+  public void testShowIndexesReportsNullPercentForEmptyTable() {
+    spark.sql(String.format("create table %s (id int, text string) using lance;", fullTable));
+    spark.sql(String.format("alter table %s create index test_index using btree (id)", fullTable));
+
+    Row row = spark.sql(String.format("show indexes from %s", fullTable)).collectAsList().get(0);
+
+    Assertions.assertTrue(row.isNullAt(7), "indexed_percent should be null for an empty table");
+    Assertions.assertEquals(0L, row.getLong(4), "no rows can be indexed");
+    Assertions.assertEquals(0L, row.getLong(6), "no rows can be unindexed");
   }
 
   @Test
