@@ -25,8 +25,8 @@ import org.lance.spark.utils.{BlobReferenceResolver, BlobUtils, Float16Utils}
 import scala.collection.JavaConverters._
 
 /**
- * Custom ArrowWriter implementation that supports converting Spark DataFrame
- * Array<Float/Double> columns to Arrow FixedSizeList for vector embeddings.
+ * Custom ArrowWriter implementation that supports writing Spark ArrayType columns to Arrow
+ * FixedSizeList vectors.
  *
  * This class is copied and modified from Apache Spark's ArrowWriter
  * (https://github.com/apache/spark/blob/master/sql/catalyst/src/main/scala/org/apache/spark/sql/execution/arrow/ArrowWriter.scala)
@@ -77,7 +77,7 @@ object LanceArrowWriter {
       metadata: org.apache.spark.sql.types.Metadata = null,
       resolver: BlobReferenceResolver = null): LanceArrowFieldWriter = {
     (sparkType, vector) match {
-      case (ArrayType(elementType: NumericType, _), vector: FixedSizeListVector) =>
+      case (ArrayType(elementType, _), vector: FixedSizeListVector) =>
         val elementWriter = createFieldWriter(vector.getDataVector(), elementType, null, resolver)
         new FixedSizeListWriter(vector, elementWriter)
 
@@ -85,11 +85,19 @@ object LanceArrowWriter {
         val elementWriter = createFieldWriter(vector.getDataVector(), elementType, null, resolver)
         new ArrayWriter(vector, elementWriter)
 
+      case (ArrayType(elementType, _), vector: LargeListVector) =>
+        val elementWriter = createFieldWriter(vector.getDataVector(), elementType, null, resolver)
+        new LargeArrayWriter(vector, elementWriter)
+
       case (BooleanType, vector: BitVector) => new BooleanWriter(vector)
       case (ByteType, vector: TinyIntVector) => new ByteWriter(vector)
       case (ShortType, vector: SmallIntVector) => new ShortWriter(vector)
+      case (ShortType, vector: UInt1Vector) => new ShortToUnsignedByteWriter(vector)
       case (IntegerType, vector: IntVector) => new IntegerWriter(vector)
+      case (IntegerType, vector: UInt2Vector) => new IntToUnsignedShortWriter(vector)
+      case (IntegerType, vector: UInt4Vector) => new UnsignedIntWriter(vector)
       case (LongType, vector: BigIntVector) => new LongWriter(vector)
+      case (LongType, vector: UInt4Vector) => new LongToUnsignedIntWriter(vector)
       case (LongType, vector: UInt8Vector) => new UnsignedLongWriter(vector)
       case (FloatType, vector)
           if vector.getClass.getName == "org.apache.arrow.vector.Float2Vector" =>
@@ -127,7 +135,9 @@ object LanceArrowWriter {
           null,
           resolver)
         new MapWriter(vector, structVector, keyWriter, valueWriter)
-      case (BinaryType, vector: StructVector) if BlobUtils.isBlobV2SparkMetadata(metadata) =>
+      case (BinaryType, vector: StructVector)
+          if BlobUtils.isBlobV2SparkMetadata(metadata) ||
+            BlobUtils.isBlobV2ArrowField(vector.getField) =>
         new BlobV2StructWriter(
           vector,
           createFieldWriter(vector.getChild("data"), BinaryType, null, resolver))
@@ -208,9 +218,13 @@ private[arrow] class FixedSizeListWriter(
     val elementWriter: LanceArrowFieldWriter) extends LanceArrowFieldWriter {
 
   override def setNull(): Unit = {
-    // Child vector must reserve listSize slots even for null rows,
-    // otherwise subsequent rows write to wrong offsets.
-    elementWriter.count += valueVector.getListSize()
+    // Child vectors must reserve listSize null slots even for null rows. Invoke the child writer for
+    // every slot so nested writers advance their descendants as well.
+    var i = 0
+    while (i < valueVector.getListSize()) {
+      elementWriter.writeNull()
+      i += 1
+    }
     valueVector.setNull(count)
   }
 
@@ -289,6 +303,62 @@ private[arrow] class UnsignedLongWriter(val valueVector: UInt8Vector)
   override def setNull(): Unit = {}
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
     valueVector.setSafe(count, input.getLong(ordinal))
+  }
+}
+
+/** Writes Spark ShortType data into a UInt1Vector (uint8). */
+private[arrow] class ShortToUnsignedByteWriter(val valueVector: UInt1Vector)
+  extends LanceArrowFieldWriter {
+  override def setNull(): Unit = {}
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    val value = input.getShort(ordinal)
+    if (value < 0 || value > 255) {
+      throw new ArithmeticException(
+        s"Value $value out of range for uint8 column '$name' [0, 255]")
+    }
+    valueVector.setSafe(count, value.toByte)
+  }
+}
+
+/** Writes Spark IntegerType data into a UInt2Vector (uint16). */
+private[arrow] class IntToUnsignedShortWriter(val valueVector: UInt2Vector)
+  extends LanceArrowFieldWriter {
+  override def setNull(): Unit = {}
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    val value = input.getInt(ordinal)
+    if (value < 0 || value > 65535) {
+      throw new ArithmeticException(
+        s"Value $value out of range for uint16 column '$name' [0, 65535]")
+    }
+    valueVector.setSafe(count, value.toChar)
+  }
+}
+
+/** Writes Spark IntegerType data into a UInt4Vector (uint32). */
+private[arrow] class UnsignedIntWriter(val valueVector: UInt4Vector)
+  extends LanceArrowFieldWriter {
+  override def setNull(): Unit = {}
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    val value = input.getInt(ordinal)
+    if (value < 0) {
+      throw new ArithmeticException(
+        s"Value $value out of range for uint32 column '$name' [0, 4294967295]")
+    }
+    valueVector.setSafe(count, value)
+  }
+}
+
+/** Writes Spark LongType data into a UInt4Vector (uint32). Used when Spark widens uint32 to Long. */
+private[arrow] class LongToUnsignedIntWriter(val valueVector: UInt4Vector)
+  extends LanceArrowFieldWriter {
+  override def setNull(): Unit = {}
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    val value = input.getLong(ordinal)
+    if (value < 0L || value > 4294967295L) {
+      throw new ArithmeticException(
+        s"Value $value out of range for uint32 column '$name' [0, 4294967295]")
+    }
+    valueVector.setSafe(count, value.toInt)
   }
 }
 
@@ -445,6 +515,31 @@ private[arrow] class ArrayWriter(
   }
 }
 
+private[arrow] class LargeArrayWriter(
+    val valueVector: LargeListVector,
+    val elementWriter: LanceArrowFieldWriter) extends LanceArrowFieldWriter {
+  override def setNull(): Unit = valueVector.setNull(count)
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    val array = input.getArray(ordinal)
+    var i = 0
+    valueVector.startNewValue(count.toLong)
+    while (i < array.numElements()) {
+      elementWriter.write(array, i)
+      i += 1
+    }
+    valueVector.endValue(count, array.numElements().toLong)
+  }
+  override def finish(): Unit = {
+    super.finish()
+    elementWriter.finish()
+  }
+  override def estimatedBufferedBytes: Long = elementWriter.estimatedBufferedBytes
+  override def reset(): Unit = {
+    super.reset()
+    elementWriter.reset()
+  }
+}
+
 private[arrow] class MapWriter(
     val valueVector: MapVector,
     val structVector: StructVector,
@@ -492,18 +587,18 @@ private[arrow] class BlobV2StructWriter(
 
   override def write(input: SpecializedGetters, ordinal: Int): Unit = {
     if (input.isNullAt(ordinal)) {
-      dataWriter.write(input, ordinal)
-      valueVector.setNull(count)
+      writeNull()
     } else {
       valueVector.setIndexDefined(count)
       dataWriter.write(input, ordinal)
+      count += 1
     }
-    count += 1
   }
 
-  // Rows are written through write(). setNull and setValue are no-ops so child counts stay
-  // owned by dataWriter.write().
-  override def setNull(): Unit = ()
+  override def setNull(): Unit = {
+    dataWriter.writeNull()
+    valueVector.setNull(count)
+  }
 
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = ()
 
@@ -545,8 +640,7 @@ private[arrow] class StructWriter(
     // index misalignment for all subsequent rows.
     var i = 0
     while (i < children.length) {
-      children(i).setNull()
-      children(i).count += 1
+      children(i).writeNull()
       i += 1
     }
     valueVector.setNull(count)

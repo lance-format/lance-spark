@@ -83,37 +83,19 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
   /** Resolves blob references during writes; null when blob resolution is not needed. */
   private final BlobReferenceResolver resolver;
 
+  /** Constructor with pre-existing Arrow schema and all tuning parameters. */
   public SemaphoreArrowBatchWriteBuffer(
-      BufferAllocator allocator,
       Schema schema,
       StructType sparkSchema,
       int batchSize,
       long maxBatchBytes,
       BlobReferenceResolver resolver) {
-    // Pass a child allocator to ArrowReader so VectorSchemaRoot allocation is tracked
-    super(allocator.newChildAllocator("semaphore-buffer", 0, Long.MAX_VALUE));
-    Preconditions.checkNotNull(schema);
-    Preconditions.checkArgument(batchSize > 0);
-    Preconditions.checkArgument(maxBatchBytes > 0, "maxBatchBytes must be positive");
-    this.schema = schema;
-    this.sparkSchema = sparkSchema;
-    this.batchSize = batchSize;
-    this.maxBatchBytes = maxBatchBytes;
-    this.resolver = resolver;
-    // Start with count = batchSize so the writer blocks on canWrite.await() until the
-    // reader's prepareLoadNextBatch() initializes arrowWriter and resets count to 0.
-    this.count = batchSize;
+    this(LanceRuntime.allocator(), schema, sparkSchema, batchSize, maxBatchBytes, resolver);
   }
 
-  public SemaphoreArrowBatchWriteBuffer(
-      BufferAllocator allocator, Schema schema, StructType sparkSchema, int batchSize) {
-    this(
-        allocator,
-        schema,
-        sparkSchema,
-        batchSize,
-        LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES,
-        null);
+  /** Constructor with pre-existing Arrow schema, using LanceRuntime allocator. */
+  public SemaphoreArrowBatchWriteBuffer(Schema schema, StructType sparkSchema, int batchSize) {
+    this(schema, sparkSchema, batchSize, LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES, null);
   }
 
   /** Simplified constructor that uses LanceRuntime allocator and converts Spark schema to Arrow. */
@@ -146,6 +128,47 @@ public class SemaphoreArrowBatchWriteBuffer extends ArrowBatchWriteBuffer {
         batchSize,
         maxBatchBytes,
         resolver);
+  }
+
+  /**
+   * @deprecated Retained for source and binary compatibility.
+   */
+  @Deprecated
+  public SemaphoreArrowBatchWriteBuffer(
+      BufferAllocator allocator,
+      Schema schema,
+      StructType sparkSchema,
+      int batchSize,
+      long maxBatchBytes,
+      BlobReferenceResolver resolver) {
+    // Pass a child allocator to ArrowReader so VectorSchemaRoot allocation is tracked
+    super(allocator.newChildAllocator("semaphore-buffer", 0, Long.MAX_VALUE));
+    Preconditions.checkNotNull(schema);
+    Preconditions.checkArgument(batchSize > 0);
+    Preconditions.checkArgument(maxBatchBytes > 0, "maxBatchBytes must be positive");
+    this.schema = schema;
+    this.sparkSchema = sparkSchema;
+    this.batchSize = batchSize;
+    this.maxBatchBytes = maxBatchBytes;
+    this.resolver = resolver;
+    // Start with count = batchSize so the writer blocks on canWrite.await() until the
+    // reader's prepareLoadNextBatch() initializes arrowWriter and resets count to 0.
+    this.count = batchSize;
+  }
+
+  /**
+   * @deprecated Retained for source and binary compatibility.
+   */
+  @Deprecated
+  public SemaphoreArrowBatchWriteBuffer(
+      BufferAllocator allocator, Schema schema, StructType sparkSchema, int batchSize) {
+    this(
+        allocator,
+        schema,
+        sparkSchema,
+        batchSize,
+        LanceSparkWriteOptions.DEFAULT_MAX_BATCH_BYTES,
+        null);
   }
 
   @Override

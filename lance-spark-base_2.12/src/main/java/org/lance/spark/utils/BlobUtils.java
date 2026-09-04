@@ -146,6 +146,14 @@ public class BlobUtils {
         && ARROW_EXTENSION_BLOB_V2.equals(metadata.getString(ARROW_EXTENSION_NAME_KEY));
   }
 
+  /** Returns true when an Arrow field carries the lance-core blob v2 extension. */
+  public static boolean isBlobV2ArrowField(org.apache.arrow.vector.types.pojo.Field field) {
+    if (field == null || field.getMetadata() == null) {
+      return false;
+    }
+    return ARROW_EXTENSION_BLOB_V2.equals(field.getMetadata().get(ARROW_EXTENSION_NAME_KEY));
+  }
+
   /** Names of the blob v2 columns in {@code schema}, identified by the lance.blob.v2 extension. */
   public static Set<String> blobV2ColumnNames(StructType schema) {
     Set<String> names = new HashSet<>();

@@ -26,6 +26,7 @@ import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.utils.BlobSourceContext;
+import org.lance.spark.utils.SchemaCompatibility;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -50,6 +51,14 @@ public class LanceBatchWrite implements BatchWrite {
   private final StructType schema;
   private LanceSparkWriteOptions writeOptions;
   private final boolean overwrite;
+  private final boolean schemaPreservingOverwrite;
+
+  /**
+   * Original Arrow Schema from the existing dataset. Used in overwrite mode to preserve the exact
+   * schema (including unsigned types, FixedSizeList, etc.) that would otherwise be lost during
+   * Spark to Arrow type conversion.
+   */
+  private final Schema originalArrowSchema;
 
   /**
    * Initial storage options fetched from namespace.describeTable() on the driver. These are passed
@@ -113,6 +122,8 @@ public class LanceBatchWrite implements BatchWrite {
       Map<String, BlobSourceContext> blobSourceContexts) {
     this.schema = schema;
     this.overwrite = overwrite;
+    this.schemaPreservingOverwrite =
+        stagedCommit == null && (overwrite || writeOptions.isOverwrite());
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
@@ -123,20 +134,50 @@ public class LanceBatchWrite implements BatchWrite {
     this.blobSourceContexts =
         blobSourceContexts == null ? java.util.Collections.emptyMap() : blobSourceContexts;
 
-    // For staged operations, the dataset is managed by StagedCommit.
-    // For non-staged operations, pin the dataset version for OCC.
+    // Explicit overwrite schema-preservation is only for non-staged truncate-overwrite.
+    // Staged create/replace/create-or-replace should not reuse existing schema.
     if (stagedCommit != null) {
       this.writeOptions = writeOptions;
+      this.originalArrowSchema = null;
     } else {
       try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
+        Schema datasetSchema =
+            Objects.requireNonNull(ds.getSchema(), "Failed to get schema from existing dataset");
+        if (!schemaPreservingOverwrite
+            && writeOptions.isUseLargeVarTypes()
+            && SchemaCompatibility.hasSmallVarTypes(datasetSchema)) {
+          throw new IllegalArgumentException(
+              "use_large_var_types cannot change an existing table schema during append. "
+                  + "Create the table with large variable-width fields or use a full-table "
+                  + "overwrite to promote them.");
+        }
+        this.originalArrowSchema =
+            schemaPreservingOverwrite && writeOptions.isUseLargeVarTypes()
+                ? SchemaCompatibility.withLargeVarTypes(datasetSchema)
+                : datasetSchema;
         this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
         logger.debug("Resolved dataset ref for batch write: {}", this.writeOptions.getRef());
+      }
+      // Early-fail on driver: every write to an existing dataset uses its Arrow schema.
+      Schema sparkSchema =
+          LanceArrowUtils.toArrowSchema(
+              schema, "UTC", true, this.writeOptions.isUseLargeVarTypes());
+      if (!SchemaCompatibility.isCompatible(originalArrowSchema, sparkSchema)) {
+        throw new IllegalArgumentException(
+            "Write schema is incompatible with the existing Lance schema. "
+                + "Writes must not change schema type families.");
       }
     }
   }
 
   @Override
   public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
+    // In non-staged overwrite mode, pass original schema JSON so executor writes with the exact
+    // Arrow types that commit() will place in the manifest.
+    String originalSchemaJson = null;
+    if (originalArrowSchema != null) {
+      originalSchemaJson = originalArrowSchema.toJson();
+    }
     return new LanceDataWriter.WriterFactory(
         schema,
         writeOptions,
@@ -145,7 +186,8 @@ public class LanceBatchWrite implements BatchWrite {
         namespaceProperties,
         tableId,
         shardingSpec,
-        blobSourceContexts);
+        blobSourceContexts,
+        originalSchemaJson);
   }
 
   @Override
@@ -166,6 +208,16 @@ public class LanceBatchWrite implements BatchWrite {
     Schema arrowSchema =
         LanceArrowUtils.toArrowSchema(schema, "UTC", true, writeOptions.isUseLargeVarTypes());
     boolean isOverwrite = overwrite || writeOptions.isOverwrite();
+
+    // In non-staged overwrite mode, use the exact schema supplied to the executor writers.
+    // Compatibility was already validated in the constructor (early-fail on driver).
+    if (schemaPreservingOverwrite) {
+      if (originalArrowSchema == null) {
+        throw new IllegalStateException(
+            "Overwrite requires existing Lance schema, but none was found.");
+      }
+      arrowSchema = originalArrowSchema;
+    }
 
     // Boxed: null means unset (inherit in lance-core); see LanceSparkWriteOptions.
     final Boolean enableStableRowIds = writeOptions.getEnableStableRowIds();
