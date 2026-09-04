@@ -169,6 +169,18 @@ public class LanceScanBuilder
         return localScan;
       }
 
+      // Reject _score without an active FTS query. The metadata column is advertised
+      // unconditionally (analyzer resolves it before the FTS rule runs), so validation
+      // must happen here at build time, after the optimizer fixed-point has finalized
+      // the relation options.
+      if (hasScoreColumn(schema) && readOptions.getFullTextQuery() == null) {
+        throw new IllegalArgumentException(
+            "Column '_score' requires a full-text search predicate (lance_match, "
+                + "lance_match_phrase, or lance_multi_match) in the WHERE clause. "
+                + "_score is a relevance score computed by the Lance FTS index and has no "
+                + "value without an active full-text query.");
+      }
+
       // Namespace-configured full-text search executes server-side via queryTable (single
       // partition). A full-text query without a namespace, or against a catalog-only namespace such
       // as Glue that does not implement queryTable, falls through to the local per-fragment scan
@@ -425,12 +437,9 @@ public class LanceScanBuilder
 
   @Override
   public boolean pushTopN(SortOrder[] orders, int limit) {
-    // The Order by operator will use compute thread in lance.
-    // So it's better to have an option to enable it.
     if (!readOptions.isTopNPushDown() || hasResidualPredicates) {
       return false;
     }
-    this.limit = Optional.of(limit);
     List<ColumnOrdering> topNSortOrders = new ArrayList<>();
     for (SortOrder sortOrder : orders) {
       ColumnOrdering.Builder builder = new ColumnOrdering.Builder();
@@ -440,9 +449,14 @@ public class LanceScanBuilder
         return false;
       }
       FieldReference reference = (FieldReference) sortOrder.expression();
-      builder.setColumnName(reference.fieldNames()[0]);
+      String columnName = reference.fieldNames()[0];
+      if (columnName.equals(LanceConstant.SCORE)) {
+        return false;
+      }
+      builder.setColumnName(columnName);
       topNSortOrders.add(builder.build());
     }
+    this.limit = Optional.of(limit);
     this.topNSortOrders = Optional.of(topNSortOrders);
     return true;
   }
@@ -477,6 +491,15 @@ public class LanceScanBuilder
       return true;
     }
 
+    return false;
+  }
+
+  private static boolean hasScoreColumn(StructType schema) {
+    for (StructField field : schema.fields()) {
+      if (field.name().equals(LanceConstant.SCORE)) {
+        return true;
+      }
+    }
     return false;
   }
 

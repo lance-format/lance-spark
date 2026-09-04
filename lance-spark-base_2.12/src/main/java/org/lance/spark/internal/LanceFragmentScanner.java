@@ -111,6 +111,9 @@ public class LanceFragmentScanner implements AutoCloseable {
       boolean hasBlobColumns = !blobColumnNames.isEmpty();
 
       List<String> projectedColumns = getColumnNames(scanSchema);
+      if (readOptions.getFullTextQuery() != null && hasField(scanSchema, LanceConstant.SCORE)) {
+        projectedColumns.add(LanceConstant.SCORE);
+      }
       if (projectedColumns.isEmpty() && scanSchema.isEmpty()) {
         scanOptions.withRowId(true);
       }
@@ -132,6 +135,7 @@ public class LanceFragmentScanner implements AutoCloseable {
       scanOptions.batchSize(readOptions.getBatchSize());
       if (readOptions.getFullTextQuery() != null) {
         scanOptions.fullTextQuery(readOptions.getFullTextQuery());
+        scanOptions.disableScoringAutoprojection(true);
       }
       scanOptions.useScalarIndex(readOptions.isUseScalarIndex());
       if (inputPartition.getLimit().isPresent()) {

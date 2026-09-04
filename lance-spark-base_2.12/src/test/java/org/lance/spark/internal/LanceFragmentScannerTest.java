@@ -150,8 +150,8 @@ public class LanceFragmentScannerTest {
 
   @Test
   public void testGetColumnNamesExcludesScore() throws Exception {
-    // _score is auto-projected by Lance when a full-text query is set, so it must not be requested
-    // in the native column projection.
+    // getColumnNames() strips _score unconditionally; the caller (create()) conditionally re-adds
+    // it when FTS is active. This test validates the stripping behavior only.
     StructType schema =
         new StructType(
             new StructField[] {
