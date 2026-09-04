@@ -19,6 +19,7 @@ import org.apache.spark.sql.catalyst.plans.logical.ShowIndexesOutputType
 import org.apache.spark.sql.catalyst.util.GenericArrayData
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.unsafe.types.UTF8String
+import org.lance.index.Index
 import org.lance.spark.LanceDataset
 import org.lance.spark.utils.{FieldPathUtils, Utils}
 
@@ -29,6 +30,14 @@ object ShowIndexesExec {
 
   private def isSystemIndex(indexName: String): Boolean =
     indexName != null && SystemIndexNames.exists(_.equalsIgnoreCase(indexName))
+
+  private[v2] def totalSizeBytes(indexes: Seq[Index]): java.lang.Long = {
+    if (indexes.exists(index => !index.getSizeBytes.isPresent)) {
+      null
+    } else {
+      java.lang.Long.valueOf(indexes.map(_.getSizeBytes.get().longValue()).sum)
+    }
+  }
 }
 
 /**
@@ -53,15 +62,15 @@ case class ShowIndexesExec(
 
     val dataset = Utils.openDatasetBuilder(readOptions).build()
     try {
-      val indexes = dataset.getIndexes.asScala.toSeq
+      val indexGroups = dataset.getIndexes.asScala.toSeq
         .filterNot(idx => ShowIndexesExec.isSystemIndex(idx.name()))
         .groupBy(_.name())
         .toSeq
         .sortBy(_._1)
-        .map(_._2.head)
       val lanceSchema = dataset.getLanceSchema()
 
-      indexes.map { idx =>
+      indexGroups.map { case (name, indexSegments) =>
+        val idx = indexSegments.head
         val fieldIds = idx.fields()
         val fieldNamesArray =
           if (fieldIds == null) {
@@ -75,7 +84,6 @@ case class ShowIndexesExec(
             new GenericArrayData(names.toArray[AnyRef])
           }
 
-        val name = idx.name()
         val stats = dataset.getIndexStatistics(name)
         val indexTypeValue = stats.get("index_type")
         val indexTypeUtf8 =
@@ -102,6 +110,8 @@ case class ShowIndexesExec(
           UTF8String.fromString(name),
           fieldNamesArray,
           indexTypeUtf8,
+          indexSegments.size.toLong,
+          ShowIndexesExec.totalSizeBytes(indexSegments),
           numIndexedFragments,
           numIndexedRows,
           numUnindexedFragments,

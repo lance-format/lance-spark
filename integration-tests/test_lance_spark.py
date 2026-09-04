@@ -864,14 +864,19 @@ class TestDDLIndex:
             )
         """)
 
-        data = [(i, f"Name{i}", float(i * 10)) for i in range(100)]
-        df = spark.createDataFrame(data, ["id", "name", "value"])
-        df.writeTo("default.test_table").append()
+        first_batch = [(i, f"Name{i}", float(i * 10)) for i in range(50)]
+        second_batch = [(i, f"Name{i}", float(i * 10)) for i in range(50, 100)]
+        spark.createDataFrame(first_batch, ["id", "name", "value"]).writeTo(
+            "default.test_table"
+        ).append()
+        spark.createDataFrame(second_batch, ["id", "name", "value"]).writeTo(
+            "default.test_table"
+        ).append()
 
         result = spark.sql("""
             ALTER TABLE default.test_table
             CREATE INDEX idx_id_zonemap USING zonemap (id)
-            WITH (rows_per_zone = 8)
+            WITH (rows_per_zone = 8, num_segments = 2)
         """).collect()
 
         assert len(result) == 1
@@ -881,8 +886,10 @@ class TestDDLIndex:
             SHOW INDEXES IN default.test_table
         """).collect()
         zonemap_rows = [row for row in indexes if row["name"] == "idx_id_zonemap"]
-        assert len(zonemap_rows) >= 1
+        assert len(zonemap_rows) == 1
         assert zonemap_rows[0]["index_type"] == "zonemap"
+        assert zonemap_rows[0]["segment_count"] == 2
+        assert zonemap_rows[0]["total_size_bytes"] > 0
 
         query_result = spark.sql("""
             SELECT * FROM default.test_table WHERE id = 50

@@ -107,16 +107,20 @@ public abstract class BaseShowIndexesTest {
     prepareDataset();
 
     // Create a B-tree index on id
-    spark.sql(String.format("alter table %s create index test_index using btree (id)", fullTable));
+    spark.sql(
+        String.format(
+            "alter table %s create index test_index using btree (id) "
+                + "with (build_mode='fragment', num_segments=2)",
+            fullTable));
 
     Dataset<Row> result = spark.sql(String.format("show indexes from %s", fullTable));
 
     Assertions.assertEquals(
-        "StructType(StructField(name,StringType,true),StructField(fields,ArrayType(StringType,true),true),StructField(index_type,StringType,true),StructField(num_indexed_fragments,LongType,true),StructField(num_indexed_rows,LongType,true),StructField(num_unindexed_fragments,LongType,true),StructField(num_unindexed_rows,LongType,true))",
+        "StructType(StructField(name,StringType,true),StructField(fields,ArrayType(StringType,true),true),StructField(index_type,StringType,true),StructField(segment_count,LongType,false),StructField(total_size_bytes,LongType,true),StructField(num_indexed_fragments,LongType,true),StructField(num_indexed_rows,LongType,true),StructField(num_unindexed_fragments,LongType,true),StructField(num_unindexed_rows,LongType,true))",
         result.schema().toString());
 
     List<Row> rows = result.collectAsList();
-    Assertions.assertFalse(rows.isEmpty(), "Expected at least one index row");
+    Assertions.assertEquals(1, rows.size(), "Expected one logical index row");
 
     Row row = rows.get(0);
 
@@ -131,12 +135,33 @@ public abstract class BaseShowIndexesTest {
     // index_type should be btree
     Assertions.assertEquals("btree", row.getString(2));
 
+    List<org.lance.index.Index> segments;
+    try (var dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.builder().datasetUri(tableDir).build())
+            .build()) {
+      segments =
+          dataset.getIndexes().stream()
+              .filter(index -> "test_index".equals(index.name()))
+              .collect(Collectors.toList());
+    }
+    Assertions.assertEquals(2, segments.size(), "Expected two physical index segments");
+    Assertions.assertEquals((long) segments.size(), row.getLong(3));
+    long expectedTotalSize =
+        segments.stream()
+            .mapToLong(
+                segment ->
+                    segment
+                        .getSizeBytes()
+                        .orElseThrow(() -> new AssertionError("Expected segment size metadata")))
+            .sum();
+    Assertions.assertEquals(expectedTotalSize, row.getLong(4));
+
     // num_indexed_fragments should be at least 1
-    long numIndexedFragments = row.getLong(3);
+    long numIndexedFragments = row.getLong(5);
     Assertions.assertTrue(numIndexedFragments >= 1L, "num_indexed_fragments should be at least 1");
 
     // num_indexed_rows should be at least 1
-    long numIndexedRows = row.getLong(4);
+    long numIndexedRows = row.getLong(6);
     Assertions.assertTrue(numIndexedRows >= 1L, "num_indexed_rows should be at least 1");
   }
 
@@ -164,7 +189,9 @@ public abstract class BaseShowIndexesTest {
     Assertions.assertEquals("test_index", row.getString(0));
     Assertions.assertEquals("btree", row.getString(2));
     Assertions.assertTrue(row.getLong(3) >= 1L);
-    Assertions.assertTrue(row.getLong(4) >= 1L);
+    Assertions.assertTrue(row.getLong(4) > 0L);
+    Assertions.assertTrue(row.getLong(5) >= 1L);
+    Assertions.assertTrue(row.getLong(6) >= 1L);
   }
 
   @Test
@@ -205,5 +232,7 @@ public abstract class BaseShowIndexesTest {
     Assertions.assertEquals(1, rows.size());
     Assertions.assertEquals("test_index", rows.get(0).getString(0));
     Assertions.assertEquals("btree", rows.get(0).getString(2));
+    Assertions.assertEquals(1L, rows.get(0).getLong(3));
+    Assertions.assertTrue(rows.get(0).getLong(4) > 0L);
   }
 }
