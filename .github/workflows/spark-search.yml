@@ -24,7 +24,10 @@ on:
       - "Makefile"
       - "docker/**"
       - "integration-tests/**"
+      - "lance-spark-base_2.12/src/main/java/org/lance/spark/LanceDataset.java"
       - "lance-spark-base_2.12/src/main/java/org/lance/spark/search/**"
+      - "lance-spark-base_2.12/src/main/java/org/lance/spark/write/*ColumnsBackfill*.java"
+      - "lance-spark-base_2.12/src/main/scala/org/apache/spark/sql/execution/datasources/v2/*ColumnsBackfillExec.scala"
       - "lance-spark-base_2.12/src/main/scala/org/lance/spark/search/**"
       - "lance-spark-base_2.12/src/test/java/org/lance/spark/search/**"
       - "lance-spark-*/src/main/scala/org/lance/spark/extensions/**"
@@ -70,6 +73,11 @@ env:
   SEARCH_TEST_BACKENDS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.backends || 'local,rest-dir' }}
   SEARCH_PYTEST_CMD: >-
     pytest /home/lance/tests/test_lance_spark.py::TestDQLSearchTableFunctions
+    -v --timeout=180
+  MANAGED_BACKFILL_PYTEST_CMD: >-
+    pytest
+    /home/lance/tests/test_lance_spark.py::TestDMLAddColumn::test_add_column_from_view_on_rest
+    /home/lance/tests/test_lance_spark.py::TestDMLUpdateColumn::test_update_column_from_view_on_rest
     -v --timeout=180
 
 jobs:
@@ -153,3 +161,16 @@ jobs:
             LANCE_SPARK_REST_DIR_PORT="${LANCE_SPARK_REST_DIR_PORT}" \
             DOCKER_RUN_ARGS="${DOCKER_RUN_ARGS}" \
             PYTEST_CMD="${SEARCH_PYTEST_CMD}"
+      # Keep managed versioning isolated from the existing REST search test server.
+      - name: Run managed REST directory namespace backfill tests
+        if: ${{ steps.rest.outputs.start_rest_dir == 'true' }}
+        run: |
+          make docker-test \
+            SPARK_VERSION=${SPARK_VERSION} \
+            SCALA_VERSION=${SCALA_VERSION} \
+            TEST_BACKENDS=rest-dir \
+            LANCE_SPARK_START_REST_DIR=1 \
+            LANCE_SPARK_REST_DIR_ROOT=/home/lance/rest-managed-data \
+            LANCE_SPARK_REST_DIR_PORT=10025 \
+            LANCE_SPARK_REST_DIR_MANAGED_VERSIONING=1 \
+            PYTEST_CMD="${MANAGED_BACKFILL_PYTEST_CMD}"

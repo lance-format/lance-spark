@@ -67,25 +67,40 @@ def _read_options_builder(jvm):
         return getattr(jvm.org.lance, "ReadOptions$Builder")()
 
 
-def _lance_index_metadata(spark, table_name, index_name):
-    if getattr(spark, "_lance_backend", None) == "lancedb":
-        return None
-
-    jvm = spark._jvm
-    storage_options = _java_hash_map(spark, _lance_storage_options(spark))
+def _open_direct_dataset(spark, table_name):
     read_options = (
-        _read_options_builder(jvm)
-        .setStorageOptions(storage_options)
-        .setSession(jvm.org.lance.spark.LanceRuntime.session(LANCE_CATALOG))
+        _read_options_builder(spark._jvm)
+        .setStorageOptions(_java_hash_map(spark, _lance_storage_options(spark)))
+        .setSession(spark._jvm.org.lance.spark.LanceRuntime.session(LANCE_CATALOG))
         .build()
     )
-    dataset = (
-        jvm.org.lance.Dataset.open()
-        .allocator(jvm.org.lance.spark.LanceRuntime.allocator())
+    return (
+        spark._jvm.org.lance.Dataset.open()
+        .allocator(spark._jvm.org.lance.spark.LanceRuntime.allocator())
         .uri(_table_location(spark, table_name))
         .readOptions(read_options)
         .build()
     )
+
+
+def _commit_dataset_config_directly(spark, table_name):
+    """Make a direct Dataset commit that intentionally bypasses the namespace client."""
+    dataset = _open_direct_dataset(spark, table_name)
+    try:
+        version_before = dataset.version()
+        dataset.updateConfig(
+            _java_hash_map(spark, {"managed_versioning_negative_control": "true"})
+        )
+        assert dataset.version() == version_before + 1
+    finally:
+        dataset.close()
+
+
+def _lance_index_metadata(spark, table_name, index_name):
+    if getattr(spark, "_lance_backend", None) == "lancedb":
+        return None
+
+    dataset = _open_direct_dataset(spark, table_name)
     try:
         indexes = dataset.getIndexes()
         for pos in range(indexes.size()):
@@ -2614,7 +2629,9 @@ class TestDMLAddColumn:
 
     @pytest.mark.requires_rest
     @pytest.mark.rest_dir_compatible
-    def test_add_column_from_view_on_rest(self, spark, test_table):
+    def test_add_column_from_view_on_rest(
+        self, spark, test_table, create_table_version_count
+    ):
         spark.sql(f"""
             CREATE TABLE {test_table} (
                 id INT,
@@ -2634,9 +2651,16 @@ class TestDMLAddColumn:
             FROM {test_table}
         """)
 
+        commit_count_before = (
+            create_table_version_count() if create_table_version_count else None
+        )
+
         spark.sql(f"""
             ALTER TABLE {test_table} ADD COLUMNS name_copy FROM namespace_add_columns_view
         """)
+
+        if commit_count_before is not None:
+            assert create_table_version_count() == commit_count_before + 1
 
         rows = spark.sql(f"""
             SELECT id, name, name_copy
@@ -2649,13 +2673,21 @@ class TestDMLAddColumn:
             (2, "bravo", "bravo"),
         ]
 
+        if commit_count_before is not None:
+            # Negative control: a real direct commit must bypass the namespace counter.
+            direct_commit_count_before = create_table_version_count()
+            _commit_dataset_config_directly(spark, test_table)
+            assert create_table_version_count() == direct_commit_count_before
+
 
 class TestDMLUpdateColumn:
     """Test DML UPDATE COLUMNS FROM operations for updating existing columns via backfill."""
 
     @pytest.mark.requires_rest
     @pytest.mark.rest_dir_compatible
-    def test_update_column_from_view_on_rest(self, spark, test_table):
+    def test_update_column_from_view_on_rest(
+        self, spark, test_table, create_table_version_count
+    ):
         spark.sql(f"""
             CREATE TABLE {test_table} (
                 id INT,
@@ -2677,10 +2709,17 @@ class TestDMLUpdateColumn:
             WHERE id = 2
         """)
 
+        commit_count_before = (
+            create_table_version_count() if create_table_version_count else None
+        )
+
         spark.sql(f"""
             ALTER TABLE {test_table}
             UPDATE COLUMNS value FROM namespace_update_columns_view
         """)
+
+        if commit_count_before is not None:
+            assert create_table_version_count() == commit_count_before + 1
 
         rows = spark.sql(f"""
             SELECT id, name, value

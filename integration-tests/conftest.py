@@ -196,6 +196,11 @@ LANCE_SPARK_REST_DIR_ROOT = os.environ.get(
     "/home/lance/rest-data",
 )
 LANCE_SPARK_REST_DIR_PORT = int(os.environ.get("LANCE_SPARK_REST_DIR_PORT", "10024"))
+LANCE_SPARK_REST_DIR_MANAGED_VERSIONING = os.environ.get(
+    "LANCE_SPARK_REST_DIR_MANAGED_VERSIONING",
+    "",
+).lower() in ("1", "true", "yes")
+CREATE_TABLE_VERSION_COUNT_PATH = "/__lance_test/create_table_version_count"
 AWS_S3_BUCKET_NAME = os.environ.get("AWS_S3_BUCKET_NAME")
 AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
 AWS_GLUE_CATALOG_ID = os.environ.get("AWS_GLUE_CATALOG_ID")
@@ -372,6 +377,7 @@ def spark(request):
     session.sql("CREATE NAMESPACE IF NOT EXISTS default")
     # Store backend name for marker-based test skipping
     session._lance_backend = backend
+    session._lance_rest_dir = rest_dir if backend == "rest-dir" else None
     yield session
     session.stop()
 
@@ -403,15 +409,39 @@ def rest_dir_namespace():
                 LANCE_SPARK_REST_DIR_ROOT,
                 "127.0.0.1",
                 str(port),
+                str(LANCE_SPARK_REST_DIR_MANAGED_VERSIONING).lower(),
             ],
             stdout=log,
             stderr=subprocess.STDOUT,
         )
         try:
             _wait_for_tcp(host, port, proc, "Lance REST directory namespace")
-            yield {"uri": uri}
+            yield {
+                "uri": uri,
+                "create_table_version_count_uri": (
+                    uri.rstrip("/") + CREATE_TABLE_VERSION_COUNT_PATH
+                    if LANCE_SPARK_REST_DIR_MANAGED_VERSIONING
+                    else None
+                ),
+            }
         finally:
             _stop_process(proc)
+
+
+@pytest.fixture
+def create_table_version_count(spark):
+    """Return the managed REST server's successful create-table-version count."""
+    rest_dir = getattr(spark, "_lance_rest_dir", None)
+    count_uri = rest_dir.get("create_table_version_count_uri") if rest_dir else None
+    if not count_uri:
+        return None
+
+    def retrieve_count():
+        with urllib.request.urlopen(count_uri, timeout=5) as response:
+            return int(response.read().decode("utf-8"))
+
+    retrieve_count()
+    return retrieve_count
 
 
 @pytest.fixture
