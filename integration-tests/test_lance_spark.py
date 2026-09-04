@@ -587,6 +587,63 @@ class TestDDLAlterTableProperties:
         assert props["team"] == "data-eng"
 
 
+class TestDDLAlterTableColumns:
+    """Test ALTER TABLE schema evolution (ADD/DROP/RENAME/ALTER COLUMN)."""
+
+    def test_add_column(self, spark):
+        """ADD COLUMN appends a nullable column filled with NULL for existing rows."""
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'Alice')")
+        spark.sql("ALTER TABLE default.test_table ADD COLUMN age INT")
+
+        columns = spark.table("default.test_table").columns
+        assert "age" in columns
+
+        row = spark.sql("SELECT id, name, age FROM default.test_table").collect()[0]
+        assert row.id == 1
+        assert row.name == "Alice"
+        assert row.age is None
+
+    def test_drop_column(self, spark):
+        """DROP COLUMN removes the column from the schema and results."""
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING, age INT)")
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'Alice', 30)")
+        spark.sql("ALTER TABLE default.test_table DROP COLUMN age")
+
+        columns = spark.table("default.test_table").columns
+        assert "age" not in columns
+        assert columns == ["id", "name"]
+
+    def test_drop_column_if_exists_missing(self, spark):
+        """DROP COLUMN IF EXISTS on a missing column is a no-op."""
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("ALTER TABLE default.test_table DROP COLUMN IF EXISTS missing")
+
+        assert spark.table("default.test_table").columns == ["id", "name"]
+
+    def test_rename_column(self, spark):
+        """RENAME COLUMN renames the column while preserving data."""
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'Alice')")
+        spark.sql("ALTER TABLE default.test_table RENAME COLUMN name TO full_name")
+
+        columns = spark.table("default.test_table").columns
+        assert "full_name" in columns
+        assert "name" not in columns
+
+        row = spark.sql("SELECT id, full_name FROM default.test_table").collect()[0]
+        assert row.full_name == "Alice"
+
+    def test_alter_column_drop_not_null(self, spark):
+        """ALTER COLUMN DROP NOT NULL relaxes a column's nullability."""
+        spark.sql("CREATE TABLE default.test_table (id INT NOT NULL, name STRING)")
+        assert spark.table("default.test_table").schema["id"].nullable is False
+
+        spark.sql("ALTER TABLE default.test_table ALTER COLUMN id DROP NOT NULL")
+
+        assert spark.table("default.test_table").schema["id"].nullable is True
+
+
 class TestDDLColumnCompression:
     """Test per-column compression TBLPROPERTIES → Arrow field metadata pipeline."""
 
