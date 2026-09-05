@@ -19,7 +19,7 @@ import org.apache.spark.sql.catalyst.plans.logical.{LanceNamedArgument, LanceOpt
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.unsafe.types.UTF8String
 import org.lance.Dataset
-import org.lance.index.{Index, OptimizeOptions}
+import org.lance.index.{Index, IndexCriteria, OptimizeOptions}
 import org.lance.operation.CreateIndex
 import org.lance.spark.LanceDataset
 import org.lance.spark.utils.Utils
@@ -90,7 +90,8 @@ case class LanceOptimizeIndexExec(
   }
 
   private def indexState(dataset: Dataset): IndexState = {
-    val description = dataset.describeIndices().asScala
+    val criteria = new IndexCriteria.Builder().hasName(indexName).build()
+    val description = dataset.describeIndices(criteria).asScala
       .find(_.getName == indexName)
       .getOrElse(throw new IllegalArgumentException(s"Index '$indexName' does not exist"))
     IndexState(description.getSegments.size().toLong)
@@ -124,11 +125,6 @@ case class LanceOptimizeIndexExec(
         case operation: CreateIndex =>
           val added = operation.getNewIndices.asScala.filter(_.name() == indexName)
           val removed = operation.getRemovedIndices.asScala.filter(_.name() == indexName)
-          if (added.isEmpty && removed.isEmpty) {
-            throw new IllegalStateException(
-              s"Dataset version $afterVersion did not change index '$indexName'")
-          }
-
           val addedFragments = added.flatMap(requiredFragments).toSet
           val removedFragments = removed.flatMap(requiredFragments).toSet
           IndexDelta(

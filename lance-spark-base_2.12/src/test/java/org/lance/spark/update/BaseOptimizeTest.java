@@ -13,17 +13,29 @@
  */
 package org.lance.spark.update;
 
+import org.lance.Transaction;
+import org.lance.operation.CreateIndex;
+import org.lance.spark.LanceDataset;
+import org.lance.spark.utils.Utils;
+
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.catalyst.plans.logical.LanceNamedArgument;
+import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.TableCatalog;
+import org.apache.spark.sql.execution.datasources.v2.LanceOptimizeIndexExec;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import scala.collection.JavaConverters;
 
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.nio.file.Path;
+import java.util.Collections;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -180,6 +192,70 @@ public abstract class BaseOptimizeTest {
     Assertions.assertEquals(
         noOp.<Long>getAs("segments_before").longValue(),
         noOp.<Long>getAs("segments_after").longValue());
+  }
+
+  @Test
+  public void testOptimizeIndexAcceptsMemWalCatchUpCommit() throws Exception {
+    String protocolTableName = tableName + "_protocol";
+    String protocolTable = catalogName + ".default." + protocolTableName;
+    spark.sql(
+        String.format(
+            "create table %s (id int, text string) using lance "
+                + "partitioned by (bucket(4, text))",
+            protocolTable));
+    spark.sql(String.format("insert into %s values (1, 'same-shard')", protocolTable));
+    spark.sql(
+        String.format("alter table %s create index idx_id using zonemap (id)", protocolTable));
+
+    Row noOp =
+        spark
+            .sql(String.format("alter table %s optimize index idx_id", protocolTable))
+            .collectAsList()
+            .get(0);
+    Assertions.assertEquals(0L, noOp.<Long>getAs("fragments_indexed"));
+
+    try (org.lance.Dataset dataset = openDataset(protocolTableName)) {
+      long beforeVersion = dataset.version();
+      CreateIndex emptyCreateIndex =
+          CreateIndex.builder()
+              .withNewIndices(Collections.emptyList())
+              .withRemovedIndices(Collections.emptyList())
+              .build();
+      try (Transaction transaction = new Transaction(beforeVersion, emptyCreateIndex);
+          org.lance.Dataset committed = dataset.commitTransaction(transaction)) {
+        Assertions.assertEquals(beforeVersion + 1, committed.version());
+
+        LanceOptimizeIndexExec exec =
+            new LanceOptimizeIndexExec(
+                null,
+                null,
+                "idx_id",
+                JavaConverters.asScalaBuffer(Collections.<LanceNamedArgument>emptyList()).toSeq());
+        Method indexDelta =
+            LanceOptimizeIndexExec.class.getDeclaredMethod(
+                "indexDelta", org.lance.Dataset.class, long.class, long.class);
+        indexDelta.setAccessible(true);
+        Object delta = indexDelta.invoke(exec, committed, beforeVersion, committed.version());
+
+        Assertions.assertEquals(0L, metric(delta, "fragmentsIndexed"));
+        Assertions.assertEquals(0L, metric(delta, "segmentsAdded"));
+        Assertions.assertEquals(0L, metric(delta, "segmentsRemoved"));
+      }
+    }
+  }
+
+  private org.lance.Dataset openDataset(String currentTableName) throws Exception {
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    LanceDataset table =
+        (LanceDataset) catalog.loadTable(Identifier.of(new String[] {"default"}, currentTableName));
+    return Utils.openDatasetBuilder(table.readOptions())
+        .initialStorageOptions(table.getInitialStorageOptions())
+        .build();
+  }
+
+  private static long metric(Object delta, String name) throws Exception {
+    return ((Long) delta.getClass().getDeclaredMethod(name).invoke(delta)).longValue();
   }
 
   @Test
