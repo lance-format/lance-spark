@@ -14,6 +14,7 @@
 package org.lance.spark.read;
 
 import org.lance.Dataset;
+import org.lance.ipc.FragmentSlice;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
 import org.lance.spark.LanceRuntime;
@@ -113,6 +114,10 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
       scanOptionsBuilder.withRowId(true);
       scanOptionsBuilder.columns(Lists.newArrayList());
       scanOptionsBuilder.fragmentIds(fragmentIds);
+      List<FragmentSlice> fragmentSlices = inputPartition.getLanceSplit().getFragmentSlices();
+      if (!fragmentSlices.isEmpty()) {
+        scanOptionsBuilder.fragmentSlices(fragmentSlices);
+      }
 
       // Collect scan stats
       scanOptionsBuilder.collectStats(true);

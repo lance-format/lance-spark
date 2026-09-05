@@ -84,7 +84,7 @@ public class LanceSearchColumnarPartitionReader implements PartitionReader<Colum
       throw new IOException("Lance namespace is required for search");
     }
     try {
-      byte[] bytes = namespace.queryTable(query.toQueryTableRequest());
+      byte[] bytes = namespace.queryTable(query.toQueryTableRequest()).getData();
       arrowReader =
           new ArrowFileReader(
               new ByteArrayReadableSeekableByteChannel(bytes), LanceRuntime.allocator());
