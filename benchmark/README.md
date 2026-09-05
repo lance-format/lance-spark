@@ -15,6 +15,47 @@ Each benchmark is split into two independent Spark jobs:
 
 Both benchmarks share the same reporting infrastructure (`BenchmarkResult`, `BenchmarkReporter`, `QueryMetrics`, `QueryMetricsListener`) and produce output in the same CSV/summary format, so results are directly comparable across workloads.
 
+## FragmentSlice physical-read benchmark
+
+`FragmentSliceBenchmark` is a focused local benchmark for ZoneMap-driven physical row-range
+pruning. It creates one large, physically ordered Lance fragment, builds a ZoneMap, and compares
+four Java Scanner modes: with and without a physical slice, each with scalar-index execution enabled
+and disabled. The primary signal is native `ScanStats.bytesRead`; elapsed time is secondary and is
+expected to be noisier on a local filesystem.
+
+Run the default workload (4 million rows, approximately 1 GB of payload):
+
+```bash
+make bundle SPARK_VERSION=3.5 SCALA_VERSION=2.12
+./benchmark/scripts/run-fragment-slice-benchmark.sh
+```
+
+Run a small smoke workload, rebuilding the dataset if it already exists:
+
+```bash
+ROWS=65536 PAYLOAD_BYTES=64 ROWS_PER_ZONE=4096 \
+  WARMUPS=0 ITERATIONS=1 REGENERATE=true \
+  ./benchmark/scripts/run-fragment-slice-benchmark.sh
+```
+
+Configuration is provided through environment variables:
+
+| Variable | Default | Description |
+|---|---:|---|
+| `DATA_DIR` | `benchmark/data/fragment-slice` | Parent directory of the generated dataset |
+| `RESULTS_DIR` | `benchmark/results` | Local directory for result CSV files |
+| `ROWS` | `4000000` | Physical rows in the single fragment |
+| `PAYLOAD_BYTES` | `256` | Deterministic payload width per row |
+| `ROWS_PER_ZONE` | `8192` | ZoneMap rows per zone and selected slice size |
+| `WARMUPS` | `1` | Warmup passes over all four modes |
+| `ITERATIONS` | `5` | Recorded passes over all four modes |
+| `REGENERATE` | `false` | Overwrite an existing benchmark dataset |
+| `MAVEN_REPO_LOCAL` | unset | Maven repository containing a locally built Lance artifact |
+
+The runner verifies that all modes return the same row count and reports the planned row ratio,
+median elapsed time, bytes read, requests, I/O operations, and index loads. A byte reduction of at
+least 80% with scalar indexes disabled is printed as the initial physical-pruning target.
+
 ### TODO
 - **Delta / Iceberg support** — not yet included because they require additional catalog/metastore tooling outside lance-spark's scope.
 
