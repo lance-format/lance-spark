@@ -204,6 +204,25 @@ public class ZonemapFragmentSlicePlannerTest {
   }
 
   @Test
+  public void testWholePhysicalFragmentRangeIsNormalizedToFullScan() {
+    Map<String, List<ZoneStats>> stats = new HashMap<>();
+    stats.put(
+        "x", Arrays.asList(new ZoneStats(0, 0, 5, 0L, 4L, 0), new ZoneStats(0, 5, 5, 5L, 9L, 0)));
+
+    ZonemapScanPlan plan =
+        ZonemapFragmentPruner.planFragmentSlices(
+                new Predicate[] {TestPredicates.gte("x", 0L)},
+                stats,
+                Collections.emptyMap(),
+                Set.of(0),
+                Collections.singletonMap(0, 10L))
+            .orElseThrow(AssertionError::new);
+
+    assertTrue(plan.scansFullFragment(0));
+    assertTrue(plan.getFragmentSlices(0).isEmpty());
+  }
+
+  @Test
   public void testTypeMismatchFallsBackToFullScan() {
     Map<String, List<ZoneStats>> stats = new HashMap<>();
     stats.put("x", Collections.singletonList(new ZoneStats(0, 0, 10, 0L, 9L, 0)));

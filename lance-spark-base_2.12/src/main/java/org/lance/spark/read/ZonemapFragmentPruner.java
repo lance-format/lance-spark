@@ -160,7 +160,8 @@ public final class ZonemapFragmentPruner {
     Map<Integer, List<FragmentSlice>> slicesByFragment = new HashMap<>();
     for (int fragmentId : allFragmentIds) {
       RangeSet ranges = result.getOrDefault(fragmentId, RangeSet.full());
-      if (ranges.isFull()) {
+      Long physicalRowCount = physicalRowCounts == null ? null : physicalRowCounts.get(fragmentId);
+      if (ranges.isFull() || ranges.coversWholeFragment(physicalRowCount)) {
         fullScanFragments.add(fragmentId);
       } else if (!ranges.isEmpty()) {
         List<FragmentSlice> slices = new ArrayList<>(ranges.ranges.size());
@@ -547,6 +548,14 @@ public final class ZonemapFragmentPruner {
 
     private boolean isEmpty() {
       return !full && ranges.isEmpty();
+    }
+
+    private boolean coversWholeFragment(Long physicalRowCount) {
+      return physicalRowCount != null
+          && physicalRowCount > 0
+          && ranges.size() == 1
+          && ranges.get(0).start == 0
+          && ranges.get(0).end == physicalRowCount;
     }
 
     private RangeSet intersect(RangeSet other) {
