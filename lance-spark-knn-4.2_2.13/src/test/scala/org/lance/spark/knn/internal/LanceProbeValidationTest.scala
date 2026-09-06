@@ -76,8 +76,14 @@ class LanceProbeValidationTest {
 
     val probe = new LanceProbe(datasetUri, fragmentIds = None)
     try {
-      val results = probe.probe(vectorColumn = "vec", query, k = 5, metric = Metric.L2)
-      assertEquals(5, results.size, "probe should return exactly k results")
+      val results = probe.probeRows(
+        vectorColumn = "vec",
+        query,
+        k = 5,
+        metric = Metric.L2,
+        projection = Seq.empty,
+        projectionFields = Seq.empty)
+      assertEquals(5, results.size, "probeRows should return exactly k results")
       // Distances must be monotonically non-decreasing for L2 (best-first).
       val scores = results.map(_.score)
       assertEquals(scores, scores.sorted, "L2 results should be sorted ascending by distance")
@@ -105,8 +111,15 @@ class LanceProbeValidationTest {
 
     val probe = new LanceProbe(datasetUri, fragmentIds = None)
     val actual =
-      try probe.probe("vec", query, k, Metric.L2)
-      finally probe.close()
+      try {
+        probe.probeRows(
+          "vec",
+          query,
+          k,
+          Metric.L2,
+          projection = Seq.empty,
+          projectionFields = Seq.empty)
+      } finally probe.close()
 
     assertEquals(k, actual.size)
     // Compare scores within float tolerance.
@@ -125,41 +138,46 @@ class LanceProbeValidationTest {
    * Cosine and Dot must rank best-first the same direction L2 does. Lance returns a DISTANCE for
    * every metric (`1 - cosine_similarity`, `1 - dot_product` for the similarity-flavored ones), so
    * smaller is better for all three — [[Metric.smallerIsBetter]] must be `true` for each. This
-   * reproduces the gatekeeper's failure directly: run a real Lance query, then merge the results
-   * through the size-1 [[TopKHeap]] the join stage uses, keyed by the metric's own direction flag.
-   * The nearest ref (Lance returns best-first, so `refs.head`) must survive; a wrong flag (treating a
-   * Lance distance as larger-is-better) would retain the FARTHEST ref instead.
+   * reproduces the gatekeeper's failure directly: run a real Lance query, then pick the survivor by
+   * the metric's own direction flag. The nearest ref (Lance returns best-first, so `refs.head`) must
+   * be the one the flag selects; a wrong flag (treating a Lance distance as larger-is-better) would
+   * select the FARTHEST ref instead.
    */
-  @Test def testMetricFlagsKeepNearestThroughHeap(): Unit = {
+  @Test def testMetricFlagsKeepNearest(): Unit = {
     val datasetUri = writeSyntheticDataset()
     val query = randomVector(new Random(555L), VectorDim)
 
     val probe = new LanceProbe(datasetUri, fragmentIds = None)
     try {
       Seq[Metric](Metric.L2, Metric.Cosine, Metric.Dot).foreach { metric =>
-        val refs = probe.probe("vec", query, k = 5, metric)
+        val refs = probe.probeRows(
+          "vec",
+          query,
+          k = 5,
+          metric,
+          projection = Seq.empty,
+          projectionFields = Seq.empty)
         assertEquals(5, refs.size, s"$metric probe should return k results")
         // Lance returns best-first, so refs.head is the true nearest for this metric.
         val nearest = refs.head
-        val heap = new TopKHeap(k = 1, metric.smallerIsBetter)
-        heap.offerAll(refs)
-        val survivor = heap.drain()
-        assertEquals(1, survivor.length, s"$metric: size-1 heap should retain one ref")
+        // The join stage keeps the best ref by the metric's direction flag; a wrong flag would keep
+        // the farthest. Select it directly here (no heap) — the flag, not the ordering, is on trial.
+        val survivor = if (metric.smallerIsBetter) refs.minBy(_.score) else refs.maxBy(_.score)
         assertEquals(
           nearest.rowAddr,
-          survivor.head.rowAddr,
-          s"$metric: size-1 heap must keep the nearest ref (rowAddr=${nearest.rowAddr}), " +
-            s"got ${survivor.head.rowAddr} — wrong smallerIsBetter direction?")
-        assertEquals(nearest.score, survivor.head.score, 1e-6f, s"$metric: kept score mismatch")
+          survivor.rowAddr,
+          s"$metric: direction flag must keep the nearest ref (rowAddr=${nearest.rowAddr}), " +
+            s"got ${survivor.rowAddr} — wrong smallerIsBetter direction?")
+        assertEquals(nearest.score, survivor.score, 1e-6f, s"$metric: kept score mismatch")
       }
     } finally probe.close()
   }
 
   /**
    * A projected payload column WITHOUT a supplied Spark type must be preserved through the generic
-   * Arrow conversion — the same fallback [[LanceProbe.materialize]] / `readRows` apply — not silently
-   * dropped. Regression: `projection = Seq("id")` with empty `projectionFields` must return payload
-   * keys `Set("id")` (the injected `_rowid` / score columns stay out of the payload).
+   * Arrow conversion, not silently dropped. Regression: `projection = Seq("id")` with empty
+   * `projectionFields` must return payload keys `Set("id")` (the injected `_rowid` / score columns
+   * stay out of the payload).
    */
   @Test def testProbeRowsPreservesUnmappedProjectedFields(): Unit = {
     val datasetUri = writeSyntheticDataset()
@@ -196,9 +214,8 @@ class LanceProbeValidationTest {
    * table (see [[LanceProbe.schemaSupportsNearest]]) rather than pick a materialization shape.
    *
    * This regression writes a real dataset WITH a `_distance` column and asserts (a) the schema is
-   * reported non-nearest-compatible, and (b) BOTH probe entry points — `probe` and the all-columns
-   * `probeRows(projection = empty)` — fail fast with a clear error naming the offending column,
-   * instead of returning results that silently omit it.
+   * reported non-nearest-compatible, and (b) the all-columns `probeRows(projection = empty)` — the
+   * exact path that used to silently omit the column — fails fast with a clear error naming it.
    */
   @Test def testReservedSchemaColumnIsDeclinedNotSilentlyDropped(): Unit = {
     val datasetUri = writeDatasetWithReservedColumn()
@@ -211,16 +228,9 @@ class LanceProbeValidationTest {
 
     val probe = new LanceProbe(datasetUri, fragmentIds = None)
     try {
-      // (b) probe() declines with a clear error naming the offending column.
-      val probeEx = assertThrows(
-        classOf[IllegalArgumentException],
-        () => probe.probe("vec", query, k = 5, Metric.L2))
-      assertTrue(
-        String.valueOf(probeEx.getMessage).contains("_distance"),
-        s"probe guard message should name the offending column '_distance'; got: ${probeEx.getMessage}")
-
       // (b) all-columns probeRows — the exact path that used to SILENTLY drop the physical
-      // `_distance` — declines with the same clear error rather than returning a lossy payload.
+      // `_distance` — declines with a clear error naming the offending column rather than returning
+      // a lossy payload.
       val probeRowsEx = assertThrows(
         classOf[IllegalArgumentException],
         () =>
@@ -266,53 +276,6 @@ class LanceProbeValidationTest {
   }
 
   /**
-   * The folded fast path ([[LanceProbe.probeRows]]) must be observationally identical to the split
-   * probe + materialize path: the SAME (rowAddr, score) hits in the SAME order, and the SAME
-   * materialized payload per row. This is the invariant the SQL join relies on when it single-scans
-   * (internalK == k) instead of probing then late-materializing. Runs on the brute-force path so the
-   * search itself is deterministic.
-   */
-  @Test def testProbeRowsMatchesProbeThenMaterialize(): Unit = {
-    val datasetUri = writeSyntheticDataset()
-    val query = randomVector(new Random(321L), VectorDim)
-    val k = 8
-    val projection = Seq("id", "vec")
-    val projectionFields = Seq(
-      StructField("id", IntegerType, nullable = false),
-      StructField("vec", ArrayType(FloatType, containsNull = false), nullable = false))
-
-    val probe = new LanceProbe(datasetUri, fragmentIds = None)
-    try {
-      // Split path: search for refs, then late-materialize the payload by _rowid.
-      val refs = probe.probe("vec", query, k, Metric.L2)
-      val expectedPayload: Map[Long, Map[String, Any]] = probe
-        .materialize(refs.map(_.rowAddr), projection, projectionFields)
-        .map(m => rowAddrOf(m) -> m)
-        .toMap
-
-      // Folded path: search AND project the payload in one scan.
-      val hits = probe.probeRows("vec", query, k, Metric.L2, projection, projectionFields)
-
-      assertEquals(k, hits.size, "probeRows should return exactly k hits")
-      // Same search: identical (rowAddr, score) sequence, in order.
-      assertEquals(
-        refs.map(r => (r.rowAddr, r.score)),
-        hits.map(h => (h.rowAddr, h.score)),
-        "probeRows hits must match probe refs (rowAddr + score), in order")
-      // Same payload: each folded hit equals the split materialize's row for that rowAddr, on the
-      // projected columns.
-      hits.foreach { h =>
-        val expected = expectedPayload(h.rowAddr)
-        assertEquals(expected("id"), h.row("id"), s"id mismatch for rowAddr=${h.rowAddr}")
-        assertEquals(
-          expected("vec").asInstanceOf[Seq[_]].toList,
-          h.row("vec").asInstanceOf[Seq[_]].toList,
-          s"vec mismatch for rowAddr=${h.rowAddr}")
-      }
-    } finally probe.close()
-  }
-
-  /**
    * Validate the dataset handle is reused across calls. The exact perf invariant ("second call
    * faster than first by some factor") is too brittle for CI, so we only assert that repeated
    * probes succeed and don't OOM — i.e., no JNI handle / Arrow buffer leak per call.
@@ -325,7 +288,13 @@ class LanceProbeValidationTest {
       val k = 4
       var i = 0
       while (i < 50) {
-        val results = probe.probe("vec", randomVector(rng, VectorDim), k, Metric.L2)
+        val results = probe.probeRows(
+          "vec",
+          randomVector(rng, VectorDim),
+          k,
+          Metric.L2,
+          projection = Seq.empty,
+          projectionFields = Seq.empty)
         assertEquals(k, results.size, s"iteration $i returned wrong size")
         i += 1
       }
@@ -337,7 +306,13 @@ class LanceProbeValidationTest {
     val datasetUri = writeSyntheticDataset()
     val probe = new LanceProbe(datasetUri, Some(Seq.empty))
     try {
-      val results = probe.probe("vec", randomVector(new Random(1L), VectorDim), 5, Metric.L2)
+      val results = probe.probeRows(
+        "vec",
+        randomVector(new Random(1L), VectorDim),
+        5,
+        Metric.L2,
+        projection = Seq.empty,
+        projectionFields = Seq.empty)
       assertTrue(results.isEmpty, s"empty fragmentIds should yield no results, got ${results.size}")
     } finally probe.close()
   }
@@ -430,13 +405,6 @@ class LanceProbeValidationTest {
       RowFactory.create(Integer.valueOf(idx), v)
     }
     (rows, vectors)
-  }
-
-  /** Read the `_rowid` key out of a materialized row map (a boxed / stringy long). */
-  private def rowAddrOf(m: Map[String, Any]): Long = m(LanceProbe.RowIdColumn) match {
-    case l: java.lang.Long => l.longValue()
-    case l: Long => l
-    case other => other.toString.toLong
   }
 
   private def randomVector(rng: Random, dim: Int): Array[Float] = {
