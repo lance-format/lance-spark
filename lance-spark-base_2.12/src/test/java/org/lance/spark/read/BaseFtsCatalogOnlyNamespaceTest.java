@@ -34,11 +34,13 @@ import org.lance.namespace.model.ListNamespacesResponse;
 import org.lance.namespace.model.ListTablesRequest;
 import org.lance.namespace.model.ListTablesResponse;
 import org.lance.namespace.model.NamespaceExistsRequest;
+import org.lance.namespace.model.NamespaceExistsResponse;
 import org.lance.namespace.model.RegisterTableRequest;
 import org.lance.namespace.model.RegisterTableResponse;
 import org.lance.namespace.model.RenameTableRequest;
 import org.lance.namespace.model.RenameTableResponse;
 import org.lance.namespace.model.TableExistsRequest;
+import org.lance.namespace.model.TableExistsResponse;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.spark.sql.Dataset;
@@ -276,8 +278,8 @@ public abstract class BaseFtsCatalogOnlyNamespaceTest {
     }
 
     @Override
-    public void namespaceExists(NamespaceExistsRequest request) {
-      delegate.namespaceExists(request);
+    public NamespaceExistsResponse namespaceExists(NamespaceExistsRequest request) {
+      return delegate.namespaceExists(request);
     }
 
     @Override
@@ -306,8 +308,8 @@ public abstract class BaseFtsCatalogOnlyNamespaceTest {
     }
 
     @Override
-    public void tableExists(TableExistsRequest request) {
-      delegate.tableExists(request);
+    public TableExistsResponse tableExists(TableExistsRequest request) {
+      return delegate.tableExists(request);
     }
 
     @Override
