@@ -131,6 +131,8 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
   }
 
   private Throwable closeResources(Throwable primary) {
+    // Null-first so close() is idempotent. A repeat call must not raise
+    // "ArrowArrayStream is already closed" from a second release().
     LanceFragmentColumnarBatchScanner scannerToClose = fragmentReader;
     fragmentReader = null;
     ExecutorNamespace namespaceToClose = executorNamespace;
