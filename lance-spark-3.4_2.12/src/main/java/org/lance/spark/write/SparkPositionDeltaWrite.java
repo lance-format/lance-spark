@@ -61,6 +61,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.FutureTask;
 import java.util.stream.Collectors;
@@ -202,6 +203,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
                 .removedFragmentIds(removedFragmentIds)
                 .updatedFragments(updatedFragments)
                 .newFragments(newFragments)
+                .updateMode(Optional.of(Update.UpdateMode.RewriteRows))
                 .build();
 
         CommitBuilder commitBuilder =
