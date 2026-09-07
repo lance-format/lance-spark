@@ -27,10 +27,7 @@ public class UInt8Accessor {
   }
 
   final long getLong(int rowId) {
-    // Read the raw two's-complement long rather than boxing through getObjectNoOverflow(), which
-    // returns an unsigned BigInteger: longValueExact() then throws for every value at or above
-    // 2^63 instead of wrapping as this accessor documents, and allocates per row. Null slots are
-    // guarded because Arrow's get() rejects them when null checking is on, which is the default.
+    // Arrow get() throws on a null slot. Spark getLongs calls getLong without isNullAt.
     return accessor.isNull(rowId) ? 0L : accessor.get(rowId);
   }
 

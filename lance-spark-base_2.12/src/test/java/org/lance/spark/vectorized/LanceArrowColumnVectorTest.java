@@ -40,8 +40,6 @@ public class LanceArrowColumnVectorTest {
     try (BufferAllocator allocator = new RootAllocator();
         UInt8Vector vector = (UInt8Vector) field.createVector(allocator)) {
       vector.allocateNew(3);
-      // 2^63 and 2^64-1 are ordinary uint64 values. LongType carries them as their
-      // two's-complement bits, which is the wrap behaviour this accessor documents.
       vector.setSafe(0, Long.MIN_VALUE);
       vector.setSafe(1, -1L);
       vector.setNull(2);
