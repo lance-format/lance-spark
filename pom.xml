@@ -27,9 +27,9 @@
     </licenses>
 
     <scm>
-        <connection>scm:git:git@github.com:lancedb/lance-spark.git</connection>
-        <developerConnection>scm:git:git@github.com:lancedb/lance-spark.git</developerConnection>
-        <url>git@github.com:lancedb/lance-spark.git</url>
+        <connection>scm:git:https://github.com/lance-format/lance-spark.git</connection>
+        <developerConnection>scm:git:https://github.com/lance-format/lance-spark.git</developerConnection>
+        <url>https://github.com/lance-format/lance-spark</url>
         <tag>HEAD</tag>
     </scm>
 
