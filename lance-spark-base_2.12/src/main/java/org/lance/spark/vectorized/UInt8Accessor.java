@@ -27,7 +27,8 @@ public class UInt8Accessor {
   }
 
   final long getLong(int rowId) {
-    return accessor.getObjectNoOverflow(rowId).longValueExact();
+    // Arrow get() throws on a null slot. Spark getLongs calls getLong without isNullAt.
+    return accessor.isNull(rowId) ? 0L : accessor.get(rowId);
   }
 
   final boolean isNullAt(int rowId) {
