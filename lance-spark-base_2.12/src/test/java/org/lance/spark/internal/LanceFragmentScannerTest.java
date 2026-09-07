@@ -14,9 +14,13 @@
 package org.lance.spark.internal;
 
 import org.lance.namespace.LanceNamespace;
+import org.lance.namespace.model.DescribeTableRequest;
+import org.lance.namespace.model.DescribeTableResponse;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.TestUtils;
 import org.lance.spark.read.LanceInputPartition;
+import org.lance.spark.read.LanceSplit;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Optional;
 
@@ -36,8 +40,8 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class LanceFragmentScannerTest {
 
@@ -222,56 +226,48 @@ public class LanceFragmentScannerTest {
     assertEquals(expected, result);
   }
 
-  /**
-   * Locks down the executor-branch contract for {@code executor_credential_refresh=false}: when an
-   * executor opens a fragment for a namespace-backed table with the flag disabled, {@link
-   * LanceFragmentScanner#create} must <i>not</i> reconstruct the namespace client. Without this
-   * gate, executors of Kerberized HMS catalogs hit {@code GSS initiate failed} because they lack a
-   * TGT for the eager {@code describeTable()} RPC.
-   *
-   * <p>Strategy: hand a real, loadable {@link LanceNamespace} impl to the partition. If the gate
-   * regresses (rebuild not skipped), {@code LanceNamespace.connect} would succeed via {@code
-   * Class.forName}, {@link RecordingNamespace#initialize} would run, and {@code
-   * readOptions.setNamespace(...)} would fire — all observable here. The bogus dataset URI lets the
-   * outer {@code Utils.openDatasetBuilder().build()} call fail predictably, since the gate runs
-   * <i>before</i> the dataset is opened. No real Lance dataset is required.
-   */
   @Test
-  public void testCreateSkipsNamespaceRebuildWhenExecutorCredentialRefreshDisabled() {
-    RecordingNamespace.INITIALIZE_CALLS.set(0);
+  public void testExecutorNamespaceOwnerClosesClient() {
+    RecordingNamespace.reset();
+    LanceInputPartition partition =
+        namespacePartition(
+            TestUtils.TestTable1Config.datasetUri,
+            Collections.singletonList(0),
+            "testExecutorNamespaceOwnerClosesClient",
+            true);
 
+    try (ExecutorNamespace ignored = ExecutorNamespace.acquire(partition)) {
+      assertNotNull(partition.getReadOptions().getNamespace());
+      assertEquals(1, RecordingNamespace.INITIALIZE_CALLS.get());
+    }
+
+    assertNull(partition.getReadOptions().getNamespace());
+    assertEquals(1, RecordingNamespace.CLOSE_CALLS.get());
+  }
+
+  private LanceInputPartition namespacePartition(
+      String location, List<Integer> fragments, String scanId, boolean executorCredentialRefresh) {
     LanceSparkReadOptions readOptions =
         LanceSparkReadOptions.builder()
-            .datasetUri("file:///tmp/__lance_nonexistent_for_executor_gate_test__")
-            .executorCredentialRefresh(false)
+            .datasetUri(location)
+            .tableId(Collections.singletonList(TestUtils.TestTable1Config.datasetName))
+            .executorCredentialRefresh(executorCredentialRefresh)
             .build();
-
-    LanceInputPartition partition =
-        new LanceInputPartition(
-            new StructType(),
-            0,
-            null,
-            readOptions,
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            "test-scan",
-            Collections.emptyMap(),
-            RecordingNamespace.class.getName(),
-            Collections.emptyMap(),
-            null);
-
-    assertThrows(RuntimeException.class, () -> LanceFragmentScanner.create(0, partition));
-
-    assertNull(
-        readOptions.getNamespace(),
-        "executor_credential_refresh=false must skip namespace rebuild on the executor");
-    assertEquals(
+    return new LanceInputPartition(
+        TestUtils.TestTable1Config.schema,
         0,
-        RecordingNamespace.INITIALIZE_CALLS.get(),
-        "executor_credential_refresh=false must not load or initialize the namespace impl");
+        new LanceSplit(fragments),
+        readOptions,
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        scanId,
+        Collections.emptyMap(),
+        RecordingNamespace.class.getName(),
+        Collections.singletonMap("location", location),
+        null);
   }
 
   @Test
@@ -302,21 +298,40 @@ public class LanceFragmentScannerTest {
   /**
    * Public, top-level-by-FQCN, no-arg {@link LanceNamespace} so that {@link
    * LanceNamespace#connect(String, Map, BufferAllocator)} can resolve it via {@code Class.forName}
-   * if the executor branch is (incorrectly) taken.
+   * during executor-side namespace initialization.
    */
-  public static class RecordingNamespace implements LanceNamespace {
+  public static class RecordingNamespace implements LanceNamespace, AutoCloseable {
     static final AtomicInteger INITIALIZE_CALLS = new AtomicInteger();
+    static final AtomicInteger CLOSE_CALLS = new AtomicInteger();
+
+    private String location;
 
     public RecordingNamespace() {}
+
+    static void reset() {
+      INITIALIZE_CALLS.set(0);
+      CLOSE_CALLS.set(0);
+    }
 
     @Override
     public void initialize(Map<String, String> properties, BufferAllocator allocator) {
       INITIALIZE_CALLS.incrementAndGet();
+      location = properties.get("location");
     }
 
     @Override
     public String namespaceId() {
       return "recording";
+    }
+
+    @Override
+    public DescribeTableResponse describeTable(DescribeTableRequest request) {
+      return new DescribeTableResponse().location(location);
+    }
+
+    @Override
+    public void close() {
+      CLOSE_CALLS.incrementAndGet();
     }
   }
 }

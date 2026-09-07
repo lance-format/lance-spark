@@ -19,7 +19,6 @@ import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
 import org.lance.ipc.ScanStats;
 import org.lance.spark.LanceConstant;
-import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.utils.BlobUtils;
@@ -82,15 +81,6 @@ public class LanceFragmentScanner implements AutoCloseable {
     LanceScanner lanceScanner = null;
     try {
       LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
-      if (inputPartition.getNamespaceImpl() != null && readOptions.isExecutorCredentialRefresh()) {
-        if (LanceRuntime.useNamespaceOnWorkers(inputPartition.getNamespaceImpl())) {
-          readOptions.setNamespace(
-              LanceRuntime.getOrCreateNamespace(
-                  inputPartition.getNamespaceImpl(), inputPartition.getNamespaceProperties()));
-        } else {
-          readOptions.setNamespace(null);
-        }
-      }
       long dsOpenStart = System.nanoTime();
       dataset =
           Utils.openDatasetBuilder(readOptions)

@@ -18,6 +18,7 @@ import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.internal.ExecutorNamespace;
 import org.lance.spark.read.metric.LanceReadMetricsTracker;
 import org.lance.spark.utils.Utils;
 import org.lance.spark.vectorized.LanceArrowColumnVector;
@@ -69,24 +70,14 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
     LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
     long totalCount = 0;
 
-    // Keep the count scan on the same executor credential-refresh path as ordinary fragment scans.
-    // When disabled, leave the namespace unset so executors open directly with the driver-vended
-    // storage options (important for Kerberized HMS catalogs).
-    if (inputPartition.getNamespaceImpl() != null && readOptions.isExecutorCredentialRefresh()) {
-      if (LanceRuntime.useNamespaceOnWorkers(inputPartition.getNamespaceImpl())) {
-        readOptions.setNamespace(
-            LanceRuntime.getOrCreateNamespace(
-                inputPartition.getNamespaceImpl(), inputPartition.getNamespaceProperties()));
-      } else {
-        readOptions.setNamespace(null);
-      }
-    }
-
     long dsOpenStart = System.nanoTime();
-    try (Dataset dataset =
-        Utils.openDatasetBuilder(readOptions)
-            .initialStorageOptions(inputPartition.getInitialStorageOptions())
-            .build()) {
+    // The namespace owner is declared outside the dataset scope so try-with-resources closes the
+    // dataset (and its nested scanner/reader) before closing the executor namespace client.
+    try (ExecutorNamespace executorNamespace = ExecutorNamespace.acquire(inputPartition);
+        Dataset dataset =
+            Utils.openDatasetBuilder(readOptions)
+                .initialStorageOptions(inputPartition.getInitialStorageOptions())
+                .build()) {
       metricsTracker.addDatasetOpenTimeNs(System.nanoTime() - dsOpenStart);
 
       List<Integer> fragmentIds = inputPartition.getLanceSplit().getFragments();

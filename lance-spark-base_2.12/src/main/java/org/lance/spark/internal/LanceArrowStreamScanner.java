@@ -71,11 +71,13 @@ public final class LanceArrowStreamScanner {
    */
   public static LanceArrowStream export(int fragmentId, LanceInputPartition inputPartition) {
     checkNoPushedAggregation(inputPartition);
-    LanceFragmentScanner fragmentScanner = LanceFragmentScanner.create(fragmentId, inputPartition);
+    ExecutorNamespace executorNamespace = ExecutorNamespace.acquire(inputPartition);
+    LanceFragmentScanner fragmentScanner = null;
     // Allocate inside the cleanup scope: the schema check and allocateNew can throw (a mismatch or
     // e.g. a bounded allocator), and the dataset + scanner opened by create() must still be closed.
     ArrowArrayStream stream = null;
     try {
+      fragmentScanner = LanceFragmentScanner.create(fragmentId, inputPartition);
       checkNativeSchemaMatchesPartition(fragmentScanner, inputPartition);
       stream = ArrowArrayStream.allocateNew(LanceRuntime.allocator());
       // The Lance native core populates the caller-owned stream directly from the planned scan, so
@@ -86,6 +88,7 @@ public final class LanceArrowStreamScanner {
     } catch (Throwable t) {
       closeQuietly(stream);
       closeQuietly(fragmentScanner);
+      closeQuietly(executorNamespace);
       if (t instanceof RuntimeException) {
         throw (RuntimeException) t;
       }
@@ -94,7 +97,7 @@ public final class LanceArrowStreamScanner {
       }
       throw new RuntimeException(t);
     }
-    return new LanceArrowStream(stream, fragmentScanner);
+    return new LanceArrowStream(stream, fragmentScanner, executorNamespace);
   }
 
   /**
@@ -202,10 +205,15 @@ public final class LanceArrowStreamScanner {
   public static final class LanceArrowStream implements AutoCloseable {
     private final ArrowArrayStream stream;
     private final LanceFragmentScanner fragmentScanner;
+    private final ExecutorNamespace executorNamespace;
 
-    LanceArrowStream(ArrowArrayStream stream, LanceFragmentScanner fragmentScanner) {
+    LanceArrowStream(
+        ArrowArrayStream stream,
+        LanceFragmentScanner fragmentScanner,
+        ExecutorNamespace executorNamespace) {
       this.stream = stream;
       this.fragmentScanner = fragmentScanner;
+      this.executorNamespace = executorNamespace;
     }
 
     /** The Arrow C Data Interface stream backing this scan. */
@@ -229,6 +237,7 @@ public final class LanceArrowStreamScanner {
       primary = releaseStream(primary);
       primary = closeAndAccumulate(stream, primary);
       primary = closeAndAccumulate(fragmentScanner, primary);
+      primary = closeAndAccumulate(executorNamespace, primary);
       if (primary != null) {
         if (primary instanceof IOException) {
           throw (IOException) primary;

@@ -15,6 +15,7 @@ package org.lance.spark.internal;
 
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRuntime;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.read.LanceSplit;
@@ -33,10 +34,12 @@ import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class LanceArrowStreamScannerTest {
@@ -119,6 +122,53 @@ public class LanceArrowStreamScannerTest {
     handle.close();
   }
 
+  @Test
+  public void exportInitializesAndClosesExecutorNamespace() throws Exception {
+    LanceFragmentScannerTest.RecordingNamespace.reset();
+    LanceSparkReadOptions readOptions =
+        LanceSparkReadOptions.builder()
+            .datasetUri(TestUtils.TestTable1Config.datasetUri)
+            .tableId(Collections.singletonList(TestUtils.TestTable1Config.datasetName))
+            .build();
+    LanceInputPartition partition = namespacePartition(readOptions);
+
+    try (LanceArrowStreamScanner.LanceArrowStream ignored =
+        LanceArrowStreamScanner.export(0, partition)) {
+      assertEquals(1, LanceFragmentScannerTest.RecordingNamespace.INITIALIZE_CALLS.get());
+      assertNotNull(readOptions.getNamespace());
+    }
+
+    assertNull(readOptions.getNamespace());
+    assertEquals(1, LanceFragmentScannerTest.RecordingNamespace.CLOSE_CALLS.get());
+  }
+
+  /**
+   * A synthesized {@code _fragid} makes the native-schema check throw after {@code
+   * ExecutorNamespace.acquire}, so cleanup must use the construction {@code catch} path rather than
+   * {@link LanceArrowStreamScanner.LanceArrowStream#close()}. Opening the fragment can also fail
+   * after acquire (for example when the JNI library is unavailable); that is the same catch path.
+   */
+  @Test
+  public void exportClosesExecutorNamespaceWhenSchemaMismatch() {
+    LanceFragmentScannerTest.RecordingNamespace.reset();
+    LanceSparkReadOptions readOptions =
+        LanceSparkReadOptions.builder()
+            .datasetUri(TestUtils.TestTable1Config.datasetUri)
+            .tableId(Collections.singletonList(TestUtils.TestTable1Config.datasetName))
+            .build();
+    LanceInputPartition partition =
+        namespacePartition(readOptions, longSchema("x", LanceConstant.FRAGMENT_ID));
+
+    assertThrows(RuntimeException.class, () -> LanceArrowStreamScanner.export(0, partition));
+
+    assertNull(readOptions.getNamespace());
+    assertEquals(1, LanceFragmentScannerTest.RecordingNamespace.INITIALIZE_CALLS.get());
+    assertEquals(
+        1,
+        LanceFragmentScannerTest.RecordingNamespace.CLOSE_CALLS.get(),
+        "a post-acquire export failure must close the executor namespace");
+  }
+
   /**
    * When the native scan schema does not match the declared partition schema, export rejects the
    * partition so the caller falls back to the columnar reader. A synthesized {@code _fragid} is not
@@ -172,6 +222,29 @@ public class LanceArrowStreamScannerTest {
         null /* namespaceImpl */,
         null /* namespaceProperties */,
         null /* partitionKeyRow */);
+  }
+
+  private static LanceInputPartition namespacePartition(LanceSparkReadOptions readOptions) {
+    return namespacePartition(readOptions, TestUtils.TestTable1Config.schema);
+  }
+
+  private static LanceInputPartition namespacePartition(
+      LanceSparkReadOptions readOptions, StructType schema) {
+    return new LanceInputPartition(
+        schema,
+        0,
+        new LanceSplit(Collections.singletonList(0)),
+        readOptions,
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        "arrow-refresh",
+        Collections.emptyMap(),
+        LanceFragmentScannerTest.RecordingNamespace.class.getName(),
+        Collections.singletonMap("location", TestUtils.TestTable1Config.datasetUri),
+        null);
   }
 
   private static LanceInputPartition partitionMatchingNoRows() {
