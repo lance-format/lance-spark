@@ -682,7 +682,7 @@ public abstract class BaseBranchDDLTest {
   }
 
   @Test
-  public void testBranchIdentifierRejectsCreateIndexAndVacuum() throws Exception {
+  public void testBranchIdentifierRejectsIndexMaintenanceAndVacuum() throws Exception {
     prepareDatasetWithHistory();
     spark.sql(String.format("alter table %s create branch audit", fullTable));
 
@@ -710,6 +710,16 @@ public abstract class BaseBranchDDLTest {
                             + "with (train=false)")
                     .collectAsList());
     Assertions.assertTrue(exceptionChainMessages(createIndex).contains("Writes are not supported"));
+
+    Exception optimizeIndex =
+        Assertions.assertThrows(
+            Exception.class,
+            () ->
+                spark
+                    .sql("alter table " + fullTable + ".branch_audit optimize index id_idx")
+                    .collectAsList());
+    Assertions.assertTrue(
+        exceptionChainMessages(optimizeIndex).contains("Writes are not supported"));
 
     Exception vacuum =
         Assertions.assertThrows(

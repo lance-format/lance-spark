@@ -16,7 +16,7 @@ package org.apache.spark.sql.catalyst.parser.extensions
 import org.antlr.v4.runtime.ParserRuleContext
 import org.apache.spark.sql.catalyst.analysis.{UnresolvedIdentifier, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.parser.{ParseException, ParserInterface}
-import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, LanceCreateBranch, LanceCreateTag, LanceDropBranch, LanceDropIndex, LanceDropTag, LanceNamedArgument, LanceShowBranches, LanceShowTags, LogicalPlan, Optimize, SetUnenforcedPrimaryKey, ShowIndexes, UpdateColumnsBackfill, Vacuum}
+import org.apache.spark.sql.catalyst.plans.logical.{AddColumnsBackfill, AddIndex, LanceCreateBranch, LanceCreateTag, LanceDropBranch, LanceDropIndex, LanceDropTag, LanceNamedArgument, LanceOptimizeIndex, LanceShowBranches, LanceShowTags, LogicalPlan, Optimize, SetUnenforcedPrimaryKey, ShowIndexes, UpdateColumnsBackfill, Vacuum}
 import org.lance.spark.utils.{FieldPathUtils, ParserUtils}
 
 import java.util.Locale
@@ -91,6 +91,19 @@ class LanceSqlExtensionsAstBuilder(delegate: ParserInterface)
       .toSeq
 
     Optimize(table, args)
+  }
+
+  override def visitOptimizeIndex(ctx: LanceSqlExtensionsParser.OptimizeIndexContext)
+      : LanceOptimizeIndex = {
+    val table = UnresolvedIdentifier(visitMultipartIdentifier(ctx.multipartIdentifier()))
+    val indexName = cleanIdentifier(ctx.indexName.getText)
+    val args = ctx.namedArgument().asScala.map(a =>
+      LanceNamedArgument(
+        normalizedOptionName(a.identifier().getText),
+        a.constant().accept(this)))
+      .toSeq
+
+    LanceOptimizeIndex(table, indexName, args)
   }
 
   override def visitVacuum(ctx: LanceSqlExtensionsParser.VacuumContext): Vacuum = {
