@@ -30,7 +30,7 @@ import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.apache.spark.{SparkException, SparkUnsupportedOperationException}
 import org.apache.spark.sql.types._
 import org.lance.spark.LanceConstant
-import org.lance.spark.utils.{BlobUtils, DateMilliUtils, FixedSizeBinaryUtils, Float16Utils, LargeVarBinaryUtils, LargeVarCharUtils, ListChildUtils, VectorUtils}
+import org.lance.spark.utils.{BlobUtils, DateMilliUtils, FixedSizeBinaryUtils, Float16Utils, JsonUtils, LargeVarBinaryUtils, LargeVarCharUtils, ListChildUtils, VectorUtils}
 
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
@@ -47,6 +47,7 @@ object LanceArrowUtils {
   val ARROW_EXT_NAME_KEY = BlobUtils.ARROW_EXTENSION_NAME_KEY
   val BLOB_V2_EXT_NAME = BlobUtils.ARROW_EXTENSION_BLOB_V2
   val ARROW_LARGE_VAR_CHAR_KEY = LargeVarCharUtils.ARROW_LARGE_VAR_CHAR_KEY
+  val JSON_EXT_NAME = JsonUtils.ARROW_JSON_EXTENSION_NAME
   val ARROW_LARGE_VAR_BINARY_KEY = LargeVarBinaryUtils.ARROW_LARGE_VAR_BINARY_KEY
   val ARROW_DATE_MILLISECOND_KEY = DateMilliUtils.ARROW_DATE_MILLISECOND_KEY
   val ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY =
@@ -137,6 +138,9 @@ object LanceArrowUtils {
         // Lance returns LargeBinary in schema but Struct in data for blob columns
         // We need to handle this as binary to match the schema
         BinaryType
+      case _: ArrowType.LargeBinary if JsonUtils.hasJsonArrowExtension(field) =>
+        // Lance stores JSON as LargeBinary JSONB, but Spark reads the decoded values as strings.
+        StringType
       case _: ArrowType.LargeUtf8 =>
         // LargeUtf8 maps back to StringType in Spark
         StringType
@@ -243,6 +247,10 @@ object LanceArrowUtils {
         if (Float16Utils.isFloat16ArrowField(field)) {
           builder.putString(ARROW_FLOAT16_KEY, Float16Utils.ARROW_FLOAT16_VALUE)
         }
+      case _: ArrowType.LargeBinary if JsonUtils.isLanceJsonField(field) =>
+        // Dataset.getSchema exposes Lance's physical JSONB representation. Spark uses the
+        // logical Arrow extension name for the decoded StringType it presents to callers.
+        builder.putString(ARROW_EXT_NAME_KEY, JsonUtils.ARROW_JSON_EXTENSION_NAME)
       case _: ArrowType.LargeUtf8 =>
         builder.putString(ARROW_LARGE_VAR_CHAR_KEY, LargeVarCharUtils.ARROW_LARGE_VAR_CHAR_VALUE)
       // Spark has a single BinaryType covering both Arrow Binary (32-bit offsets) and LargeBinary
@@ -251,8 +259,10 @@ object LanceArrowUtils {
       // the schema (UPDATE, ADD COLUMNS FROM, or simply read -> transform -> write), and the
       // resulting write fails type validation against the existing Lance schema.
       // Blob columns are excluded: they are already LargeBinary-backed via the blob marker, which
-      // toArrowField honors on its own.
-      case _: ArrowType.LargeBinary if !isBlobField(field) =>
+      // toArrowField honors on its own. JSON columns are excluded too: they surface as StringType,
+      // so a binary marker would contradict the Spark type and steer writeback to LargeBinary.
+      case _: ArrowType.LargeBinary
+          if !isBlobField(field) && !JsonUtils.hasJsonArrowExtension(field) =>
         builder.putString(
           ARROW_LARGE_VAR_BINARY_KEY,
           LargeVarBinaryUtils.ARROW_LARGE_VAR_BINARY_VALUE)
@@ -515,6 +525,15 @@ object LanceArrowUtils {
             toArrowField("uri", StringType, nullable = true, timeZoneId),
             arrowUInt64Field("position"),
             arrowUInt64Field("size")).asJava)
+      case _: StringType if JsonUtils.hasJsonMetadata(metadata) =>
+        // Lance JSON column. Two things matter here. First, the storage must be UTF-8: Lance
+        // encodes the JSON text to its internal JSONB form itself, and rejects a LargeBinary
+        // array of pre-encoded bytes. The extension name must be the canonical `arrow.json`.
+        // Read metadata is normalized to that name, and forcing it here also supports callers
+        // that provide the physical `lance.json` spelling directly.
+        val jsonMeta = (meta + (ARROW_EXT_NAME_KEY -> JSON_EXT_NAME)).asJava
+        val jsonType = if (large) ArrowType.LargeUtf8.INSTANCE else ArrowType.Utf8.INSTANCE
+        new Field(name, new FieldType(nullable, jsonType, null, jsonMeta), Seq.empty[Field].asJava)
       case dataType =>
         val fieldType =
           new FieldType(nullable, toArrowType(dataType, timeZoneId, large, name), null, meta.asJava)
