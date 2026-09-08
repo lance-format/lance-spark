@@ -25,6 +25,7 @@ import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.memwal.ShardingField;
 import org.lance.memwal.ShardingSpec;
+import org.lance.schema.LanceField;
 import org.lance.schema.LanceSchema;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRef;
@@ -60,6 +61,7 @@ import org.apache.spark.sql.connector.read.SupportsPushDownRequiredColumns;
 import org.apache.spark.sql.connector.read.SupportsPushDownTopN;
 import org.apache.spark.sql.connector.read.SupportsPushDownV2Filters;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.DecimalType;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.slf4j.Logger;
@@ -215,6 +217,11 @@ public class LanceScanBuilder
       Set<String> columnsToLoad = extractReferencedColumns(pushedPredicates);
       Dataset dataset = getOrOpenDataset();
       LanceSchema lanceSchema = dataset.getLanceSchema();
+      Set<String> exactEqualityIndexedColumns =
+          readOptions.isPushDownFilters()
+              ? exactEqualityIndexedColumns(dataset, lanceSchema, schema)
+              : Collections.emptySet();
+      columnsToLoad.addAll(exactEqualityIndexedColumns);
       ShardingSpec activeShardingSpec =
           SparkLanceShardingUtils.isEmpty(shardingSpec)
               ? SparkLanceShardingUtils.firstShardingSpec(dataset)
@@ -241,6 +248,7 @@ public class LanceScanBuilder
       // zones; if every fragment has a single sharding value, we get a fragment-to-key map.
       Map<Integer, Object> fragmentShardingKeys = null;
       Expression activeShardingExpression = null;
+      String activeShardingColumn = null;
       for (ShardingField field : SparkLanceShardingUtils.fields(activeShardingSpec)) {
         String column = SparkLanceShardingUtils.columnName(field, lanceSchema);
         List<ZoneStats> colStats = zonemapStats.get(column);
@@ -258,6 +266,7 @@ public class LanceScanBuilder
         if (keys.isPresent()) {
           fragmentShardingKeys = keys.get();
           activeShardingExpression = SparkLanceShardingUtils.toSparkExpression(field, lanceSchema);
+          activeShardingColumn = column;
           LOG.info(
               "Detected Lance sharding field {}('{}') with {} fragments",
               field.transform().orElse(null),
@@ -266,6 +275,16 @@ public class LanceScanBuilder
           break;
         }
       }
+
+      Set<String> runtimeFilterColumns =
+          pushedAggregation.isPresent()
+              ? Collections.emptySet()
+              : runtimeFilterColumns(
+                  schema,
+                  readOptions,
+                  exactEqualityIndexedColumns,
+                  zonemapStats.keySet(),
+                  activeShardingColumn);
 
       // Pre-compute fragment pruning so we can (a) estimate post-pruning statistics for
       // JoinSelection (BroadcastHashJoin vs SortMergeJoin) and (b) pass the cached result
@@ -342,9 +361,16 @@ public class LanceScanBuilder
           pushedPredicates,
           statistics,
           survivingFragmentIds,
+          immutableZonemapStats(zonemapStats),
+          immutableCoverage(zonemapLoad.uncoveredByColumn),
+          runtimeFilterColumns.stream()
+              .sorted()
+              .map(FieldReference::column)
+              .toArray(NamedReference[]::new),
           scanPlan.getSplits(),
           scanPlan.getFragmentRowCounts(),
           activeShardingExpression,
+          activeShardingColumn,
           fragmentShardingKeys,
           initialStorageOptions,
           namespaceImpl,
@@ -923,5 +949,104 @@ public class LanceScanBuilder
       }
     }
     return columns;
+  }
+
+  private static Set<String> exactEqualityIndexedColumns(
+      Dataset dataset, LanceSchema lanceSchema, StructType projectedSchema) {
+    Map<Integer, String> topLevelNamesById = new HashMap<>();
+    for (LanceField field : lanceSchema.fields()) {
+      topLevelNamesById.put(field.getId(), field.getName());
+    }
+
+    Set<String> projectedScalarColumns = projectedScalarColumns(projectedSchema);
+
+    Set<String> result = new HashSet<>();
+    for (Index index : dataset.getIndexes()) {
+      if (index.fields().size() != 1) {
+        continue;
+      }
+      IndexType indexType = index.indexType();
+      if (indexType != IndexType.BTREE
+          && indexType != IndexType.BITMAP
+          && indexType != IndexType.ZONEMAP
+          && indexType != IndexType.SCALAR
+          && indexType != IndexType.BLOOM_FILTER) {
+        continue;
+      }
+      String column = topLevelNamesById.get(index.fields().get(0));
+      if (column != null && projectedScalarColumns.contains(column)) {
+        result.add(column);
+      }
+    }
+    return result;
+  }
+
+  private static Set<String> projectedScalarColumns(StructType projectedSchema) {
+    Set<String> result = new HashSet<>();
+    for (StructField field : projectedSchema.fields()) {
+      if (isRuntimeFilterScalarType(field)) {
+        result.add(field.name());
+      }
+    }
+    return result;
+  }
+
+  private static Set<String> runtimeFilterColumns(
+      StructType projectedSchema,
+      LanceSparkReadOptions readOptions,
+      Set<String> exactEqualityIndexedColumns,
+      Set<String> zonemapColumns,
+      String activeShardingColumn) {
+    if (!readOptions.isPushDownFilters()) {
+      return Collections.emptySet();
+    }
+
+    Set<String> result = new HashSet<>();
+    for (StructField field : projectedSchema.fields()) {
+      String column = field.name();
+      if (LanceConstant.ROW_ADDRESS.equals(column)) {
+        result.add(column);
+      } else if (isRuntimeFilterScalarType(field)
+          && (column.equals(activeShardingColumn)
+              || zonemapColumns.contains(column)
+              || (readOptions.isUseScalarIndex()
+                  && exactEqualityIndexedColumns.contains(column)))) {
+        result.add(column);
+      }
+    }
+    return result;
+  }
+
+  private static boolean isRuntimeFilterScalarType(StructField field) {
+    if (field.metadata().contains(BlobUtils.ARROW_EXTENSION_NAME_KEY)) {
+      return false;
+    }
+    return field.dataType() == DataTypes.ByteType
+        || field.dataType() == DataTypes.ShortType
+        || field.dataType() == DataTypes.IntegerType
+        || field.dataType() == DataTypes.LongType
+        || field.dataType() == DataTypes.BooleanType
+        || field.dataType() == DataTypes.StringType
+        || field.dataType() == DataTypes.DateType
+        || field.dataType() == DataTypes.TimestampType
+        || field.dataType() instanceof DecimalType;
+  }
+
+  private static Map<String, List<ZoneStats>> immutableZonemapStats(
+      Map<String, List<ZoneStats>> stats) {
+    Map<String, List<ZoneStats>> copy = new HashMap<>();
+    for (Map.Entry<String, List<ZoneStats>> entry : stats.entrySet()) {
+      copy.put(entry.getKey(), Collections.unmodifiableList(new ArrayList<>(entry.getValue())));
+    }
+    return Collections.unmodifiableMap(copy);
+  }
+
+  private static Map<String, Set<Integer>> immutableCoverage(
+      Map<String, Set<Integer>> uncoveredByColumn) {
+    Map<String, Set<Integer>> copy = new HashMap<>();
+    for (Map.Entry<String, Set<Integer>> entry : uncoveredByColumn.entrySet()) {
+      copy.put(entry.getKey(), Collections.unmodifiableSet(new HashSet<>(entry.getValue())));
+    }
+    return Collections.unmodifiableMap(copy);
   }
 }

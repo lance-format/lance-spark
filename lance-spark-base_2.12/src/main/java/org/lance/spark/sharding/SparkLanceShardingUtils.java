@@ -35,6 +35,8 @@ import org.apache.spark.sql.connector.expressions.NullOrdering;
 import org.apache.spark.sql.connector.expressions.SortDirection;
 import org.apache.spark.sql.connector.expressions.SortOrder;
 import org.apache.spark.sql.connector.expressions.Transform;
+import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.unsafe.types.UTF8String;
 import scala.collection.JavaConverters;
 
@@ -112,22 +114,22 @@ public final class SparkLanceShardingUtils {
   }
 
   public static NamedReference toClusteringRef(ShardingField field, LanceSchema schema) {
-    return Expressions.column(columnName(field, schema));
+    return FieldReference.column(columnName(field, schema));
   }
 
   public static SortOrder toSortOrder(ShardingField field, LanceSchema schema) {
     String column = columnName(field, schema);
     return Expressions.sort(
-        Expressions.column(column), SortDirection.ASCENDING, NullOrdering.NULLS_FIRST);
+        FieldReference.column(column), SortDirection.ASCENDING, NullOrdering.NULLS_FIRST);
   }
 
   public static Expression toSparkExpression(ShardingField field, LanceSchema schema) {
     String transform = field.transform().orElse(null);
     String column = columnName(field, schema);
     if ("bucket".equals(transform)) {
-      return Expressions.bucket(numBuckets(field), column);
+      return Expressions.bucket(numBuckets(field), quotedIdentifier(column));
     } else if ("identity".equals(transform)) {
-      return FieldReference.apply(column);
+      return FieldReference.column(column);
     }
     throw new UnsupportedOperationException("Unsupported sharding transform: " + transform);
   }
@@ -175,6 +177,30 @@ public final class SparkLanceShardingUtils {
 
   public static InternalRow partitionKeyRow(Object value) {
     Object sparkValue = value instanceof String ? UTF8String.fromString((String) value) : value;
+    return new GenericInternalRow(new Object[] {sparkValue});
+  }
+
+  /** Converts a zonemap value to the boxed representation Spark expects for a partition key. */
+  public static InternalRow partitionKeyRow(Object value, DataType dataType) {
+    Object sparkValue = value;
+    if (value instanceof Number) {
+      Number number = (Number) value;
+      if (dataType == DataTypes.ByteType) {
+        sparkValue = number.byteValue();
+      } else if (dataType == DataTypes.ShortType) {
+        sparkValue = number.shortValue();
+      } else if (dataType == DataTypes.IntegerType || dataType == DataTypes.DateType) {
+        sparkValue = number.intValue();
+      } else if (dataType == DataTypes.LongType || dataType == DataTypes.TimestampType) {
+        sparkValue = number.longValue();
+      } else if (dataType == DataTypes.FloatType) {
+        sparkValue = number.floatValue();
+      } else if (dataType == DataTypes.DoubleType) {
+        sparkValue = number.doubleValue();
+      }
+    } else if (value instanceof String && dataType == DataTypes.StringType) {
+      sparkValue = UTF8String.fromString((String) value);
+    }
     return new GenericInternalRow(new Object[] {sparkValue});
   }
 
@@ -286,6 +312,10 @@ public final class SparkLanceShardingUtils {
           "MemWAL sharding field " + field.fieldId() + " missing parameter num_buckets");
     }
     return Integer.parseInt(value);
+  }
+
+  private static String quotedIdentifier(String identifier) {
+    return "`" + identifier.replace("`", "``") + "`";
   }
 
   private static List<Integer> sourceIds(String column, LanceSchema schema) {

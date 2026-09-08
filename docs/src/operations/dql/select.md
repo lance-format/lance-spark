@@ -363,7 +363,25 @@ These options control how data is read from Lance datasets. They can be set usin
 | `index_cache_size`    | Integer | -       | Size of the index cache in number of entries.                                                                     |
 | `metadata_cache_size` | Integer | -       | Size of the metadata cache in number of entries.                                                                  |
 | `pushDownFilters`     | Boolean | `true`  | Whether to push down filter predicates to the Lance reader for optimized scanning.                                |
+| `runtime_filter_max_keys` | Integer | `10000` | Maximum accumulated non-null keys accepted from Spark runtime `IN` filters. Oversized filters are ignored.       |
+| `runtime_filter_max_bytes` | Integer | `1048576` | Maximum estimated serialized size of accumulated Spark runtime filters. Oversized filters are ignored.         |
 | `topN_push_down`      | Boolean | `true`  | Whether to push down TopN (ORDER BY ... LIMIT) operations to Lance for optimized sorting.                         |
+
+### Runtime Join Filtering
+
+Spark 4.1 and newer can route join-generated dynamic partition pruning filters into Lance scans.
+Lance accepts exact `IN` predicates for projected `_rowaddr`, active sharding columns, and
+top-level scalar columns backed by a compatible scalar or zonemap index. Runtime filters prune a
+subset of the snapshot-pinned fragments and are also passed to the native Lance scanner; Spark
+still evaluates the normal join, including duplicate-key multiplicity.
+
+Repeated runtime filters are combined with `AND`. Null equality keys are discarded, an empty or
+null-only key set produces an empty scan, and uncovered fragments from a partially built zonemap
+index are retained conservatively. Setting `pushDownFilters=false` disables runtime filtering.
+Setting `use_scalar_index=false` disables native scalar-index lookup but still allows exact
+`_rowaddr`/sharding pruning and zonemap fragment pruning. The two guardrail options above bound
+driver memory and generated filter size; a rejected runtime filter is observable in scan metadata
+as `rejectedRuntimeFilterCount` and does not affect query correctness.
 
 ## User-Defined Types
 
