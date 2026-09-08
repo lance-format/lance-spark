@@ -50,13 +50,18 @@ abstract private[arrow] class LanceArrowFieldWriter {
    */
   def estimatedBufferedBytes: Long = 0L
 
+  private[arrow] def writeNull(): Unit = {
+    setNull()
+    count += 1
+  }
+
   def write(input: SpecializedGetters, ordinal: Int): Unit = {
     if (input.isNullAt(ordinal)) {
-      setNull()
+      writeNull()
     } else {
       setValue(input, ordinal)
+      count += 1
     }
-    count += 1
   }
 
   def finish(): Unit = {

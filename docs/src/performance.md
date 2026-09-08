@@ -133,14 +133,19 @@ hit the 2GB overflow error. There is no meaningful performance overhead -- the o
 difference is 8 bytes per row for the offset buffer instead of 4.
 
 ```python
+# Create a new dataset whose string and binary fields use 64-bit offsets.
 df.write \
     .format("lance") \
     .option("use_large_var_types", "true") \
-    .mode("append") \
-    .saveAsTable("my_table")
+    .save("/path/to/new-output.lance")
 ```
 
 !!!note
+    Append and row-level writes must use the existing table schema. To append large values, create
+    the table with large variable-width fields first. Setting `use_large_var_types=true` while
+    appending to a table that still has `Utf8` or `Binary` fields fails before executor writers
+    start. A full-table overwrite may intentionally promote those fields.
+
     For per-column control at table creation time, see the
     [`arrow.large_var_char` table property](operations/ddl/create-table.md#large-string-columns).
 

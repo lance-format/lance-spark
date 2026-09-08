@@ -445,8 +445,8 @@ class LanceArrowUtilsSuite extends AnyFunSuite {
       3,
       primitiveField("element", ArrowType.LargeUtf8.INSTANCE))))
     val sparkSchema = LanceArrowUtils.fromArrowSchema(arrow)
-    // FixedSizeList<LargeUtf8> is not a Lance vector (element is not numeric), so it
-    // collapses to a regular List on writeback. Element type fidelity is still required.
+    // FixedSizeList metadata is retained, but creating FixedSizeLists from Spark schemas remains
+    // limited to numeric vector columns. Schema-preserving writes use the original Arrow field.
     val arrowBack = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false)
     val elementType = arrowBack.findField("fsl").getChildren.get(0).getType
     assert(
