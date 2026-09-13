@@ -26,10 +26,12 @@ import org.lance.spark.sharding.SparkLanceShardingUtils;
 import org.lance.spark.utils.BlobReferenceResolver;
 import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.Utils;
+import org.lance.spark.write.metric.LanceWriteMetricsTracker;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
 import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.connector.metric.CustomTaskMetric;
 import org.apache.spark.sql.connector.write.DataWriter;
 import org.apache.spark.sql.connector.write.DataWriterFactory;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
@@ -59,6 +61,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
   private final Supplier<BufferAndTask> bufferTaskFactory;
   private final ShardingBatchKeyEvaluator shardingKeyEvaluator;
   private final List<FragmentMetadata> completedFragments = new ArrayList<>();
+  private final LanceWriteMetricsTracker metricsTracker = new LanceWriteMetricsTracker();
 
   /**
    * Resolves blob references to actual bytes during writes. Shared across all batches/fragments of
@@ -97,6 +100,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
 
   @Override
   public void write(InternalRow record) throws IOException {
+    metricsTracker.incrementRecordsWritten();
     if (shardingKeyEvaluator != null) {
       shardingKeyEvaluator.write(record, this::writePartitionedRow);
       return;
@@ -119,7 +123,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
   private void rollFragment() throws IOException {
     writeBuffer.setFinished();
     try {
-      completedFragments.addAll(stripRowIdMeta(fragmentCreationTask.get()));
+      addCompletedFragments(fragmentCreationTask.get());
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       throw new IOException("Interrupted while rolling fragment", e);
@@ -144,7 +148,10 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
     writeBuffer.setFinished();
 
     try {
-      completedFragments.addAll(stripRowIdMeta(fragmentCreationTask.get()));
+      addCompletedFragments(fragmentCreationTask.get());
+      // currentMetricsValues() is called before commit(), so the fragment finished here would
+      // otherwise never be reported. Totals are absolute, so republishing cannot double count.
+      metricsTracker.publishOutputMetrics();
       return new LanceBatchWrite.TaskCommit(new ArrayList<>(completedFragments));
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
@@ -152,6 +159,17 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
     } catch (ExecutionException e) {
       throw new IOException("Exception in fragment creation thread", e);
     }
+  }
+
+  private void addCompletedFragments(List<FragmentMetadata> fragments) {
+    List<FragmentMetadata> stripped = stripRowIdMeta(fragments);
+    completedFragments.addAll(stripped);
+    metricsTracker.addFragments(stripped);
+  }
+
+  @Override
+  public CustomTaskMetric[] currentMetricsValues() {
+    return metricsTracker.currentMetricsValues();
   }
 
   @Override

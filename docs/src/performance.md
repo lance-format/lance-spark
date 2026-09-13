@@ -195,6 +195,26 @@ How to read these together:
 - **Catalog overhead**: `datasetOpenTimeNs` accumulates per fragment opened. If many fragments are
   opened per task, this can dominate; metadata cache size and namespace caching matter most here.
 
+### Custom Write Metrics
+
+Lance Spark reports per-task custom metrics on the Spark UI write node.
+
+| Metric | Type | Description |
+|---|---|---|
+| `bytesWritten` | counter | Total size of the Lance data files produced by this task, summed over the files of every fragment it committed. |
+| `recordsWritten` | counter | Rows written by this task. Counted exactly, as rows are handed to the writer. |
+
+Unlike the read metrics, these two names are **reserved by Spark**: it recognizes exactly
+`bytesWritten` and `recordsWritten` and forwards them to the task's output metrics, so they also
+appear as stage-level `outputBytes` / `outputRecords` in the Stages UI and the history server REST
+API (`/applications/{id}/stages`). Any other metric name would only reach the SQL tab.
+
+Because a fragment's byte size is only known once its creation task completes (which for the last
+fragment of a task happens during `commit()`, after Spark's final `currentMetricsValues()` call),
+the writer also publishes the final totals to the output metrics at the end of `commit()`. Both
+paths report absolute task totals and Spark consumes them with set-semantics, so this cannot double
+count.
+
 ## Caching
 
 Lance Spark uses a multi-level caching strategy to minimize redundant I/O and improve query performance.
