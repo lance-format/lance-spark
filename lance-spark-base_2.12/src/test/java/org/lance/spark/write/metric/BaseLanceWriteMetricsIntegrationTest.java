@@ -16,10 +16,14 @@ package org.lance.spark.write.metric;
 import org.apache.spark.scheduler.SparkListener;
 import org.apache.spark.scheduler.SparkListenerTaskEnd;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.execution.QueryExecution;
+import org.apache.spark.sql.execution.SparkPlan;
+import org.apache.spark.sql.util.QueryExecutionListener;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import scala.collection.JavaConverters;
 
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicLong;
@@ -56,6 +60,38 @@ public abstract class BaseLanceWriteMetricsIntegrationTest {
     }
   }
 
+  /** Captures the SQL-tab SQLMetric named bytesWritten from the executed plan. */
+  static class SqlMetricListener implements QueryExecutionListener {
+    final AtomicLong sqlBytesWritten = new AtomicLong(-1);
+    final AtomicLong sqlRecordsWritten = new AtomicLong(-1);
+
+    private void walk(SparkPlan plan) {
+      scala.collection.Iterator<String> keys = plan.metrics().keysIterator();
+      while (keys.hasNext()) {
+        String key = keys.next();
+        if (key.equals("bytesWritten")) {
+          sqlBytesWritten.set(plan.metrics().apply(key).value());
+        }
+        if (key.equals("recordsWritten")) {
+          sqlRecordsWritten.set(plan.metrics().apply(key).value());
+        }
+      }
+      for (SparkPlan child : JavaConverters.seqAsJavaList(plan.children())) {
+        walk(child);
+      }
+    }
+
+    @Override
+    public void onSuccess(String funcName, QueryExecution qe, long durationNs) {
+      walk(qe.executedPlan());
+    }
+
+    @Override
+    public void onFailure(String funcName, QueryExecution qe, Exception exception) {}
+  }
+
+  private SqlMetricListener sqlListener;
+
   @BeforeEach
   public void setup() {
     spark =
@@ -70,6 +106,8 @@ public abstract class BaseLanceWriteMetricsIntegrationTest {
             .getOrCreate();
     listener = new OutputMetricsListener();
     spark.sparkContext().addSparkListener(listener);
+    sqlListener = new SqlMetricListener();
+    spark.listenerManager().register(sqlListener);
     spark.sql(String.format("CREATE TABLE %s (id INT, text STRING) USING LANCE;", TABLE));
   }
 
@@ -98,6 +136,36 @@ public abstract class BaseLanceWriteMetricsIntegrationTest {
     assertEquals(rows, listener.recordsWritten.get(), "outputMetrics.recordsWritten");
     // The only fragment here is completed inside commit(), after Spark's last
     // currentMetricsValues() call, so a nonzero value proves the post-commit publish works.
+    assertTrue(
+        listener.bytesWritten.get() > 0,
+        "outputMetrics.bytesWritten should be > 0, was " + listener.bytesWritten.get());
+  }
+
+  /**
+   * The reviewer's reproducer on lance-format/lance-spark#824, inverted. Spark takes its last
+   * {@code currentMetricsValues()} poll before {@code commit()} and offers no driver-side path to
+   * correct a SQL metric afterwards, so an advertised {@code bytesWritten} would read 0 here.
+   * {@code recordsWritten} is counted in {@code write()}, so it is already final at the last poll
+   * and is exact on the SQL tab; the byte total reaches users through outputMetrics instead.
+   */
+  @Test
+  void testSqlMetricsAreOnlyTheOnesThatCanBeCorrect() throws Exception {
+    int rows = 50;
+    spark.sql(
+        String.format(
+            "INSERT INTO %s (id, text) VALUES %s ;",
+            TABLE,
+            IntStream.range(0, rows)
+                .boxed()
+                .map(i -> String.format("(%d, 'text_%d')", i, i))
+                .collect(Collectors.joining(","))));
+    spark.sparkContext().listenerBus().waitUntilEmpty(10000);
+
+    assertEquals(rows, sqlListener.sqlRecordsWritten.get(), "SQL recordsWritten");
+    assertEquals(
+        -1,
+        sqlListener.sqlBytesWritten.get(),
+        "bytesWritten must not be advertised as a SQL metric, it cannot be correct there");
     assertTrue(
         listener.bytesWritten.get() > 0,
         "outputMetrics.bytesWritten should be > 0, was " + listener.bytesWritten.get());

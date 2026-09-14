@@ -46,15 +46,29 @@ public abstract class BaseLanceWriteMetricsTest {
   @Test
   void testAllMetricsHaveUniqueNamesAndDescriptions() {
     CustomMetric[] metrics = LanceWriteMetrics.allMetrics();
-    assertEquals(2, metrics.length);
+    assertEquals(1, metrics.length);
     HashMap<String, CustomMetric> byName = new HashMap<>();
     for (CustomMetric metric : metrics) {
       assertNotNull(metric.description(), "Missing description for " + metric.name());
       assertTrue(metric.description().length() > 0, "Empty description for " + metric.name());
       assertTrue(byName.put(metric.name(), metric) == null, "Duplicate name: " + metric.name());
     }
-    assertTrue(byName.containsKey(LanceWriteMetrics.BYTES_WRITTEN));
     assertTrue(byName.containsKey(LanceWriteMetrics.RECORDS_WRITTEN));
+  }
+
+  /**
+   * bytesWritten must NOT be advertised as a SQL custom metric: its final value is only known
+   * inside commit(), after Spark's last currentMetricsValues() poll, and no driver-side path exists
+   * to correct the SQLMetric afterwards. Advertising it would render 0 on single-fragment writes.
+   * It is still reported as a task metric, where Spark routes it into outputMetrics.
+   */
+  @Test
+  void testBytesWrittenIsNotAdvertisedAsSqlMetric() {
+    for (CustomMetric metric : LanceWriteMetrics.allMetrics()) {
+      assertTrue(
+          !LanceWriteMetrics.BYTES_WRITTEN.equals(metric.name()),
+          "bytesWritten must not be advertised as a SQL custom metric");
+    }
   }
 
   @Test
