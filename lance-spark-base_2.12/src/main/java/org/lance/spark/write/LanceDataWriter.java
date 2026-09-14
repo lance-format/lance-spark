@@ -149,8 +149,8 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
 
     try {
       addCompletedFragments(fragmentCreationTask.get());
-      // currentMetricsValues() is called before commit(), so the fragment finished here would
-      // otherwise never be reported. Totals are absolute, so republishing cannot double count.
+      // Spark's last currentMetricsValues() poll happens before commit(), so the fragment
+      // finished above would otherwise go unreported.
       metricsTracker.publishOutputMetrics();
       return new LanceBatchWrite.TaskCommit(new ArrayList<>(completedFragments));
     } catch (InterruptedException e) {

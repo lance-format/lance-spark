@@ -35,8 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * End-to-end check that write metrics reach {@code TaskMetrics.outputMetrics}, which is what the
- * history server REST API (and lance's own benchmark harness) reads as stage outputBytes /
- * outputRecords. Before write metrics existed both were always 0.
+ * history server REST API and the benchmark harness read as stage outputBytes / outputRecords.
  */
 public abstract class BaseLanceWriteMetricsIntegrationTest {
   private SparkSession spark;
@@ -131,22 +130,17 @@ public abstract class BaseLanceWriteMetricsIntegrationTest {
                 .collect(Collectors.joining(","))));
     spark.sparkContext().listenerBus().waitUntilEmpty(10000);
 
-    // Exact: every row handed to the writer is counted once, and the value is absolute, so the
-    // repeated currentMetricsValues() polls plus the post-commit publish cannot inflate it.
     assertEquals(rows, listener.recordsWritten.get(), "outputMetrics.recordsWritten");
-    // The only fragment here is completed inside commit(), after Spark's last
-    // currentMetricsValues() call, so a nonzero value proves the post-commit publish works.
+    // The only fragment completes inside commit(), so a nonzero value proves the post-commit
+    // publish works.
     assertTrue(
         listener.bytesWritten.get() > 0,
         "outputMetrics.bytesWritten should be > 0, was " + listener.bytesWritten.get());
   }
 
   /**
-   * The reviewer's reproducer on lance-format/lance-spark#824, inverted. Spark takes its last
-   * {@code currentMetricsValues()} poll before {@code commit()} and offers no driver-side path to
-   * correct a SQL metric afterwards, so an advertised {@code bytesWritten} would read 0 here.
-   * {@code recordsWritten} is counted in {@code write()}, so it is already final at the last poll
-   * and is exact on the SQL tab; the byte total reaches users through outputMetrics instead.
+   * {@code recordsWritten} is exact on the SQL tab because rows are counted in {@code write()}.
+   * {@code bytesWritten} is not advertised there, and reaches users through outputMetrics instead.
    */
   @Test
   void testSqlMetricsAreOnlyTheOnesThatCanBeCorrect() throws Exception {

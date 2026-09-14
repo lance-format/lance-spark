@@ -19,31 +19,24 @@ import org.apache.spark.sql.connector.metric.CustomSumMetric;
 /**
  * Custom metrics for the Lance write path, displayed on the Spark UI write node.
  *
- * <p>Both names here are reserved by Spark: {@code
+ * <p>Both names are reserved by Spark: {@code
  * org.apache.spark.sql.execution.metric.CustomMetrics#updateMetrics} recognizes exactly {@code
  * bytesWritten} and {@code recordsWritten} and forwards them to {@code
  * TaskContext.get().taskMetrics().outputMetrics()}, which is what populates the stage-level {@code
- * outputBytes}/{@code outputRecords} reported by the Spark history server REST API and the Stages
- * UI. Any other metric name would only reach the SQL tab. Renaming these therefore silently breaks
- * external tooling — see {@link LanceWriteMetricsTracker}. That routing is independent of {@link
- * #allMetrics()}: it happens for any reported task metric with a reserved name, advertised or not.
+ * outputBytes}/{@code outputRecords} shown in the Stages UI and the history server REST API. Any
+ * other name would reach only the SQL tab. That routing happens for any reported task metric with a
+ * reserved name, whether or not it is advertised by {@link #allMetrics()}.
  *
- * <p><b>Only {@code recordsWritten} is advertised as a SQL custom metric.</b> A SQL metric can only
- * ever be set from {@code DataWriter.currentMetricsValues()}, which Spark 3.4-4.1 stops calling
- * before {@code DataWriter.commit()}, and there is no driver-side path back: after {@code
- * BatchWrite.commit(WriterCommitMessage[])} the write exec only logs and records streaming commit
- * progress, never touching the SQL metrics. Rows are counted in {@code write()} so {@code
- * recordsWritten} is already final by the last poll, but a fragment's byte size is only known once
- * its creation task resolves — for the last fragment, inside {@code commit()} — so an advertised
- * {@code bytesWritten} would render as 0 on every single-fragment write and short by the final
- * fragment on sharded ones. It is reported as a task metric (for the output-metrics routing above)
- * but deliberately kept off the SQL tab rather than shown wrong.
+ * <p>Only {@code recordsWritten} is advertised as a SQL custom metric. A SQL metric can only be set
+ * from {@code DataWriter.currentMetricsValues()}, which Spark stops polling before {@code
+ * DataWriter.commit()}, and no driver-side path updates it afterwards. Rows are counted in {@code
+ * write()} so {@code recordsWritten} is final by the last poll; a fragment's byte size is not known
+ * until its creation task resolves, which for the last fragment happens inside {@code commit()}, so
+ * an advertised {@code bytesWritten} would render as 0 on a single-fragment write. It is reported
+ * as a task metric only.
  */
 public final class LanceWriteMetrics {
-  /**
-   * Reserved Spark metric name, routed to {@code OutputMetrics.setBytesWritten}. Reported as a task
-   * metric only; not advertised as a SQL custom metric (see the class javadoc).
-   */
+  /** Reserved Spark metric name, routed to {@code OutputMetrics.setBytesWritten}. */
   public static final String BYTES_WRITTEN = "bytesWritten";
 
   /** Reserved Spark metric name, routed to {@code OutputMetrics.setRecordsWritten}. */

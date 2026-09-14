@@ -33,9 +33,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public abstract class BaseLanceWriteMetricsTest {
 
   /**
-   * Spark only routes these two exact names into {@code TaskContext.taskMetrics().outputMetrics()}
-   * (see {@code org.apache.spark.sql.execution.metric.CustomMetrics#updateMetrics}). Renaming them
-   * silently drops stage-level outputBytes/outputRecords, so pin the literals.
+   * Spark routes only these two exact names into {@code taskMetrics().outputMetrics()}, so a rename
+   * would silently drop stage-level outputBytes/outputRecords.
    */
   @Test
   void testReservedSparkMetricNames() {
@@ -57,10 +56,8 @@ public abstract class BaseLanceWriteMetricsTest {
   }
 
   /**
-   * bytesWritten must NOT be advertised as a SQL custom metric: its final value is only known
-   * inside commit(), after Spark's last currentMetricsValues() poll, and no driver-side path exists
-   * to correct the SQLMetric afterwards. Advertising it would render 0 on single-fragment writes.
-   * It is still reported as a task metric, where Spark routes it into outputMetrics.
+   * bytesWritten is final only inside commit(), after Spark's last currentMetricsValues() poll, so
+   * advertising it as a SQL metric would render 0 on a single-fragment write.
    */
   @Test
   void testBytesWrittenIsNotAdvertisedAsSqlMetric() {
@@ -106,11 +103,7 @@ public abstract class BaseLanceWriteMetricsTest {
     assertEquals(42, tracker.getBytesWritten());
   }
 
-  /**
-   * Values are absolute task totals, not deltas: Spark 3.5 polls currentMetricsValues() every 100
-   * rows and again after the write loop, and consumes the value with SQLMetric.set /
-   * OutputMetrics.setBytesWritten. Reading twice with no work in between must not change anything.
-   */
+  /** Values are absolute task totals, so repeated polls with no work in between are stable. */
   @Test
   void testCurrentMetricsValuesAreAbsoluteAndStable() {
     LanceWriteMetricsTracker tracker = new LanceWriteMetricsTracker();

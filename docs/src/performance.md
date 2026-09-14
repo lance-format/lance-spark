@@ -201,26 +201,21 @@ The write path reports two per-task metrics.
 
 | Metric | Type | Where it shows up | Description |
 |---|---|---|---|
-| `recordsWritten` | counter | SQL tab write node, **and** stage `outputRecords` | Rows written by this task. Counted exactly, as rows are handed to the writer. |
-| `bytesWritten` | counter | stage `outputBytes` only | Total size of the Lance data files produced by this task, summed over the files of every fragment it committed. |
+| `recordsWritten` | counter | SQL tab write node, **and** stage `outputRecords` | Rows written by this task, counted exactly as they are handed to the writer. |
+| `bytesWritten` | counter | stage `outputBytes` only | Total size of the Lance data files this task produced, summed over the files of every fragment it committed. |
 
-Both names are **reserved by Spark**: `CustomMetrics.updateMetrics` recognizes exactly
-`bytesWritten` and `recordsWritten` and forwards them to the task's output metrics, which is what
-populates stage-level `outputBytes` / `outputRecords` in the Stages UI and the history server REST
-API (`/applications/{id}/stages`). That routing applies to any reported task metric with a reserved
-name, whether or not the metric is advertised via `supportedCustomMetrics()`.
+Both names are reserved by Spark: `CustomMetrics.updateMetrics` recognizes exactly `bytesWritten`
+and `recordsWritten` and forwards them to the task's output metrics, which is what populates
+stage-level `outputBytes` / `outputRecords` in the Stages UI and the history server REST API. That
+routing applies whether or not the metric is advertised via `supportedCustomMetrics()`.
 
-Only `recordsWritten` is advertised as a SQL custom metric, because only it can be correct there. A
-SQL metric can be set solely from `DataWriter.currentMetricsValues()`, and Spark 3.4-4.1 takes its
-last poll of that *before* `DataWriter.commit()`; after `BatchWrite.commit()` the driver-side write
-exec only logs and records streaming commit progress, so there is no path back to the SQL metric.
-Rows are counted in `write()`, so `recordsWritten` is already final at the last poll. A Lance
-fragment's byte size, by contrast, is only known once its creation task resolves — for the last
-fragment of a task, inside `commit()` — so an advertised `bytesWritten` would read 0 on every
-single-fragment write and be short by the final fragment on sharded ones. The writer therefore
-publishes the byte total to the task's output metrics directly at the end of `commit()`, and
-`bytesWritten` is deliberately kept off the SQL tab rather than displayed wrong. Both paths report
-absolute task totals that Spark consumes with set-semantics, so republishing cannot double count.
+Only `recordsWritten` is advertised as a SQL custom metric. A SQL metric can only be set from
+`DataWriter.currentMetricsValues()`, which Spark stops polling before `DataWriter.commit()`, and no
+driver-side path updates it afterwards. Rows are counted in `write()`, so `recordsWritten` is final
+by the last poll; a fragment's byte size is not known until its creation task resolves, which for
+the last fragment happens inside `commit()`. The writer therefore publishes the byte total to the
+task's output metrics at the end of `commit()`, and keeps `bytesWritten` off the SQL tab rather
+than showing a value that would read 0 on a single-fragment write.
 
 ## Caching
 

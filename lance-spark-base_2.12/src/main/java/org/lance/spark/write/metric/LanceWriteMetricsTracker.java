@@ -25,22 +25,11 @@ import java.util.List;
  * Accumulates write-path metrics on the executor side. Thread-confined (one instance per {@code
  * LanceDataWriter}, single-threaded access).
  *
- * <p>All values are <b>absolute task totals</b>, never deltas. This matters because Spark consumes
- * them absolutely on both paths: {@code SQLMetric.set} for the SQL tab, and {@code
- * OutputMetrics.setBytesWritten}/{@code setRecordsWritten} for the stage-level output metrics. Two
- * consequences:
- *
- * <ul>
- *   <li>Spark calls {@link #currentMetricsValues()} repeatedly (Spark 3.5 does so every 100 rows
- *       and again after the write loop), so repeated reporting is idempotent, not additive.
- *   <li>{@link #publishOutputMetrics()} can safely re-report the final totals after commit without
- *       double counting what {@code currentMetricsValues()} already reported.
- * </ul>
- *
- * <p>The post-commit publish exists because Spark calls {@code DataWriter.currentMetricsValues()}
- * <i>before</i> {@code DataWriter.commit()}, while a Lance fragment's byte size only becomes known
- * once its creation task resolves — which for the last fragment happens inside {@code commit()}.
- * Without it the final fragment's bytes would be dropped from every write.
+ * <p>All values are absolute task totals, never deltas, because Spark consumes them absolutely on
+ * both paths ({@code SQLMetric.set} and {@code OutputMetrics.setBytesWritten}/{@code
+ * setRecordsWritten}). Spark polls {@link #currentMetricsValues()} repeatedly during the write
+ * loop, and {@link #publishOutputMetrics()} re-reports the final totals after commit; neither can
+ * double count.
  */
 public class LanceWriteMetricsTracker {
   private long bytesWritten;
@@ -72,7 +61,7 @@ public class LanceWriteMetricsTracker {
         },
       };
 
-  /** Counts one row handed to the writer. Rows are counted exactly, not derived from fragments. */
+  /** Counts one row handed to the writer, rather than deriving the count from fragments. */
   public void incrementRecordsWritten() {
     recordsWritten++;
   }
@@ -89,14 +78,15 @@ public class LanceWriteMetricsTracker {
     }
   }
 
-  /** Absolute task totals. Allocation-free: the metric instances are created once per tracker. */
+  /** Absolute task totals. The metric instances are allocated once per tracker, not per call. */
   public CustomTaskMetric[] currentMetricsValues() {
     return taskMetrics;
   }
 
   /**
    * Sets the task's output metrics directly, so the totals include the fragment completed during
-   * {@code commit()}. No-op outside a Spark task (e.g. unit tests).
+   * {@code commit()}, after Spark's last {@code currentMetricsValues()} poll. No-op outside a Spark
+   * task.
    */
   public void publishOutputMetrics() {
     TaskContext context = TaskContext.get();
