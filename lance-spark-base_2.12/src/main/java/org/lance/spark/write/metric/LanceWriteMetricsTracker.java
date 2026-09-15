@@ -26,8 +26,9 @@ import java.util.List;
  * LanceDataWriter}, single-threaded access).
  *
  * <p>Values are absolute task totals, not deltas. Spark consumes them absolutely on both paths
- * ({@code SQLMetric.set} and {@code OutputMetrics.setBytesWritten}), so the repeated polls and the
- * post-commit publish cannot double count.
+ * ({@code SQLMetric.set} and {@code OutputMetrics.setBytesWritten}), so within one attempt the
+ * repeated polls and the post-commit publish cannot double count. Across attempts they can, which
+ * is what {@link #clearOutputMetrics()} handles.
  */
 public class LanceWriteMetricsTracker {
   private long bytesWritten;
@@ -64,7 +65,7 @@ public class LanceWriteMetricsTracker {
     recordsWritten++;
   }
 
-  /** Adds the data-file bytes of newly completed fragments to the running total. */
+  /** Data files with an unknown size are skipped rather than counted as zero. */
   public void addFragments(List<FragmentMetadata> fragments) {
     for (FragmentMetadata fragment : fragments) {
       for (DataFile file : fragment.getFiles()) {
@@ -82,16 +83,30 @@ public class LanceWriteMetricsTracker {
   }
 
   /**
-   * Sets the task's output metrics directly, so the totals include the fragment that completes
+   * Sets the task's output metrics directly, so the totals include the fragments that complete
    * inside {@code commit()}, after Spark's last poll. No-op outside a Spark task.
    */
   public void publishOutputMetrics() {
+    setOutputMetrics(bytesWritten, recordsWritten);
+  }
+
+  /**
+   * Zeroes the task's output metrics. Spark routes the reserved names into output metrics from
+   * inside the write loop, and {@code AppStatusListener} folds a task's metrics into the stage
+   * totals whatever its end reason, so a failed attempt would otherwise leave its partial row count
+   * in stage {@code outputRecords} and the retry would add a full count on top.
+   */
+  public void clearOutputMetrics() {
+    setOutputMetrics(0L, 0L);
+  }
+
+  private void setOutputMetrics(long bytes, long records) {
     TaskContext context = TaskContext.get();
     if (context == null) {
       return;
     }
-    context.taskMetrics().outputMetrics().setBytesWritten(bytesWritten);
-    context.taskMetrics().outputMetrics().setRecordsWritten(recordsWritten);
+    context.taskMetrics().outputMetrics().setBytesWritten(bytes);
+    context.taskMetrics().outputMetrics().setRecordsWritten(records);
   }
 
   /** Visible for testing. */

@@ -17,25 +17,23 @@ import org.apache.spark.sql.connector.metric.CustomMetric;
 import org.apache.spark.sql.connector.metric.CustomSumMetric;
 
 /**
- * Custom metrics for the Lance write path, displayed on the Spark UI write node.
+ * Custom metrics for the Lance write path.
  *
  * <p>{@code bytesWritten} and {@code recordsWritten} are reserved names: {@code
- * execution.metric.CustomMetrics#updateMetrics} recognizes exactly these two and forwards them to
- * the task's output metrics, which is what populates stage-level {@code outputBytes}/{@code
- * outputRecords}. That happens for any reported task metric with a reserved name, advertised here
- * or not.
+ * org.apache.spark.sql.execution.metric.CustomMetrics#updateMetrics} matches exactly these two and
+ * forwards them to the task's output metrics, which is what populates stage-level {@code
+ * outputBytes}/{@code outputRecords}. That happens for any reported task metric with a reserved
+ * name, advertised here or not.
  *
- * <p>Only {@code recordsWritten} is advertised as a SQL metric. SQL metrics are set from {@code
- * currentMetricsValues()}, which Spark stops polling before {@code commit()}, and the last
- * fragment's byte size is not known until then, so an advertised {@code bytesWritten} would read 0
- * on a single-fragment write. {@link LanceWriteMetricsTracker#publishOutputMetrics()} reports it
+ * <p>Only {@code recordsWritten} is advertised as a SQL metric. SQL metrics come from {@code
+ * currentMetricsValues()}, whose last poll is just before {@code commit()}. Fragments only complete
+ * inside {@code commit()} unless the write is sharded, so an advertised {@code bytesWritten} would
+ * read 0 on an ordinary write. {@link LanceWriteMetricsTracker#publishOutputMetrics()} reports it
  * after commit instead.
  */
 public final class LanceWriteMetrics {
-  /** Reserved Spark metric name, routed to {@code OutputMetrics.setBytesWritten}. */
   public static final String BYTES_WRITTEN = "bytesWritten";
 
-  /** Reserved Spark metric name, routed to {@code OutputMetrics.setRecordsWritten}. */
   public static final String RECORDS_WRITTEN = "recordsWritten";
 
   private LanceWriteMetrics() {}

@@ -149,8 +149,6 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
 
     try {
       addCompletedFragments(fragmentCreationTask.get());
-      // Spark's last currentMetricsValues() poll is before commit(), so the fragment finished
-      // above would otherwise go unreported.
       metricsTracker.publishOutputMetrics();
       return new LanceBatchWrite.TaskCommit(new ArrayList<>(completedFragments));
     } catch (InterruptedException e) {
@@ -174,6 +172,7 @@ public class LanceDataWriter implements DataWriter<InternalRow> {
 
   @Override
   public void abort() throws IOException {
+    metricsTracker.clearOutputMetrics();
     writeBuffer.setFinished();
     fragmentCreationThread.interrupt();
     try {

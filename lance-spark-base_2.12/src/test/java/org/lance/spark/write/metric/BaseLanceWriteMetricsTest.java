@@ -52,7 +52,7 @@ public abstract class BaseLanceWriteMetricsTest {
     assertTrue(byName.containsKey(LanceWriteMetrics.RECORDS_WRITTEN));
   }
 
-  /** Advertising it would render 0 on a single-fragment write. See {@link LanceWriteMetrics}. */
+  /** Advertising it would always read 0. See {@link LanceWriteMetrics}. */
   @Test
   void testBytesWrittenIsNotAdvertisedAsSqlMetric() {
     for (CustomMetric metric : LanceWriteMetrics.allMetrics()) {

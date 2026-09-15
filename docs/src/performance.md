@@ -199,19 +199,24 @@ How to read these together:
 
 The write path reports two per-task metrics.
 
-| Metric | Type | Where it shows up | Description |
+| Metric | SQL tab | Stage metric | Description |
 |---|---|---|---|
-| `recordsWritten` | counter | SQL tab write node, **and** stage `outputRecords` | Rows written by this task, counted exactly as they are handed to the writer. |
-| `bytesWritten` | counter | stage `outputBytes` only | Total size of the Lance data files this task produced. |
+| `recordsWritten` | yes | `outputRecords` | Rows handed to this task's writer. |
+| `bytesWritten` | no | `outputBytes` | Total size of the Lance data files this task produced. |
 
-Spark reserves both names: `CustomMetrics.updateMetrics` recognizes exactly `bytesWritten` and
-`recordsWritten` and forwards them to the task's output metrics, which is what populates
-stage-level `outputBytes` / `outputRecords` in the Stages UI and the history server REST API.
+Spark special-cases both names: `execution.metric.CustomMetrics.updateMetrics` matches exactly
+`bytesWritten` and `recordsWritten` and forwards them to the task's output metrics, which is what
+populates stage-level `outputBytes` / `outputRecords` in the Stages UI and the history server REST
+API. That happens whether or not the connector advertises them as SQL metrics.
 
-`bytesWritten` is deliberately not advertised as a SQL metric. SQL metrics are set from
-`DataWriter.currentMetricsValues()`, which Spark stops polling before `commit()`, and the last
-fragment's byte size is not known until then, so the SQL tab would show 0 for a single-fragment
-write. The writer publishes the byte total to output metrics at the end of `commit()` instead.
+`bytesWritten` is not advertised as a SQL metric. SQL metrics come from
+`DataWriter.currentMetricsValues()`, whose last poll is just before `commit()`, and Lance fragments
+only complete inside `commit()` unless the write is sharded. The SQL tab would therefore show 0, so
+the writer publishes the byte total straight to output metrics at the end of `commit()` instead.
+
+A failed task attempt clears its own output metrics in `abort()`. Spark folds a task's metrics into
+the stage totals whatever its end reason, so without that clear a retried write would report the
+failed attempt's partial rows on top of the retry's full count.
 
 ## Caching
 

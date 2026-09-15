@@ -13,11 +13,14 @@
  */
 package org.lance.spark.write.metric;
 
+import org.apache.spark.TaskContext;
 import org.apache.spark.scheduler.SparkListener;
 import org.apache.spark.scheduler.SparkListenerTaskEnd;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.api.java.UDF1;
 import org.apache.spark.sql.execution.QueryExecution;
 import org.apache.spark.sql.execution.SparkPlan;
+import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.util.QueryExecutionListener;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -131,7 +134,7 @@ public abstract class BaseLanceWriteMetricsIntegrationTest {
     spark.sparkContext().listenerBus().waitUntilEmpty(10000);
 
     assertEquals(rows, listener.recordsWritten.get(), "outputMetrics.recordsWritten");
-    // The only fragment completes inside commit(), so nonzero proves the post-commit publish ran.
+    // No fragment completes before commit(), so nonzero proves the post-commit publish ran.
     assertTrue(
         listener.bytesWritten.get() > 0,
         "outputMetrics.bytesWritten should be > 0, was " + listener.bytesWritten.get());
@@ -139,7 +142,7 @@ public abstract class BaseLanceWriteMetricsIntegrationTest {
 
   /** The SQL tab carries recordsWritten only; bytesWritten reaches users via outputMetrics. */
   @Test
-  void testSqlMetricsAreOnlyTheOnesThatCanBeCorrect() throws Exception {
+  void testBytesWrittenIsNotASqlMetric() throws Exception {
     int rows = 50;
     spark.sql(
         String.format(
@@ -155,9 +158,67 @@ public abstract class BaseLanceWriteMetricsIntegrationTest {
     assertEquals(
         -1,
         sqlListener.sqlBytesWritten.get(),
-        "bytesWritten must not be advertised as a SQL metric, it cannot be correct there");
+        "bytesWritten must not be advertised as a SQL metric; it would always read 0");
     assertTrue(
         listener.bytesWritten.get() > 0,
         "outputMetrics.bytesWritten should be > 0, was " + listener.bytesWritten.get());
+  }
+
+  /**
+   * A failed attempt must not leave its partial row count in the stage totals. Spark routes the
+   * reserved names into output metrics from inside the write loop, and {@code AppStatusListener}
+   * folds a task's metrics into the stage whatever its end reason, so without the clear in {@code
+   * abort()} the retry's count lands on top of the failed attempt's.
+   */
+  @Test
+  void testFailedAttemptDoesNotInflateOutputMetrics() throws Exception {
+    spark.stop();
+    // local[1,2]: one thread, two attempts, so the first failure is retried rather than fatal.
+    spark =
+        SparkSession.builder()
+            .appName("lance-write-metrics-retry-test")
+            .master("local[1,2]")
+            .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
+            .config(
+                "spark.sql.extensions", "org.lance.spark.extensions.LanceSparkSessionExtensions")
+            .config("spark.sql.catalog.lance.impl", "dir")
+            .config("spark.sql.catalog.lance.root", tempDir.toString())
+            .getOrCreate();
+    OutputMetricsListener retryListener = new OutputMetricsListener();
+    spark.sparkContext().addSparkListener(retryListener);
+
+    String table = "lance.default.write_metrics_retry_test";
+    spark.sql(String.format("CREATE TABLE %s (id INT, text STRING) USING LANCE;", table));
+
+    int rows = 500;
+    // Fails deep enough into the write that the in-loop metric update has already run.
+    spark
+        .udf()
+        .register(
+            "fail_first_attempt",
+            (UDF1<Long, Long>)
+                id -> {
+                  if (TaskContext.get().attemptNumber() == 0 && id == 450L) {
+                    throw new RuntimeException("injected failure on attempt 0");
+                  }
+                  return id;
+                },
+            DataTypes.LongType);
+
+    spark.sql(
+        String.format(
+            "INSERT INTO %s SELECT CAST(fail_first_attempt(id) AS INT), CAST(id AS STRING) "
+                + "FROM range(%d);",
+            table, rows));
+    spark.sparkContext().listenerBus().waitUntilEmpty(10000);
+
+    assertEquals(
+        rows,
+        spark.sql(String.format("SELECT * FROM %s;", table)).count(),
+        "the retry should have written every row exactly once");
+    assertEquals(
+        rows,
+        retryListener.recordsWritten.get(),
+        "stage outputRecords must count the committed rows only, not the failed attempt's");
   }
 }
