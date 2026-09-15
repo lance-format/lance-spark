@@ -15,6 +15,7 @@ package org.lance.spark.internal;
 
 import org.lance.Dataset;
 import org.lance.Fragment;
+import org.lance.ipc.FragmentSlice;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
 import org.lance.ipc.ScanStats;
@@ -124,6 +125,13 @@ public class LanceFragmentScanner implements AutoCloseable {
         scanOptions.fullTextQuery(readOptions.getFullTextQuery());
       }
       scanOptions.useScalarIndex(readOptions.isUseScalarIndex());
+      List<FragmentSlice> fragmentSlices =
+          inputPartition.getLanceSplit().getFragmentSlices().stream()
+              .filter(slice -> slice.getFragmentId() == fragmentId)
+              .collect(Collectors.toList());
+      if (!fragmentSlices.isEmpty()) {
+        scanOptions.fragmentSlices(fragmentSlices);
+      }
       if (inputPartition.getLimit().isPresent()) {
         scanOptions.limit(inputPartition.getLimit().get());
       }

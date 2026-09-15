@@ -34,11 +34,13 @@ import org.lance.namespace.model.ListNamespacesResponse;
 import org.lance.namespace.model.ListTablesRequest;
 import org.lance.namespace.model.ListTablesResponse;
 import org.lance.namespace.model.NamespaceExistsRequest;
+import org.lance.namespace.model.NamespaceExistsResponse;
 import org.lance.namespace.model.RegisterTableRequest;
 import org.lance.namespace.model.RegisterTableResponse;
 import org.lance.namespace.model.RenameTableRequest;
 import org.lance.namespace.model.RenameTableResponse;
 import org.lance.namespace.model.TableExistsRequest;
+import org.lance.namespace.model.TableExistsResponse;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.spark.sql.Dataset;
@@ -236,6 +238,25 @@ public abstract class BaseFtsCatalogOnlyNamespaceTest {
         "count(*) must count only ids 15-19, which match both 'hello' and id >= 10");
   }
 
+  @Test
+  public void zonemapFilterWithFtsFallsBackToFragmentPruning() {
+    spark.sql(
+        String.format(
+            "ALTER TABLE %s CREATE INDEX id_zm USING zonemap (id) WITH (rows_per_zone=2)",
+            fullTable));
+
+    List<Row> rows =
+        spark
+            .sql(
+                String.format(
+                    "SELECT id FROM %s WHERE lance_match(body, 'hello') AND id >= 10", fullTable))
+            .collectAsList();
+
+    assertEquals(
+        List.of(15, 16, 17, 18, 19),
+        rows.stream().map(row -> row.getInt(0)).sorted().collect(Collectors.toList()));
+  }
+
   /**
    * Delegates every operation the connector uses to a {@link DirectoryNamespace}, but deliberately
    * leaves {@code queryTable} unimplemented so it keeps the interface default that throws.
@@ -276,8 +297,8 @@ public abstract class BaseFtsCatalogOnlyNamespaceTest {
     }
 
     @Override
-    public void namespaceExists(NamespaceExistsRequest request) {
-      delegate.namespaceExists(request);
+    public NamespaceExistsResponse namespaceExists(NamespaceExistsRequest request) {
+      return delegate.namespaceExists(request);
     }
 
     @Override
@@ -306,8 +327,8 @@ public abstract class BaseFtsCatalogOnlyNamespaceTest {
     }
 
     @Override
-    public void tableExists(TableExistsRequest request) {
-      delegate.tableExists(request);
+    public TableExistsResponse tableExists(TableExistsRequest request) {
+      return delegate.tableExists(request);
     }
 
     @Override

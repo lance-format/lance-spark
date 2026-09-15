@@ -78,11 +78,8 @@ public class LanceScan
   private final LanceStatistics statistics;
   private final String scanId = UUID.randomUUID().toString();
 
-  /**
-   * Pre-computed surviving fragment IDs from zonemap pruning in LanceScanBuilder. When non-null,
-   * {@link #pruneByZonemapStats} skips re-computing and uses these directly.
-   */
-  private final Set<Integer> cachedSurvivingFragmentIds;
+  /** Driver-computed zonemap plan. Null means no zonemap pruning can be applied. */
+  private final ZonemapScanPlan zonemapScanPlan;
 
   /**
    * Splits pre-computed on the driver during {@link LanceScanBuilder#build()}. Each entry is one
@@ -138,6 +135,46 @@ public class LanceScan
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
       java.util.Map<String, String> namespaceProperties) {
+    this(
+        schema,
+        readOptions,
+        whereConditions,
+        limit,
+        offset,
+        topNSortOrders,
+        pushedAggregation,
+        pushedPredicates,
+        statistics,
+        survivingFragmentIds,
+        precomputedSplits,
+        precomputedFragmentRowCounts,
+        activeShardingExpression,
+        fragmentShardingKeys,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        null);
+  }
+
+  LanceScan(
+      StructType schema,
+      LanceSparkReadOptions readOptions,
+      Optional<String> whereConditions,
+      Optional<Integer> limit,
+      Optional<Integer> offset,
+      Optional<List<ColumnOrdering>> topNSortOrders,
+      Optional<Aggregation> pushedAggregation,
+      Predicate[] pushedPredicates,
+      LanceStatistics statistics,
+      Set<Integer> survivingFragmentIds,
+      List<LanceSplit> precomputedSplits,
+      java.util.Map<Integer, Long> precomputedFragmentRowCounts,
+      Expression activeShardingExpression,
+      java.util.Map<Integer, Object> fragmentShardingKeys,
+      java.util.Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      java.util.Map<String, String> namespaceProperties,
+      ZonemapScanPlan physicalSlicePlan) {
     this.schema = schema;
     this.readOptions = readOptions;
     this.whereConditions = whereConditions;
@@ -150,7 +187,12 @@ public class LanceScan
             ? Arrays.copyOf(pushedPredicates, pushedPredicates.length)
             : new Predicate[0];
     this.statistics = statistics;
-    this.cachedSurvivingFragmentIds = survivingFragmentIds;
+    this.zonemapScanPlan =
+        physicalSlicePlan != null
+            ? physicalSlicePlan
+            : survivingFragmentIds == null
+                ? null
+                : ZonemapScanPlan.fullFragments(survivingFragmentIds);
     this.precomputedSplits = precomputedSplits;
     this.precomputedFragmentRowCounts =
         precomputedFragmentRowCounts != null
@@ -314,7 +356,8 @@ public class LanceScan
         || topNSortOrders.isPresent()
         || pushedAggregation.isPresent()
         || readOptions.getFullTextQuery() != null
-        || fragmentRowCounts.isEmpty()) {
+        || fragmentRowCounts.isEmpty()
+        || allSplits.stream().anyMatch(split -> !split.getFragmentSlices().isEmpty())) {
       return allSplits;
     }
 
@@ -357,15 +400,35 @@ public class LanceScan
    */
   private List<LanceSplit> pruneByZonemapStats(List<LanceSplit> allSplits) {
     // Null means the builder did not prune. Do not recompute here.
-    if (cachedSurvivingFragmentIds == null) {
+    if (zonemapScanPlan == null) {
       return allSplits;
     }
-    Set<Integer> allowedIds = cachedSurvivingFragmentIds;
+    Set<Integer> allowedIds = zonemapScanPlan.getSurvivingFragmentIds();
 
-    List<LanceSplit> pruned =
-        allSplits.stream()
-            .filter(split -> split.getFragments().stream().anyMatch(allowedIds::contains))
-            .collect(Collectors.toList());
+    List<LanceSplit> pruned = new java.util.ArrayList<>();
+    for (LanceSplit split : allSplits) {
+      if (split.getFragments().size() != 1) {
+        if (split.getFragments().stream().anyMatch(allowedIds::contains)) {
+          LOG.warn(
+              "Split contains {} fragments; physical zonemap slice attachment requires "
+                  + "single-fragment splits, so retaining the full split",
+              split.getFragments().size());
+          pruned.add(split);
+        }
+        continue;
+      }
+
+      int fragmentId = split.getFragments().get(0);
+      if (!allowedIds.contains(fragmentId)) {
+        continue;
+      }
+      if (zonemapScanPlan.scansFullFragment(fragmentId)) {
+        pruned.add(split);
+      } else {
+        pruned.add(
+            new LanceSplit(split.getFragments(), zonemapScanPlan.getFragmentSlices(fragmentId)));
+      }
+    }
 
     if (pruned.size() < allSplits.size()) {
       LOG.debug(
