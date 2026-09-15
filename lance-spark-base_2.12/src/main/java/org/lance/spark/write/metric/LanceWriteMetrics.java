@@ -19,21 +19,17 @@ import org.apache.spark.sql.connector.metric.CustomSumMetric;
 /**
  * Custom metrics for the Lance write path, displayed on the Spark UI write node.
  *
- * <p>Both names are reserved by Spark: {@code
- * org.apache.spark.sql.execution.metric.CustomMetrics#updateMetrics} recognizes exactly {@code
- * bytesWritten} and {@code recordsWritten} and forwards them to {@code
- * TaskContext.get().taskMetrics().outputMetrics()}, which is what populates the stage-level {@code
- * outputBytes}/{@code outputRecords} shown in the Stages UI and the history server REST API. Any
- * other name would reach only the SQL tab. That routing happens for any reported task metric with a
- * reserved name, whether or not it is advertised by {@link #allMetrics()}.
+ * <p>{@code bytesWritten} and {@code recordsWritten} are reserved names: {@code
+ * execution.metric.CustomMetrics#updateMetrics} recognizes exactly these two and forwards them to
+ * the task's output metrics, which is what populates stage-level {@code outputBytes}/{@code
+ * outputRecords}. That happens for any reported task metric with a reserved name, advertised here
+ * or not.
  *
- * <p>Only {@code recordsWritten} is advertised as a SQL custom metric. A SQL metric can only be set
- * from {@code DataWriter.currentMetricsValues()}, which Spark stops polling before {@code
- * DataWriter.commit()}, and no driver-side path updates it afterwards. Rows are counted in {@code
- * write()} so {@code recordsWritten} is final by the last poll; a fragment's byte size is not known
- * until its creation task resolves, which for the last fragment happens inside {@code commit()}, so
- * an advertised {@code bytesWritten} would render as 0 on a single-fragment write. It is reported
- * as a task metric only.
+ * <p>Only {@code recordsWritten} is advertised as a SQL metric. SQL metrics are set from {@code
+ * currentMetricsValues()}, which Spark stops polling before {@code commit()}, and the last
+ * fragment's byte size is not known until then, so an advertised {@code bytesWritten} would read 0
+ * on a single-fragment write. {@link LanceWriteMetricsTracker#publishOutputMetrics()} reports it
+ * after commit instead.
  */
 public final class LanceWriteMetrics {
   /** Reserved Spark metric name, routed to {@code OutputMetrics.setBytesWritten}. */

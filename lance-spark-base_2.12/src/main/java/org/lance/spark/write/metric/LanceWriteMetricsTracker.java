@@ -25,11 +25,9 @@ import java.util.List;
  * Accumulates write-path metrics on the executor side. Thread-confined (one instance per {@code
  * LanceDataWriter}, single-threaded access).
  *
- * <p>All values are absolute task totals, never deltas, because Spark consumes them absolutely on
- * both paths ({@code SQLMetric.set} and {@code OutputMetrics.setBytesWritten}/{@code
- * setRecordsWritten}). Spark polls {@link #currentMetricsValues()} repeatedly during the write
- * loop, and {@link #publishOutputMetrics()} re-reports the final totals after commit; neither can
- * double count.
+ * <p>Values are absolute task totals, not deltas. Spark consumes them absolutely on both paths
+ * ({@code SQLMetric.set} and {@code OutputMetrics.setBytesWritten}), so the repeated polls and the
+ * post-commit publish cannot double count.
  */
 public class LanceWriteMetricsTracker {
   private long bytesWritten;
@@ -61,7 +59,7 @@ public class LanceWriteMetricsTracker {
         },
       };
 
-  /** Counts one row handed to the writer, rather than deriving the count from fragments. */
+  /** Counts a row as it is handed to the writer, rather than deriving it from fragments. */
   public void incrementRecordsWritten() {
     recordsWritten++;
   }
@@ -78,15 +76,14 @@ public class LanceWriteMetricsTracker {
     }
   }
 
-  /** Absolute task totals. The metric instances are allocated once per tracker, not per call. */
+  /** Metric instances are allocated once per tracker, not per call. */
   public CustomTaskMetric[] currentMetricsValues() {
     return taskMetrics;
   }
 
   /**
-   * Sets the task's output metrics directly, so the totals include the fragment completed during
-   * {@code commit()}, after Spark's last {@code currentMetricsValues()} poll. No-op outside a Spark
-   * task.
+   * Sets the task's output metrics directly, so the totals include the fragment that completes
+   * inside {@code commit()}, after Spark's last poll. No-op outside a Spark task.
    */
   public void publishOutputMetrics() {
     TaskContext context = TaskContext.get();

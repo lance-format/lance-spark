@@ -32,10 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public abstract class BaseLanceWriteMetricsTest {
 
-  /**
-   * Spark routes only these two exact names into {@code taskMetrics().outputMetrics()}, so a rename
-   * would silently drop stage-level outputBytes/outputRecords.
-   */
+  /** A rename here would silently drop stage-level outputBytes/outputRecords. */
   @Test
   void testReservedSparkMetricNames() {
     assertEquals("bytesWritten", LanceWriteMetrics.BYTES_WRITTEN);
@@ -55,10 +52,7 @@ public abstract class BaseLanceWriteMetricsTest {
     assertTrue(byName.containsKey(LanceWriteMetrics.RECORDS_WRITTEN));
   }
 
-  /**
-   * bytesWritten is final only inside commit(), after Spark's last currentMetricsValues() poll, so
-   * advertising it as a SQL metric would render 0 on a single-fragment write.
-   */
+  /** Advertising it would render 0 on a single-fragment write. See {@link LanceWriteMetrics}. */
   @Test
   void testBytesWrittenIsNotAdvertisedAsSqlMetric() {
     for (CustomMetric metric : LanceWriteMetrics.allMetrics()) {

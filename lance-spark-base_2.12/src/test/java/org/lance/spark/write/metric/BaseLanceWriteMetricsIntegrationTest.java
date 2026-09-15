@@ -131,17 +131,13 @@ public abstract class BaseLanceWriteMetricsIntegrationTest {
     spark.sparkContext().listenerBus().waitUntilEmpty(10000);
 
     assertEquals(rows, listener.recordsWritten.get(), "outputMetrics.recordsWritten");
-    // The only fragment completes inside commit(), so a nonzero value proves the post-commit
-    // publish works.
+    // The only fragment completes inside commit(), so nonzero proves the post-commit publish ran.
     assertTrue(
         listener.bytesWritten.get() > 0,
         "outputMetrics.bytesWritten should be > 0, was " + listener.bytesWritten.get());
   }
 
-  /**
-   * {@code recordsWritten} is exact on the SQL tab because rows are counted in {@code write()}.
-   * {@code bytesWritten} is not advertised there, and reaches users through outputMetrics instead.
-   */
+  /** The SQL tab carries recordsWritten only; bytesWritten reaches users via outputMetrics. */
   @Test
   void testSqlMetricsAreOnlyTheOnesThatCanBeCorrect() throws Exception {
     int rows = 50;

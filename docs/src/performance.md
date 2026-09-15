@@ -202,20 +202,16 @@ The write path reports two per-task metrics.
 | Metric | Type | Where it shows up | Description |
 |---|---|---|---|
 | `recordsWritten` | counter | SQL tab write node, **and** stage `outputRecords` | Rows written by this task, counted exactly as they are handed to the writer. |
-| `bytesWritten` | counter | stage `outputBytes` only | Total size of the Lance data files this task produced, summed over the files of every fragment it committed. |
+| `bytesWritten` | counter | stage `outputBytes` only | Total size of the Lance data files this task produced. |
 
-Both names are reserved by Spark: `CustomMetrics.updateMetrics` recognizes exactly `bytesWritten`
-and `recordsWritten` and forwards them to the task's output metrics, which is what populates
-stage-level `outputBytes` / `outputRecords` in the Stages UI and the history server REST API. That
-routing applies whether or not the metric is advertised via `supportedCustomMetrics()`.
+Spark reserves both names: `CustomMetrics.updateMetrics` recognizes exactly `bytesWritten` and
+`recordsWritten` and forwards them to the task's output metrics, which is what populates
+stage-level `outputBytes` / `outputRecords` in the Stages UI and the history server REST API.
 
-Only `recordsWritten` is advertised as a SQL custom metric. A SQL metric can only be set from
-`DataWriter.currentMetricsValues()`, which Spark stops polling before `DataWriter.commit()`, and no
-driver-side path updates it afterwards. Rows are counted in `write()`, so `recordsWritten` is final
-by the last poll; a fragment's byte size is not known until its creation task resolves, which for
-the last fragment happens inside `commit()`. The writer therefore publishes the byte total to the
-task's output metrics at the end of `commit()`, and keeps `bytesWritten` off the SQL tab rather
-than showing a value that would read 0 on a single-fragment write.
+`bytesWritten` is deliberately not advertised as a SQL metric. SQL metrics are set from
+`DataWriter.currentMetricsValues()`, which Spark stops polling before `commit()`, and the last
+fragment's byte size is not known until then, so the SQL tab would show 0 for a single-fragment
+write. The writer publishes the byte total to output metrics at the end of `commit()` instead.
 
 ## Caching
 
