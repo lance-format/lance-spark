@@ -71,6 +71,9 @@ make format
 
 ## Docker Integration Tests
 
+Pytest creates an in-process `local[2]` SparkSession. `make docker-test` does not
+start a standalone cluster. `docker-up` / notebooks still do.
+
 Build the Spark bundle and Docker integration-test image before running Docker tests:
 
 ```shell

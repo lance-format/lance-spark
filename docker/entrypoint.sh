@@ -1,16 +1,12 @@
 #!/bin/bash
 
-# Start Spark master
-start-master.sh -p 7077
-
-# Start Spark worker
-start-worker.sh spark://spark-lance:7077
-
-# Start History Server
-start-history-server.sh
-
-# Start Thrift Server
-start-thriftserver.sh --driver-java-options "-Dderby.system.home=/tmp/derby"
+# Standalone daemons are for notebooks. Tests use SparkSession local[2].
+if [[ "${SPARK_STANDALONE:-1}" != "0" ]]; then
+  start-master.sh -p 7077
+  start-worker.sh spark://spark-lance:7077
+  start-history-server.sh
+  start-thriftserver.sh --driver-java-options "-Dderby.system.home=/tmp/derby"
+fi
 
 # Entrypoint, for example notebook, pyspark or spark-sql
 if [[ $# -gt 0 ]] ; then

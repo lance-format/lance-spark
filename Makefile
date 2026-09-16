@@ -203,6 +203,8 @@ docker-test:
 		(echo "Error: Docker image 'lance-spark-test:$(SPARK_VERSION)_$(SCALA_VERSION)' not found. Run 'make docker-build-test' first." && exit 1)
 	docker run --rm --hostname lance-spark \
 		-e SPARK_VERSION=$(SPARK_VERSION) \
+		-e SPARK_STANDALONE=0 \
+		-e SPARK_LOCAL_IP=localhost \
 		$(if $(LANCEDB_DB),-e LANCEDB_DB=$(LANCEDB_DB)) \
 		$(if $(LANCEDB_API_KEY),-e LANCEDB_API_KEY=$(LANCEDB_API_KEY)) \
 		$(if $(LANCEDB_HOST_OVERRIDE),-e LANCEDB_HOST_OVERRIDE=$(LANCEDB_HOST_OVERRIDE)) \

@@ -123,6 +123,12 @@ def _require_sql_search_backend(spark):
         pytest.skip("SQL search table functions are covered on local dir and rest-dir backends")
 
 
+class TestSparkSession:
+    def test_spark_session_uses_local_master(self, spark):
+        assert spark.sparkContext.master == "local[2]"
+        assert spark.conf.get("spark.driver.host") == "127.0.0.1"
+
+
 # =============================================================================
 # DDL (Data Definition Language) Tests
 # =============================================================================

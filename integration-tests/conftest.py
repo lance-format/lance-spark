@@ -250,6 +250,8 @@ def spark(request):
     builder = (
         SparkSession.builder
         .appName("LanceSparkTests")
+        .master("local[2]")
+        .config("spark.driver.host", "127.0.0.1")
         .config(
             f"spark.sql.catalog.{CATALOG}",
             "org.lance.spark.LanceNamespaceSparkCatalog",
@@ -367,6 +369,12 @@ def spark(request):
             )
 
     session = builder.getOrCreate()
+    master = session.sparkContext.master
+    if master != "local[2]":
+        session.stop()
+        raise AssertionError(
+            f"expected in-process Spark master local[2], got {master}"
+        )
     session.sql(f"SET spark.sql.defaultCatalog={CATALOG}")
     # Create default namespace for multi-level namespace mode
     session.sql("CREATE NAMESPACE IF NOT EXISTS default")
