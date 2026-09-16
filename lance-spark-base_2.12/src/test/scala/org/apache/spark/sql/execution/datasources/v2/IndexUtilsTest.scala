@@ -16,9 +16,15 @@ package org.apache.spark.sql.execution.datasources.v2
 import org.apache.spark.sql.catalyst.plans.logical.LanceNamedArgument
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.function.Executable
 import org.lance.index.{Index, IndexType}
 
+import java.util.Optional
+import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, Executors, TimeUnit}
+import java.util.concurrent.atomic.AtomicInteger
+
 import scala.collection.JavaConverters._
+import scala.collection.mutable.ArrayBuffer
 
 /**
  * Unit tests for [[IndexUtils]] helper methods.
@@ -421,6 +427,257 @@ class IndexUtilsTest {
     assertThrows(
       classOf[ArithmeticException],
       () => IndexUtils.batchFragments(fragmentWorkloads(Long.MaxValue, 1), Some(1), 1))
+  }
+
+  @Test
+  def indexBuildProgress_reportsKnownAndUnknownStageQuantities(): Unit = {
+    var progressUpdates = 0L
+    var completedStages = 0L
+    var now = 0L
+    val logs = ArrayBuffer.empty[String]
+    val progress = testProgress(
+      () => progressUpdates += 1L,
+      () => completedStages += 1L,
+      logs += _,
+      () => now,
+      progressLogIntervalNanos = 100L)
+
+    progress.stageStart("load_data", Optional.of(java.lang.Long.valueOf(10L)), "rows")
+    now = 1L
+    progress.stageProgress("load_data", 1L)
+    now = 2L
+    progress.stageProgress("load_data", 10L)
+    progress.stageComplete("load_data")
+    progress.stageStart("write_metadata", Optional.empty[java.lang.Long](), "files")
+    now = 3L
+    progress.stageProgress("write_metadata", Long.MaxValue)
+    progress.stageComplete("write_metadata")
+
+    assertEquals(3L, progressUpdates)
+    assertEquals(2L, completedStages)
+    assertTrue(logs.exists(_.contains("stage=\"load_data\" completed=10 total=10 unit=\"rows\"")))
+    assertTrue(
+      logs.exists(
+        _.contains(
+          "stage=\"write_metadata\" completed=" + Long.MaxValue +
+            " total=unknown unit=\"files\"")))
+  }
+
+  @Test
+  def indexBuildProgress_ignoresRepeatedRegressingAndZeroValues(): Unit = {
+    var updates = 0L
+    val logs = ArrayBuffer.empty[String]
+    val progress = testProgress(
+      () => updates += 1L,
+      () => (),
+      logs += _,
+      () => 0L,
+      progressLogIntervalNanos = 0L)
+
+    progress.stageStart("tokenize_docs", Optional.of(java.lang.Long.valueOf(9L)), "rows")
+    Seq(0L, 4L, 4L, 3L, 9L, 8L).foreach(progress.stageProgress("tokenize_docs", _))
+
+    assertEquals(2L, updates)
+    assertEquals(2, logs.count(_.contains("index_build_stage_progress")))
+  }
+
+  @Test
+  def indexBuildProgress_rateLimitsLogsButAlwaysLogsKnownTotalAndCompletion(): Unit = {
+    var updates = 0L
+    var now = 0L
+    val logs = ArrayBuffer.empty[String]
+    val progress = testProgress(
+      () => updates += 1L,
+      () => (),
+      logs += _,
+      () => now,
+      progressLogIntervalNanos = 100L)
+
+    progress.stageStart("copy_partitions", Optional.of(java.lang.Long.valueOf(4L)), "partitions")
+    now = 1L
+    progress.stageProgress("copy_partitions", 1L)
+    now = 2L
+    progress.stageProgress("copy_partitions", 2L)
+    now = 101L
+    progress.stageProgress("copy_partitions", 3L)
+    now = 102L
+    progress.stageProgress("copy_partitions", 4L)
+    now = 103L
+    progress.stageComplete("copy_partitions")
+
+    assertEquals(4L, updates, "rate limiting must never suppress metric activity")
+    assertEquals(3, logs.count(_.contains("index_build_stage_progress")))
+    assertTrue(logs.exists(_.contains("completed=4 total=4")), "known total must be logged")
+    assertTrue(logs.last.contains("index_build_stage_complete"))
+    assertTrue(logs.last.contains("completed=4 total=4"))
+  }
+
+  @Test
+  def indexBuildProgress_countsStageCompletionOnceButLogsEveryCallback(): Unit = {
+    var completions = 0L
+    val logs = ArrayBuffer.empty[String]
+    val progress = testProgress(
+      () => (),
+      () => completions += 1L,
+      logs += _,
+      () => 0L,
+      progressLogIntervalNanos = 0L)
+
+    progress.stageStart("write_metadata", Optional.empty[java.lang.Long](), "files")
+    progress.stageComplete("write_metadata")
+    progress.stageComplete("write_metadata")
+
+    assertEquals(1L, completions)
+    assertEquals(2, logs.count(_.contains("index_build_stage_complete")))
+  }
+
+  @Test
+  def indexBuildProgress_isThreadSafeAcrossConcurrentCallbacks(): Unit = {
+    val stageCount = 32
+    val updates = new java.util.concurrent.atomic.AtomicLong(0L)
+    val completions = new java.util.concurrent.atomic.AtomicLong(0L)
+    val activeMetricCallbacks = new AtomicInteger(0)
+    val overlappingMetricCallbacks = new AtomicInteger(0)
+    val logs = new ConcurrentLinkedQueue[String]()
+    val recordMetric: java.util.concurrent.atomic.AtomicLong => Unit = counter => {
+      if (activeMetricCallbacks.incrementAndGet() > 1) {
+        overlappingMetricCallbacks.incrementAndGet()
+      }
+      try {
+        Thread.sleep(2L)
+        counter.incrementAndGet()
+      } finally {
+        activeMetricCallbacks.decrementAndGet()
+      }
+    }
+    val progress = testProgress(
+      () => recordMetric(updates),
+      () => recordMetric(completions),
+      logs.add,
+      () => 0L,
+      progressLogIntervalNanos = Long.MaxValue)
+    (0 until stageCount).foreach { stage =>
+      progress.stageStart(s"stage_$stage", Optional.empty[java.lang.Long](), "items")
+    }
+
+    val executor = Executors.newFixedThreadPool(8)
+    val start = new CountDownLatch(1)
+    try {
+      val futures = (0 until stageCount).map { stage =>
+        executor.submit(new Runnable {
+          override def run(): Unit = {
+            start.await(10, TimeUnit.SECONDS)
+            progress.stageProgress(s"stage_$stage", 1L)
+            progress.stageComplete(s"stage_$stage")
+            progress.stageComplete(s"stage_$stage")
+          }
+        })
+      }
+      start.countDown()
+      futures.foreach(_.get(10, TimeUnit.SECONDS))
+    } finally {
+      executor.shutdownNow()
+    }
+
+    assertEquals(stageCount.toLong, updates.get())
+    assertEquals(stageCount.toLong, completions.get())
+    assertEquals(
+      0,
+      overlappingMetricCallbacks.get(),
+      "the adapter must serialize SQLMetric updates from concurrent native callbacks")
+    assertEquals(
+      stageCount * 2,
+      logs.asScala.count(_.contains("index_build_stage_complete")))
+  }
+
+  @Test
+  def indexBuildProgress_logsTaskAttemptIdentityAndEscapesFields(): Unit = {
+    val logs = ArrayBuffer.empty[String]
+    val progress = testProgress(
+      () => (),
+      () => (),
+      logs += _,
+      () => 0L,
+      progressLogIntervalNanos = 0L,
+      indexName = "idx_\"text",
+      partitionId = 7,
+      taskAttemptId = 42L)
+
+    progress.stageStart("load\\data", Optional.empty[java.lang.Long](), "row\"s")
+
+    assertTrue(logs.head.contains("index=\"idx_\\\"text\""))
+    assertTrue(logs.head.contains("partitionId=7 taskAttemptId=42"))
+    assertTrue(logs.head.contains("stage=\"load\\\\data\""))
+    assertTrue(logs.head.contains("unit=\"row\\\"s\""))
+    assertTrue(logs.head.contains("elapsedMs=0"))
+  }
+
+  @Test
+  def indexBuildProgress_isolatesMetricLoggingAndWarningFailures(): Unit = {
+    var warnings = 0
+    val progress = new SparkIndexBuildProgress(
+      "idx_text",
+      3,
+      9L,
+      () => throw new RuntimeException("progress metric failed"),
+      () => throw new RuntimeException("stage metric failed"),
+      _ => throw new RuntimeException("log failed"),
+      (_, _) => {
+        warnings += 1
+        throw new RuntimeException("warning failed")
+      },
+      () => 0L,
+      0L)
+
+    assertProgressDoesNotThrow {
+      progress.stageStart("load_data", Optional.empty[java.lang.Long](), "rows")
+      progress.stageProgress("load_data", 1L)
+      progress.stageComplete("load_data")
+    }
+    assertEquals(5, warnings)
+  }
+
+  @Test
+  def indexBuildMetricDefinitions_onlyReportsForEagerFtsBuilds(): Unit = {
+    val expected = Set(
+      AddIndexExec.INDEX_BUILD_PROGRESS_UPDATES,
+      AddIndexExec.INDEX_BUILD_COMPLETED_STAGES)
+
+    assertEquals(expected, AddIndexExec.indexBuildMetricDefinitions("fts", Seq.empty).keySet)
+    assertEquals(expected, AddIndexExec.indexBuildMetricDefinitions("INVERTED", Seq.empty).keySet)
+    assertTrue(AddIndexExec.indexBuildMetricDefinitions("btree", Seq.empty).isEmpty)
+    assertTrue(AddIndexExec.indexBuildMetricDefinitions("zonemap", Seq.empty).isEmpty)
+    assertTrue(
+      AddIndexExec.indexBuildMetricDefinitions(
+        "fts",
+        Seq(LanceNamedArgument("train", java.lang.Boolean.FALSE))).isEmpty)
+    assertTrue(AddIndexExec.indexBuildMetricDefinitions("ivf_pq", Seq.empty).isEmpty)
+  }
+
+  private def testProgress(
+      addProgressUpdate: () => Unit,
+      addCompletedStage: () => Unit,
+      logStatus: String => Unit,
+      nanoTime: () => Long,
+      progressLogIntervalNanos: Long,
+      indexName: String = "idx_text",
+      partitionId: Int = 2,
+      taskAttemptId: Long = 11L): SparkIndexBuildProgress =
+    new SparkIndexBuildProgress(
+      indexName,
+      partitionId,
+      taskAttemptId,
+      addProgressUpdate,
+      addCompletedStage,
+      logStatus,
+      (_, _) => (),
+      nanoTime,
+      progressLogIntervalNanos)
+
+  private def assertProgressDoesNotThrow(callback: => Unit): Unit = {
+    assertDoesNotThrow(new Executable {
+      override def execute(): Unit = callback
+    })
   }
 
   @Test
