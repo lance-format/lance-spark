@@ -16,21 +16,7 @@ package org.lance.spark.write.metric;
 import org.apache.spark.sql.connector.metric.CustomMetric;
 import org.apache.spark.sql.connector.metric.CustomSumMetric;
 
-/**
- * Custom metrics for the Lance write path.
- *
- * <p>{@code bytesWritten} and {@code recordsWritten} are reserved names: {@code
- * org.apache.spark.sql.execution.metric.CustomMetrics#updateMetrics} matches exactly these two and
- * forwards them to the task's output metrics, which is what populates stage-level {@code
- * outputBytes}/{@code outputRecords}. That happens for any reported task metric with a reserved
- * name, advertised here or not.
- *
- * <p>Only {@code recordsWritten} is advertised as a SQL metric. SQL metrics come from {@code
- * currentMetricsValues()}, whose last poll is just before {@code commit()}. Fragments only complete
- * inside {@code commit()} unless the write is sharded, so an advertised {@code bytesWritten} would
- * read 0 on an ordinary write. {@link LanceWriteMetricsTracker#publishOutputMetrics()} reports it
- * after commit instead.
- */
+/** Custom metrics advertised on the Spark SQL write node. */
 public final class LanceWriteMetrics {
   public static final String BYTES_WRITTEN = "bytesWritten";
 

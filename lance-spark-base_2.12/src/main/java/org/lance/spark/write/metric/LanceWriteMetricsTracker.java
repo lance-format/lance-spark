@@ -65,7 +65,7 @@ public class LanceWriteMetricsTracker {
     recordsWritten++;
   }
 
-  /** Data files with an unknown size are skipped rather than counted as zero. */
+  /** Sums known fragment data-file sizes. */
   public void addFragments(List<FragmentMetadata> fragments) {
     for (FragmentMetadata fragment : fragments) {
       for (DataFile file : fragment.getFiles()) {
