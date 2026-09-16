@@ -144,23 +144,39 @@ docker-shell:
 docker-down: check-docker-compose
 	${DOCKER_COMPOSE} -f docker/docker-compose.yml down
 
+SPARK_DIST_TGZ := spark-$(SPARK_DOWNLOAD_VERSION)-bin-hadoop3$(SPARK_SCALA_SUFFIX).tgz
+SPARK_DIST_URL := https://archive.apache.org/dist/spark/spark-$(SPARK_DOWNLOAD_VERSION)/$(SPARK_DIST_TGZ)
+SPARK_CACHE_DIR := docker/.spark-cache
+SPARK_CACHED_TGZ := $(SPARK_CACHE_DIR)/$(SPARK_DIST_TGZ)
+SPARK_DOCKER_TGZ := docker/spark.tgz
+
 # Print resolved Docker build args for use in CI (e.g. GitHub Actions step outputs).
 # This keeps versions.mk as the single source of truth for version mappings.
 .PHONY: print-docker-build-args
 print-docker-build-args:
 	@echo "spark-download-version=$(SPARK_DOWNLOAD_VERSION)"
+	@echo "spark-dist-tgz=$(SPARK_DIST_TGZ)"
 	@echo "py4j-version=$(PY4J_VERSION)"
 	@echo "spark-scala-suffix=$(SPARK_SCALA_SUFFIX)"
 	@echo "lance-namespace-impl-version=$(LANCE_NAMESPACE_IMPL_VERSION)"
 
+.PHONY: docker-fetch-spark
+docker-fetch-spark:
+	@test -n "$(SPARK_DOWNLOAD_VERSION)" || { echo "unknown Spark download for SPARK_VERSION=$(SPARK_VERSION)"; exit 1; }
+	mkdir -p $(SPARK_CACHE_DIR)
+	@if [ ! -f "$(SPARK_CACHED_TGZ)" ] || ! tar tzf "$(SPARK_CACHED_TGZ)" >/dev/null 2>&1; then \
+		echo "Downloading $(SPARK_DIST_URL)"; \
+		rm -f "$(SPARK_CACHED_TGZ)" "$(SPARK_CACHED_TGZ).tmp"; \
+		curl -fL --retry 3 --retry-delay 5 -o "$(SPARK_CACHED_TGZ).tmp" "$(SPARK_DIST_URL)" && \
+		tar tzf "$(SPARK_CACHED_TGZ).tmp" >/dev/null && \
+		mv "$(SPARK_CACHED_TGZ).tmp" "$(SPARK_CACHED_TGZ)"; \
+	fi
+	ln -f "$(SPARK_CACHED_TGZ)" "$(SPARK_DOCKER_TGZ)"
+
 .PHONY: docker-build-test-base
-docker-build-test-base:
+docker-build-test-base: docker-fetch-spark
 	cd docker && docker buildx build \
-		--build-arg SPARK_DOWNLOAD_VERSION=$(SPARK_DOWNLOAD_VERSION) \
-		--build-arg SPARK_MAJOR_VERSION=$(SPARK_VERSION) \
-		--build-arg SCALA_VERSION=$(SCALA_VERSION) \
 		--build-arg PY4J_VERSION=$(PY4J_VERSION) \
-		--build-arg SPARK_SCALA_SUFFIX=$(SPARK_SCALA_SUFFIX) \
 		$(if $(DOCKER_CACHE_FROM),--cache-from $(DOCKER_CACHE_FROM)) \
 		$(if $(DOCKER_CACHE_TO),--cache-to $(DOCKER_CACHE_TO)) \
 		--load \
@@ -300,6 +316,7 @@ help:
 	@echo "  docker-up              - Start docker containers"
 	@echo "  docker-shell           - Open shell in spark-lance container"
 	@echo "  docker-down            - Stop docker containers"
+	@echo "  docker-fetch-spark     - Download Spark tarball into docker/.spark-cache"
 	@echo "  docker-build-test-base - Build test base image (system deps + Spark)"
 	@echo "  docker-build-test      - Build test image (base + bundle JAR)"
 	@echo "  docker-test            - Run integration tests in lance-spark-test container"

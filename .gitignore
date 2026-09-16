@@ -74,6 +74,10 @@ venv.bak/
 __pycache__/
 
 
+# Spark dist tarball fetched for Docker test-base builds
+docker/.spark-cache/
+docker/spark.tgz
+
 # mkdocs documentation
 /docs/site
 

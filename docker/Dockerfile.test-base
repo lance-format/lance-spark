@@ -31,16 +31,13 @@ ENV SPARK_HOME="/opt/spark"
 ENV PYTHONPATH="${SPARK_HOME}/python:${PYTHONPATH}"
 ENV PATH="${SPARK_HOME}/sbin:${SPARK_HOME}/bin:${PATH}"
 
-ARG SPARK_DOWNLOAD_VERSION=4.0.0
-ARG SPARK_MAJOR_VERSION=4.0
-ARG SCALA_VERSION=2.13
 ARG PY4J_VERSION=0.10.9.9
-ARG SPARK_SCALA_SUFFIX=
 
 ENV PYTHONPATH="${SPARK_HOME}/python/lib/py4j-${PY4J_VERSION}-src.zip:${PYTHONPATH}"
 
+# Spark is fetched and cached by the host/CI so Docker layer-cache misses
+# do not require another download from archive.apache.org.
+COPY spark.tgz /tmp/spark.tgz
 RUN mkdir -p ${SPARK_HOME} \
-    && curl -fL https://archive.apache.org/dist/spark/spark-${SPARK_DOWNLOAD_VERSION}/spark-${SPARK_DOWNLOAD_VERSION}-bin-hadoop3${SPARK_SCALA_SUFFIX}.tgz \
-       -o spark.tgz \
-    && tar xzf spark.tgz --directory ${SPARK_HOME} --strip-components 1 \
-    && rm spark.tgz
+    && tar xzf /tmp/spark.tgz --directory ${SPARK_HOME} --strip-components 1 \
+    && rm /tmp/spark.tgz
