@@ -455,6 +455,7 @@ def cleanup_tables(spark):
     spark.sql("DROP TABLE IF EXISTS default.employees PURGE")
     spark.sql("DROP TABLE IF EXISTS default.test_blob_v2 PURGE")
     spark.sql("DROP TABLE IF EXISTS default.test_blob_v2_bad_insert PURGE")
+    spark.sql("DROP TABLE IF EXISTS default.fts_docs PURGE")
     # TODO - reenable once `tableExists` works on Spark 4.0
     #spark.catalog.dropTempView("source") if spark.catalog.tableExists("source") else None
     #spark.catalog.dropTempView("tmp_view") if spark.catalog.tableExists("tmp_view") else None
@@ -468,6 +469,7 @@ def cleanup_tables(spark):
     spark.sql("DROP TABLE IF EXISTS default.employees PURGE")
     spark.sql("DROP TABLE IF EXISTS default.test_blob_v2 PURGE")
     spark.sql("DROP TABLE IF EXISTS default.test_blob_v2_bad_insert PURGE")
+    spark.sql("DROP TABLE IF EXISTS default.fts_docs PURGE")
     # TODO - reenable once `tableExists` works on Spark 4.0
     #spark.catalog.dropTempView("source") if spark.catalog.tableExists("source") else None
     #spark.catalog.dropTempView("tmp_view") if spark.catalog.tableExists("tmp_view") else None
