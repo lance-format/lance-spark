@@ -34,12 +34,14 @@ runs:
           >> $GITHUB_OUTPUT
 
     - name: Cache Spark distribution
+      if: ${{ steps.docker-args.outputs.spark-image == '' }}
       uses: actions/cache@v4
       with:
         path: docker/.spark-cache
         key: spark-dist-${{ steps.docker-args.outputs.spark-dist-tgz }}
 
     - name: Fetch Spark distribution
+      if: ${{ steps.docker-args.outputs.spark-image == '' }}
       shell: bash
       run: make docker-fetch-spark SPARK_VERSION=${{ inputs.spark-version }} SCALA_VERSION=${{ inputs.scala-version }}
 
@@ -50,11 +52,11 @@ runs:
       uses: docker/build-push-action@v7
       with:
         context: docker
-        file: docker/Dockerfile.test-base
+        file: docker/${{ steps.docker-args.outputs.test-base-dockerfile }}
         load: true
         tags: lance-spark-test-base:${{ inputs.spark-version }}_${{ inputs.scala-version }}
         build-args: |
-          PY4J_VERSION=${{ steps.docker-args.outputs.py4j-version }}
+          SPARK_IMAGE=${{ steps.docker-args.outputs.spark-image }}
         cache-from: type=gha,scope=test-base-${{ inputs.spark-version }}_${{ inputs.scala-version }}
         cache-to: type=gha,mode=max,scope=test-base-${{ inputs.spark-version }}_${{ inputs.scala-version }}
 

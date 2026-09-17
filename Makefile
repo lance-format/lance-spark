@@ -23,7 +23,8 @@ BASE_MODULE := lance-spark-base_$(SCALA_VERSION)
 # Spark download versions for Docker
 include docker/versions.mk
 SPARK_DOWNLOAD_VERSION := $(SPARK_DOWNLOAD_VERSION_$(SPARK_VERSION))
-PY4J_VERSION := $(PY4J_VERSION_$(SPARK_VERSION))
+SPARK_IMAGE := $(SPARK_IMAGE_$(SPARK_VERSION)_$(SCALA_VERSION))
+TEST_BASE_DOCKERFILE := $(if $(strip $(SPARK_IMAGE)),Dockerfile.test-base,Dockerfile.test-base-tarball)
 
 # Spark 3.x default binaries are Scala 2.12; Scala 2.13 needs explicit suffix.
 # Spark 4.x only supports Scala 2.13, so no suffix is needed.
@@ -156,7 +157,8 @@ SPARK_DOCKER_TGZ := docker/spark.tgz
 print-docker-build-args:
 	@echo "spark-download-version=$(SPARK_DOWNLOAD_VERSION)"
 	@echo "spark-dist-tgz=$(SPARK_DIST_TGZ)"
-	@echo "py4j-version=$(PY4J_VERSION)"
+	@echo "spark-image=$(SPARK_IMAGE)"
+	@echo "test-base-dockerfile=$(TEST_BASE_DOCKERFILE)"
 	@echo "spark-scala-suffix=$(SPARK_SCALA_SUFFIX)"
 	@echo "lance-namespace-impl-version=$(LANCE_NAMESPACE_IMPL_VERSION)"
 
@@ -174,13 +176,13 @@ docker-fetch-spark:
 	ln -f "$(SPARK_CACHED_TGZ)" "$(SPARK_DOCKER_TGZ)"
 
 .PHONY: docker-build-test-base
-docker-build-test-base: docker-fetch-spark
+docker-build-test-base: $(if $(strip $(SPARK_IMAGE)),,docker-fetch-spark)
 	cd docker && docker buildx build \
-		--build-arg PY4J_VERSION=$(PY4J_VERSION) \
+		$(if $(strip $(SPARK_IMAGE)),--build-arg SPARK_IMAGE=$(SPARK_IMAGE)) \
 		$(if $(DOCKER_CACHE_FROM),--cache-from $(DOCKER_CACHE_FROM)) \
 		$(if $(DOCKER_CACHE_TO),--cache-to $(DOCKER_CACHE_TO)) \
 		--load \
-		-f Dockerfile.test-base \
+		-f $(TEST_BASE_DOCKERFILE) \
 		-t lance-spark-test-base:$(SPARK_VERSION)_$(SCALA_VERSION) \
 		.
 
