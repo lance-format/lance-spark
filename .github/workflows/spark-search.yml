@@ -10,7 +10,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Spark Search Docker
+name: Spark Search
 
 on:
   pull_request:
@@ -21,7 +21,9 @@ on:
       - reopened
     paths:
       - ".github/workflows/spark-search.yml"
+      - ".github/actions/pytest-integration/**"
       - "Makefile"
+      - "scripts/run-integration-tests.sh"
       - "docker/**"
       - "integration-tests/**"
       - "lance-spark-base_2.12/src/main/java/org/lance/spark/search/**"
@@ -52,10 +54,6 @@ on:
         description: "Optional database header value for an external REST namespace"
         required: false
         default: ""
-      docker-run-args:
-        description: "Extra docker run args for docker-test"
-        required: false
-        default: ""
 
 permissions:
   contents: read
@@ -69,12 +67,12 @@ env:
   SCALA_VERSION: ${{ github.event.inputs['scala-version'] || '2.13' }}
   SEARCH_TEST_BACKENDS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.backends || 'local,rest-dir' }}
   SEARCH_PYTEST_CMD: >-
-    pytest /home/lance/tests/test_lance_spark.py::TestDQLSearchTableFunctions
+    pytest integration-tests/test_lance_spark.py::TestDQLSearchTableFunctions
     -v --timeout=180
 
 jobs:
-  search-docker-test:
-    name: Search Docker Test
+  search-integration-test:
+    name: Search Test
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -88,68 +86,33 @@ jobs:
           distribution: temurin
           java-version: 17
           cache: "maven"
-      - name: Build Docker images
-        uses: ./.github/actions/docker-build
-        with:
-          spark-version: ${{ env.SPARK_VERSION }}
-          scala-version: ${{ env.SCALA_VERSION }}
-      - name: Run directory namespace search tests
-        if: ${{ contains(env.SEARCH_TEST_BACKENDS, 'local') }}
-        run: |
-          make docker-test \
-            SPARK_VERSION=${SPARK_VERSION} \
-            SCALA_VERSION=${SCALA_VERSION} \
-            TEST_BACKENDS=local \
-            PYTEST_CMD="${SEARCH_PYTEST_CMD}"
-      - name: Resolve REST namespace URI
+      - name: Resolve REST namespace
         id: rest
         if: ${{ contains(env.SEARCH_TEST_BACKENDS, 'rest-dir') }}
         env:
           INPUT_REST_URI: ${{ github.event.inputs['rest-uri'] }}
-          INPUT_DOCKER_RUN_ARGS: ${{ github.event.inputs['docker-run-args'] }}
         run: |
           rest_uri="${INPUT_REST_URI}"
-          docker_run_args="${INPUT_DOCKER_RUN_ARGS}"
           start_rest_dir="false"
-          rest_dir_root=""
           rest_dir_port=""
-
           if [ -z "${rest_uri}" ]; then
             rest_dir_port="10024"
-            rest_dir_root="/home/lance/rest-data"
             rest_uri="http://127.0.0.1:${rest_dir_port}"
             start_rest_dir="true"
           fi
-
           echo "uri=${rest_uri}" >> "$GITHUB_OUTPUT"
           echo "start_rest_dir=${start_rest_dir}" >> "$GITHUB_OUTPUT"
-          echo "rest_dir_root=${rest_dir_root}" >> "$GITHUB_OUTPUT"
           echo "rest_dir_port=${rest_dir_port}" >> "$GITHUB_OUTPUT"
-          {
-            echo "docker_run_args<<EOF"
-            echo "${docker_run_args}"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-      - name: Run REST directory namespace search tests
-        if: ${{ contains(env.SEARCH_TEST_BACKENDS, 'rest-dir') }}
+      - name: Run search tests
         env:
+          TEST_BACKENDS: ${{ env.SEARCH_TEST_BACKENDS }}
           LANCE_SPARK_REST_URI: ${{ steps.rest.outputs.uri }}
           LANCE_SPARK_REST_API_KEY: ${{ secrets.LANCE_SPARK_REST_API_KEY }}
           LANCE_SPARK_REST_DATABASE: ${{ github.event.inputs['rest-database'] }}
           LANCE_SPARK_START_REST_DIR: ${{ steps.rest.outputs.start_rest_dir }}
-          LANCE_SPARK_REST_DIR_ROOT: ${{ steps.rest.outputs.rest_dir_root }}
           LANCE_SPARK_REST_DIR_PORT: ${{ steps.rest.outputs.rest_dir_port }}
-          DOCKER_RUN_ARGS: ${{ steps.rest.outputs.docker_run_args }}
-        run: |
-          make docker-test \
-            SPARK_VERSION=${SPARK_VERSION} \
-            SCALA_VERSION=${SCALA_VERSION} \
-            TEST_BACKENDS=rest-dir \
-            LANCE_SPARK_REST_URI="${LANCE_SPARK_REST_URI}" \
-            LANCE_SPARK_REST_API_KEY="${LANCE_SPARK_REST_API_KEY}" \
-            LANCE_SPARK_REST_DATABASE="${LANCE_SPARK_REST_DATABASE}" \
-            LANCE_SPARK_START_REST_DIR="${LANCE_SPARK_START_REST_DIR}" \
-            LANCE_SPARK_REST_DIR_ROOT="${LANCE_SPARK_REST_DIR_ROOT}" \
-            LANCE_SPARK_REST_DIR_PORT="${LANCE_SPARK_REST_DIR_PORT}" \
-            DOCKER_RUN_ARGS="${DOCKER_RUN_ARGS}" \
-            PYTEST_CMD="${SEARCH_PYTEST_CMD}"
+        uses: ./.github/actions/pytest-integration
+        with:
+          spark-version: ${{ env.SPARK_VERSION }}
+          scala-version: ${{ env.SCALA_VERSION }}
+          pytest-cmd: ${{ env.SEARCH_PYTEST_CMD }}

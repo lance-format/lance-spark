@@ -143,10 +143,8 @@ jobs:
           distribution: temurin
           java-version: 17
           cache: "maven"
-      - name: Build Docker images
-        uses: ./.github/actions/docker-build
+      - name: Run integration tests
+        uses: ./.github/actions/pytest-integration
         with:
           spark-version: ${{ matrix.spark-version }}
           scala-version: ${{ matrix.scala-version }}
-      - name: Run Docker integration tests
-        run: make docker-test SPARK_VERSION=${{ matrix.spark-version }} SCALA_VERSION=${{ matrix.scala-version }}

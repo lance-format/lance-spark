@@ -76,7 +76,15 @@ __pycache__/
 
 # Spark dist tarball fetched for Docker test-base builds
 docker/.spark-cache/
+docker/.spark-home/
 docker/spark.tgz
+
+# Host pytest integration
+integration-tests/.data/
+integration-tests/.rest-data/
+integration-tests/*.class
+integration-tests/.pyspark-pin
+.minio-bin/
 
 # mkdocs documentation
 /docs/site

@@ -28,6 +28,7 @@ Use `./mvnw` instead of `mvn` to ensure the correct Maven version.
 * Compile: `./mvnw compile -pl lance-spark-3.5_2.13 -am`
 * Test: `./mvnw test -pl lance-spark-3.5_2.13`
 * Full build: `make build SPARK_VERSION=3.5 SCALA_VERSION=2.13`
+* Integration tests: `make integration-test SPARK_VERSION=3.5 SCALA_VERSION=2.12` (requires `azurite-blob` and `minio` on `PATH`)
 
 Use `-pl <module> -am` to target a specific Spark/Scala version and build its dependencies.
 

@@ -69,9 +69,39 @@ To auto-format the code, run:
 make format
 ```
 
+## Integration Tests
+
+PySpark integration tests run on the host against an in-process Spark session (`local[2]`), the same model as the JUnit suite. Install Azurite and MinIO, then:
+
+```shell
+# azurite-blob from: npm install -g azurite
+# minio on PATH
+make integration-test SPARK_VERSION=3.5 SCALA_VERSION=2.12
+```
+
+Use `INTEGRATION_PYTEST_CMD` to run a targeted pytest path:
+
+```shell
+make integration-test SPARK_VERSION=3.5 SCALA_VERSION=2.13 \
+  TEST_BACKENDS=local \
+  INTEGRATION_PYTEST_CMD="pytest integration-tests/test_lance_spark.py::TestDQLSearchTableFunctions -v --timeout=180"
+```
+
+To also validate a REST namespace backed by a directory namespace:
+
+```shell
+make integration-test SPARK_VERSION=3.5 SCALA_VERSION=2.13 \
+  TEST_BACKENDS=local,rest-dir \
+  LANCE_SPARK_START_REST_DIR=true \
+  LANCE_SPARK_REST_URI=http://127.0.0.1:10024 \
+  INTEGRATION_PYTEST_CMD="pytest integration-tests/test_lance_spark.py::TestDQLSearchTableFunctions -v --timeout=180"
+```
+
+The `Spark Search` GitHub Actions workflow runs that targeted suite. Pull requests cover directory and REST-directory backends. Use workflow dispatch with `rest-uri` only when validating against an external REST namespace server.
+
 ## Docker Integration Tests
 
-Build the Spark bundle and Docker integration-test image before running Docker tests:
+Docker remains available for a packaged Spark environment (notebooks, a full distro). Build the Spark bundle and Docker integration-test image before running Docker tests:
 
 ```shell
 make bundle SPARK_VERSION=3.5 SCALA_VERSION=2.13
@@ -98,8 +128,6 @@ make docker-test SPARK_VERSION=3.5 SCALA_VERSION=2.13 \
 ```
 
 To run against an already-running compatible REST namespace server instead, omit `LANCE_SPARK_START_REST_DIR` and pass that server's URI with `LANCE_SPARK_REST_URI`.
-
-The `Spark Search Docker` GitHub Actions workflow runs the same targeted Docker tests. Pull requests run directory namespace and REST-directory namespace coverage automatically. Use workflow dispatch with `rest-uri` only when validating against an external REST namespace server.
 
 ## Documentation
 

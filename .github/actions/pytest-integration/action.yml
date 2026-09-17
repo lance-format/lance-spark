@@ -1,0 +1,100 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: "Pytest integration"
+description: "Run PySpark integration tests on the runner (no Spark Docker image)"
+
+inputs:
+  spark-version:
+    description: "Spark major version (e.g. 3.5)"
+    required: true
+  scala-version:
+    description: "Scala version (e.g. 2.13)"
+    required: true
+  pytest-cmd:
+    description: "Override INTEGRATION_PYTEST_CMD"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Resolve Spark versions
+      id: args
+      shell: bash
+      run: |
+        args="$(make print-docker-build-args \
+          SPARK_VERSION=${{ inputs.spark-version }} \
+          SCALA_VERSION=${{ inputs.scala-version }})"
+        printf '%s\n' "$args" >> "$GITHUB_OUTPUT"
+        echo "pyspark==$(printf '%s\n' "$args" | sed -n 's/^spark-download-version=//p')" \
+          > integration-tests/.pyspark-pin
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+        cache: pip
+        cache-dependency-path: |
+          integration-tests/requirements.txt
+          integration-tests/.pyspark-pin
+
+    - name: Set up Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: "22"
+
+    - name: Cache MinIO binary
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/.minio-bin
+        key: minio-RELEASE.2025-09-07T16-13-09Z-${{ runner.os }}-${{ runner.arch }}
+
+    - name: Install MinIO
+      shell: bash
+      run: |
+        dest="${{ github.workspace }}/.minio-bin"
+        mkdir -p "$dest"
+        if [ ! -x "$dest/minio" ]; then
+          docker rm -f minio-extract >/dev/null 2>&1 || true
+          docker pull quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+          docker create --name minio-extract quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+          docker cp minio-extract:/usr/bin/minio "$dest/minio"
+          docker rm minio-extract
+          chmod +x "$dest/minio"
+        fi
+        echo "$dest" >> "$GITHUB_PATH"
+
+    - name: Install Azurite
+      shell: bash
+      run: npm install -g azurite
+
+    - name: Cache Spark distribution
+      if: ${{ steps.args.outputs.needs-spark-dist == 'true' }}
+      uses: actions/cache@v4
+      with:
+        path: docker/.spark-cache
+        key: spark-dist-${{ steps.args.outputs.spark-dist-tgz }}
+
+    - name: Run integration tests
+      shell: bash
+      env:
+        PYTHON: python
+      run: |
+        extra=()
+        if [ -n "${{ inputs.pytest-cmd }}" ]; then
+          extra+=(INTEGRATION_PYTEST_CMD="${{ inputs.pytest-cmd }}")
+        fi
+        make integration-test \
+          SPARK_VERSION=${{ inputs.spark-version }} \
+          SCALA_VERSION=${{ inputs.scala-version }} \
+          "${extra[@]}"

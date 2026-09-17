@@ -191,6 +191,7 @@ LANCE_SPARK_START_REST_DIR = os.environ.get("LANCE_SPARK_START_REST_DIR", "").lo
     "true",
     "yes",
 )
+LANCE_SPARK_DATA_ROOT = os.environ.get("LANCE_SPARK_DATA_ROOT", "/home/lance/data")
 LANCE_SPARK_REST_DIR_ROOT = os.environ.get(
     "LANCE_SPARK_REST_DIR_ROOT",
     "/home/lance/rest-data",
@@ -234,7 +235,7 @@ def spark(request):
     Parameterized across storage backends so the full test suite runs against
     each one:
 
-    - **local** – local filesystem at ``/home/lance/data``
+    - **local** – local filesystem at ``LANCE_SPARK_DATA_ROOT`` (default ``/home/lance/data``)
     - **azurite** – Azure Blob Storage via the Azurite emulator
     - **minio** – S3-compatible storage via the MinIO emulator
     - **lancedb** – LanceDB Cloud via REST API (requires ``LANCEDB_DB`` and
@@ -250,6 +251,9 @@ def spark(request):
     builder = (
         SparkSession.builder
         .appName("LanceSparkTests")
+        .master("local[2]")
+        .config("spark.ui.enabled", "false")
+        .config("spark.driver.host", "127.0.0.1")
         .config(
             f"spark.sql.catalog.{CATALOG}",
             "org.lance.spark.LanceNamespaceSparkCatalog",
@@ -339,8 +343,9 @@ def spark(request):
         builder = builder.config(f"spark.sql.catalog.{CATALOG}.impl", "dir")
 
         if backend == "local":
+            os.makedirs(LANCE_SPARK_DATA_ROOT, exist_ok=True)
             builder = builder.config(
-                f"spark.sql.catalog.{CATALOG}.root", "/home/lance/data",
+                f"spark.sql.catalog.{CATALOG}.root", LANCE_SPARK_DATA_ROOT,
             )
         elif backend == "azurite":
             az = request.getfixturevalue("azurite")
@@ -391,7 +396,12 @@ def rest_dir_namespace():
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or LANCE_SPARK_REST_DIR_PORT
     log_path = "/tmp/lance-rest-dir-namespace.log"
-    classpath = "/home/lance/tests:/opt/spark/jars/*"
+    test_dir = os.path.dirname(os.path.abspath(__file__))
+    spark_home = os.environ.get("SPARK_HOME", "/opt/spark")
+    classpath = os.environ.get(
+        "LANCE_SPARK_REST_CLASSPATH",
+        f"{test_dir}:{spark_home}/jars/*",
+    )
 
     with open(log_path, "w", encoding="utf-8") as log:
         proc = subprocess.Popen(

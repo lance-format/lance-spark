@@ -97,25 +97,25 @@ Current behavior:
 - Runs the latest Spark/Scala pair: Spark 4.1 with Scala 2.13.
 - Uses `TEST_BACKENDS=glue`.
 - Skips pull requests from forks because repository secrets are unavailable there.
-- Builds the Lance Spark bundle, builds the Docker image, verifies AWS targets, then runs the Docker pytest suite.
+- Builds the Lance Spark bundle, verifies AWS targets, then runs pytest on the runner.
 
 To confirm the workflow is using real AWS Glue/S3:
 
 1. Check the `Verify AWS Glue/S3 targets` step. It must run `aws sts get-caller-identity`, `aws s3api head-bucket`, and `aws glue get-databases`.
-2. Check the Docker test step environment. `AWS_GLUE_ROOT` should be an `s3://` URI under the real bucket secret.
+2. Check the Glue/S3 test step environment. `AWS_GLUE_ROOT` should be an `s3://` URI under the real bucket secret.
 3. Check the pytest header for `lance spark backends: glue`, `aws glue root: s3://...`, and the expected AWS region.
 4. Confirm there is no `AWS_GLUE_ENDPOINT`, MinIO endpoint, `storage.endpoint`, or `storage.aws_allow_http` in the real AWS job.
 
 Workflow references:
 
-- [`.github/workflows/spark-aws.yml`](../../../.github/workflows/spark-aws.yml#L51) defines the Glue/S3 Docker test job.
-- [`.github/workflows/spark-aws.yml`](../../../.github/workflows/spark-aws.yml#L102) verifies real AWS targets before running pytest.
-- [`.github/workflows/spark-aws.yml`](../../../.github/workflows/spark-aws.yml#L127) runs the Glue/S3 Docker integration tests.
-- [`.github/workflows/spark-aws.yml`](../../../.github/workflows/spark-aws.yml#L142) cleans up S3 test data.
+- [`.github/workflows/spark-aws.yml`](../../../.github/workflows/spark-aws.yml#L51) defines the Glue/S3 test job.
+- [`.github/workflows/spark-aws.yml`](../../../.github/workflows/spark-aws.yml#L74) verifies real AWS targets before running pytest.
+- [`.github/workflows/spark-aws.yml`](../../../.github/workflows/spark-aws.yml#L99) runs the Glue/S3 integration tests.
+- [`.github/workflows/spark-aws.yml`](../../../.github/workflows/spark-aws.yml#L114) cleans up S3 test data.
 
 ## Python Integration Tests
 
-The Docker test runs `pytest /home/lance/tests/ -v --timeout=180`. The test backend selection and Spark session configuration live in [integration-tests/conftest.py](../../../integration-tests/conftest.py#L173).
+CI runs `make integration-test` (pytest on the runner, SparkSession `local[2]`). The test backend selection and Spark session configuration live in [integration-tests/conftest.py](../../../integration-tests/conftest.py).
 
 Glue-specific behavior:
 
@@ -177,7 +177,7 @@ The test role needs permissions for STS identity checks, bucket access under the
 
 ## Troubleshooting
 
-`Glue/S3 Docker Test` is skipped in CI:
+`Glue/S3 Test` is skipped in CI:
 
 - For pull requests, the job only runs when the PR branch is in the same repository because forked PRs cannot access AWS secrets.
 - Confirm the workflow trigger did not ignore the changed paths. Documentation-only changes under `docs/**` or `README.md` are ignored by this workflow.

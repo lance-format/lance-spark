@@ -43,6 +43,7 @@ DOCKER_CACHE_FROM ?=
 DOCKER_CACHE_TO ?=
 LANCE_NAMESPACE_IMPL_VERSION ?= $(shell sed -n 's:.*<lance-namespace-impl.version>\(.*\)</lance-namespace-impl.version>.*:\1:p' pom.xml | head -n 1)
 PYTEST_CMD ?= pytest /home/lance/tests/ -v --timeout=180
+INTEGRATION_PYTEST_CMD ?= pytest integration-tests/ -v --timeout=180
 
 DOCKER_COMPOSE := $(shell \
 	if docker compose version >/dev/null 2>&1; then \
@@ -83,6 +84,18 @@ clean-bundle:
 .PHONY: install-base
 install-base:
 	./mvnw install -pl $(BASE_MODULE) -am -DskipTests
+
+.PHONY: integration-test
+integration-test: bundle
+	SPARK_VERSION=$(SPARK_VERSION) \
+	SCALA_VERSION=$(SCALA_VERSION) \
+	SPARK_DOWNLOAD_VERSION=$(SPARK_DOWNLOAD_VERSION) \
+	SPARK_SCALA_SUFFIX=$(SPARK_SCALA_SUFFIX) \
+	SPARK_DIST_TGZ=$(SPARK_DIST_TGZ) \
+	BUNDLE_MODULE=$(BUNDLE_MODULE) \
+	LANCE_NAMESPACE_IMPL_VERSION=$(LANCE_NAMESPACE_IMPL_VERSION) \
+	INTEGRATION_PYTEST_CMD="$(INTEGRATION_PYTEST_CMD)" \
+	./scripts/run-integration-tests.sh
 
 # =============================================================================
 # Global commands (all modules)
@@ -158,6 +171,7 @@ print-docker-build-args:
 	@echo "spark-dist-tgz=$(SPARK_DIST_TGZ)"
 	@echo "py4j-version=$(PY4J_VERSION)"
 	@echo "spark-scala-suffix=$(SPARK_SCALA_SUFFIX)"
+	@echo "needs-spark-dist=$(if $(SPARK_SCALA_SUFFIX),true,false)"
 	@echo "lance-namespace-impl-version=$(LANCE_NAMESPACE_IMPL_VERSION)"
 
 .PHONY: docker-fetch-spark
@@ -302,6 +316,7 @@ help:
 	@echo "  bundle         - Build bundle module (incremental)"
 	@echo "  clean-bundle   - Clean then build bundle module (use when source changes are not picked up)"
 	@echo "  install-base   - Install base module"
+	@echo "  integration-test - Run PySpark pytest on the host (azurite-blob and minio on PATH)"
 	@echo ""
 	@echo "Global commands (all modules):"
 	@echo "  lint           - Check code style (checkstyle + spotless)"
