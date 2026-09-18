@@ -78,7 +78,9 @@ For the `btree` method, the following options are supported:
 |------------------|--------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `zone_size`      | Long   | The number of rows per zone in the B-tree index.                                                                                                                                                         |
 | `build_mode`     | String | Index building mode: 'fragment' builds indexes in parallel by fragment; 'range' sorts data by indexed columns first, then partitions and builds indexes in parallel by partition. Default is 'fragment'. |
-| `rows_per_range` | Long   | The number of rows per range when built using range mode. Default is 1000000.                                                                                                                            |
+
+`build_mode = 'range'` partitions on fragment id so each partition holds whole fragments, and takes
+its partition count from the fragment count. Range width is not configurable.
 
 
 ### FTS / Inverted Options
