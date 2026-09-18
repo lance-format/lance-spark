@@ -28,6 +28,8 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -38,6 +40,7 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -302,12 +305,12 @@ public abstract class BaseLanceFormatTest {
   }
 
   /**
-   * Tests that V2_0 legacy encoders read null structs as empty structs rather than null. This is a
-   * known behavioral difference: V2_0's CoreFieldEncodingStrategy does not preserve null semantics
-   * for struct types, so a null struct is read back as a non-null struct with null child fields.
+   * Lance rejects null struct values at file version 2.0: that format cannot encode struct
+   * validity, and older Lance releases silently read such a struct back as a non-null struct with
+   * null children. The write now fails instead of corrupting the value.
    */
   @Test
-  public void testNullStructV2_0ReadsAsEmptyStruct() {
+  public void testNullStructV2_0IsRejected() {
     StructType schema = createIdAddressSchema(createAddressSchema());
     List<Row> data =
         Arrays.asList(
@@ -315,20 +318,18 @@ public abstract class BaseLanceFormatTest {
             RowFactory.create(2, null),
             RowFactory.create(3, RowFactory.create("New York", "USA")));
 
-    List<Row> result = writeAndReadStruct(data, schema, "2.0", "v20_null_behavior");
+    Exception failure =
+        assertThrows(
+            Exception.class, () -> writeAndReadStruct(data, schema, "2.0", "v20_null_behavior"));
+    assertTrue(
+        stackTraceOf(failure).contains("does not encode struct validity"),
+        "expected Lance to reject a null struct at file version 2.0, got: " + failure);
+  }
 
-    assertEquals(3, result.size());
-    // V2_0: null struct is read back as non-null with null child fields (known behavior)
-    assertFalse(
-        result.get(1).isNullAt(1),
-        "V2_0 legacy encoder reads null struct as empty struct, not null");
-    Row emptyStruct = result.get(1).getStruct(1);
-    assertNotNull(emptyStruct);
-    assertTrue(emptyStruct.isNullAt(0), "city should be null in V2_0 empty struct");
-    assertTrue(emptyStruct.isNullAt(1), "country should be null in V2_0 empty struct");
-    // Non-null rows should still be correct
-    assertEquals("Beijing", result.get(0).getStruct(1).getString(0));
-    assertEquals("New York", result.get(2).getStruct(1).getString(0));
+  private static String stackTraceOf(Throwable throwable) {
+    StringWriter writer = new StringWriter();
+    throwable.printStackTrace(new PrintWriter(writer));
+    return writer.toString();
   }
 
   /**

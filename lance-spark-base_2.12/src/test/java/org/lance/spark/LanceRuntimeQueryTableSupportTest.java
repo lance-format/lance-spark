@@ -15,6 +15,7 @@ package org.lance.spark;
 
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.QueryTableRequest;
+import org.lance.namespace.model.QueryTableResponse;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.junit.jupiter.api.Test;
@@ -97,8 +98,8 @@ class LanceRuntimeQueryTableSupportTest {
     public QueryingNamespace() {}
 
     @Override
-    public byte[] queryTable(QueryTableRequest request) {
-      return new byte[0];
+    public QueryTableResponse queryTable(QueryTableRequest request) {
+      return new QueryTableResponse().data(new byte[0]);
     }
   }
 }

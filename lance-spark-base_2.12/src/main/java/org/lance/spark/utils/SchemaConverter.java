@@ -215,12 +215,12 @@ public class SchemaConverter {
     StructField[] newFields = new StructField[sparkSchema.fields().length];
     for (int i = 0; i < sparkSchema.fields().length; i++) {
       StructField field = sparkSchema.fields()[i];
-      String blobEncodingProperty = field.name() + ".lance.encoding";
+      String blobEncodingProperty = field.name() + BlobUtils.BLOB_ENCODING_PROPERTY_SUFFIX;
 
       if (properties.containsKey(blobEncodingProperty)) {
         // This field should be a blob column
         String encodingValue = properties.get(blobEncodingProperty);
-        if ("blob".equalsIgnoreCase(encodingValue)) {
+        if (BlobUtils.BLOB_ENCODING_PROPERTY_VALUE.equalsIgnoreCase(encodingValue)) {
           if (field.dataType() instanceof BinaryType) {
             // Add metadata for blob encoding
             boolean useV2 = BlobUtils.fileFormatSupportsBlobV2(fileFormatVersion);

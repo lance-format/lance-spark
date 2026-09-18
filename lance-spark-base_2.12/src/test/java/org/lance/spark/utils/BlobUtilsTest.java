@@ -143,6 +143,9 @@ public class BlobUtilsTest {
     assertTrue(BlobUtils.fileFormatSupportsBlobV2("2.10"));
     assertTrue(BlobUtils.fileFormatSupportsBlobV2("3.0"));
     assertTrue(BlobUtils.fileFormatSupportsBlobV2(" 2.2 "));
+    // Lance's release selectors resolve to 2.2 or newer at write time.
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2("stable"));
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2("next"));
   }
 
   @Test
@@ -156,7 +159,7 @@ public class BlobUtilsTest {
 
   @Test
   public void fileFormatSupportsBlobV2RejectsNamedAndMalformedVersions() {
-    assertFalse(BlobUtils.fileFormatSupportsBlobV2("stable"));
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2("legacy"));
     assertFalse(BlobUtils.fileFormatSupportsBlobV2(""));
     assertFalse(BlobUtils.fileFormatSupportsBlobV2("."));
     assertFalse(BlobUtils.fileFormatSupportsBlobV2("2.x"));
