@@ -11,7 +11,7 @@
 # limitations under the License.
 
 name: "Pytest integration"
-description: "Run PySpark integration tests on the runner (no Spark Docker image)"
+description: "Run PySpark integration tests on the runner"
 
 inputs:
   spark-version:
@@ -32,12 +32,23 @@ runs:
       id: args
       shell: bash
       run: |
-        args="$(make print-docker-build-args \
+        args="$(make print-spark-test-args \
           SPARK_VERSION=${{ inputs.spark-version }} \
           SCALA_VERSION=${{ inputs.scala-version }})"
         printf '%s\n' "$args" >> "$GITHUB_OUTPUT"
         echo "pyspark==$(printf '%s\n' "$args" | sed -n 's/^spark-download-version=//p')" \
           > integration-tests/.pyspark-pin
+        backends="${TEST_BACKENDS:-}"
+        needs_azurite=false
+        needs_minio=false
+        if [ -z "$backends" ] || [[ ",$backends," == *",azurite,"* ]]; then
+          needs_azurite=true
+        fi
+        if [ -z "$backends" ] || [[ ",$backends," == *",minio,"* ]]; then
+          needs_minio=true
+        fi
+        echo "needs-azurite=$needs_azurite" >> "$GITHUB_OUTPUT"
+        echo "needs-minio=$needs_minio" >> "$GITHUB_OUTPUT"
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -49,17 +60,20 @@ runs:
           integration-tests/.pyspark-pin
 
     - name: Set up Node
+      if: ${{ steps.args.outputs.needs-azurite == 'true' }}
       uses: actions/setup-node@v4
       with:
         node-version: "22"
 
     - name: Cache MinIO binary
+      if: ${{ steps.args.outputs.needs-minio == 'true' }}
       uses: actions/cache@v4
       with:
         path: ${{ github.workspace }}/.minio-bin
         key: minio-RELEASE.2025-09-07T16-13-09Z-${{ runner.os }}-${{ runner.arch }}
 
     - name: Install MinIO
+      if: ${{ steps.args.outputs.needs-minio == 'true' }}
       shell: bash
       run: |
         dest="${{ github.workspace }}/.minio-bin"
@@ -75,6 +89,7 @@ runs:
         echo "$dest" >> "$GITHUB_PATH"
 
     - name: Install Azurite
+      if: ${{ steps.args.outputs.needs-azurite == 'true' }}
       shell: bash
       run: npm install -g azurite
 

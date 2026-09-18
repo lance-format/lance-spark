@@ -71,11 +71,15 @@ make format
 
 ## Integration Tests
 
-PySpark integration tests run on the host against an in-process Spark session (`local[2]`), the same model as the JUnit suite. Install Azurite and MinIO, then:
+PySpark tests use Spark `local[2]`. Filesystem-only:
 
 ```shell
-# azurite-blob from: npm install -g azurite
-# minio on PATH
+make integration-test SPARK_VERSION=3.5 SCALA_VERSION=2.12 TEST_BACKENDS=local
+```
+
+To run the default suite used by CI, install Azurite and MinIO. Install `azurite-blob` with `npm install -g azurite` and put `minio` on `PATH`, then:
+
+```shell
 make integration-test SPARK_VERSION=3.5 SCALA_VERSION=2.12
 ```
 
@@ -97,37 +101,18 @@ make integration-test SPARK_VERSION=3.5 SCALA_VERSION=2.13 \
   INTEGRATION_PYTEST_CMD="pytest integration-tests/test_lance_spark.py::TestDQLSearchTableFunctions -v --timeout=180"
 ```
 
-The `Spark Search` GitHub Actions workflow runs that targeted suite. Pull requests cover directory and REST-directory backends. Use workflow dispatch with `rest-uri` only when validating against an external REST namespace server.
+The Spark Search workflow runs that suite on pull requests. Workflow dispatch with `rest-uri` is for an external REST server.
 
-## Docker Integration Tests
+## Notebooks
 
-Docker remains available for a packaged Spark environment (notebooks, a full distro). Build the Spark bundle and Docker integration-test image before running Docker tests:
-
-```shell
-make bundle SPARK_VERSION=3.5 SCALA_VERSION=2.13
-make docker-build-test SPARK_VERSION=3.5 SCALA_VERSION=2.13
-make docker-test SPARK_VERSION=3.5 SCALA_VERSION=2.13
-```
-
-Use `PYTEST_CMD` to run a targeted pytest path in the Docker image. For example, run only the SQL search table-function tests against the directory namespace:
+After `make bundle`, start the notebook image in `docker/`:
 
 ```shell
-make docker-test SPARK_VERSION=3.5 SCALA_VERSION=2.13 \
-  TEST_BACKENDS=local \
-  PYTEST_CMD="pytest /home/lance/tests/test_lance_spark.py::TestDQLSearchTableFunctions -v --timeout=180"
+make docker-build
+make docker-up
 ```
 
-To also validate a REST namespace backed by a directory namespace, let the Docker test container start the OSS Lance REST adapter:
-
-```shell
-make docker-test SPARK_VERSION=3.5 SCALA_VERSION=2.13 \
-  TEST_BACKENDS=local,rest-dir \
-  LANCE_SPARK_START_REST_DIR=true \
-  LANCE_SPARK_REST_URI=http://127.0.0.1:10024 \
-  PYTEST_CMD="pytest /home/lance/tests/test_lance_spark.py::TestDQLSearchTableFunctions -v --timeout=180"
-```
-
-To run against an already-running compatible REST namespace server instead, omit `LANCE_SPARK_START_REST_DIR` and pass that server's URI with `LANCE_SPARK_REST_URI`.
+Then open `http://localhost:8888`.
 
 ## Documentation
 

@@ -10,9 +10,9 @@ Multi-module Maven project with shared base code and version-specific modules:
 - `lance-spark-{3.4,3.5}_2.{12,13}/` - Spark version-specific modules
 - `lance-spark-{4.0,4.1}_2.13/` - Spark 4.x modules (Scala 2.13 only)
 - `lance-spark-bundle-*/` - Shaded JARs for distribution
-- `integration-tests/` - PySpark integration tests (pytest, runs against local/Azurite/MinIO/LanceDB Cloud)
+- `integration-tests/` - PySpark integration tests
 - `docs/` - MkDocs documentation (hosted at lance.org/integrations/spark/)
-- `docker/` - Docker environment for running integration tests and notebooks
+- `docker/` - Notebook image
 - `benchmark/` - Performance benchmarks
 
 Source lives in `lance-spark-base_2.12/src/main/{scala,java}/`. Tests live alongside in `src/test/{scala,java}/`. The `build-helper-maven-plugin` copies both source and test directories across version modules so they don't need to be duplicated — add code once in the base module and it builds/tests against all supported Spark/Scala versions.
@@ -28,7 +28,7 @@ Use `./mvnw` instead of `mvn` to ensure the correct Maven version.
 * Compile: `./mvnw compile -pl lance-spark-3.5_2.13 -am`
 * Test: `./mvnw test -pl lance-spark-3.5_2.13`
 * Full build: `make build SPARK_VERSION=3.5 SCALA_VERSION=2.13`
-* Integration tests: `make integration-test SPARK_VERSION=3.5 SCALA_VERSION=2.12` (requires `azurite-blob` and `minio` on `PATH`)
+* Integration tests: `make integration-test SPARK_VERSION=3.5 SCALA_VERSION=2.12 TEST_BACKENDS=local`. Full backend list needs `azurite-blob` and `minio` on `PATH`.
 
 Use `-pl <module> -am` to target a specific Spark/Scala version and build its dependencies.
 

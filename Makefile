@@ -20,10 +20,9 @@ MODULE := lance-spark-$(SPARK_VERSION)_$(SCALA_VERSION)
 BUNDLE_MODULE := lance-spark-bundle-$(SPARK_VERSION)_$(SCALA_VERSION)
 BASE_MODULE := lance-spark-base_$(SCALA_VERSION)
 
-# Spark download versions for Docker
+# Spark tarball versions
 include docker/versions.mk
 SPARK_DOWNLOAD_VERSION := $(SPARK_DOWNLOAD_VERSION_$(SPARK_VERSION))
-PY4J_VERSION := $(PY4J_VERSION_$(SPARK_VERSION))
 
 # Spark 3.x default binaries are Scala 2.12; Scala 2.13 needs explicit suffix.
 # Spark 4.x only supports Scala 2.13, so no suffix is needed.
@@ -37,13 +36,13 @@ else
   SPARK_SCALA_SUFFIX :=
 endif
 
-# Optional Docker build cache flags (set in CI for layer caching)
-# Example: make docker-build-test-base DOCKER_CACHE_FROM="type=gha" DOCKER_CACHE_TO="type=gha,mode=max"
-DOCKER_CACHE_FROM ?=
-DOCKER_CACHE_TO ?=
 LANCE_NAMESPACE_IMPL_VERSION ?= $(shell sed -n 's:.*<lance-namespace-impl.version>\(.*\)</lance-namespace-impl.version>.*:\1:p' pom.xml | head -n 1)
-PYTEST_CMD ?= pytest /home/lance/tests/ -v --timeout=180
 INTEGRATION_PYTEST_CMD ?= pytest integration-tests/ -v --timeout=180
+
+SPARK_DIST_TGZ := spark-$(SPARK_DOWNLOAD_VERSION)-bin-hadoop3$(SPARK_SCALA_SUFFIX).tgz
+SPARK_DIST_URL := https://archive.apache.org/dist/spark/spark-$(SPARK_DOWNLOAD_VERSION)/$(SPARK_DIST_TGZ)
+SPARK_CACHE_DIR := docker/.spark-cache
+SPARK_CACHED_TGZ := $(SPARK_CACHE_DIR)/$(SPARK_DIST_TGZ)
 
 DOCKER_COMPOSE := $(shell \
 	if docker compose version >/dev/null 2>&1; then \
@@ -96,6 +95,26 @@ integration-test: bundle
 	LANCE_NAMESPACE_IMPL_VERSION=$(LANCE_NAMESPACE_IMPL_VERSION) \
 	INTEGRATION_PYTEST_CMD="$(INTEGRATION_PYTEST_CMD)" \
 	./scripts/run-integration-tests.sh
+
+.PHONY: print-spark-test-args
+print-spark-test-args:
+	@echo "spark-download-version=$(SPARK_DOWNLOAD_VERSION)"
+	@echo "spark-dist-tgz=$(SPARK_DIST_TGZ)"
+	@echo "spark-scala-suffix=$(SPARK_SCALA_SUFFIX)"
+	@echo "needs-spark-dist=$(if $(SPARK_SCALA_SUFFIX),true,false)"
+	@echo "lance-namespace-impl-version=$(LANCE_NAMESPACE_IMPL_VERSION)"
+
+.PHONY: fetch-spark-dist
+fetch-spark-dist:
+	@test -n "$(SPARK_DOWNLOAD_VERSION)" || { echo "unknown Spark download for SPARK_VERSION=$(SPARK_VERSION)"; exit 1; }
+	mkdir -p $(SPARK_CACHE_DIR)
+	@if [ ! -f "$(SPARK_CACHED_TGZ)" ] || ! tar tzf "$(SPARK_CACHED_TGZ)" >/dev/null 2>&1; then \
+		echo "Downloading $(SPARK_DIST_URL)"; \
+		rm -f "$(SPARK_CACHED_TGZ)" "$(SPARK_CACHED_TGZ).tmp"; \
+		curl -fL --retry 3 --retry-delay 5 -o "$(SPARK_CACHED_TGZ).tmp" "$(SPARK_DIST_URL)" && \
+		tar tzf "$(SPARK_CACHED_TGZ).tmp" >/dev/null && \
+		mv "$(SPARK_CACHED_TGZ).tmp" "$(SPARK_CACHED_TGZ)"; \
+	fi
 
 # =============================================================================
 # Global commands (all modules)
@@ -156,93 +175,6 @@ docker-shell:
 .PHONY: docker-down
 docker-down: check-docker-compose
 	${DOCKER_COMPOSE} -f docker/docker-compose.yml down
-
-SPARK_DIST_TGZ := spark-$(SPARK_DOWNLOAD_VERSION)-bin-hadoop3$(SPARK_SCALA_SUFFIX).tgz
-SPARK_DIST_URL := https://archive.apache.org/dist/spark/spark-$(SPARK_DOWNLOAD_VERSION)/$(SPARK_DIST_TGZ)
-SPARK_CACHE_DIR := docker/.spark-cache
-SPARK_CACHED_TGZ := $(SPARK_CACHE_DIR)/$(SPARK_DIST_TGZ)
-SPARK_DOCKER_TGZ := docker/spark.tgz
-
-# Print resolved Docker build args for use in CI (e.g. GitHub Actions step outputs).
-# This keeps versions.mk as the single source of truth for version mappings.
-.PHONY: print-docker-build-args
-print-docker-build-args:
-	@echo "spark-download-version=$(SPARK_DOWNLOAD_VERSION)"
-	@echo "spark-dist-tgz=$(SPARK_DIST_TGZ)"
-	@echo "py4j-version=$(PY4J_VERSION)"
-	@echo "spark-scala-suffix=$(SPARK_SCALA_SUFFIX)"
-	@echo "needs-spark-dist=$(if $(SPARK_SCALA_SUFFIX),true,false)"
-	@echo "lance-namespace-impl-version=$(LANCE_NAMESPACE_IMPL_VERSION)"
-
-.PHONY: docker-fetch-spark
-docker-fetch-spark:
-	@test -n "$(SPARK_DOWNLOAD_VERSION)" || { echo "unknown Spark download for SPARK_VERSION=$(SPARK_VERSION)"; exit 1; }
-	mkdir -p $(SPARK_CACHE_DIR)
-	@if [ ! -f "$(SPARK_CACHED_TGZ)" ] || ! tar tzf "$(SPARK_CACHED_TGZ)" >/dev/null 2>&1; then \
-		echo "Downloading $(SPARK_DIST_URL)"; \
-		rm -f "$(SPARK_CACHED_TGZ)" "$(SPARK_CACHED_TGZ).tmp"; \
-		curl -fL --retry 3 --retry-delay 5 -o "$(SPARK_CACHED_TGZ).tmp" "$(SPARK_DIST_URL)" && \
-		tar tzf "$(SPARK_CACHED_TGZ).tmp" >/dev/null && \
-		mv "$(SPARK_CACHED_TGZ).tmp" "$(SPARK_CACHED_TGZ)"; \
-	fi
-	ln -f "$(SPARK_CACHED_TGZ)" "$(SPARK_DOCKER_TGZ)"
-
-.PHONY: docker-build-test-base
-docker-build-test-base: docker-fetch-spark
-	cd docker && docker buildx build \
-		--build-arg PY4J_VERSION=$(PY4J_VERSION) \
-		$(if $(DOCKER_CACHE_FROM),--cache-from $(DOCKER_CACHE_FROM)) \
-		$(if $(DOCKER_CACHE_TO),--cache-to $(DOCKER_CACHE_TO)) \
-		--load \
-		-f Dockerfile.test-base \
-		-t lance-spark-test-base:$(SPARK_VERSION)_$(SCALA_VERSION) \
-		.
-
-.PHONY: docker-build-test
-docker-build-test:
-	@ls $(BUNDLE_MODULE)/target/$(BUNDLE_MODULE)-*.jar >/dev/null 2>&1 || \
-		(echo "Error: Bundle jar not found. Run 'make bundle' first." && exit 1)
-	docker build \
-		--build-arg SPARK_MAJOR_VERSION=$(SPARK_VERSION) \
-		--build-arg SCALA_VERSION=$(SCALA_VERSION) \
-		--build-arg LANCE_NAMESPACE_IMPL_VERSION=$(LANCE_NAMESPACE_IMPL_VERSION) \
-		-f docker/Dockerfile.test \
-		-t lance-spark-test:$(SPARK_VERSION)_$(SCALA_VERSION) \
-		.
-
-
-.PHONY: docker-test
-docker-test:
-	@docker image inspect lance-spark-test:$(SPARK_VERSION)_$(SCALA_VERSION) >/dev/null 2>&1 || \
-		(echo "Error: Docker image 'lance-spark-test:$(SPARK_VERSION)_$(SCALA_VERSION)' not found. Run 'make docker-build-test' first." && exit 1)
-	docker run --rm --hostname lance-spark \
-		-e SPARK_VERSION=$(SPARK_VERSION) \
-		$(if $(LANCEDB_DB),-e LANCEDB_DB=$(LANCEDB_DB)) \
-		$(if $(LANCEDB_API_KEY),-e LANCEDB_API_KEY=$(LANCEDB_API_KEY)) \
-		$(if $(LANCEDB_HOST_OVERRIDE),-e LANCEDB_HOST_OVERRIDE=$(LANCEDB_HOST_OVERRIDE)) \
-		$(if $(LANCEDB_REGION),-e LANCEDB_REGION=$(LANCEDB_REGION)) \
-		$(if $(LANCE_SPARK_REST_URI),-e LANCE_SPARK_REST_URI=$(LANCE_SPARK_REST_URI)) \
-		$(if $(LANCE_SPARK_REST_API_KEY),-e LANCE_SPARK_REST_API_KEY=$(LANCE_SPARK_REST_API_KEY)) \
-		$(if $(LANCE_SPARK_REST_DATABASE),-e LANCE_SPARK_REST_DATABASE=$(LANCE_SPARK_REST_DATABASE)) \
-		$(if $(LANCE_SPARK_START_REST_DIR),-e LANCE_SPARK_START_REST_DIR=$(LANCE_SPARK_START_REST_DIR)) \
-		$(if $(LANCE_SPARK_REST_DIR_ROOT),-e LANCE_SPARK_REST_DIR_ROOT=$(LANCE_SPARK_REST_DIR_ROOT)) \
-		$(if $(LANCE_SPARK_REST_DIR_PORT),-e LANCE_SPARK_REST_DIR_PORT=$(LANCE_SPARK_REST_DIR_PORT)) \
-		$(if $(TEST_BACKENDS),-e TEST_BACKENDS=$(TEST_BACKENDS)) \
-		$(if $(LANCE_FTS_FORMAT_VERSION),-e LANCE_FTS_FORMAT_VERSION=$(LANCE_FTS_FORMAT_VERSION)) \
-		$(if $(AWS_REGION),-e AWS_REGION=$(AWS_REGION)) \
-		$(if $(AWS_DEFAULT_REGION),-e AWS_DEFAULT_REGION=$(AWS_DEFAULT_REGION)) \
-		$(if $(AWS_S3_BUCKET_NAME),-e AWS_S3_BUCKET_NAME=$(AWS_S3_BUCKET_NAME)) \
-		$(if $(AWS_GLUE_ROOT),-e AWS_GLUE_ROOT=$(AWS_GLUE_ROOT)) \
-		$(if $(AWS_GLUE_CATALOG_ID),-e AWS_GLUE_CATALOG_ID=$(AWS_GLUE_CATALOG_ID)) \
-		$(if $(AWS_GLUE_ENDPOINT),-e AWS_GLUE_ENDPOINT=$(AWS_GLUE_ENDPOINT)) \
-		$(if $(AWS_ACCESS_KEY_ID),-e AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID)) \
-		$(if $(AWS_SECRET_ACCESS_KEY),-e AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY)) \
-		$(if $(AWS_SESSION_TOKEN),-e AWS_SESSION_TOKEN=$(AWS_SESSION_TOKEN)) \
-		$(if $(AWS_PROFILE),-e AWS_PROFILE=$(AWS_PROFILE)) \
-		$(if $(AWS_PROFILE),-v $(HOME)/.aws:/root/.aws:ro) \
-		$(DOCKER_RUN_ARGS) \
-		lance-spark-test:$(SPARK_VERSION)_$(SCALA_VERSION) \
-		"$(PYTEST_CMD)"
 
 # =============================================================================
 # Benchmark
@@ -316,7 +248,8 @@ help:
 	@echo "  bundle         - Build bundle module (incremental)"
 	@echo "  clean-bundle   - Clean then build bundle module (use when source changes are not picked up)"
 	@echo "  install-base   - Install base module"
-	@echo "  integration-test - Run PySpark pytest on the host (azurite-blob and minio on PATH)"
+	@echo "  integration-test - Run PySpark pytest"
+	@echo "  fetch-spark-dist - Download Spark tarball for 3.x Scala 2.13 pytest"
 	@echo ""
 	@echo "Global commands (all modules):"
 	@echo "  lint           - Check code style (checkstyle + spotless)"
@@ -326,16 +259,11 @@ help:
 	@echo "  build-all      - Lint and install all modules"
 	@echo "  clean          - Clean all modules"
 	@echo ""
-	@echo "Docker commands:"
-	@echo "  docker-build           - Build docker image with Spark 3.5/Scala 2.12 bundle"
+	@echo "Notebook Docker commands:"
+	@echo "  docker-build           - Build the notebook image"
 	@echo "  docker-up              - Start docker containers"
 	@echo "  docker-shell           - Open shell in spark-lance container"
 	@echo "  docker-down            - Stop docker containers"
-	@echo "  docker-fetch-spark     - Download Spark tarball into docker/.spark-cache"
-	@echo "  docker-build-test-base - Build test base image (system deps + Spark)"
-	@echo "  docker-build-test      - Build test image (base + bundle JAR)"
-	@echo "  docker-test            - Run integration tests in lance-spark-test container"
-	@echo "                           Override PYTEST_CMD to run a targeted pytest command"
 	@echo ""
 	@echo "Benchmark:"
 	@echo "  benchmark-build         - Build benchmark jar (shared by TPC-DS and TPC-H)"

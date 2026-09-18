@@ -74,14 +74,15 @@ venv.bak/
 __pycache__/
 
 
-# Spark dist tarball fetched for Docker test-base builds
+# Spark dist tarball for Spark 3.x Scala 2.13 pytest
 docker/.spark-cache/
 docker/.spark-home/
-docker/spark.tgz
 
-# Host pytest integration
+# Pytest
 integration-tests/.data/
 integration-tests/.rest-data/
+integration-tests/.jars/
+integration-tests/.cache/
 integration-tests/*.class
 integration-tests/.pyspark-pin
 .minio-bin/
