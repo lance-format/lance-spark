@@ -68,6 +68,30 @@ public class LanceStatistics implements Statistics, Serializable {
   }
 
   /**
+   * Estimate post-pruning statistics from the exact row count of surviving fragments.
+   *
+   * <p>The row count is exact for the fragments selected by planning. File size remains an estimate
+   * because the scan plan does not carry per-fragment byte sizes, so it is scaled by the
+   * surviving-row ratio. Invalid or non-selective inputs conservatively retain full-table stats.
+   *
+   * @param totalRows total rows in the dataset
+   * @param totalFilesSize total file size in bytes
+   * @param survivingRows exact row count across surviving fragments
+   * @return row-weighted post-pruning statistics
+   */
+  static LanceStatistics estimatePostPruningByRows(
+      long totalRows, long totalFilesSize, long survivingRows) {
+    if (totalRows <= 0 || survivingRows >= totalRows) {
+      return new LanceStatistics(totalRows, totalFilesSize);
+    }
+    if (survivingRows <= 0) {
+      return new LanceStatistics(0, 0);
+    }
+    double ratio = (double) survivingRows / totalRows;
+    return new LanceStatistics(survivingRows, (long) (totalFilesSize * ratio));
+  }
+
+  /**
    * Estimate post-projection size using {@code sizeInBytes × (projectedWidths / fullWidths)}, the
    * same formula Spark's DSv2 {@code FileScan.estimateStatistics} applies after column pruning (see
    * {@code org.apache.spark.sql.execution.datasources.v2.FileScan}). Lets {@code JoinSelection} see
