@@ -205,14 +205,9 @@ public abstract class BaseSparkSearchTableFunctionTest {
   }
 
   @Test
-  @Disabled(
-      "Mixes VECTOR_SEARCH/HYBRID_SEARCH (still working) with SEARCH, which now routes to"
-          + " queryTable and fails until lance-core dir.rs supports structured_query. TODO: split"
-          + " the SEARCH assertions into a separate case so vector/hybrid named-args stay covered.")
   public void testNamedArguments() {
     Assumptions.assumeTrue(supportsNamedArguments());
     String vectorTable = createVectorTable();
-    String ftsTable = createFtsTable();
     String hybridTable = createHybridTable();
 
     List<Row> vectorRows =
@@ -282,6 +277,42 @@ public abstract class BaseSparkSearchTableFunctionTest {
     assertEquals(0.0f, vectorRowId.getFloat(1), 0.001f);
     assertTrue(vectorRowId.getLong(2) >= 0);
 
+    Dataset<Row> hybridWithRowId =
+        spark.sql(
+            "SELECT * FROM HYBRID_SEARCH("
+                + "table => '"
+                + hybridTable
+                + "', "
+                + "query_vector => array(0.0, 0.0, 0.0, 0.0), "
+                + "query => 'lance', "
+                + "vector_column => 'vector', "
+                + "search_columns => array('body'), "
+                + "columns => array('ID'), "
+                + "num_results => 2, "
+                + "candidates => 3, "
+                + "rrf_k => 1.0, "
+                + "with_row_id => true) "
+                + "ORDER BY _relevance_score DESC, id");
+    assertEquals(
+        java.util.Arrays.asList("id", "_distance", "_score", "_relevance_score", "_rowid"),
+        java.util.Arrays.asList(hybridWithRowId.columns()));
+    List<Row> hybridRows = hybridWithRowId.collectAsList();
+    assertEquals(2, hybridRows.size());
+    assertEquals(1, hybridRows.get(0).getInt(0));
+    assertEquals(0.0f, hybridRows.get(0).getFloat(1), 0.001f);
+    assertTrue(hybridRows.get(0).getFloat(2) > 0.0f);
+    assertTrue(hybridRows.get(0).getFloat(3) > hybridRows.get(1).getFloat(3));
+    assertTrue(hybridRows.get(0).getLong(4) >= 0);
+  }
+
+  @Test
+  @Disabled(
+      "SEARCH now routes to queryTable, which ignores structured_query until lance-core dir.rs"
+          + " adds structured support (re-enable after the lance-core bump).")
+  public void testSearchNamedArguments() {
+    Assumptions.assumeTrue(supportsNamedArguments());
+    String ftsTable = createFtsTable();
+
     List<Row> searchRows =
         spark
             .sql(
@@ -346,33 +377,6 @@ public abstract class BaseSparkSearchTableFunctionTest {
     assertTrue(searchRowId.getInt(0) == 1 || searchRowId.getInt(0) == 3);
     assertTrue(searchRowId.getFloat(1) > 0.0f);
     assertTrue(searchRowId.getLong(2) >= 0);
-
-    Dataset<Row> hybridWithRowId =
-        spark.sql(
-            "SELECT * FROM HYBRID_SEARCH("
-                + "table => '"
-                + hybridTable
-                + "', "
-                + "query_vector => array(0.0, 0.0, 0.0, 0.0), "
-                + "query => 'lance', "
-                + "vector_column => 'vector', "
-                + "search_columns => array('body'), "
-                + "columns => array('ID'), "
-                + "num_results => 2, "
-                + "candidates => 3, "
-                + "rrf_k => 1.0, "
-                + "with_row_id => true) "
-                + "ORDER BY _relevance_score DESC, id");
-    assertEquals(
-        java.util.Arrays.asList("id", "_distance", "_score", "_relevance_score", "_rowid"),
-        java.util.Arrays.asList(hybridWithRowId.columns()));
-    List<Row> hybridRows = hybridWithRowId.collectAsList();
-    assertEquals(2, hybridRows.size());
-    assertEquals(1, hybridRows.get(0).getInt(0));
-    assertEquals(0.0f, hybridRows.get(0).getFloat(1), 0.001f);
-    assertTrue(hybridRows.get(0).getFloat(2) > 0.0f);
-    assertTrue(hybridRows.get(0).getFloat(3) > hybridRows.get(1).getFloat(3));
-    assertTrue(hybridRows.get(0).getLong(4) >= 0);
   }
 
   private String createVectorTable() {
