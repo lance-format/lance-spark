@@ -157,10 +157,10 @@ public class LanceDataset
       };
 
   /**
-   * Relevance score, auto-projected by Lance only when a full-text query is active on the scan.
+   * BM25 relevance score, explicitly projected when a full-text query is active on the scan.
    * Advertised unconditionally because {@code metadataColumns()} is consulted by the analyzer
-   * before the query is known to contain FTS; selecting it without a full-text search yields an
-   * empty scan result for this column rather than a plan-time error (validation is a follow-up).
+   * before the query is known to contain FTS; selecting it without a full-text search raises {@code
+   * IllegalArgumentException} at scan-build time with a clear diagnostic message.
    */
   public static final MetadataColumn SCORE_COLUMN =
       new MetadataColumn() {
