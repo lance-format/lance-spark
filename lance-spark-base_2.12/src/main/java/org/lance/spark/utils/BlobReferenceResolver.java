@@ -76,15 +76,18 @@ public class BlobReferenceResolver implements AutoCloseable {
    * @throws IOException if reading the blob fails
    */
   public byte[] resolve(BlobReference ref) throws IOException {
-    Dataset dataset = getOrOpenDataset(ref.getDatasetUri());
     List<Long> rowAddresses = new ArrayList<>(1);
     rowAddresses.add(ref.getRowAddress());
-    List<BlobFile> blobs = dataset.takeBlobs(rowAddresses, ref.getColumnName());
-    if (blobs.isEmpty()) {
-      return new byte[0];
-    }
-    try (BlobFile blob = blobs.get(0)) {
-      return blob.read();
+    List<BlobFile> blobs = takeBlobs(ref.getDatasetUri(), rowAddresses, ref.getColumnName());
+    try {
+      if (blobs.isEmpty()) {
+        return new byte[0];
+      }
+      return blobs.get(0).read();
+    } finally {
+      for (BlobFile blob : blobs) {
+        CloseableUtil.closeQuietly(blob);
+      }
     }
   }
 
@@ -133,39 +136,48 @@ public class BlobReferenceResolver implements AutoCloseable {
     // Resolve each group with a single takeBlobs() call over its distinct addresses, then fan the
     // bytes back out to every vector index that referenced that address.
     for (Group group : groups.values()) {
-      Dataset dataset = getOrOpenDataset(group.datasetUri);
       List<Long> addresses = group.distinctAddresses; // requested order
-      List<BlobFile> blobs = dataset.takeBlobs(addresses, group.columnName);
+      List<BlobFile> blobs = takeBlobs(group.datasetUri, addresses, group.columnName);
 
-      // takeBlobs must return exactly one BlobFile per requested address, in order. A mismatch
-      // means the selection hit deleted/null-descriptor rows, in which case positional mapping
-      // would skew and silently write the wrong bytes into the target table — fail loudly instead.
-      if (blobs.size() != addresses.size()) {
-        throw new IOException(
-            String.format(
-                "takeBlobs returned %d blobs for %d requested addresses (column=%s, dataset=%s); "
-                    + "cannot map results to rows",
-                blobs.size(), addresses.size(), group.columnName, group.datasetUri));
-      }
-
-      for (int i = 0; i < addresses.size(); i++) {
-        BlobFile blob = blobs.get(i);
-        if (blob == null) {
+      // Every handle takeBlobs returned is released in the finally below, including on the two
+      // throws: BlobFile wraps a native handle with no cleaner, so an abandoned one is only
+      // reclaimed when the JVM exits, and Spark retries the task in the same JVM.
+      try {
+        // takeBlobs must return exactly one BlobFile per requested address, in order. A mismatch
+        // means the selection hit deleted/null-descriptor rows, in which case positional mapping
+        // would skew and silently write the wrong bytes into the target table — fail loudly.
+        if (blobs.size() != addresses.size()) {
           throw new IOException(
               String.format(
-                  "takeBlobs returned a null blob for address %d (column=%s, dataset=%s)",
-                  addresses.get(i), group.columnName, group.datasetUri));
+                  "takeBlobs returned %d blobs for %d requested addresses (column=%s, dataset=%s); "
+                      + "cannot map results to rows",
+                  blobs.size(), addresses.size(), group.columnName, group.datasetUri));
         }
-        byte[] data;
-        try (BlobFile b = blob) {
-          data = b.read();
+
+        for (int i = 0; i < addresses.size(); i++) {
+          BlobFile blob = blobs.get(i);
+          if (blob == null) {
+            throw new IOException(
+                String.format(
+                    "takeBlobs returned a null blob for address %d (column=%s, dataset=%s)",
+                    addresses.get(i), group.columnName, group.datasetUri));
+          }
+          byte[] data = blob.read();
+          for (int vectorIndex : group.indicesByAddress.get(addresses.get(i))) {
+            resolved.put(vectorIndex, data);
+          }
         }
-        for (int vectorIndex : group.indicesByAddress.get(addresses.get(i))) {
-          resolved.put(vectorIndex, data);
+      } finally {
+        for (BlobFile blob : blobs) {
+          CloseableUtil.closeQuietly(blob);
         }
       }
     }
     return resolved;
+  }
+
+  List<BlobFile> takeBlobs(String datasetUri, List<Long> addresses, String columnName) {
+    return getOrOpenDataset(datasetUri).takeBlobs(addresses, columnName);
   }
 
   private Dataset getOrOpenDataset(String datasetUri) {
