@@ -23,6 +23,7 @@ import org.apache.spark.sql.catalyst.parser.extensions.LanceSqlExtensionsParser;
 import org.apache.spark.sql.catalyst.plans.logical.AddColumnsBackfill;
 import org.apache.spark.sql.catalyst.plans.logical.AddIndex;
 import org.apache.spark.sql.catalyst.plans.logical.Optimize;
+import org.apache.spark.sql.catalyst.plans.logical.RefreshIndex;
 import org.apache.spark.sql.catalyst.plans.logical.ShowIndexes;
 import org.apache.spark.sql.catalyst.plans.logical.UpdateColumnsBackfill;
 import org.apache.spark.sql.catalyst.plans.logical.Vacuum;
@@ -160,6 +161,31 @@ public class LanceSqlExtensionsAstBuilderTest {
     assertEquals(Boolean.FALSE, plan.args().apply(0).value());
     assertEquals("rows_per_zone", plan.args().apply(1).name());
     assertEquals(4L, plan.args().apply(1).value());
+  }
+
+  @Test
+  public void testRefreshIndexWithBacktickedIdentifiers() {
+    LanceSqlExtensionsParser parser =
+        createParser(
+            "ALTER TABLE `my-catalog`.`my-table` REFRESH INDEX `my-idx` WITH (NUM_SEGMENTS = 4)");
+    RefreshIndex plan = (RefreshIndex) astBuilder.visitSingleStatement(parser.singleStatement());
+
+    UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
+    assertEquals(
+        List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+    assertEquals("my-idx", plan.indexName());
+    assertEquals(1, plan.args().size());
+    assertEquals("num_segments", plan.args().apply(0).name());
+    assertEquals(4L, plan.args().apply(0).value());
+  }
+
+  @Test
+  public void testRefreshIndexWithoutOptions() {
+    LanceSqlExtensionsParser parser = createParser("ALTER TABLE DB.T REFRESH INDEX IDX");
+    RefreshIndex plan = (RefreshIndex) astBuilder.visitSingleStatement(parser.singleStatement());
+
+    assertEquals("IDX", plan.indexName());
+    assertEquals(0, plan.args().size());
   }
 
   @Test

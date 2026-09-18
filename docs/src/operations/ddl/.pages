@@ -11,6 +11,7 @@ nav:
   - show-tblproperties.md
   - drop-table.md
   - create-index.md
+  - refresh-index.md
   - show-indexes.md
   - create-branch.md
   - drop-branch.md
