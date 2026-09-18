@@ -31,6 +31,8 @@ import org.apache.spark.sql.connector.catalog.SupportsNamespaces;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.catalog.TableChange;
 import org.apache.spark.sql.connector.catalog.functions.UnboundFunction;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -39,6 +41,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -953,16 +956,411 @@ public abstract class SparkLanceNamespaceTestBase {
     spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
 
     Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    // Updating a column comment is a recognized column change that Lance does not support.
     UnsupportedOperationException ex =
         assertThrows(
             UnsupportedOperationException.class,
             () -> {
               catalog.alterTable(
-                  ident,
-                  TableChange.addColumn(
-                      new String[] {"new_col"}, org.apache.spark.sql.types.DataTypes.StringType));
+                  ident, TableChange.updateColumnComment(new String[] {"id"}, "the id"));
             });
-    assertTrue(ex.getMessage().contains("Only SET/UNSET TBLPROPERTIES is supported"));
+    assertTrue(ex.getMessage().contains("Unsupported column change type: UpdateColumnComment"));
+  }
+
+  @Test
+  public void testAddColumn() throws Exception {
+    String tableName = generateTableName("add_column");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, 'Alice')");
+    spark.sql("ALTER TABLE " + fullName + " ADD COLUMN age INT");
+
+    StructType schema = spark.table(fullName).schema();
+    assertTrue(Arrays.asList(schema.fieldNames()).contains("age"));
+
+    Row row = spark.sql("SELECT id, name, age FROM " + fullName).collectAsList().get(0);
+    assertEquals(1L, row.getLong(0));
+    assertEquals("Alice", row.getString(1));
+    assertTrue(row.isNullAt(2));
+  }
+
+  @Test
+  public void testDropColumn() throws Exception {
+    String tableName = generateTableName("drop_column");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING, age INT)");
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, 'Alice', 30)");
+    spark.sql("ALTER TABLE " + fullName + " DROP COLUMN age");
+
+    StructType schema = spark.table(fullName).schema();
+    assertFalse(Arrays.asList(schema.fieldNames()).contains("age"));
+
+    Row row = spark.sql("SELECT * FROM " + fullName).collectAsList().get(0);
+    assertEquals(2, row.length());
+    assertEquals(1L, row.getLong(0));
+    assertEquals("Alice", row.getString(1));
+  }
+
+  @Test
+  public void testRenameColumn() throws Exception {
+    String tableName = generateTableName("rename_column");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, 'Alice')");
+    spark.sql("ALTER TABLE " + fullName + " RENAME COLUMN name TO full_name");
+
+    StructType schema = spark.table(fullName).schema();
+    assertTrue(Arrays.asList(schema.fieldNames()).contains("full_name"));
+    assertFalse(Arrays.asList(schema.fieldNames()).contains("name"));
+
+    Row row = spark.sql("SELECT id, full_name FROM " + fullName).collectAsList().get(0);
+    assertEquals("Alice", row.getString(1));
+  }
+
+  @Test
+  public void testAlterColumnTypeUnsupported() throws Exception {
+    String tableName = generateTableName("alter_column_type");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id INT NOT NULL, name STRING)");
+
+    // Changing a column type is not supported by the current Lance version; it must fail loudly
+    // rather than silently no-op.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    UnsupportedOperationException ex =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () ->
+                catalog.alterTable(
+                    ident, TableChange.updateColumnType(new String[] {"id"}, DataTypes.LongType)));
+    assertTrue(ex.getMessage().contains("Changing the type of column"));
+  }
+
+  @Test
+  public void testAlterColumnDropNotNull() throws Exception {
+    String tableName = generateTableName("alter_column_nullable");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+    assertFalse(spark.table(fullName).schema().apply(0).nullable());
+
+    spark.sql("ALTER TABLE " + fullName + " ALTER COLUMN id DROP NOT NULL");
+
+    assertTrue(spark.table(fullName).schema().apply(0).nullable());
+  }
+
+  @Test
+  public void testAlterTableRejectsRequestAtomically() throws Exception {
+    String tableName = generateTableName("atomic_reject");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+
+    // A supported ADD COLUMN batched with an unsupported column-type change must be rejected as a
+    // whole: neither change may take effect.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    assertThrows(
+        UnsupportedOperationException.class,
+        () ->
+            catalog.alterTable(
+                ident,
+                TableChange.addColumn(new String[] {"added"}, DataTypes.IntegerType),
+                TableChange.updateColumnType(new String[] {"id"}, DataTypes.LongType)));
+
+    assertFalse(Arrays.asList(catalog.loadTable(ident).schema().fieldNames()).contains("added"));
+  }
+
+  @Test
+  public void testAddMultipleColumnsInOneStatement() throws Exception {
+    String tableName = generateTableName("add_multi");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL)");
+    spark.sql("ALTER TABLE " + fullName + " ADD COLUMNS (age INT, email STRING)");
+
+    List<String> columns = Arrays.asList(spark.table(fullName).schema().fieldNames());
+    assertTrue(columns.contains("age"));
+    assertTrue(columns.contains("email"));
+  }
+
+  @Test
+  public void testAlterTableRejectsMixedColumnChangeKinds() throws Exception {
+    String tableName = generateTableName("mixed_kinds");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+
+    // ADD and DROP compile to different core mutations and cannot be committed atomically together.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    UnsupportedOperationException ex =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () ->
+                catalog.alterTable(
+                    ident,
+                    TableChange.addColumn(new String[] {"added"}, DataTypes.IntegerType),
+                    TableChange.deleteColumn(new String[] {"name"}, false)));
+    assertTrue(ex.getMessage().contains("cannot mix"));
+
+    List<String> columns = Arrays.asList(catalog.loadTable(ident).schema().fieldNames());
+    assertFalse(columns.contains("added"));
+    assertTrue(columns.contains("name"));
+  }
+
+  @Test
+  public void testAlterTableRejectsColumnChangeMixedWithProperties() throws Exception {
+    String tableName = generateTableName("mixed_prop");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL)");
+
+    // A column change and a TBLPROPERTIES change are separate commits, so combining them is
+    // rejected before either is written.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    UnsupportedOperationException ex =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () ->
+                catalog.alterTable(
+                    ident,
+                    TableChange.addColumn(new String[] {"added"}, DataTypes.IntegerType),
+                    TableChange.setProperty("k", "v")));
+    assertTrue(ex.getMessage().contains("TBLPROPERTIES"));
+
+    assertFalse(Arrays.asList(catalog.loadTable(ident).schema().fieldNames()).contains("added"));
+  }
+
+  @Test
+  public void testAlterTableRejectsRenameDependentChange() throws Exception {
+    String tableName = generateTableName("rename_dependent");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING NOT NULL)");
+
+    // A change that depends on an earlier rename in the same request cannot be expressed as one
+    // core batch (which targets the current schema), so it is rejected before any mutation.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    assertThrows(
+        UnsupportedOperationException.class,
+        () ->
+            catalog.alterTable(
+                ident,
+                TableChange.renameColumn(new String[] {"name"}, "full_name"),
+                TableChange.updateColumnNullability(new String[] {"full_name"}, true)));
+
+    assertArrayEquals(new String[] {"id", "name"}, catalog.loadTable(ident).schema().fieldNames());
+  }
+
+  @Test
+  public void testAlterTableRejectsRepeatedColumnTarget() throws Exception {
+    String tableName = generateTableName("repeated_target");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+
+    // Two changes targeting the same column would lose their order when collapsed into one core
+    // batch, so the request is rejected.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    UnsupportedOperationException ex =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () ->
+                catalog.alterTable(
+                    ident,
+                    TableChange.updateColumnNullability(new String[] {"name"}, false),
+                    TableChange.updateColumnNullability(new String[] {"name"}, true)));
+    assertTrue(ex.getMessage().contains("more than one change"));
+  }
+
+  @Test
+  public void testDropNestedColumnRejected() throws Exception {
+    String tableName = generateTableName("drop_nested");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, s STRUCT<x: INT>)");
+
+    // Validation is top-level only; a nested path (even with IF EXISTS) is rejected up front
+    // rather than reaching the core with a path it would error on.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    assertThrows(
+        UnsupportedOperationException.class,
+        () ->
+            catalog.alterTable(
+                ident, TableChange.deleteColumn(new String[] {"s", "missing"}, true)));
+
+    assertArrayEquals(new String[] {"id", "s"}, catalog.loadTable(ident).schema().fieldNames());
+  }
+
+  @Test
+  public void testAlterTableRejectsRenameToOccupiedName() throws Exception {
+    String tableName = generateTableName("rename_occupied");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (a INT, b INT)");
+
+    // In Spark's ordered semantics, `a -> b` must fail because `b` already exists at that step, so
+    // the whole request is rejected before any mutation.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    assertThrows(
+        UnsupportedOperationException.class,
+        () ->
+            catalog.alterTable(
+                ident,
+                TableChange.renameColumn(new String[] {"a"}, "b"),
+                TableChange.renameColumn(new String[] {"b"}, "c")));
+
+    assertArrayEquals(new String[] {"a", "b"}, catalog.loadTable(ident).schema().fieldNames());
+  }
+
+  @Test
+  public void testDropColumnWithSpecialCharacterName() throws Exception {
+    String tableName = generateTableName("drop_special");
+    String fullName = catalogName + ".default." + tableName;
+
+    // A top-level column name containing Lance path syntax (here a space) is escaped into a
+    // canonical field path before it reaches the core.
+    spark.sql("CREATE TABLE " + fullName + " (`weird name` INT, keep INT)");
+
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    catalog.alterTable(ident, TableChange.deleteColumn(new String[] {"weird name"}, false));
+
+    assertArrayEquals(new String[] {"keep"}, catalog.loadTable(ident).schema().fieldNames());
+  }
+
+  @Test
+  public void testDropColumnWithBacktickNameRejected() throws Exception {
+    String tableName = generateTableName("drop_backtick");
+    String fullName = catalogName + ".default." + tableName;
+
+    // The current core drop API cannot resolve a backtick-containing name, so the request is
+    // rejected before any mutation rather than failing mid-commit.
+    spark.sql("CREATE TABLE " + fullName + " (`a``b` INT, keep INT)");
+
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    UnsupportedOperationException ex =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () -> catalog.alterTable(ident, TableChange.deleteColumn(new String[] {"a`b"}, false)));
+    assertTrue(ex.getMessage().contains("backtick"));
+
+    assertArrayEquals(new String[] {"a`b", "keep"}, catalog.loadTable(ident).schema().fieldNames());
+  }
+
+  @Test
+  public void testDropColumnIfExistsMissingBacktickNameIsNoOp() throws Exception {
+    String tableName = generateTableName("drop_missing_backtick");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id INT)");
+
+    // IF EXISTS is an existence contract: a missing name is a no-op regardless of whether the core
+    // could represent it, so an absent backtick name must not raise.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    catalog.alterTable(ident, TableChange.deleteColumn(new String[] {"missing`name"}, true));
+
+    assertArrayEquals(new String[] {"id"}, catalog.loadTable(ident).schema().fieldNames());
+  }
+
+  @Test
+  public void testRenameColumnWithSpecialCharacterName() throws Exception {
+    String tableName = generateTableName("rename_special");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (`weird name` INT NOT NULL, keep INT)");
+
+    // Rename and nullability sources are canonicalized too.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    catalog.alterTable(ident, TableChange.renameColumn(new String[] {"weird name"}, "renamed"));
+
+    List<String> columns = Arrays.asList(catalog.loadTable(ident).schema().fieldNames());
+    assertTrue(columns.contains("renamed"));
+    assertFalse(columns.contains("weird name"));
+  }
+
+  @Test
+  public void testRenameThenNullabilityOnDistinctColumns() throws Exception {
+    String tableName = generateTableName("alter_distinct");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+
+    // Renaming one column and relaxing another column's nullability in one statement targets two
+    // distinct existing columns, so it commits as a single alterColumns batch.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    catalog.alterTable(
+        ident,
+        TableChange.renameColumn(new String[] {"name"}, "full_name"),
+        TableChange.updateColumnNullability(new String[] {"id"}, true));
+
+    StructType schema = catalog.loadTable(ident).schema();
+    assertArrayEquals(new String[] {"id", "full_name"}, schema.fieldNames());
+    assertTrue(schema.apply(schema.fieldIndex("id")).nullable());
+  }
+
+  @Test
+  public void testDropColumnIfExistsMissingIsNoOp() throws Exception {
+    String tableName = generateTableName("drop_if_exists");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL, name STRING)");
+
+    // DROP COLUMN IF EXISTS on a missing column must not fail.
+    spark.sql("ALTER TABLE " + fullName + " DROP COLUMN IF EXISTS missing");
+
+    assertArrayEquals(new String[] {"id", "name"}, spark.table(fullName).schema().fieldNames());
+  }
+
+  @Test
+  public void testAddColumnWithDefaultRejected() throws Exception {
+    String tableName = generateTableName("add_default");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql("CREATE TABLE " + fullName + " (id BIGINT NOT NULL)");
+
+    // A DEFAULT value cannot be honored, so it must be rejected rather than silently dropped.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    UnsupportedOperationException ex =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () ->
+                catalog.alterTable(
+                    ident,
+                    TableChange.addColumn(
+                        new String[] {"with_default"},
+                        DataTypes.IntegerType,
+                        true,
+                        null,
+                        null,
+                        new org.apache.spark.sql.connector.catalog.ColumnDefaultValue(
+                            "7",
+                            new org.apache.spark.sql.connector.expressions.LiteralValue<>(
+                                7, DataTypes.IntegerType)))));
+    assertTrue(ex.getMessage().contains("DEFAULT"));
+  }
+
+  @Test
+  public void testAddColumnRejectedOnLegacyFormat() throws Exception {
+    String tableName = generateTableName("add_legacy");
+    String fullName = catalogName + ".default." + tableName;
+
+    spark.sql(
+        "CREATE TABLE "
+            + fullName
+            + " (id INT NOT NULL) TBLPROPERTIES ('file_format_version'='LEGACY')");
+
+    // ADD COLUMN is unsupported on legacy-format tables and must fail loudly rather than surface a
+    // raw core error.
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    UnsupportedOperationException ex =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () ->
+                catalog.alterTable(
+                    ident, TableChange.addColumn(new String[] {"added"}, DataTypes.IntegerType)));
+    assertTrue(ex.getMessage().contains("legacy"));
   }
 
   @Test
