@@ -62,10 +62,10 @@ public class SchemaConverterTest {
 
     StructType result = SchemaConverter.processSchemaWithProperties(schema, properties);
     StructField dataField = result.apply("data");
-    assertTrue(dataField.metadata().contains(BlobUtils.LANCE_ENCODING_BLOB_KEY));
+    assertTrue(dataField.metadata().contains(BlobUtils.ARROW_EXTENSION_NAME_KEY));
     assertEquals(
-        BlobUtils.LANCE_ENCODING_BLOB_VALUE,
-        dataField.metadata().getString(BlobUtils.LANCE_ENCODING_BLOB_KEY));
+        BlobUtils.ARROW_EXTENSION_BLOB_V2,
+        dataField.metadata().getString(BlobUtils.ARROW_EXTENSION_NAME_KEY));
   }
 
   @Test
@@ -370,8 +370,8 @@ public class SchemaConverterTest {
     StructType result = SchemaConverter.processSchemaWithProperties(schema, properties);
     StructField field = result.apply("data");
     assertEquals(
-        BlobUtils.LANCE_ENCODING_BLOB_VALUE,
-        field.metadata().getString(BlobUtils.LANCE_ENCODING_BLOB_KEY));
+        BlobUtils.ARROW_EXTENSION_BLOB_V2,
+        field.metadata().getString(BlobUtils.ARROW_EXTENSION_NAME_KEY));
     assertEquals("lz4", field.metadata().getString(LanceEncodingUtils.LANCE_ENCODING_COMPRESSION));
   }
 
@@ -611,8 +611,8 @@ public class SchemaConverterTest {
   }
 
   @Test
-  public void testBlobV1WhenVersionNull() {
-    assertBlobV1Field(blobSchemaWithVersion(null).apply("data"));
+  public void testBlobV2WhenVersionNull() {
+    assertBlobV2Field(blobSchemaWithVersion(null).apply("data"));
   }
 
   @Test
@@ -631,8 +631,8 @@ public class SchemaConverterTest {
   }
 
   @Test
-  public void testBlobEncodingAtNamedFileFormatVersionResolvesToBlobV1() {
-    assertBlobV1Field(blobSchemaWithVersion("stable").apply("data"));
+  public void testBlobEncodingAtNamedFileFormatVersionResolvesToBlobV2() {
+    assertBlobV2Field(blobSchemaWithVersion("stable").apply("data"));
   }
 
   @Test

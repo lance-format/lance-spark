@@ -95,10 +95,10 @@ public class CreateTableSpecTest {
   }
 
   @Test
-  public void blobV2SchemaUpgradesNamedCatalogDefault() {
+  public void blobV2SchemaKeepsNamedCatalogDefault() {
     CreateTableSpec spec =
         CreateTableSpec.resolve(blobV2QuerySchema(), Collections.emptyMap(), "stable");
-    assertEquals(BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION, spec.fileFormatVersion());
+    assertEquals("stable", spec.fileFormatVersion());
   }
 
   @Test
@@ -128,23 +128,19 @@ public class CreateTableSpecTest {
   }
 
   @Test
-  public void blobPropertyAtNamedCatalogDefaultStaysBlobV1() {
+  public void blobPropertyAtNamedCatalogDefaultBecomesBlobV2() {
     CreateTableSpec spec =
         CreateTableSpec.resolve(SCHEMA, props("data.lance.encoding", "blob"), "stable");
     assertEquals("stable", spec.fileFormatVersion());
-    assertTrue(BlobUtils.isBlobSparkField(spec.schema().apply("data")));
-    assertFalse(BlobUtils.isBlobV2SparkField(spec.schema().apply("data")));
+    assertTrue(BlobUtils.isBlobV2SparkField(spec.schema().apply("data")));
+    assertFalse(BlobUtils.isBlobSparkField(spec.schema().apply("data")));
   }
 
   @Test
-  public void blobV2SchemaRejectsExplicitNamedTableVersion() {
-    IllegalArgumentException ex =
-        assertThrows(
-            IllegalArgumentException.class,
-            () ->
-                CreateTableSpec.resolve(
-                    blobV2QuerySchema(), props("file_format_version", "stable"), null));
-    assertTrue(ex.getMessage().contains("stable"), ex.getMessage());
+  public void blobV2SchemaAcceptsExplicitNamedTableVersion() {
+    CreateTableSpec spec =
+        CreateTableSpec.resolve(blobV2QuerySchema(), props("file_format_version", "stable"), null);
+    assertEquals("stable", spec.fileFormatVersion());
   }
 
   @Test

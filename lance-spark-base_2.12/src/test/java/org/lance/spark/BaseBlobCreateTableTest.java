@@ -103,7 +103,8 @@ public abstract class BaseBlobCreateTableTest {
             + "data BINARY"
             + ") USING lance "
             + "TBLPROPERTIES ("
-            + "'data.lance.encoding' = 'blob'"
+            + "'data.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.1'"
             + ")");
 
     // Verify schema has blob metadata
@@ -215,6 +216,7 @@ public abstract class BaseBlobCreateTableTest {
     // Create table with tableProperty API
     df.writeTo(catalogName + ".default." + tableName)
         .tableProperty("data.lance.encoding", "blob")
+        .tableProperty("file_format_version", "2.1")
         .createOrReplace();
 
     // Verify schema has blob metadata
@@ -274,7 +276,8 @@ public abstract class BaseBlobCreateTableTest {
             + "blob_data BINARY"
             + ") USING lance "
             + "TBLPROPERTIES ("
-            + "'blob_data.lance.encoding' = 'blob'"
+            + "'blob_data.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.1'"
             + ")");
 
     // Verify table was created
@@ -410,7 +413,8 @@ public abstract class BaseBlobCreateTableTest {
             + "data BINARY"
             + ") USING lance "
             + "TBLPROPERTIES ("
-            + "'data.lance.encoding' = 'blob'"
+            + "'data.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.1'"
             + ")");
 
     // Insert test data using plain schema (no metadata needed)

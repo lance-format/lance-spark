@@ -34,6 +34,9 @@ public class BlobUtils {
   /** Lowest Lance file format version that can store blob v2 columns. */
   public static final String MIN_BLOB_V2_FILE_FORMAT_VERSION = "2.2";
 
+  /** Named file format version alias resolving to Lance's default, currently 2.2. */
+  public static final String STABLE_FILE_FORMAT_VERSION = "stable";
+
   /**
    * Spark struct type for a Lance blob v2 descriptor: {@code kind, position, size, blob_id,
    * blob_uri}.
@@ -190,21 +193,28 @@ public class BlobUtils {
   }
 
   /**
-   * True when {@code fileFormatVersion} is numeric {@code major[.minor]} of {@value
-   * #MIN_BLOB_V2_FILE_FORMAT_VERSION} or newer.
+   * True when {@code fileFormatVersion} can store blob v2 columns, that is when it is numeric
+   * {@code major[.minor]} of {@value #MIN_BLOB_V2_FILE_FORMAT_VERSION} or newer.
    *
-   * <p>Null, named aliases like {@code stable}, and malformed strings return false. Lance validates
-   * version strings at dataset creation.
+   * <p>Unset means Lance chooses its own default, which is {@value
+   * #MIN_BLOB_V2_FILE_FORMAT_VERSION} or newer, so blob v2 applies. {@value
+   * #STABLE_FILE_FORMAT_VERSION} resolves to the same default. {@code legacy} and other malformed
+   * strings return false. Lance validates version strings at dataset creation.
    *
    * <p>TODO: delegate to {@code LanceFileFormatVersion.isAtLeast()} in lance-core once version
-   * aliases are exposed to Java. Local parsing is conservative while {@code stable} resolves below
-   * 2.2.
+   * aliases are exposed to Java.
    */
   public static boolean fileFormatSupportsBlobV2(String fileFormatVersion) {
     if (fileFormatVersion == null) {
-      return false;
+      return true;
     }
-    String[] parts = fileFormatVersion.trim().split("\\.");
+
+    String trimmed = fileFormatVersion.trim();
+    if (trimmed.isEmpty() || STABLE_FILE_FORMAT_VERSION.equalsIgnoreCase(trimmed)) {
+      return true;
+    }
+
+    String[] parts = trimmed.split("\\.");
     try {
       int major = Integer.parseInt(parts.length > 0 ? parts[0] : "");
       int minor = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;

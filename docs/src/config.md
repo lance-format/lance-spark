@@ -652,12 +652,13 @@ TBLPROPERTIES (
 ```
 
 With `file_format_version = '2.2'` or higher, blob columns are written using blob v2
-encoding and `ARROW:extension:name = lance.blob.v2 metadata`.
+encoding and `ARROW:extension:name = lance.blob.v2 metadata`. This is also what you get
+when `file_format_version` is unset or `stable`, since both resolve to Lance's default
+of 2.2.
 
-With an older version, or when `file_format_version` is not set, blob columns use the
-legacy v1 encoding with `lance-encoding:blob = true` metadata.
-
-Blob encoding requires a numeric `file_format_version`, such as `2.2`.
+Only an explicit version below 2.2, such as `2.0` or `2.1`, writes the legacy v1
+encoding with `lance-encoding:blob = true` metadata. Lance rejects legacy blob columns
+outright at 2.2 and above, so a table that needs v1 must pin its version.
 
 Blob v2 writes must go through the catalog path. Use SQL DDL with `TBLPROPERTIES`, as
 shown above, or use the `DataFrameWriterV2` API:

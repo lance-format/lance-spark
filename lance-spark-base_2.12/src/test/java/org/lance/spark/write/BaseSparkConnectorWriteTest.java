@@ -554,11 +554,11 @@ public abstract class BaseSparkConnectorWriteTest {
 
     try (org.lance.Dataset ds =
         org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
-      // STABLE maps to 2.0 or 2.1 depending on lance version
+      // STABLE maps to 2.0, 2.1 or 2.2 depending on lance version
       String version = ds.getLanceFileFormatVersion();
       assertTrue(
-          version.equals("2.0") || version.equals("2.1"),
-          "Expected STABLE version (2.0 or 2.1), got: " + version);
+          version.equals("2.0") || version.equals("2.1") || version.equals("2.2"),
+          "Expected STABLE version (2.0, 2.1 or 2.2), got: " + version);
     }
   }
 
@@ -680,8 +680,8 @@ public abstract class BaseSparkConnectorWriteTest {
         org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
       String version = ds.getLanceFileFormatVersion();
       assertTrue(
-          version.equals("2.0") || version.equals("2.1"),
-          "Expected STABLE version (2.0 or 2.1), got: " + version);
+          version.equals("2.0") || version.equals("2.1") || version.equals("2.2"),
+          "Expected STABLE version (2.0, 2.1 or 2.2), got: " + version);
     }
   }
 

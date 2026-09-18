@@ -146,8 +146,7 @@ public class BlobUtilsTest {
   }
 
   @Test
-  public void fileFormatSupportsBlobV2RejectsOlderAndNull() {
-    assertFalse(BlobUtils.fileFormatSupportsBlobV2(null));
+  public void fileFormatSupportsBlobV2RejectsOlderVersions() {
     assertFalse(BlobUtils.fileFormatSupportsBlobV2("2.0"));
     assertFalse(BlobUtils.fileFormatSupportsBlobV2("2.1"));
     assertFalse(BlobUtils.fileFormatSupportsBlobV2("2"));
@@ -155,9 +154,16 @@ public class BlobUtilsTest {
   }
 
   @Test
-  public void fileFormatSupportsBlobV2RejectsNamedAndMalformedVersions() {
-    assertFalse(BlobUtils.fileFormatSupportsBlobV2("stable"));
-    assertFalse(BlobUtils.fileFormatSupportsBlobV2(""));
+  public void fileFormatSupportsBlobV2AcceptsUnsetAndStable() {
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2(null));
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2(""));
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2("stable"));
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2("STABLE"));
+  }
+
+  @Test
+  public void fileFormatSupportsBlobV2RejectsMalformedVersions() {
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2("legacy"));
     assertFalse(BlobUtils.fileFormatSupportsBlobV2("."));
     assertFalse(BlobUtils.fileFormatSupportsBlobV2("2.x"));
   }
