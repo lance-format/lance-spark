@@ -1,6 +1,7 @@
 title: DML
 nav:
   - insert-into.md
+  - insert-overwrite.md
   - update.md
   - delete.md
   - add-columns.md

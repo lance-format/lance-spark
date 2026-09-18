@@ -8,9 +8,11 @@ nav:
   - show-tables.md
   - describe-table.md
   - alter-table.md
+  - set-unenforced-primary-key.md
   - show-tblproperties.md
   - drop-table.md
   - create-index.md
+  - drop-index.md
   - show-indexes.md
   - create-branch.md
   - drop-branch.md
