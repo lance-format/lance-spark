@@ -20,6 +20,8 @@ import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.connector.catalog._
 import org.apache.spark.sql.execution.{SparkPlan, SparkStrategy}
 
+import java.util.Locale
+
 case class LanceDataSourceV2Strategy(session: SparkSession) extends SparkStrategy
   with PredicateHelper {
 
@@ -50,6 +52,13 @@ case class LanceDataSourceV2Strategy(session: SparkSession) extends SparkStrateg
 
     case LanceDropIndex(ResolvedIdentifier(catalog, ident), indexName) =>
       LanceDropIndexExec(asTableCatalog(catalog), ident, indexName.toLowerCase) :: Nil
+
+    case LanceOptimizeIndex(ResolvedIdentifier(catalog, ident), indexName, args) =>
+      LanceOptimizeIndexExec(
+        asTableCatalog(catalog),
+        ident,
+        indexName.toLowerCase(Locale.ROOT),
+        args) :: Nil
 
     case LanceCreateBranch(ResolvedIdentifier(catalog, ident), branchName, ref, ifNotExists) =>
       LanceCreateBranchExec(asTableCatalog(catalog), ident, branchName, ref, ifNotExists) :: Nil
