@@ -66,6 +66,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.FutureTask;
 import java.util.stream.Collectors;
@@ -100,6 +101,14 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
   /** Blob source contexts for resolving copy tokens, keyed by source dataset URI. */
   private final Map<String, BlobSourceContext> blobSourceContexts;
 
+  /**
+   * The table's unenforced primary key columns, or null if none is declared. When present, the
+   * inserted rows' key hashes are recorded in a {@code KeyExistenceFilter} on the committed {@link
+   * Update} so lance-core's conflict resolver rejects a concurrent commit that inserted the same
+   * keys (forcing a retry that matches instead of re-inserting).
+   */
+  private final PrimaryKeyColumns primaryKey;
+
   public SparkPositionDeltaWrite(
       StructType sparkSchema,
       LanceSparkWriteOptions writeOptions,
@@ -113,10 +122,12 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
       this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
       this.hasStableRowIds = hasStableRowIds(ds, writeOptions);
+      this.primaryKey = PrimaryKeyColumns.resolve(ds, sparkSchema);
       LOG.debug(
-          "Resolved dataset ref for position delta write: {}, stableRowIds={}",
+          "Resolved dataset ref for position delta write: {}, stableRowIds={}, primaryKey={}",
           this.writeOptions.getRef(),
-          this.hasStableRowIds);
+          this.hasStableRowIds,
+          this.primaryKey);
     }
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
@@ -160,7 +171,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
           namespaceProperties,
           tableId,
           hasStableRowIds,
-          blobSourceContexts);
+          blobSourceContexts,
+          primaryKey);
     }
 
     @Override
@@ -176,12 +188,16 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       List<FragmentMetadata> newFragments = new ArrayList<>();
       Map<Integer, RoaringBitmap> aggregatedDeletions = new HashMap<>();
       boolean useStableRowIds = hasStableRowIds;
+      InsertedKeys insertedKeys = new InsertedKeys();
 
       for (WriterCommitMessage msg : messages) {
         DeltaWriteTaskCommit taskCommit = (DeltaWriteTaskCommit) msg;
         newFragments.addAll(taskCommit.newFragments());
         if (taskCommit.useStableRowIds()) {
           useStableRowIds = true;
+        }
+        if (taskCommit.insertedKeys() != null) {
+          insertedKeys.merge(taskCommit.insertedKeys());
         }
         taskCommit
             .deletionMap()
@@ -219,12 +235,20 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
           }
         }
 
-        Update update =
+        Update.Builder updateBuilder =
             Update.builder()
                 .removedFragmentIds(removedFragmentIds)
                 .updatedFragments(updatedFragments)
                 .newFragments(newFragments)
-                .build();
+                // Position deltas rewrite whole rows. Lance used to infer this from an absent
+                // mode; it now requires the mode to be stated explicitly.
+                .updateMode(Optional.of(Update.UpdateMode.RewriteRows));
+        // Record the inserted keys so a concurrent commit that inserted the same keys conflicts
+        // and retries, instead of both silently inserting.
+        if (primaryKey != null && !insertedKeys.isEmpty()) {
+          updateBuilder.insertedRowsFilter(insertedKeys.toFilter(primaryKey.fieldIds()));
+        }
+        Update update = updateBuilder.build();
 
         CommitBuilder commitBuilder =
             new CommitBuilder(dataset)
@@ -275,6 +299,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     private final List<String> tableId;
     private final boolean hasStableRowIds;
     private final Map<String, BlobSourceContext> blobSourceContexts;
+    private final PrimaryKeyColumns primaryKey;
 
     PositionDeltaWriteFactory(
         StructType sparkSchema,
@@ -284,7 +309,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
         Map<String, String> namespaceProperties,
         List<String> tableId,
         boolean hasStableRowIds,
-        Map<String, BlobSourceContext> blobSourceContexts) {
+        Map<String, BlobSourceContext> blobSourceContexts,
+        PrimaryKeyColumns primaryKey) {
       this.sparkSchema = sparkSchema;
       this.writeOptions = writeOptions;
       this.initialStorageOptions = initialStorageOptions;
@@ -293,6 +319,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       this.tableId = tableId;
       this.hasStableRowIds = hasStableRowIds;
       this.blobSourceContexts = blobSourceContexts;
+      this.primaryKey = primaryKey;
     }
 
     @Override
@@ -342,7 +369,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
           new LanceDataWriter(
               writeBuffer, fragmentCreationTask, fragmentCreationThread, null, null, blobResolver),
           initialStorageOptions,
-          hasStableRowIds);
+          hasStableRowIds,
+          primaryKey);
     }
   }
 
@@ -365,17 +393,27 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
     private final boolean hasStableRowIds;
 
+    private final PrimaryKeyColumns primaryKey;
+
+    // Key hashes of the rows this task inserted; empty when no primary key is declared. Note that
+    // MERGE represents matched updates as delete+insert, so updated rows' keys are recorded too,
+    // which only makes the filter more conservative.
+    private final InsertedKeys insertedKeys;
+
     private LanceDeltaWriter(
         LanceSparkWriteOptions writeOptions,
         LanceDataWriter writer,
         Map<String, String> initialStorageOptions,
-        boolean hasStableRowIds) {
+        boolean hasStableRowIds,
+        PrimaryKeyColumns primaryKey) {
       this.writeOptions = writeOptions;
       this.writer = writer;
       this.initialStorageOptions = initialStorageOptions;
       this.capturedRowIds = new ArrayList<>();
       this.deletionMap = new HashMap<>();
       this.hasStableRowIds = hasStableRowIds;
+      this.primaryKey = primaryKey;
+      this.insertedKeys = new InsertedKeys();
     }
 
     @Override
@@ -402,6 +440,9 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
     @Override
     public void insert(InternalRow row) throws IOException {
+      if (primaryKey != null) {
+        insertedKeys.add(primaryKey.hashKey(row));
+      }
       writer.write(row);
     }
 
@@ -426,7 +467,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
         }
       }
 
-      return new DeltaWriteTaskCommit(newFragments, deletionMap, hasStableRowIds);
+      return new DeltaWriteTaskCommit(newFragments, deletionMap, hasStableRowIds, insertedKeys);
     }
 
     @Override
@@ -499,19 +540,29 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     private final List<FragmentMetadata> newFragments;
     private final Map<Integer, RoaringBitmap> deletionMap;
     private final boolean useStableRowIds;
+    private final InsertedKeys insertedKeys;
+
+    DeltaWriteTaskCommit(
+        List<FragmentMetadata> newFragments,
+        Map<Integer, RoaringBitmap> deletionMap,
+        boolean useStableRowIds,
+        InsertedKeys insertedKeys) {
+      this.newFragments = newFragments;
+      this.deletionMap = deletionMap;
+      this.useStableRowIds = useStableRowIds;
+      this.insertedKeys = insertedKeys;
+    }
 
     DeltaWriteTaskCommit(
         List<FragmentMetadata> newFragments,
         Map<Integer, RoaringBitmap> deletionMap,
         boolean useStableRowIds) {
-      this.newFragments = newFragments;
-      this.deletionMap = deletionMap;
-      this.useStableRowIds = useStableRowIds;
+      this(newFragments, deletionMap, useStableRowIds, null);
     }
 
     DeltaWriteTaskCommit(
         List<FragmentMetadata> newFragments, Map<Integer, RoaringBitmap> deletionMap) {
-      this(newFragments, deletionMap, false);
+      this(newFragments, deletionMap, false, null);
     }
 
     public List<FragmentMetadata> newFragments() {
@@ -524,6 +575,10 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
     public boolean useStableRowIds() {
       return useStableRowIds;
+    }
+
+    InsertedKeys insertedKeys() {
+      return insertedKeys;
     }
   }
 }

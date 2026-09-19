@@ -631,8 +631,16 @@ public class SchemaConverterTest {
   }
 
   @Test
-  public void testBlobEncodingAtNamedFileFormatVersionResolvesToBlobV1() {
-    assertBlobV1Field(blobSchemaWithVersion("stable").apply("data"));
+  public void testBlobEncodingAtStableFileFormatVersionResolvesToBlobV2() {
+    // Lance resolves "stable" to 2.2 or newer at write time, which only accepts blob v2.
+    StructField field = blobSchemaWithVersion("stable").apply("data");
+    assertEquals(DataTypes.BinaryType, field.dataType());
+    assertTrue(BlobUtils.isBlobV2SparkField(field));
+  }
+
+  @Test
+  public void testBlobEncodingAtLegacyFileFormatVersionResolvesToBlobV1() {
+    assertBlobV1Field(blobSchemaWithVersion("legacy").apply("data"));
   }
 
   @Test

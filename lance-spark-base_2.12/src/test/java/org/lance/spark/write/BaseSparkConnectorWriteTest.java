@@ -59,6 +59,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 public abstract class BaseSparkConnectorWriteTest {
+  /** Concrete versions Lance's STABLE release selector may resolve to. */
+  private static final List<String> STABLE_FILE_FORMAT_VERSIONS =
+      Arrays.asList("2.0", "2.1", "2.2");
+
   private static SparkSession spark;
   private static Dataset<Row> testData;
   @TempDir static Path dbPath;
@@ -554,11 +558,14 @@ public abstract class BaseSparkConnectorWriteTest {
 
     try (org.lance.Dataset ds =
         org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
-      // STABLE maps to 2.0 or 2.1 depending on lance version
+      // STABLE is a release selector; lance resolves it to whichever 2.x is stable at write time
       String version = ds.getLanceFileFormatVersion();
       assertTrue(
-          version.equals("2.0") || version.equals("2.1"),
-          "Expected STABLE version (2.0 or 2.1), got: " + version);
+          STABLE_FILE_FORMAT_VERSIONS.contains(version),
+          "Expected STABLE to resolve to one of "
+              + STABLE_FILE_FORMAT_VERSIONS
+              + ", got: "
+              + version);
     }
   }
 
@@ -680,8 +687,11 @@ public abstract class BaseSparkConnectorWriteTest {
         org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
       String version = ds.getLanceFileFormatVersion();
       assertTrue(
-          version.equals("2.0") || version.equals("2.1"),
-          "Expected STABLE version (2.0 or 2.1), got: " + version);
+          STABLE_FILE_FORMAT_VERSIONS.contains(version),
+          "Expected STABLE to resolve to one of "
+              + STABLE_FILE_FORMAT_VERSIONS
+              + ", got: "
+              + version);
     }
   }
 

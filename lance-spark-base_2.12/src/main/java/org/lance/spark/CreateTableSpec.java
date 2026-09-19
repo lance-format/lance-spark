@@ -59,16 +59,32 @@ public final class CreateTableSpec {
       StructType sparkSchema, Map<String, String> tableProperties, String catalogDefaultVersion) {
     String tableVersion =
         tableProperties.get(LanceSparkCatalogConfig.TABLE_OPT_FILE_FORMAT_VERSION);
-    String resolved = resolveVersion(sparkSchema, tableVersion, catalogDefaultVersion);
+    String resolved =
+        resolveVersion(sparkSchema, tableProperties, tableVersion, catalogDefaultVersion);
     StructType schema =
         SchemaConverter.processSchemaWithProperties(sparkSchema, tableProperties, resolved);
     return new CreateTableSpec(schema, resolved);
   }
 
   private static String resolveVersion(
-      StructType schema, String tableVersion, String catalogDefaultVersion) {
+      StructType schema,
+      Map<String, String> tableProperties,
+      String tableVersion,
+      String catalogDefaultVersion) {
     if (!BlobUtils.hasBlobV2Fields(schema)) {
-      return tableVersion != null ? tableVersion : catalogDefaultVersion;
+      String requested = tableVersion != null ? tableVersion : catalogDefaultVersion;
+      if (requested == null && BlobUtils.requestsBlobEncoding(tableProperties)) {
+        // Nobody pinned a version and the table wants a blob column. Lance's default is now
+        // newer than the last version that accepts the legacy (v1) blob encoding, so pin the
+        // table rather than let the write fail. Asking for blob v2 means asking for 2.2+.
+        LOG.info(
+            "Creating table with file_format_version {} so its blob columns can use the legacy"
+                + " (v1) encoding. Set file_format_version to {} or newer for blob v2.",
+            BlobUtils.MAX_BLOB_V1_FILE_FORMAT_VERSION,
+            BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION);
+        return BlobUtils.MAX_BLOB_V1_FILE_FORMAT_VERSION;
+      }
+      return requested;
     }
 
     if (tableVersion != null) {

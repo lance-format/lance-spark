@@ -95,9 +95,17 @@ public class CreateTableSpecTest {
   }
 
   @Test
-  public void blobV2SchemaUpgradesNamedCatalogDefault() {
+  public void blobV2SchemaKeepsNamedCatalogDefaultThatResolvesAboveMinimum() {
+    // Lance resolves "stable" to 2.2 or newer at write time, so it can store blob v2.
     CreateTableSpec spec =
         CreateTableSpec.resolve(blobV2QuerySchema(), Collections.emptyMap(), "stable");
+    assertEquals("stable", spec.fileFormatVersion());
+  }
+
+  @Test
+  public void blobV2SchemaUpgradesLegacyCatalogDefault() {
+    CreateTableSpec spec =
+        CreateTableSpec.resolve(blobV2QuerySchema(), Collections.emptyMap(), "legacy");
     assertEquals(BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION, spec.fileFormatVersion());
   }
 
@@ -128,23 +136,40 @@ public class CreateTableSpecTest {
   }
 
   @Test
-  public void blobPropertyAtNamedCatalogDefaultStaysBlobV1() {
+  public void blobPropertyAtNamedCatalogDefaultResolvesToBlobV2() {
     CreateTableSpec spec =
         CreateTableSpec.resolve(SCHEMA, props("data.lance.encoding", "blob"), "stable");
     assertEquals("stable", spec.fileFormatVersion());
+    assertTrue(BlobUtils.isBlobV2SparkField(spec.schema().apply("data")));
+  }
+
+  @Test
+  public void blobPropertyWithoutAnyVersionPinsToTheLastV1CapableVersion() {
+    // Lance's own default no longer accepts legacy blob columns, so an unpinned blob table has
+    // to be pinned to keep the documented v1 behavior instead of failing the write.
+    CreateTableSpec spec =
+        CreateTableSpec.resolve(SCHEMA, props("data.lance.encoding", "blob"), null);
+    assertEquals(BlobUtils.MAX_BLOB_V1_FILE_FORMAT_VERSION, spec.fileFormatVersion());
     assertTrue(BlobUtils.isBlobSparkField(spec.schema().apply("data")));
     assertFalse(BlobUtils.isBlobV2SparkField(spec.schema().apply("data")));
   }
 
   @Test
-  public void blobV2SchemaRejectsExplicitNamedTableVersion() {
+  public void blobV2SchemaAcceptsExplicitNamedTableVersion() {
+    CreateTableSpec spec =
+        CreateTableSpec.resolve(blobV2QuerySchema(), props("file_format_version", "stable"), null);
+    assertEquals("stable", spec.fileFormatVersion());
+  }
+
+  @Test
+  public void blobV2SchemaRejectsExplicitLegacyTableVersion() {
     IllegalArgumentException ex =
         assertThrows(
             IllegalArgumentException.class,
             () ->
                 CreateTableSpec.resolve(
-                    blobV2QuerySchema(), props("file_format_version", "stable"), null));
-    assertTrue(ex.getMessage().contains("stable"), ex.getMessage());
+                    blobV2QuerySchema(), props("file_format_version", "legacy"), null));
+    assertTrue(ex.getMessage().contains("legacy"), ex.getMessage());
   }
 
   @Test

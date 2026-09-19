@@ -343,6 +343,8 @@ To create blob v2 columns, set the blob encoding property and use `file_format_v
 
 Spark writes blob v2 columns as `BINARY` and reads expose descriptor structs ([Blob v2 Reads](../../config.md#blob-v2-reads)).
 
+Leaving `file_format_version` unset creates the table at `2.1` with legacy v1 blob columns instead ([Blob v2 Writes](../../config.md#blob-v2-writes)).
+
 === "SQL"
     ```sql
     CREATE TABLE documents (
