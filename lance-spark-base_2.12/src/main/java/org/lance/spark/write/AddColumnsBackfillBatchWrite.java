@@ -19,8 +19,10 @@ import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.Transaction;
 import org.lance.fragment.FragmentMergeResult;
+import org.lance.namespace.LanceNamespace;
 import org.lance.operation.Merge;
 import org.lance.spark.LanceDataset;
+import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.utils.Utils;
@@ -64,6 +66,7 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
 
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
+  private final boolean managedVersioning;
 
   public AddColumnsBackfillBatchWrite(
       StructType schema,
@@ -72,17 +75,19 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
-      List<String> tableId) {
+      List<String> tableId,
+      boolean managedVersioning) {
     this.schema = schema;
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
-      this.writeOptions = writeOptions.withVersion(ds.version());
-      logger.debug("Resolved dataset version for ADD COLUMNS: {}", this.writeOptions.getVersion());
+      this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
+      logger.debug("Resolved dataset ref for ADD COLUMNS: {}", this.writeOptions.getRef());
     }
     this.newColumns = newColumns;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
+    this.managedVersioning = managedVersioning;
   }
 
   @Override
@@ -137,8 +142,10 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false);
     long version =
         Objects.requireNonNull(
-            writeOptions.getVersion(),
-            "version must be set (resolved in AddColumnsBackfillBatchWrite constructor)");
+                writeOptions.getRef(),
+                "ref must be set (resolved in AddColumnsBackfillBatchWrite constructor)")
+            .getVersionNumber()
+            .get();
 
     // Get existing fragments
     try (Dataset dataset = Utils.openDatasetBuilder(writeOptions).build()) {
@@ -149,14 +156,26 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
 
       // Commit merge operation using CommitBuilder
       Merge merge = Merge.builder().fragments(fragments).schema(arrowSchema).build();
+      CommitBuilder commitBuilder =
+          new CommitBuilder(dataset)
+              .writeParams(
+                  LanceRuntime.mergeStorageOptions(
+                      writeOptions.getStorageOptions(), initialStorageOptions));
+      String fileFormatVersion = writeOptions.getFileFormatVersion();
+      if (fileFormatVersion != null) {
+        commitBuilder.storageFormat(fileFormatVersion);
+      }
+      if (managedVersioning) {
+        LanceNamespace namespace =
+            LanceRuntime.getOrCreateNamespace(namespaceImpl, namespaceProperties);
+        commitBuilder
+            .namespaceClient(namespace)
+            .tableId(tableId)
+            .namespaceClientManagedVersioning(true);
+      }
       try (Transaction txn =
               new Transaction.Builder().readVersion(version).operation(merge).build();
-          Dataset committed =
-              new CommitBuilder(dataset)
-                  .writeParams(
-                      LanceRuntime.mergeStorageOptions(
-                          writeOptions.getStorageOptions(), initialStorageOptions))
-                  .execute(txn)) {
+          Dataset committed = commitBuilder.execute(txn)) {
         // auto-close txn and committed dataset
       }
     }
@@ -239,6 +258,8 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
 
     @Override
     public DataWriter<InternalRow> createWriter(int partitionId, long taskId) {
+      LanceRuntime.enableOpenTelemetry();
+
       return new AddColumnsWriter(
           writeOptions,
           schema,

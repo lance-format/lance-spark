@@ -95,7 +95,6 @@ Lance supports vector (embedding) columns for AI workloads. These columns are st
 
 - **Element Types**: `FLOAT` (float32), `DOUBLE` (float64), `FLOAT` with float16 flag (half-precision)
 - **Requirements**:
-    - Vectors must be non-nullable
     - All vectors in a column must have the same dimension
     - Dimension is specified via table properties
 

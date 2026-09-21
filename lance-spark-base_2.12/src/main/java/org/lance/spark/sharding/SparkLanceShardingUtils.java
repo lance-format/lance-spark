@@ -41,9 +41,12 @@ import scala.collection.JavaConverters;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 /** Spark-facing helpers for Lance MemWAL sharding specs. */
 public final class SparkLanceShardingUtils {
@@ -129,6 +132,14 @@ public final class SparkLanceShardingUtils {
     throw new UnsupportedOperationException("Unsupported sharding transform: " + transform);
   }
 
+  /**
+   * Detects partition keys only for fragments represented by the supplied zone stats.
+   *
+   * @deprecated This overload cannot verify that the stats cover every live fragment. Use {@link
+   *     #detectFragmentKeys(ShardingField, LanceSchema, List, Set)} when deciding whether a scan
+   *     can advertise key-grouped partitioning.
+   */
+  @Deprecated
   public static Optional<Map<Integer, Object>> detectFragmentKeys(
       ShardingField field, LanceSchema schema, List<ZoneStats> zones) {
     columnName(field, schema);
@@ -138,6 +149,47 @@ public final class SparkLanceShardingUtils {
     }
     for (int fragmentId : new ArrayList<>(result.keySet())) {
       Optional<Object> key = fragmentKeyFromZones(field, schema, zones, fragmentId);
+      if (!key.isPresent()) {
+        return Optional.empty();
+      }
+      result.put(fragmentId, key.get());
+    }
+    return Optional.of(result);
+  }
+
+  /**
+   * Detects a partition key for every live fragment.
+   *
+   * <p>Only stats for live fragments participate. Every live fragment must be covered and all of
+   * its zones must resolve to one key; otherwise the scan cannot safely advertise key-grouped
+   * partitioning.
+   */
+  public static Optional<Map<Integer, Object>> detectFragmentKeys(
+      ShardingField field,
+      LanceSchema schema,
+      List<ZoneStats> zones,
+      Set<Integer> liveFragmentIds) {
+    columnName(field, schema);
+    Objects.requireNonNull(liveFragmentIds, "liveFragmentIds");
+    if (liveFragmentIds.isEmpty()) {
+      return Optional.empty();
+    }
+
+    List<ZoneStats> liveZones = new ArrayList<>();
+    Set<Integer> coveredFragmentIds = new HashSet<>();
+    for (ZoneStats zone : zones) {
+      if (liveFragmentIds.contains(zone.getFragmentId())) {
+        liveZones.add(zone);
+        coveredFragmentIds.add(zone.getFragmentId());
+      }
+    }
+    if (!coveredFragmentIds.equals(liveFragmentIds)) {
+      return Optional.empty();
+    }
+
+    Map<Integer, Object> result = new HashMap<>();
+    for (int fragmentId : liveFragmentIds) {
+      Optional<Object> key = fragmentKeyFromZones(field, schema, liveZones, fragmentId);
       if (!key.isPresent()) {
         return Optional.empty();
       }

@@ -38,7 +38,7 @@ jobs:
           # When triggered manually, use the provided ref
           ref: ${{ github.event.release.tag_name || inputs.ref }}
       - name: Set up Java 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: corretto
           java-version: 17

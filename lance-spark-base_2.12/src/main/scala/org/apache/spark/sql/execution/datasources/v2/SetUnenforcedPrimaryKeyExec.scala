@@ -39,12 +39,8 @@ case class SetUnenforcedPrimaryKeyExec(
   override def output: Seq[Attribute] = SetUnenforcedPrimaryKeyOutputType.SCHEMA
 
   override protected def run(): Seq[InternalRow] = {
-    val lanceDataset = catalog.loadTable(ident) match {
-      case ds: LanceDataset => ds
-      case _ =>
-        throw new UnsupportedOperationException(
-          "SET UNENFORCED PRIMARY KEY only supports LanceDataset")
-    }
+    val lanceDataset =
+      LanceDataset.requireWritable(catalog.loadTable(ident), "SET UNENFORCED PRIMARY KEY")
 
     val readOptions = lanceDataset.readOptions()
     val dataset = Utils.openDatasetBuilder(readOptions).build()

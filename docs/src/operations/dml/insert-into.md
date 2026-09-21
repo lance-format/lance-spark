@@ -214,7 +214,7 @@ copied this way; `ORDER BY` and `LIMIT` on the SELECT are supported. `writeTo().
 and `.overwrite()` work the same way. Transformed values (e.g. `content.size`),
 `DISTINCT`, `GROUP BY`, `UNION`, ordering by the blob column itself, and joins of multiple
 blob sources keep their descriptor semantics and cannot be inserted into a blob column. See
-[CREATE TABLE](../ddl/create-table.md#copying-blob-v2-columns-with-ctas) for creating a new
+[CREATE TABLE](../ddl/create-table.md#ctas-from-a-blob-v2-source) for creating a new
 table from a blob v2 query.
 
 On Spark 3.5+, `MERGE INTO` and `UPDATE` deep-copy blob v2 columns the same way: a blob

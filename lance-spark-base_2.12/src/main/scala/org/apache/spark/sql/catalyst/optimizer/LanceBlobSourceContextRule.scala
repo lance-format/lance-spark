@@ -20,7 +20,7 @@ import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2Relation, DataSourceV2ScanRelation}
 import org.apache.spark.sql.util.{CaseInsensitiveStringMap, LanceSerializeUtil}
-import org.lance.spark.{LanceConstant, LanceDataset, LanceSparkReadOptions}
+import org.lance.spark.{LanceConstant, LanceDataset, LanceRef, LanceSparkReadOptions}
 import org.lance.spark.read.LanceScan
 import org.lance.spark.utils.{BlobSourceContext, BlobUtils, Utils}
 
@@ -133,12 +133,12 @@ object LanceBlobSourceContextRule extends Logging {
   // Pin to the driver-visible version when time travel is not set; fall back on open failure.
   private def pinToCurrentVersion(ds: LanceDataset): LanceSparkReadOptions = {
     val opts = ds.readOptions()
-    if (opts.getVersion != null) {
+    if (opts.getRef != null) {
       return opts
     }
     try {
       val dataset = Utils.openDatasetBuilder(opts).build()
-      try opts.withVersion(dataset.version())
+      try opts.withRef(LanceRef.ofMain(dataset.version()))
       finally dataset.close()
     } catch {
       case NonFatal(e) =>

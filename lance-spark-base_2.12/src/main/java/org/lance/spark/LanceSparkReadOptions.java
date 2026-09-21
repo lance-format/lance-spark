@@ -47,12 +47,13 @@ import java.util.Objects;
  * }</pre>
  */
 public class LanceSparkReadOptions implements Serializable {
-  private static final long serialVersionUID = 3L;
+  private static final long serialVersionUID = 4L;
 
   public static final String CONFIG_DATASET_URI = "path";
   public static final String CONFIG_PUSH_DOWN_FILTERS = "pushDownFilters";
   public static final String CONFIG_BLOCK_SIZE = "block_size";
   public static final String CONFIG_VERSION = "version";
+  public static final String CONFIG_BRANCH = "branch";
   public static final String CONFIG_INDEX_CACHE_SIZE = "index_cache_size";
   public static final String CONFIG_METADATA_CACHE_SIZE = "metadata_cache_size";
   public static final String CONFIG_BATCH_SIZE = "batch_size";
@@ -109,7 +110,7 @@ public class LanceSparkReadOptions implements Serializable {
   private final String datasetName;
   private final boolean pushDownFilters;
   private final Integer blockSize;
-  private final Long version;
+  private final LanceRef ref;
   private final Integer indexCacheSize;
   private final Integer metadataCacheSize;
   private final int batchSize;
@@ -127,6 +128,11 @@ public class LanceSparkReadOptions implements Serializable {
   /** The catalog name for cache isolation when multiple catalogs are configured. */
   private final String catalogName;
 
+  /** Registered cache backend URIs for the process-local catalog session. */
+  private final String indexCacheBackend;
+
+  private final String metadataCacheBackend;
+
   /**
    * Whether executors should rebuild the namespace client for credential refresh. See {@link
    * #CONFIG_EXECUTOR_CREDENTIAL_REFRESH} for details.
@@ -140,7 +146,7 @@ public class LanceSparkReadOptions implements Serializable {
     this.datasetName = paths[1];
     this.pushDownFilters = builder.pushDownFilters;
     this.blockSize = builder.blockSize;
-    this.version = builder.version;
+    this.ref = builder.ref;
     this.indexCacheSize = builder.indexCacheSize;
     this.metadataCacheSize = builder.metadataCacheSize;
     this.batchSize = builder.batchSize;
@@ -151,6 +157,8 @@ public class LanceSparkReadOptions implements Serializable {
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
     this.catalogName = builder.catalogName;
+    this.indexCacheBackend = builder.indexCacheBackend;
+    this.metadataCacheBackend = builder.metadataCacheBackend;
     this.executorCredentialRefresh = builder.executorCredentialRefresh;
   }
 
@@ -242,8 +250,8 @@ public class LanceSparkReadOptions implements Serializable {
     return blockSize;
   }
 
-  public Long getVersion() {
-    return version;
+  public LanceRef getRef() {
+    return ref;
   }
 
   public Integer getIndexCacheSize() {
@@ -286,6 +294,14 @@ public class LanceSparkReadOptions implements Serializable {
     return catalogName;
   }
 
+  public String getIndexCacheBackend() {
+    return indexCacheBackend;
+  }
+
+  public String getMetadataCacheBackend() {
+    return metadataCacheBackend;
+  }
+
   /**
    * Returns whether executors should rebuild the namespace client and route the dataset open
    * through the namespace path (for credential refresh). See {@link
@@ -309,19 +325,19 @@ public class LanceSparkReadOptions implements Serializable {
   }
 
   /**
-   * Creates a copy of this options with a different version.
+   * Creates a copy of these options with a different reference.
    *
-   * <p>This is used to pin the version during scan planning for snapshot isolation.
+   * <p>This is used to pin the resolved reference during scan planning for snapshot isolation.
    *
-   * @param newVersion the version to use
-   * @return a new LanceSparkReadOptions with the specified version
+   * @param newRef the reference to use
+   * @return new read options with the specified reference
    */
-  public LanceSparkReadOptions withVersion(long newVersion) {
+  public LanceSparkReadOptions withRef(LanceRef newRef) {
     return builder()
         .datasetUri(this.datasetUri)
         .pushDownFilters(this.pushDownFilters)
         .blockSize(this.blockSize)
-        .version(newVersion)
+        .ref(newRef)
         .indexCacheSize(this.indexCacheSize)
         .metadataCacheSize(this.metadataCacheSize)
         .batchSize(this.batchSize)
@@ -332,6 +348,8 @@ public class LanceSparkReadOptions implements Serializable {
         .namespace(this.namespace)
         .tableId(this.tableId)
         .catalogName(this.catalogName)
+        .indexCacheBackend(this.indexCacheBackend)
+        .metadataCacheBackend(this.metadataCacheBackend)
         .executorCredentialRefresh(this.executorCredentialRefresh)
         .build();
   }
@@ -343,12 +361,12 @@ public class LanceSparkReadOptions implements Serializable {
    */
   public ReadOptions toReadOptions() {
     ReadOptions.Builder builder = new ReadOptions.Builder();
-    builder.setSession(LanceRuntime.session());
+    builder.setSession(LanceRuntime.session(catalogName, indexCacheBackend, metadataCacheBackend));
     if (blockSize != null) {
       builder.setBlockSize(blockSize);
     }
-    if (version != null) {
-      builder.setVersion(version);
+    if (ref != null && ref.isMain()) {
+      ref.getVersionNumber().ifPresent(builder::setVersion);
     }
     if (indexCacheSize != null) {
       builder.setIndexCacheSize(indexCacheSize);
@@ -387,12 +405,14 @@ public class LanceSparkReadOptions implements Serializable {
         && FullTextQueryUtils.equals(fullTextQuery, that.fullTextQuery)
         && Objects.equals(datasetUri, that.datasetUri)
         && Objects.equals(blockSize, that.blockSize)
-        && Objects.equals(version, that.version)
+        && Objects.equals(ref, that.ref)
         && Objects.equals(indexCacheSize, that.indexCacheSize)
         && Objects.equals(metadataCacheSize, that.metadataCacheSize)
         && Objects.equals(storageOptions, that.storageOptions)
         && Objects.equals(tableId, that.tableId)
-        && Objects.equals(catalogName, that.catalogName);
+        && Objects.equals(catalogName, that.catalogName)
+        && Objects.equals(indexCacheBackend, that.indexCacheBackend)
+        && Objects.equals(metadataCacheBackend, that.metadataCacheBackend);
   }
 
   @Override
@@ -401,7 +421,7 @@ public class LanceSparkReadOptions implements Serializable {
         datasetUri,
         pushDownFilters,
         blockSize,
-        version,
+        ref,
         indexCacheSize,
         metadataCacheSize,
         batchSize,
@@ -411,6 +431,8 @@ public class LanceSparkReadOptions implements Serializable {
         storageOptions,
         tableId,
         catalogName,
+        indexCacheBackend,
+        metadataCacheBackend,
         executorCredentialRefresh);
   }
 
@@ -420,7 +442,7 @@ public class LanceSparkReadOptions implements Serializable {
     private boolean pushDownFilters = DEFAULT_PUSH_DOWN_FILTERS;
     private Integer blockSize;
     private FullTextQuery fullTextQuery;
-    private Long version;
+    private LanceRef ref;
     private Integer indexCacheSize;
     private Integer metadataCacheSize;
     private int batchSize = DEFAULT_BATCH_SIZE;
@@ -430,6 +452,8 @@ public class LanceSparkReadOptions implements Serializable {
     private LanceNamespace namespace;
     private List<String> tableId;
     private String catalogName;
+    private String indexCacheBackend;
+    private String metadataCacheBackend;
     private boolean executorCredentialRefresh = DEFAULT_EXECUTOR_CREDENTIAL_REFRESH;
 
     private Builder() {}
@@ -454,8 +478,8 @@ public class LanceSparkReadOptions implements Serializable {
       return this;
     }
 
-    public Builder version(Long version) {
-      this.version = version;
+    public Builder ref(LanceRef ref) {
+      this.ref = ref;
       return this;
     }
 
@@ -504,6 +528,16 @@ public class LanceSparkReadOptions implements Serializable {
       return this;
     }
 
+    public Builder indexCacheBackend(String indexCacheBackend) {
+      this.indexCacheBackend = indexCacheBackend;
+      return this;
+    }
+
+    public Builder metadataCacheBackend(String metadataCacheBackend) {
+      this.metadataCacheBackend = metadataCacheBackend;
+      return this;
+    }
+
     public Builder executorCredentialRefresh(boolean executorCredentialRefresh) {
       this.executorCredentialRefresh = executorCredentialRefresh;
       return this;
@@ -536,6 +570,8 @@ public class LanceSparkReadOptions implements Serializable {
       // Merge storage options: catalog options are defaults, current options override
       Map<String, String> merged = new HashMap<>(catalogConfig.getStorageOptions());
       merged.putAll(this.storageOptions);
+      this.indexCacheBackend = catalogConfig.getIndexCacheBackend();
+      this.metadataCacheBackend = catalogConfig.getMetadataCacheBackend();
       return fromOptions(merged);
     }
 
@@ -548,6 +584,9 @@ public class LanceSparkReadOptions implements Serializable {
       Preconditions.checkArgument(
           !opts.containsKey(CONFIG_NEAREST),
           "The nearest read option is no longer supported; use VECTOR_SEARCH table function");
+      Preconditions.checkArgument(
+          !(opts.containsKey(CONFIG_VERSION) && opts.containsKey(CONFIG_BRANCH)),
+          "Specify only one of branch or version");
       if (opts.containsKey(CONFIG_PUSH_DOWN_FILTERS)) {
         this.pushDownFilters = Boolean.parseBoolean(opts.get(CONFIG_PUSH_DOWN_FILTERS));
       }
@@ -555,7 +594,9 @@ public class LanceSparkReadOptions implements Serializable {
         this.blockSize = Integer.parseInt(opts.get(CONFIG_BLOCK_SIZE));
       }
       if (opts.containsKey(CONFIG_VERSION)) {
-        this.version = Long.parseLong(opts.get(CONFIG_VERSION));
+        this.ref = LanceRef.ofMain(Long.parseLong(opts.get(CONFIG_VERSION)));
+      } else if (opts.containsKey(CONFIG_BRANCH)) {
+        this.ref = LanceRef.ofBranch(opts.get(CONFIG_BRANCH));
       }
       if (opts.containsKey(CONFIG_INDEX_CACHE_SIZE)) {
         this.indexCacheSize = Integer.parseInt(opts.get(CONFIG_INDEX_CACHE_SIZE));

@@ -27,6 +27,7 @@ public class StagedCommitOptions {
 
   private final Map<String, String> storageOptions;
   private final boolean enableStableRowIds;
+  private final String fileFormatVersion;
   private final LanceNamespace namespace;
   private final List<String> tableId;
   private final boolean managedVersioning;
@@ -34,11 +35,13 @@ public class StagedCommitOptions {
   private StagedCommitOptions(
       final Map<String, String> storageOptions,
       final boolean enableStableRowIds,
+      final String fileFormatVersion,
       final LanceNamespace namespace,
       final List<String> tableId,
       final boolean managedVersioning) {
     this.storageOptions = storageOptions;
     this.enableStableRowIds = enableStableRowIds;
+    this.fileFormatVersion = fileFormatVersion;
     this.namespace = namespace;
     this.tableId = tableId;
     this.managedVersioning = managedVersioning;
@@ -47,17 +50,30 @@ public class StagedCommitOptions {
   public static StagedCommitOptions of(
       final Map<String, String> storageOptions,
       final boolean enableStableRowIds,
+      final String fileFormatVersion,
       final LanceNamespace namespace,
       final List<String> tableId,
       final boolean managedVersioning) {
     return new StagedCommitOptions(
-        storageOptions, enableStableRowIds, namespace, tableId, managedVersioning);
+        storageOptions,
+        enableStableRowIds,
+        fileFormatVersion,
+        namespace,
+        tableId,
+        managedVersioning);
   }
 
   public static StagedCommitOptions pathBased(
-      final Map<String, String> storageOptions, final boolean enableStableRowIds) {
+      final Map<String, String> storageOptions,
+      final boolean enableStableRowIds,
+      final String fileFormatVersion) {
     return new StagedCommitOptions(
-        storageOptions, enableStableRowIds, NO_NAMESPACE, NO_TABLE_ID, NO_MANAGED_VERSIONING);
+        storageOptions,
+        enableStableRowIds,
+        fileFormatVersion,
+        NO_NAMESPACE,
+        NO_TABLE_ID,
+        NO_MANAGED_VERSIONING);
   }
 
   public Map<String, String> getStorageOptions() {
@@ -66,6 +82,10 @@ public class StagedCommitOptions {
 
   public boolean isEnableStableRowIds() {
     return enableStableRowIds;
+  }
+
+  public String getFileFormatVersion() {
+    return fileFormatVersion;
   }
 
   public LanceNamespace getNamespace() {

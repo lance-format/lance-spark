@@ -782,7 +782,7 @@ class TestDDLBlobV2:
 
 
 class TestDDLIndex:
-    """Test DDL index operations: CREATE INDEX (BTree, FTS)."""
+    """Test DDL index operations."""
 
     def test_create_btree_index_on_int(self, spark):
         """Test CREATE INDEX with BTree on integer column."""
@@ -889,6 +889,64 @@ class TestDDLIndex:
         """).collect()
         assert len(query_result) == 1
         assert query_result[0].id == 50
+
+    def test_create_distributed_bitmap_index(self, spark):
+        """Test distributed Bitmap creation with multiple fragments in one segment."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                status INT
+            )
+        """)
+        spark.sql("INSERT INTO default.test_table VALUES (1, 10), (2, 20)")
+        spark.sql("INSERT INTO default.test_table VALUES (3, 10), (4, 20)")
+
+        result = spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX idx_status_bitmap USING bitmap (status)
+            WITH (num_segments = 1)
+        """).collect()
+
+        assert len(result) == 1
+        assert result[0][0] >= 2
+        assert result[0][1] == "idx_status_bitmap"
+        _assert_lance_index_metadata(
+            spark, "default.test_table", "idx_status_bitmap", "BITMAP"
+        )
+        assert spark.sql("SELECT * FROM default.test_table").count() == 4
+
+    def test_optimize_index(self, spark):
+        """Test incremental index maintenance through Spark SQL."""
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'one'), (2, 'two')")
+        spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX idx_id USING zonemap (id)
+        """)
+        spark.sql("INSERT INTO default.test_table VALUES (3, 'three')")
+
+        before = next(
+            row
+            for row in spark.sql("SHOW INDEXES IN default.test_table").collect()
+            if row.name == "idx_id"
+        )
+        assert before.num_unindexed_fragments > 0
+
+        result = spark.sql("""
+            ALTER TABLE default.test_table OPTIMIZE INDEX idx_id
+            WITH (num_indices_to_merge = 0)
+        """).first()
+
+        assert result.index_name == "idx_id"
+        assert result.fragments_indexed == before.num_unindexed_fragments
+        assert result.segments_after >= result.segments_before
+
+        after = next(
+            row
+            for row in spark.sql("SHOW INDEXES IN default.test_table").collect()
+            if row.name == "idx_id"
+        )
+        assert after.num_unindexed_fragments == 0
 
     def test_create_btree_index_on_nested_literal_dot_field(self, spark):
         """Test CREATE INDEX on nested struct fields, including literal dots."""
@@ -1000,7 +1058,7 @@ class TestDDLIndex:
         assert metadata["index_version"] == 2
 
     def test_create_index_empty_table(self, spark):
-        """Test CREATE INDEX on empty table."""
+        """Test creating scalar indexes on an empty table."""
         spark.sql("""
             CREATE TABLE default.test_table (
                 id INT,
@@ -1008,14 +1066,26 @@ class TestDDLIndex:
             )
         """)
 
-        # Creating index on empty table should return 0 fragments indexed
-        result = spark.sql("""
-            ALTER TABLE default.test_table
-            CREATE INDEX idx_id USING btree (id)
-        """).collect()
+        statements = [
+            "CREATE INDEX idx_id USING btree (id)",
+            "CREATE INDEX idx_name_zonemap USING zonemap (name)",
+            """CREATE INDEX idx_name_fts USING fts (name) WITH (
+                base_tokenizer = 'simple', language = 'English',
+                max_token_length = 40, lower_case = true, stem = false,
+                remove_stop_words = false, ascii_folding = false,
+                with_position = true
+            )""",
+        ]
 
-        # Should return with 0 fragments indexed
-        assert result[0][0] == 0
+        for statement in statements:
+            result = spark.sql(
+                f"ALTER TABLE default.test_table {statement}"
+            ).collect()
+            assert result[0]["fragments_indexed"] == 0
+
+        indexes = spark.sql("SHOW INDEXES IN default.test_table").collect()
+        index_names = {row["name"] for row in indexes}
+        assert index_names == {"idx_id", "idx_name_zonemap", "idx_name_fts"}
 
     def test_drop_index(self, spark):
         """Test DROP INDEX removes an existing index."""
@@ -1802,6 +1872,17 @@ class TestDQLSearchTableFunctions:
 class TestDQLSelect:
     """Test DQL SELECT operations."""
 
+    def test_cache_backend_catalog_session_reads_written_table(self, spark, test_table):
+        """Verify catalog cache backends are used by a real Spark write/read path."""
+        spark.sql(f"CREATE TABLE {test_table} (id INT, value STRING)")
+        spark.createDataFrame([(1, "one"), (2, "two")], ["id", "value"]) \
+            .writeTo(test_table).append()
+
+        jvm = spark._jvm
+        runtime_session = jvm.org.lance.spark.LanceRuntime.session(LANCE_CATALOG)
+        assert not runtime_session.isClosed()
+        assert spark.sql(f"SELECT id FROM {test_table} ORDER BY id").collect() == [(1,), (2,)]
+
     def test_select_all(self, spark):
         """Test SELECT * query."""
         spark.sql("""
@@ -2221,6 +2302,175 @@ class TestDMLMerge:
 class TestDMLAddColumn:
     """Test DML ADD COLUMN FROM operations for schema evolution with backfill."""
 
+    def test_add_blob_v2_binary_column(self, spark):
+        """Test adding a BINARY column with blob v2 encoding."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING
+            )
+            TBLPROPERTIES (
+                'file_format_version' = '2.2'
+            )
+        """)
+
+        spark.sql("""
+            ALTER TABLE default.test_table
+            SET TBLPROPERTIES (
+                'content.lance.encoding' = 'blob',
+                'invalid_content.lance.encoding' = 'blob'
+            )
+        """)
+
+        first_content = b"alpha"
+        second_content = b"bravo-charlie"
+
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (1, 'alpha')
+        """)
+
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (2, 'bravo-charlie')
+        """)
+
+        spark.sql("""
+            CREATE TEMPORARY VIEW tmp_view AS
+            SELECT _rowaddr, _fragid, CAST(name AS BINARY) AS content
+            FROM default.test_table
+        """)
+
+        spark.sql("""
+            ALTER TABLE default.test_table ADD COLUMNS content FROM tmp_view
+        """)
+
+        content_field = next(
+            row
+            for row in spark.sql("DESCRIBE default.test_table").collect()
+            if row.col_name == "content"
+        )
+        content_type = content_field.data_type.lower()
+        assert "struct" in content_type
+        assert "kind" in content_type
+        assert "blob_uri" in content_type
+
+        rows = spark.sql("""
+            SELECT id, content.size, content.kind
+            FROM default.test_table
+            ORDER BY id
+        """).collect()
+
+        assert [(row.id, row.size, row.kind) for row in rows] == [
+            (1, len(first_content), 0),
+            (2, len(second_content), 0),
+        ]
+
+        spark.sql("""
+            CREATE OR REPLACE TEMPORARY VIEW tmp_view AS
+            SELECT _rowaddr, _fragid, name AS invalid_content
+            FROM default.test_table
+        """)
+
+        with pytest.raises(Exception, match="must have BINARY type"):
+            spark.sql("""
+                ALTER TABLE default.test_table
+                ADD COLUMNS invalid_content FROM tmp_view
+            """)
+
+        field_names = [field.name for field in spark.table("default.test_table").schema.fields]
+        assert "invalid_content" not in field_names
+
+    def test_add_blob_column_without_encoding_property_stays_binary(self, spark, test_table):
+        """Test that a blob column added without its encoding property stays BINARY."""
+        spark.sql(f"""
+            CREATE TABLE {test_table} (
+                id INT,
+                name STRING
+            )
+            TBLPROPERTIES (
+                'file_format_version' = '2.2'
+            )
+        """)
+
+        spark.sql(f"""
+            INSERT INTO {test_table} VALUES
+            (1, 'alpha'),
+            (2, 'bravo')
+        """)
+
+        spark.sql(f"""
+            CREATE TEMPORARY VIEW no_property_backfill AS
+            SELECT _rowaddr, _fragid, CAST(name AS BINARY) AS content
+            FROM {test_table}
+        """)
+
+        spark.sql(f"""
+            ALTER TABLE {test_table} ADD COLUMNS content FROM no_property_backfill
+        """)
+
+        content_type = next(
+            row.data_type
+            for row in spark.sql(f"DESCRIBE {test_table}").collect()
+            if row.col_name == "content"
+        )
+        assert content_type == "binary"
+
+        spark.sql(f"""
+            ALTER TABLE {test_table}
+            SET TBLPROPERTIES ('content.lance.encoding' = 'blob')
+        """)
+
+        content_type_after_property = next(
+            row.data_type
+            for row in spark.sql(f"DESCRIBE {test_table}").collect()
+            if row.col_name == "content"
+        )
+        assert content_type_after_property == "binary"
+
+    def test_add_blob_column_with_mismatched_encoding_property_stays_binary(
+        self, spark, test_table
+    ):
+        """Test that an encoding property must exactly match the added column name."""
+        spark.sql(f"""
+            CREATE TABLE {test_table} (
+                id INT,
+                name STRING
+            )
+            TBLPROPERTIES (
+                'file_format_version' = '2.2'
+            )
+        """)
+
+        spark.sql(f"""
+            ALTER TABLE {test_table}
+            SET TBLPROPERTIES ('content.lance.encoding' = 'blob')
+        """)
+
+        spark.sql(f"""
+            INSERT INTO {test_table} VALUES
+            (1, 'alpha'),
+            (2, 'bravo')
+        """)
+
+        spark.sql(f"""
+            CREATE TEMPORARY VIEW mismatched_property_backfill AS
+            SELECT _rowaddr, _fragid, CAST(name AS BINARY) AS content_bytes
+            FROM {test_table}
+        """)
+
+        spark.sql(f"""
+            ALTER TABLE {test_table}
+            ADD COLUMNS content_bytes FROM mismatched_property_backfill
+        """)
+
+        content_bytes_type = next(
+            row.data_type
+            for row in spark.sql(f"DESCRIBE {test_table}").collect()
+            if row.col_name == "content_bytes"
+        )
+        assert content_bytes_type == "binary"
+
     def test_add_column_from_view(self, spark):
         """Test ALTER TABLE ADD COLUMNS FROM with single column."""
         spark.sql("""
@@ -2395,9 +2645,86 @@ class TestDMLAddColumn:
         assert result[1].total_compensation == 69000   # 60000 + 9000
         assert result[2].total_compensation == 84000   # 70000 + 14000
 
+    @pytest.mark.requires_rest
+    @pytest.mark.rest_dir_compatible
+    def test_add_column_from_view_on_rest(self, spark, test_table):
+        spark.sql(f"""
+            CREATE TABLE {test_table} (
+                id INT,
+                name STRING
+            )
+        """)
+
+        spark.sql(f"""
+            INSERT INTO {test_table} VALUES
+            (1, 'alpha'),
+            (2, 'bravo')
+        """)
+
+        spark.sql(f"""
+            CREATE OR REPLACE TEMPORARY VIEW namespace_add_columns_view AS
+            SELECT _rowaddr, _fragid, name AS name_copy
+            FROM {test_table}
+        """)
+
+        spark.sql(f"""
+            ALTER TABLE {test_table} ADD COLUMNS name_copy FROM namespace_add_columns_view
+        """)
+
+        rows = spark.sql(f"""
+            SELECT id, name, name_copy
+            FROM {test_table}
+            ORDER BY id
+        """).collect()
+
+        assert [(row.id, row.name, row.name_copy) for row in rows] == [
+            (1, "alpha", "alpha"),
+            (2, "bravo", "bravo"),
+        ]
+
 
 class TestDMLUpdateColumn:
     """Test DML UPDATE COLUMNS FROM operations for updating existing columns via backfill."""
+
+    @pytest.mark.requires_rest
+    @pytest.mark.rest_dir_compatible
+    def test_update_column_from_view_on_rest(self, spark, test_table):
+        spark.sql(f"""
+            CREATE TABLE {test_table} (
+                id INT,
+                name STRING,
+                value INT
+            )
+        """)
+
+        spark.sql(f"""
+            INSERT INTO {test_table} VALUES
+            (1, 'alpha', 10),
+            (2, 'bravo', 20)
+        """)
+
+        spark.sql(f"""
+            CREATE OR REPLACE TEMPORARY VIEW namespace_update_columns_view AS
+            SELECT _rowaddr, _fragid, value * 10 AS value
+            FROM {test_table}
+            WHERE id = 2
+        """)
+
+        spark.sql(f"""
+            ALTER TABLE {test_table}
+            UPDATE COLUMNS value FROM namespace_update_columns_view
+        """)
+
+        rows = spark.sql(f"""
+            SELECT id, name, value
+            FROM {test_table}
+            ORDER BY id
+        """).collect()
+
+        assert [(row.id, row.name, row.value) for row in rows] == [
+            (1, "alpha", 10),
+            (2, "bravo", 200),
+        ]
 
     def test_update_single_column(self, spark):
         """Test ALTER TABLE UPDATE COLUMNS FROM with a single column."""
@@ -2654,6 +2981,49 @@ class TestDQLTimeTravel:
         assert len(result) == 1
         assert result[0].id == 1
 
+    def test_tag_as_of_excludes_data_inserted_after_tag_creation(self, spark):
+        """Test that a tag remains on its snapshot after the main table advances."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT,
+                name STRING
+            )
+        """)
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (1, 'before_tag_1'),
+            (2, 'before_tag_2')
+        """)
+        spark.sql("ALTER TABLE default.test_table CREATE TAG stable")
+
+        spark.sql("""
+            INSERT INTO default.test_table VALUES
+            (3, 'after_tag_1'),
+            (4, 'after_tag_2')
+        """)
+
+        tagged = spark.sql("""
+            SELECT id, name
+            FROM default.test_table VERSION AS OF 'stable'
+            ORDER BY id
+        """).collect()
+        current = spark.sql("""
+            SELECT id, name
+            FROM default.test_table
+            ORDER BY id
+        """).collect()
+
+        assert [(row.id, row.name) for row in tagged] == [
+            (1, "before_tag_1"),
+            (2, "before_tag_2"),
+        ]
+        assert [(row.id, row.name) for row in current] == [
+            (1, "before_tag_1"),
+            (2, "before_tag_2"),
+            (3, "after_tag_1"),
+            (4, "after_tag_2"),
+        ]
+
     @requires_update_or_merge
     def test_version_as_of_after_update(self, spark):
         """Test VERSION AS OF returns data before an update."""
@@ -2711,6 +3081,103 @@ class TestDQLTimeTravel:
             SELECT * FROM default.test_table VERSION AS OF 2
         """).collect()
         assert len(result) == 3
+
+
+class TestDQLBranchRead:
+    def test_branch_identifier_matches_option_and_path(self, spark):
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql(
+            "INSERT INTO default.test_table VALUES (1, 'a'), (2, 'b')"
+        )
+        expected = [(1, "a"), (2, "b")]
+        spark.sql(
+            "ALTER TABLE default.test_table CREATE BRANCH test_branch"
+        )
+        spark.sql(
+            "INSERT INTO default.test_table VALUES (3, 'c'), (4, 'd')"
+        )
+
+        identifier = spark.sql(
+            "SELECT * FROM default.test_table.branch_test_branch ORDER BY id"
+        ).collect()
+        option_table = (
+            spark.read.option("branch", "test_branch")
+            .table("default.test_table")
+            .orderBy("id")
+            .collect()
+        )
+        option_path = (
+            spark.read.format("lance")
+            .option("branch", "test_branch")
+            .load(_table_location(spark, "default.test_table"))
+            .orderBy("id")
+            .collect()
+        )
+        main = spark.sql(
+            "SELECT * FROM default.test_table ORDER BY id"
+        ).collect()
+
+        assert [(row.id, row.name) for row in identifier] == expected
+        assert [(row.id, row.name) for row in option_table] == expected
+        assert [(row.id, row.name) for row in option_path] == expected
+        assert [(row.id, row.name) for row in main] == expected + [(3, "c"), (4, "d")]
+
+    def test_branch_identifier_rejects_as_of_and_conflicting_options(self, spark):
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'main')")
+        spark.sql("ALTER TABLE default.test_table CREATE BRANCH audit")
+
+        with pytest.raises(Exception, match="Cannot combine"):
+            spark.sql(
+                "SELECT * FROM default.test_table.branch_audit VERSION AS OF 1"
+            ).collect()
+        with pytest.raises(Exception, match="Cannot combine"):
+            spark.sql(
+                "SELECT * FROM default.test_table.branch_audit TIMESTAMP AS OF now()"
+            ).collect()
+        with pytest.raises(Exception):
+            spark.read.option("branch", "audit").option("version", "1").table(
+                "default.test_table"
+            ).collect()
+        with pytest.raises(Exception, match="no_such_branch"):
+            spark.read.option("branch", "no_such_branch").table(
+                "default.test_table"
+            ).collect()
+
+    def test_branch_identifier_is_read_only(self, spark):
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'main')")
+        spark.sql("ALTER TABLE default.test_table CREATE BRANCH audit")
+
+        with pytest.raises(Exception):
+            spark.sql(
+                "INSERT INTO default.test_table.branch_audit VALUES (2, 'branch')"
+            ).collect()
+
+        assert spark.table("default.test_table").count() == 1
+        assert spark.table("default.test_table.branch_audit").count() == 1
+
+    def test_existing_table_wins_over_branch_identifier(self, spark):
+        if getattr(spark, "_lance_backend", None) == "glue":
+            pytest.skip("Glue table identifiers are database.table")
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'branch_row')")
+        spark.sql("ALTER TABLE default.test_table CREATE BRANCH audit")
+        spark.sql(
+            "CREATE TABLE default.test_table.branch_audit (id INT, name STRING)"
+        )
+        spark.sql(
+            "INSERT INTO default.test_table.branch_audit VALUES (99, 'literal')"
+        )
+
+        rows = spark.table("default.test_table.branch_audit").collect()
+        assert [(row.id, row.name) for row in rows] == [(99, "literal")]
+        assert [
+            row.id
+            for row in spark.read.option("branch", "audit")
+            .table("default.test_table")
+            .collect()
+        ] == [1]
 
 
 @requires_update_or_merge

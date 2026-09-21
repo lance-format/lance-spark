@@ -13,6 +13,14 @@
  */
 package org.lance.spark.update;
 
+import org.lance.index.Index;
+import org.lance.index.IndexOptions;
+import org.lance.index.IndexParams;
+import org.lance.index.IndexType;
+import org.lance.index.scalar.ScalarIndexParams;
+import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.utils.Utils;
+
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
@@ -50,7 +58,8 @@ public abstract class BaseShowIndexesTest {
     spark =
         SparkSession.builder()
             .appName("lance-show-indexes-test")
-            .master("local[10]")
+            .master("local[3]")
+            .config("spark.default.parallelism", "10")
             .config(
                 "spark.sql.catalog." + catalogName, "org.lance.spark.LanceNamespaceSparkCatalog")
             .config(
@@ -104,7 +113,7 @@ public abstract class BaseShowIndexesTest {
     Dataset<Row> result = spark.sql(String.format("show indexes from %s", fullTable));
 
     Assertions.assertEquals(
-        "StructType(StructField(name,StringType,true),StructField(fields,ArrayType(StringType,true),true),StructField(index_type,StringType,true),StructField(num_indexed_fragments,LongType,true),StructField(num_indexed_rows,LongType,true),StructField(num_unindexed_fragments,LongType,true),StructField(num_unindexed_rows,LongType,true))",
+        "StructType(StructField(name,StringType,true),StructField(fields,ArrayType(StringType,true),true),StructField(index_type,StringType,true),StructField(num_indexed_fragments,LongType,true),StructField(num_indexed_rows,LongType,true),StructField(num_unindexed_fragments,LongType,true),StructField(num_unindexed_rows,LongType,true),StructField(indexed_percent,DoubleType,true),StructField(num_segments,LongType,true),StructField(size_bytes,LongType,true))",
         result.schema().toString());
 
     List<Row> rows = result.collectAsList();
@@ -130,5 +139,130 @@ public abstract class BaseShowIndexesTest {
     // num_indexed_rows should be at least 1
     long numIndexedRows = row.getLong(4);
     Assertions.assertTrue(numIndexedRows >= 1L, "num_indexed_rows should be at least 1");
+
+    Assertions.assertEquals(100.0d, row.getDouble(7), 1e-9, "indexed_percent should be 100");
+    Assertions.assertTrue(row.getLong(8) >= 1L, "num_segments should be at least 1");
+    Assertions.assertTrue(row.getLong(9) > 0L, "size_bytes should be positive");
+  }
+
+  @Test
+  public void testShowIndexesAggregatesAcrossSegments() {
+    spark.sql(String.format("create table %s (id int, name string) using lance", fullTable));
+    for (int batch = 0; batch < 4; batch++) {
+      spark.sql(
+          String.format(
+              "insert into %s values (%d, 'n%d'), (%d, 'n%d')",
+              fullTable, batch * 2, batch * 2, batch * 2 + 1, batch * 2 + 1));
+    }
+    spark.sql(
+        String.format(
+            "alter table %s create index test_index using btree (id) with (num_segments = 2)",
+            fullTable));
+
+    long expectedSize = 0L;
+    int segmentCount;
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.builder().datasetUri(tableDir).build())
+            .build()) {
+      List<Index> segments =
+          dataset.getIndexes().stream()
+              .filter(index -> "test_index".equals(index.name()))
+              .collect(Collectors.toList());
+      segmentCount = segments.size();
+      for (Index segment : segments) {
+        expectedSize += segment.getSizeBytes().orElse(0L);
+      }
+    }
+    Assertions.assertEquals(
+        2, segmentCount, "num_segments = 2 should have produced two physical segments");
+
+    Row row = spark.sql(String.format("show indexes from %s", fullTable)).collectAsList().get(0);
+
+    Assertions.assertEquals(2L, row.getLong(8), "num_segments must count every physical segment");
+    Assertions.assertEquals(
+        expectedSize,
+        row.getLong(9),
+        "size_bytes must sum every segment's files, not just the first");
+    Assertions.assertEquals(
+        100.0d, row.getDouble(7), 1e-9, "a freshly built index covers every row");
+  }
+
+  @Test
+  public void testShowIndexesReportsNullPercentForEmptyTable() {
+    spark.sql(String.format("create table %s (id int, text string) using lance;", fullTable));
+    spark.sql(String.format("alter table %s create index test_index using btree (id)", fullTable));
+
+    Row row = spark.sql(String.format("show indexes from %s", fullTable)).collectAsList().get(0);
+
+    Assertions.assertTrue(row.isNullAt(7), "indexed_percent should be null for an empty table");
+    Assertions.assertEquals(0L, row.getLong(4), "no rows can be indexed");
+    Assertions.assertEquals(0L, row.getLong(6), "no rows can be unindexed");
+  }
+
+  @Test
+  public void testShowIndexesFiltersMemWalIndex() {
+    spark.sql(
+        String.format(
+            "create table %s (id int, region string) using lance "
+                + "partitioned by (bucket(4, region))",
+            fullTable));
+    spark.sql(
+        String.format(
+            "insert into %s values (1, 'east'), (2, 'west'), (3, 'north'), (4, 'south')",
+            fullTable));
+
+    List<Row> systemOnly =
+        spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+    Assertions.assertTrue(systemOnly.isEmpty(), "MemWAL must not appear in SHOW INDEXES");
+
+    spark.sql(String.format("alter table %s create index test_index using btree (id)", fullTable));
+    List<Row> rows = spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+
+    Assertions.assertEquals(1, rows.size());
+    Row row = rows.get(0);
+    Assertions.assertEquals("test_index", row.getString(0));
+    Assertions.assertEquals("btree", row.getString(2));
+    Assertions.assertTrue(row.getLong(3) >= 1L);
+    Assertions.assertTrue(row.getLong(4) >= 1L);
+  }
+
+  @Test
+  public void testShowIndexesFiltersFragmentReuseIndex() {
+    prepareDataset();
+
+    // Use one index segment over all fragments so compaction rewrites indexed data. Distributed
+    // CREATE INDEX produces per-task segments that the compaction planner keeps in separate bins.
+    IndexParams indexParams =
+        IndexParams.builder().setScalarIndexParams(ScalarIndexParams.create("BTREE")).build();
+    try (var dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.builder().datasetUri(tableDir).build())
+            .build()) {
+      dataset.createIndex(
+          IndexOptions.builder(List.of("id"), IndexType.BTREE, indexParams)
+              .replace(true)
+              .train(true)
+              .withIndexName("test_index")
+              .build());
+    }
+
+    spark.sql(
+        String.format(
+            "optimize %s with (target_rows_per_fragment=20000, defer_index_remap=true)",
+            fullTable));
+
+    try (var dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.builder().datasetUri(tableDir).build())
+            .build()) {
+      Assertions.assertTrue(
+          dataset.getIndexes().stream()
+              .anyMatch(index -> "__lance_frag_reuse".equalsIgnoreCase(index.name())),
+          "OPTIMIZE with deferred index remapping must create a fragment-reuse system index");
+    }
+
+    List<Row> rows = spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+
+    Assertions.assertEquals(1, rows.size());
+    Assertions.assertEquals("test_index", rows.get(0).getString(0));
+    Assertions.assertEquals("btree", rows.get(0).getString(2));
   }
 }

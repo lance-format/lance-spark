@@ -1,0 +1,5 @@
+pytest
+pytest-timeout
+packaging
+azure-storage-blob
+boto3

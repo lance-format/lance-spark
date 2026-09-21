@@ -4,7 +4,7 @@
 
     <groupId>org.lance</groupId>
     <artifactId>lance-spark-root</artifactId>
-    <version>0.6.1</version>
+    <version>0.8.0-beta.1</version>
     <packaging>pom</packaging>
 
     <name>${project.artifactId}</name>
@@ -26,10 +26,12 @@
         </license>
     </licenses>
 
-    <scm>
-        <connection>scm:git:git@github.com:lancedb/lance-spark.git</connection>
-        <developerConnection>scm:git:git@github.com:lancedb/lance-spark.git</developerConnection>
-        <url>git@github.com:lancedb/lance-spark.git</url>
+    <scm child.scm.connection.inherit.append.path="false"
+         child.scm.developerConnection.inherit.append.path="false"
+         child.scm.url.inherit.append.path="false">
+        <connection>scm:git:https://github.com/lance-format/lance-spark.git</connection>
+        <developerConnection>scm:git:https://github.com/lance-format/lance-spark.git</developerConnection>
+        <url>https://github.com/lance-format/lance-spark</url>
         <tag>HEAD</tag>
     </scm>
 
@@ -50,9 +52,9 @@
     </distributionManagement>
 
     <properties>
-        <lance-spark.version>0.6.1</lance-spark.version>
-        <lance.version>9.0.0-rc.1</lance.version>
-        <lance-namespace.version>0.8.6</lance-namespace.version>
+        <lance-spark.version>0.8.0-beta.1</lance-spark.version>
+        <lance.version>12.0.0-beta.14</lance.version>
+        <lance-namespace.version>0.11.1</lance-namespace.version>
         <lance-namespace-impl.version>0.4.0</lance-namespace-impl.version>
 
         <arrow14.version>14.0.2</arrow14.version>
@@ -109,6 +111,7 @@
             */
         </spotless.license.header>
 
+        <opentelemetry.version>1.64.0</opentelemetry.version>
         <junit.version>5.10.1</junit.version>
         <scalatest.version>3.2.10</scalatest.version>
 
@@ -218,6 +221,11 @@
                     <artifactId>slf4j-api</artifactId>
                 </exclusion>
             </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-api</artifactId>
+            <version>${opentelemetry.version}</version>
         </dependency>
         <dependency>
             <groupId>org.lance</groupId>

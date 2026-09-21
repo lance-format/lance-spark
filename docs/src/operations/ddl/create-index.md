@@ -22,15 +22,23 @@ The command uses the `ALTER TABLE` syntax to add an index.
 
 The following index methods are supported:
 
-| Method  | Description                                                                 |
-|---------|-----------------------------------------------------------------------------|
-| `zonemap` | Lightweight min/max index for fragment pruning on a scalar column. |
-| `btree` | B-tree index for efficient range queries and point lookups on scalar columns. |
-| `fts`   | Full-text search (inverted) index for text search on string columns.        |
+| Method        | Description                                                                   |
+|---------------|-------------------------------------------------------------------------------|
+| `zonemap`     | Lightweight min/max index for fragment pruning on a scalar column.            |
+| `btree`       | B-tree index for efficient range queries and point lookups on ordered values. |
+| `bitmap`      | Bitmap index for low-cardinality values.                                      |
+| `label_list`  | Label membership index for array/list columns.                                |
+| `ngram`       | N-gram index for string values.                                               |
+| `bloomfilter` | Bloom filter index for approximate membership pruning.                        |
+| `rtree`       | R-tree index for GeoArrow geometry columns.                                   |
+| `fts`         | Full-text search (inverted) index for text search on string columns.          |
+| `inverted`    | Alias for `fts`; creates the same full-text inverted index.                   |
 
 ## Options
 
 The `CREATE INDEX` command supports options via the `WITH` clause to control index creation. These options are specific to the chosen index method.
+
+Option names are case-insensitive: `WITH (TRAIN = false)` and `WITH (train = false)` are the same option.
 
 ### Common Options
 
@@ -40,14 +48,27 @@ These options apply to all index methods:
 |---------|---------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `train` | Boolean | When `false`, defer index training: register an empty index covering no rows without scanning any data, to be populated later. Default `true`. See [Deferred Index Creation](#deferred-index-creation). |
 
+### Distributed Index Options
+
+The distributed build used by `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`,
+`rtree`, `fts` (or `inverted`), and `btree` with `build_mode = 'fragment'` supports:
+
+| Option         | Type    | Description                                                                                                                                                                                                                        |
+|----------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `num_segments` | Integer | Number of parallel build tasks, and so of index segments created (clamped to fragment count when larger). Each task takes a contiguous run of fragments, and the runs are chosen so the heaviest task is as light as any contiguous split allows. Defaults to `min(fragment_count, spark.default.parallelism)`. |
+
+Contiguous coverage matters beyond parallelism: [OPTIMIZE](./optimize.md) can only group fragments
+that the identical set of index segments covers. Interleaved segments leave it nothing to coalesce at
+all, while contiguous ones let it coalesce within each segment's run. A segment boundary is still a
+boundary, so `num_segments` also bounds how far compaction can get.
+
 ### ZoneMap Options
 
 For the `zonemap` method, the following options are supported:
 
-| Option          | Type | Description                                  |
-|-----------------|------|----------------------------------------------|
-| `rows_per_zone` | Long    | The approximate number of rows per zonemap zone. |
-| `num_segments`  | Integer | Target number of index segments (upper bound; clamped to fragment count when larger). Each segment covers a batch of fragments. Defaults to `min(fragment_count, spark.default.parallelism)`. |
+| Option          | Type | Description                                      |
+|-----------------|------|--------------------------------------------------|
+| `rows_per_zone` | Long | The approximate number of rows per zonemap zone. |
 
 ### BTree Options
 
@@ -60,9 +81,9 @@ For the `btree` method, the following options are supported:
 | `rows_per_range` | Long   | The number of rows per range when built using range mode. Default is 1000000.                                                                                                                            |
 
 
-### FTS Options
+### FTS / Inverted Options
 
-For the `fts` method, the following options are required:
+For the `fts` method (or its `inverted` alias), the following options are required:
 
 | Option             | Type    | Description                                                    |
 |--------------------|---------|----------------------------------------------------------------|
@@ -91,7 +112,7 @@ Lance FTS index format v2 is selected by the Lance runtime environment variable 
         ...
     ```
 
-Spark SQL currently does not expose a per-index `fts_version` option. Use `USING fts` with the normal FTS options shown above; Spark records the index details and version returned by Lance.
+Spark SQL currently does not expose a per-index `fts_version` option. Use `USING fts` (or `USING inverted`) with the normal FTS options shown above; Spark records the index details and version returned by Lance.
 
 ## Examples
 
@@ -106,12 +127,8 @@ Create a simple B-tree index on a single column:
 
 ### Indexing Multiple Columns
 
-Create a composite index on multiple columns.
-
-=== "SQL"
-    ```sql
-    ALTER TABLE lance.db.logs CREATE INDEX idx_ts_level USING btree (timestamp, level);
-    ```
+Scalar indexes currently support exactly one indexed column. Create separate indexes when you
+need to accelerate filters on multiple columns.
 
 ### Lightweight Fragment Pruning
 
@@ -140,6 +157,73 @@ Create a zonemap index and specify the approximate number of rows per zone:
     ALTER TABLE lance.db.users CREATE INDEX idx_id_zonemap USING zonemap (id) WITH (rows_per_zone = 2048);
     ```
 
+### Bitmap
+
+Use `bitmap` for columns with a relatively small number of distinct values.
+
+=== "SQL"
+    ```sql
+    ALTER TABLE lance.db.events CREATE INDEX idx_status_bitmap
+        USING bitmap (status) WITH (num_segments = 8);
+    ```
+
+### Label List
+
+Use `label_list` for membership filtering on an array/list column. The list item type must be
+non-nested.
+
+=== "SQL"
+    ```sql
+    ALTER TABLE lance.db.events CREATE INDEX idx_labels
+        USING label_list (labels) WITH (num_segments = 8);
+    ```
+
+### NGram
+
+Use `ngram` to build a fixed trigram index on a string column.
+
+=== "SQL"
+    ```sql
+    ALTER TABLE lance.db.documents CREATE INDEX idx_content_ngram
+        USING ngram (content) WITH (num_segments = 8);
+    ```
+
+### Bloom Filter
+
+Use `bloomfilter` for membership pruning when a compact probabilistic index is appropriate.
+
+| Option            | Type   | Description                                                                                              |
+|-------------------|--------|----------------------------------------------------------------------------------------------------------|
+| `number_of_items` | Long   | Expected number of values per Bloom filter block. Default `8192`.                                        |
+| `probability`     | Double | Target false-positive probability. Default `0.00057` (approximately one false positive in 1,754 probes). |
+
+=== "SQL"
+    ```sql
+    ALTER TABLE lance.db.events CREATE INDEX idx_id_bloom
+        USING bloomfilter (id) WITH (
+            number_of_items = 16384,
+            probability = 0.001,
+            num_segments = 8
+        );
+    ```
+
+### RTree
+
+Use `rtree` for spatial filtering on a supported GeoArrow geometry column. For example, a point
+can be represented by a struct carrying `ARROW:extension:name=geoarrow.point` metadata.
+
+| Option      | Type    | Description                                            |
+|-------------|---------|--------------------------------------------------------|
+| `page_size` | Integer | Maximum number of entries per R-tree page. Minimum `2`; default `4096`. |
+
+=== "SQL"
+    ```sql
+    ALTER TABLE lance.db.places CREATE INDEX idx_geometry
+        USING rtree (geometry) WITH (page_size = 2048, num_segments = 8);
+    ```
+
+Lance validates each method's column type and parameters during index creation.
+
 ### Full-Text Search Index
 
 Create an FTS index on a text column:
@@ -154,7 +238,8 @@ Create an FTS index on a text column:
         stem = false,
         remove_stop_words = false,
         ascii_folding = false,
-        with_position = true
+        with_position = true,
+        num_segments = 8
     );
     ```
 
@@ -181,17 +266,21 @@ to scanning the data until it is populated. There are two ways to populate it:
     ALTER TABLE lance.db.users CREATE INDEX idx_id USING zonemap (id);
     ```
 
-- **Incremental build through the SDK:** when only some fragments are unindexed (for example after
-  appending data to an already-built index), `Dataset.optimizeIndices` indexes just the unindexed
-  fragments. This currently runs on a single node:
+- **Incremental maintenance:** when only some fragments are unindexed (for example after appending
+  data to an already-built index), [`OPTIMIZE INDEX`](optimize-index.md) indexes the uncovered
+  fragments. This currently runs on the Spark driver:
 
-    ```java
-    dataset.optimizeIndices(OptimizeOptions.builder().build());
+    ```sql
+    ALTER TABLE lance.db.users OPTIMIZE INDEX idx_id;
     ```
 
-`train = false` is supported for all index methods (`btree`, `fts`, `zonemap`). Because a deferred
-index performs no segmented build at creation time, `num_segments` cannot be combined with
-`train = false` — pass it on the eager build that populates the index instead.
+`train = false` is supported for all index methods. Because deferred index creation does not build
+index data, `num_segments` cannot be combined with `train = false` — pass it on the eager build
+that populates the index instead.
+
+Creating a scalar index on an empty table also registers an empty index with zero fragment
+coverage. The index is immediately visible through `SHOW INDEXES`. After data is appended, populate
+it by re-running `CREATE INDEX` or calling `Dataset.optimizeIndices`.
 
 ## Output
 
@@ -214,13 +303,13 @@ Consider creating an index when:
 
 The `CREATE INDEX` command operates as follows:
 
-1.  **Index Build Execution**: Lance Spark chooses an execution path based on the index method. Methods such as `btree`, `fts`, and `zonemap` can build physical index segments in parallel across fragments. `zonemap` publishes those segments directly as one logical index. Range-mode `btree` uses Spark repartitioning and sorted preprocessed data.
+1.  **Index Build Execution**: Lance Spark chooses an execution path based on the index method. `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, `rtree`, `fts` (or `inverted`), and fragment-mode `btree` split source fragments into batches and build them in parallel. Range-mode `btree` uses Spark repartitioning and sorted preprocessed data.
 2.  **Metadata Finalization**: Lance Spark merges or commits the resulting index metadata on the driver so the new logical index becomes visible atomically.
 3.  **Transactional Commit**: A new table version is committed with the new index information. The operation is atomic and ensures that concurrent reads are not affected.
 
 ## Notes and Limitations
 
-- **Index Methods**: The `zonemap`, `btree`, and `fts` methods are supported for scalar index creation.
-- **Zonemap Column Count**: Zonemap indexes currently support a single column only. The generic `CREATE INDEX` grammar accepts a column list, but Lance rejects multi-column zonemap creation.
+- **Index Methods**: The `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, `rtree`, `btree`, and `fts` (or `inverted`) methods are supported for index creation.
+- **Indexed Column Count**: All supported index methods currently support exactly one indexed column.
 - **Index Replacement**: If you create an index with the same name as an existing one, the old index will be replaced by the new one.
-- **Deferred Training**: With `train = false` the index is registered empty and is populated later, either by re-running `CREATE INDEX` (a full distributed build that replaces the empty index) or, for incremental coverage of newly appended fragments, by `Dataset.optimizeIndices` in the SDK. The SQL `OPTIMIZE` command compacts fragments and does not train deferred indexes.
+- **Deferred Training**: With `train = false` the index is registered empty and is populated later, either by re-running `CREATE INDEX` (a full distributed build that replaces the empty index) or through `ALTER TABLE ... OPTIMIZE INDEX` for driver-side incremental maintenance. The table-level `OPTIMIZE` command compacts fragments and does not train deferred indexes.

@@ -55,7 +55,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17
@@ -70,7 +70,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17
@@ -103,7 +103,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17
@@ -138,15 +138,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17
           cache: "maven"
-      - name: Build Docker images
-        uses: ./.github/actions/docker-build
+      - name: Run integration tests
+        uses: ./.github/actions/pytest-integration
         with:
           spark-version: ${{ matrix.spark-version }}
           scala-version: ${{ matrix.scala-version }}
-      - name: Run Docker integration tests
-        run: make docker-test SPARK_VERSION=${{ matrix.spark-version }} SCALA_VERSION=${{ matrix.scala-version }}

@@ -304,7 +304,7 @@ public abstract class BaseAddColumnsBackfillTest {
 
       AddColumnsBackfillBatchWrite backfillWrite =
           new AddColumnsBackfillBatchWrite(
-              backfillSchema, writeOptions, newColumns, null, null, null, null);
+              backfillSchema, writeOptions, newColumns, null, null, null, null, false);
 
       DataWriterFactory factory = backfillWrite.createBatchWriterFactory(() -> 1);
       WriterCommitMessage backfillMsg;

@@ -19,13 +19,13 @@ import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
 import org.lance.ipc.ScanStats;
 import org.lance.spark.LanceConstant;
-import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.vector.ipc.ArrowReader;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
@@ -81,15 +81,6 @@ public class LanceFragmentScanner implements AutoCloseable {
     LanceScanner lanceScanner = null;
     try {
       LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
-      if (inputPartition.getNamespaceImpl() != null && readOptions.isExecutorCredentialRefresh()) {
-        if (LanceRuntime.useNamespaceOnWorkers(inputPartition.getNamespaceImpl())) {
-          readOptions.setNamespace(
-              LanceRuntime.getOrCreateNamespace(
-                  inputPartition.getNamespaceImpl(), inputPartition.getNamespaceProperties()));
-        } else {
-          readOptions.setNamespace(null);
-        }
-      }
       long dsOpenStart = System.nanoTime();
       dataset =
           Utils.openDatasetBuilder(readOptions)
@@ -101,7 +92,7 @@ public class LanceFragmentScanner implements AutoCloseable {
         throw new IllegalStateException(
             String.format(
                 "Fragment %d not found in dataset at %s (version=%s)",
-                fragmentId, readOptions.getDatasetUri(), readOptions.getVersion()));
+                fragmentId, readOptions.getDatasetUri(), readOptions.getRef()));
       }
       ScanOptions.Builder scanOptions = new ScanOptions.Builder();
 
@@ -184,6 +175,28 @@ public class LanceFragmentScanner implements AutoCloseable {
    */
   public ArrowReader getArrowReader() {
     return scanner.scanBatches();
+  }
+
+  /**
+   * Exports this fragment scan into a caller-owned Arrow C Data Interface stream. The Lance native
+   * side populates the {@code ArrowArrayStream} at {@code streamAddress} directly, so only the
+   * C-struct address crosses the JVM/native boundary. The caller owns the stream and must close it
+   * (which releases the native scan via the stream's release callback); the scanner and dataset
+   * held by this object are released separately by {@link #close()}.
+   *
+   * @param streamAddress the memory address of a freshly-allocated, empty {@code ArrowArrayStream}
+   */
+  public void exportArrowStream(long streamAddress) throws IOException {
+    scanner.exportArrowStream(streamAddress);
+  }
+
+  /**
+   * @return the Arrow schema the native scan produces, including any columns Lance auto-projects
+   *     that are not in the requested projection (e.g. {@code _rowid}, {@code _rowaddr}, or the
+   *     {@code _score} of a full-text query)
+   */
+  public Schema schema() {
+    return scanner.schema();
   }
 
   @Override

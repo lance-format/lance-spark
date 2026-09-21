@@ -22,6 +22,7 @@ import org.lance.namespace.LanceNamespace;
 import org.lance.operation.Append;
 import org.lance.operation.Operation;
 import org.lance.operation.Overwrite;
+import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.utils.BlobSourceContext;
@@ -130,9 +131,8 @@ public class LanceBatchWrite implements BatchWrite {
       this.writeOptions = writeOptions;
     } else {
       try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
-        this.writeOptions = writeOptions.withVersion(ds.version());
-        logger.debug(
-            "Resolved dataset version for batch write: {}", this.writeOptions.getVersion());
+        this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
+        logger.debug("Resolved dataset ref for batch write: {}", this.writeOptions.getRef());
       }
     }
   }
@@ -180,12 +180,24 @@ public class LanceBatchWrite implements BatchWrite {
       if (enableStableRowIds != null) {
         stagedCommit.setEnableStableRowIds(enableStableRowIds);
       }
+      String fileFormatVersion = writeOptions.getFileFormatVersion();
+      if (fileFormatVersion != null) {
+        stagedCommit.setFileFormatVersion(fileFormatVersion);
+      }
+      // For a path-based staged create, StagedCommit only has the catalog's static storage
+      // options at this point. Merge in write-time and namespace-vended options now so
+      // StagedCommit.commit() uses them. Mirrors the non-staged merge below.
+      stagedCommit.mergeStorageOptions(
+          LanceRuntime.mergeStorageOptions(
+              writeOptions.getStorageOptions(), initialStorageOptions));
     } else {
       // For non-staged tables, commit immediately
       long version =
           Objects.requireNonNull(
-              writeOptions.getVersion(),
-              "version must be set (resolved in LanceBatchWrite constructor)");
+                  writeOptions.getRef(),
+                  "ref must be set (resolved in LanceBatchWrite constructor)")
+              .getVersionNumber()
+              .get();
       try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
         Operation operation;
         if (isOverwrite) {
@@ -198,6 +210,10 @@ public class LanceBatchWrite implements BatchWrite {
                 .writeParams(
                     LanceRuntime.mergeStorageOptions(
                         writeOptions.getStorageOptions(), initialStorageOptions));
+        String fileFormatVersion = writeOptions.getFileFormatVersion();
+        if (fileFormatVersion != null) {
+          commitBuilder.storageFormat(fileFormatVersion);
+        }
         // When enableStableRowIds is null (user didn't pass the option),
         // lance-core auto-inherits the flag from the existing manifest.
         // Appending to a table with stable row IDs works without

@@ -13,20 +13,32 @@
  */
 package org.lance.spark.read;
 
+import org.lance.namespace.LanceNamespace;
+import org.lance.namespace.model.DescribeTableRequest;
+import org.lance.namespace.model.DescribeTableResponse;
 import org.lance.spark.LanceRuntime;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 import org.lance.spark.utils.Optional;
 
+import org.apache.arrow.memory.BufferAllocator;
 import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
 import org.apache.spark.sql.connector.expressions.aggregate.CountStar;
+import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class LanceCountStarPartitionReaderTest {
@@ -81,5 +93,124 @@ public class LanceCountStarPartitionReaderTest {
             + memBeforeClose
             + ", after close: "
             + memAfterClose);
+  }
+
+  @Test
+  public void testComputeCountClosesNamespaceWhenDatasetOpenFails() {
+    RecordingNamespace.reset();
+    LanceSparkReadOptions readOptions =
+        LanceSparkReadOptions.builder()
+            .datasetUri("file:///tmp/__lance_count_star_namespace_test__")
+            .tableId(Collections.singletonList("table"))
+            .build();
+    LanceCountStarPartitionReader reader =
+        new LanceCountStarPartitionReader(newPartition(readOptions));
+
+    assertThrows(RuntimeException.class, reader::get);
+    assertNull(readOptions.getNamespace());
+    assertEquals(1, RecordingNamespace.INITIALIZE_CALLS.get());
+    assertEquals(1, RecordingNamespace.CLOSE_CALLS.get());
+  }
+
+  @Test
+  public void testComputeCountClosesExecutorNamespaceAfterScan() throws Exception {
+    RecordingNamespace.reset();
+    LanceSparkReadOptions readOptions =
+        LanceSparkReadOptions.builder()
+            .datasetUri(TestUtils.TestTable1Config.datasetUri)
+            .tableId(Collections.singletonList(TestUtils.TestTable1Config.datasetName))
+            .build();
+    LanceInputPartition partition =
+        newPartition(
+            readOptions,
+            Arrays.asList(0, 1),
+            Collections.singletonMap("location", TestUtils.TestTable1Config.datasetUri));
+
+    try (LanceCountStarPartitionReader reader = new LanceCountStarPartitionReader(partition)) {
+      assertTrue(reader.next());
+      assertEquals(4L, reader.get().column(0).getLong(0));
+    }
+
+    assertNull(readOptions.getNamespace());
+    assertEquals(1, RecordingNamespace.INITIALIZE_CALLS.get());
+    assertEquals(1, RecordingNamespace.CLOSE_CALLS.get());
+  }
+
+  @Test
+  public void testComputeCountSkipsNamespaceRebuildWhenCredentialRefreshDisabled() {
+    RecordingNamespace.reset();
+    LanceSparkReadOptions readOptions =
+        LanceSparkReadOptions.builder()
+            .datasetUri("file:///tmp/__lance_count_star_namespace_test__")
+            .tableId(Collections.singletonList("table"))
+            .executorCredentialRefresh(false)
+            .build();
+    LanceCountStarPartitionReader reader =
+        new LanceCountStarPartitionReader(newPartition(readOptions));
+
+    assertThrows(RuntimeException.class, reader::get);
+    assertNull(readOptions.getNamespace());
+    assertEquals(0, RecordingNamespace.INITIALIZE_CALLS.get());
+    assertEquals(0, RecordingNamespace.CLOSE_CALLS.get());
+  }
+
+  private LanceInputPartition newPartition(LanceSparkReadOptions readOptions) {
+    return newPartition(readOptions, Collections.emptyList(), Collections.emptyMap());
+  }
+
+  private LanceInputPartition newPartition(
+      LanceSparkReadOptions readOptions,
+      List<Integer> fragments,
+      Map<String, String> namespaceProperties) {
+    return new LanceInputPartition(
+        new StructType(),
+        0,
+        new LanceSplit(fragments),
+        readOptions,
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        "test-credential-refresh",
+        null,
+        RecordingNamespace.class.getName(),
+        namespaceProperties,
+        null);
+  }
+
+  public static class RecordingNamespace implements LanceNamespace, AutoCloseable {
+    static final AtomicInteger INITIALIZE_CALLS = new AtomicInteger();
+    static final AtomicInteger CLOSE_CALLS = new AtomicInteger();
+
+    private String location;
+
+    public RecordingNamespace() {}
+
+    static void reset() {
+      INITIALIZE_CALLS.set(0);
+      CLOSE_CALLS.set(0);
+    }
+
+    @Override
+    public void initialize(Map<String, String> properties, BufferAllocator allocator) {
+      INITIALIZE_CALLS.incrementAndGet();
+      location = properties.get("location");
+    }
+
+    @Override
+    public String namespaceId() {
+      return "recording";
+    }
+
+    @Override
+    public DescribeTableResponse describeTable(DescribeTableRequest request) {
+      return new DescribeTableResponse().location(location);
+    }
+
+    @Override
+    public void close() {
+      CLOSE_CALLS.incrementAndGet();
+    }
   }
 }

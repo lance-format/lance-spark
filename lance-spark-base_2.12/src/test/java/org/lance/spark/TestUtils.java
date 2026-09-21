@@ -109,6 +109,10 @@ public class TestUtils {
     return sb.append(datasetUri).toString();
   }
 
+  public static void clearOpenTelemetry() {
+    LanceRuntime.clearOpenTelemetry();
+  }
+
   /**
    * A non-functional {@link LanceNamespace} stub for toBuilder identity and serialization tests:
    * assigned to the transient {@code LanceSparkWriteOptions#namespace} field before serialization,

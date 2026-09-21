@@ -57,15 +57,28 @@ public final class ZonemapFragmentPruner {
   private ZonemapFragmentPruner() {}
 
   /**
-   * Prune fragments using zonemap statistics.
+   * Prune fragments, assuming the stats describe every fragment.
    *
-   * @param pushedPredicates the V2 predicates pushed down by Spark
-   * @param zonemapStatsByColumn map from column name to its zonemap zone stats
-   * @return present with the set of fragment IDs that might match; empty if no pruning can be
-   *     derived
+   * @deprecated asserts full coverage, which cannot be checked here. Use {@link
+   *     #pruneFragments(Predicate[], Map, Map)} and pass per-column coverage.
    */
+  @Deprecated
   public static Optional<Set<Integer>> pruneFragments(
       Predicate[] pushedPredicates, Map<String, List<ZoneStats>> zonemapStatsByColumn) {
+    return pruneFragments(pushedPredicates, zonemapStatsByColumn, Collections.emptyMap());
+  }
+
+  /**
+   * Prune fragments using zonemap statistics, retaining fragments the stats do not describe.
+   *
+   * @param uncoveredFragmentsByColumn per column, the fragments its zones do not describe. An
+   *     absent or empty entry means fully described.
+   * @return fragment IDs that might match; empty if no pruning can be derived
+   */
+  public static Optional<Set<Integer>> pruneFragments(
+      Predicate[] pushedPredicates,
+      Map<String, List<ZoneStats>> zonemapStatsByColumn,
+      Map<String, Set<Integer>> uncoveredFragmentsByColumn) {
 
     if (pushedPredicates == null
         || pushedPredicates.length == 0
@@ -77,12 +90,23 @@ public final class ZonemapFragmentPruner {
     Set<Integer> result = null;
     for (Predicate predicate : pushedPredicates) {
       Optional<Set<Integer>> fragmentIds = analyzePredicate(predicate, zonemapStatsByColumn);
-      if (fragmentIds.isPresent()) {
-        if (result == null) {
-          result = new HashSet<>(fragmentIds.get());
-        } else {
-          result.retainAll(fragmentIds.get());
+      if (!fragmentIds.isPresent()) {
+        continue;
+      }
+      // Widen before intersecting: a fragment column B describes but A does not says
+      // nothing about A, so A's predicate must not exclude it.
+      Set<Integer> widened = new HashSet<>(fragmentIds.get());
+      for (String column : referencedColumns(predicate)) {
+        Set<Integer> uncovered = uncoveredFragmentsByColumn.get(column);
+        if (uncovered != null) {
+          widened.addAll(uncovered);
         }
+      }
+
+      if (result == null) {
+        result = widened;
+      } else {
+        result.retainAll(widened);
       }
     }
 
@@ -91,6 +115,16 @@ public final class ZonemapFragmentPruner {
     }
 
     return Optional.of(Collections.unmodifiableSet(result));
+  }
+
+  /** Every column referenced anywhere in a predicate tree, including nested AND/OR/NOT. */
+  private static Set<String> referencedColumns(Predicate predicate) {
+    Set<String> columns = new HashSet<>();
+    for (NamedReference ref : predicate.references()) {
+      String[] names = ref.fieldNames();
+      columns.add(names.length == 1 ? names[0] : String.join(".", names));
+    }
+    return columns;
   }
 
   /**

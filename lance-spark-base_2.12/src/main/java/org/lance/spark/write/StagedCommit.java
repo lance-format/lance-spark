@@ -31,6 +31,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -52,6 +53,7 @@ public class StagedCommit {
   // The non-staged path (LanceBatchWrite) uses boxed Boolean because null means
   // "user didn't specify" and lets lance-core inherit the flag from the manifest.
   private boolean enableStableRowIds;
+  private String fileFormatVersion;
   private List<FragmentMetadata> fragments;
   private Schema schema;
   private ShardingSpec shardingSpec;
@@ -91,9 +93,10 @@ public class StagedCommit {
     this.fragments = new ArrayList<>(fragments);
     this.schema = schema;
     this.datasetUri = datasetUri;
-    this.storageOptions = options.getStorageOptions();
+    this.storageOptions = new HashMap<>(options.getStorageOptions());
     this.isNewTable = datasetUri != null;
     this.enableStableRowIds = options.isEnableStableRowIds();
+    this.fileFormatVersion = options.getFileFormatVersion();
     this.namespace = options.getNamespace();
     this.tableId = options.getTableId();
     this.managedVersioning = options.isManagedVersioning();
@@ -111,8 +114,35 @@ public class StagedCommit {
     this.enableStableRowIds = enableStableRowIds;
   }
 
+  public void setFileFormatVersion(String fileFormatVersion) {
+    this.fileFormatVersion = fileFormatVersion;
+  }
+
   public void setShardingSpec(ShardingSpec shardingSpec) {
     this.shardingSpec = shardingSpec;
+  }
+
+  /**
+   * Merges additional storage options into this staged commit's storage options, for options that
+   * were not yet known when this {@code StagedCommit} was constructed.
+   *
+   * @param extra additional storage options to merge in; a no-op when null or empty. Keys in {@code
+   *     extra} take precedence over any existing entry with the same key.
+   */
+  public void mergeStorageOptions(Map<String, String> extra) {
+    if (extra != null && !extra.isEmpty()) {
+      this.storageOptions.putAll(extra);
+    }
+  }
+
+  /** Returns the current storage options. Visible for testing. */
+  Map<String, String> getStorageOptions() {
+    return storageOptions;
+  }
+
+  /** Returns the current file format version. Visible for testing. */
+  String getFileFormatVersion() {
+    return fileFormatVersion;
   }
 
   /** Performs the actual commit using the stored dataset and fragments. */
@@ -131,6 +161,9 @@ public class StagedCommit {
     if (enableStableRowIds) {
       builder.useStableRowIds(true);
     }
+    if (fileFormatVersion != null) {
+      builder.storageFormat(fileFormatVersion);
+    }
     applyManagedVersioning(builder);
     try (Transaction txn = new Transaction.Builder().operation(operation).build();
         Dataset committed = builder.execute(txn)) {
@@ -148,6 +181,9 @@ public class StagedCommit {
     final CommitBuilder builder =
         new CommitBuilder(uri, LanceRuntime.allocator()).writeParams(storageOptions);
     builder.useStableRowIds(enableStableRowIds);
+    if (fileFormatVersion != null) {
+      builder.storageFormat(fileFormatVersion);
+    }
     applyManagedVersioning(builder);
     try (Dataset committed = commitOperation(builder, version, operation)) {
       SparkLanceShardingUtils.initializeMemWal(committed, shardingSpec);

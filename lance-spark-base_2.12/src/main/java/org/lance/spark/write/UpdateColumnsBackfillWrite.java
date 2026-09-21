@@ -54,6 +54,7 @@ public class UpdateColumnsBackfillWrite implements Write, RequiresDistributionAn
 
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
+  private final boolean managedVersioning;
 
   UpdateColumnsBackfillWrite(
       StructType schema,
@@ -62,7 +63,8 @@ public class UpdateColumnsBackfillWrite implements Write, RequiresDistributionAn
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
-      List<String> tableId) {
+      List<String> tableId,
+      boolean managedVersioning) {
     this.schema = schema;
     this.writeOptions = writeOptions;
     this.updateColumns = updateColumns;
@@ -70,6 +72,7 @@ public class UpdateColumnsBackfillWrite implements Write, RequiresDistributionAn
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
+    this.managedVersioning = managedVersioning;
   }
 
   @Override
@@ -81,7 +84,8 @@ public class UpdateColumnsBackfillWrite implements Write, RequiresDistributionAn
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
-        tableId);
+        tableId,
+        managedVersioning);
   }
 
   @Override
@@ -117,6 +121,7 @@ public class UpdateColumnsBackfillWrite implements Write, RequiresDistributionAn
 
     private final Map<String, String> namespaceProperties;
     private final List<String> tableId;
+    private final boolean managedVersioning;
 
     public UpdateColumnsWriteBuilder(
         StructType schema,
@@ -125,7 +130,8 @@ public class UpdateColumnsBackfillWrite implements Write, RequiresDistributionAn
         Map<String, String> initialStorageOptions,
         String namespaceImpl,
         Map<String, String> namespaceProperties,
-        List<String> tableId) {
+        List<String> tableId,
+        boolean managedVersioning) {
       this.schema = schema;
       this.writeOptions = writeOptions;
       this.updateColumns = updateColumns;
@@ -133,6 +139,7 @@ public class UpdateColumnsBackfillWrite implements Write, RequiresDistributionAn
       this.namespaceImpl = namespaceImpl;
       this.namespaceProperties = namespaceProperties;
       this.tableId = tableId;
+      this.managedVersioning = managedVersioning;
     }
 
     @Override
@@ -144,7 +151,8 @@ public class UpdateColumnsBackfillWrite implements Write, RequiresDistributionAn
           initialStorageOptions,
           namespaceImpl,
           namespaceProperties,
-          tableId);
+          tableId,
+          managedVersioning);
     }
   }
 }

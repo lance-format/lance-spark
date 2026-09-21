@@ -13,17 +13,29 @@
  */
 package org.lance.spark.update;
 
+import org.lance.Transaction;
+import org.lance.operation.CreateIndex;
+import org.lance.spark.LanceDataset;
+import org.lance.spark.utils.Utils;
+
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.catalyst.plans.logical.LanceNamedArgument;
+import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.TableCatalog;
+import org.apache.spark.sql.execution.datasources.v2.LanceOptimizeIndexExec;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import scala.collection.JavaConverters;
 
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.nio.file.Path;
+import java.util.Collections;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -136,5 +148,178 @@ public abstract class BaseOptimizeTest {
     Dataset<Row> result = spark.sql(String.format("optimize %s", fullTable));
 
     Assertions.assertEquals("[10,1,10,1]", result.collectAsList().get(0).toString());
+  }
+
+  @Test
+  public void testOptimizeIndex() {
+    prepareDataset();
+    spark.sql(String.format("alter table %s create index idx_id using zonemap (id)", fullTable));
+    spark.sql(String.format("insert into %s values (10, 'text_10')", fullTable));
+
+    Row before =
+        spark.sql(String.format("show indexes in %s", fullTable)).collectAsList().stream()
+            .filter(row -> "idx_id".equals(row.getAs("name")))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("Index not found: idx_id"));
+    long unindexedFragments = before.getAs("num_unindexed_fragments");
+    Assertions.assertTrue(unindexedFragments > 0);
+
+    Dataset<Row> result =
+        spark.sql(String.format("alter table %s optimize index idx_id", fullTable));
+
+    Assertions.assertEquals(
+        "StructType(StructField(index_name,StringType,false),StructField(fragments_indexed,LongType,false),StructField(segments_before,LongType,false),StructField(segments_after,LongType,false))",
+        result.schema().toString());
+    Row optimized = result.collectAsList().get(0);
+    Assertions.assertEquals("idx_id", optimized.getAs("index_name"));
+    Assertions.assertEquals(unindexedFragments, optimized.<Long>getAs("fragments_indexed"));
+    Assertions.assertTrue(optimized.<Long>getAs("segments_before") > 0);
+    Assertions.assertTrue(optimized.<Long>getAs("segments_after") > 0);
+
+    Row after =
+        spark.sql(String.format("show indexes in %s", fullTable)).collectAsList().stream()
+            .filter(row -> "idx_id".equals(row.getAs("name")))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("Index not found: idx_id"));
+    Assertions.assertEquals(0L, after.<Long>getAs("num_unindexed_fragments"));
+
+    Row noOp =
+        spark
+            .sql(String.format("alter table %s optimize index idx_id", fullTable))
+            .collectAsList()
+            .get(0);
+    Assertions.assertEquals(0L, noOp.<Long>getAs("fragments_indexed"));
+    Assertions.assertEquals(
+        noOp.<Long>getAs("segments_before").longValue(),
+        noOp.<Long>getAs("segments_after").longValue());
+  }
+
+  @Test
+  public void testOptimizeIndexAcceptsMemWalCatchUpCommit() throws Exception {
+    String protocolTableName = tableName + "_protocol";
+    String protocolTable = catalogName + ".default." + protocolTableName;
+    spark.sql(
+        String.format(
+            "create table %s (id int, text string) using lance "
+                + "partitioned by (bucket(4, text))",
+            protocolTable));
+    spark.sql(String.format("insert into %s values (1, 'same-shard')", protocolTable));
+    spark.sql(
+        String.format("alter table %s create index idx_id using zonemap (id)", protocolTable));
+
+    Row noOp =
+        spark
+            .sql(String.format("alter table %s optimize index idx_id", protocolTable))
+            .collectAsList()
+            .get(0);
+    Assertions.assertEquals(0L, noOp.<Long>getAs("fragments_indexed"));
+
+    try (org.lance.Dataset dataset = openDataset(protocolTableName)) {
+      long beforeVersion = dataset.version();
+      CreateIndex emptyCreateIndex =
+          CreateIndex.builder()
+              .withNewIndices(Collections.emptyList())
+              .withRemovedIndices(Collections.emptyList())
+              .build();
+      try (Transaction transaction = new Transaction(beforeVersion, emptyCreateIndex);
+          org.lance.Dataset committed = dataset.commitTransaction(transaction)) {
+        Assertions.assertEquals(beforeVersion + 1, committed.version());
+
+        LanceOptimizeIndexExec exec =
+            new LanceOptimizeIndexExec(
+                null,
+                null,
+                "idx_id",
+                JavaConverters.asScalaBuffer(Collections.<LanceNamedArgument>emptyList()).toSeq());
+        Method indexDelta =
+            LanceOptimizeIndexExec.class.getDeclaredMethod(
+                "indexDelta", org.lance.Dataset.class, long.class, long.class);
+        indexDelta.setAccessible(true);
+        Object delta = indexDelta.invoke(exec, committed, beforeVersion, committed.version());
+
+        Assertions.assertEquals(0L, metric(delta, "fragmentsIndexed"));
+        Assertions.assertEquals(0L, metric(delta, "segmentsAdded"));
+        Assertions.assertEquals(0L, metric(delta, "segmentsRemoved"));
+      }
+    }
+  }
+
+  private org.lance.Dataset openDataset(String currentTableName) throws Exception {
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    LanceDataset table =
+        (LanceDataset) catalog.loadTable(Identifier.of(new String[] {"default"}, currentTableName));
+    return Utils.openDatasetBuilder(table.readOptions())
+        .initialStorageOptions(table.getInitialStorageOptions())
+        .build();
+  }
+
+  private static long metric(Object delta, String name) throws Exception {
+    return ((Long) delta.getClass().getDeclaredMethod(name).invoke(delta)).longValue();
+  }
+
+  @Test
+  public void testOptimizeMissingIndex() {
+    prepareDataset();
+
+    assertOptimizeIndexFails("missing", "", "Index 'missing' does not exist");
+  }
+
+  @Test
+  public void testOptimizeRejectsSystemIndex() {
+    prepareDataset();
+
+    assertOptimizeIndexFails(
+        "__lance_frag_reuse", "", "Cannot optimize system index '__lance_frag_reuse'");
+  }
+
+  @Test
+  public void testOptimizeIndexValidatesOptions() {
+    prepareDataset();
+    spark.sql(String.format("alter table %s create index idx_id using zonemap (id)", fullTable));
+
+    assertOptimizeIndexFails(
+        "idx_id", "with (unknown_option=1)", "Unsupported OPTIMIZE INDEX options: unknown_option");
+    assertOptimizeIndexFails(
+        "idx_id",
+        "with (num_indices_to_merge=0, NUM_INDICES_TO_MERGE=1)",
+        "Duplicate OPTIMIZE INDEX options: num_indices_to_merge");
+    assertOptimizeIndexFails(
+        "idx_id",
+        "with (num_indices_to_merge='two')",
+        "num_indices_to_merge must be a non-negative integer");
+    assertOptimizeIndexFails(
+        "idx_id",
+        "with (num_indices_to_merge=-1)",
+        "num_indices_to_merge must be between 0 and 2147483647");
+    assertOptimizeIndexFails(
+        "idx_id",
+        "with (num_indices_to_merge=2147483648)",
+        "num_indices_to_merge must be between 0 and 2147483647");
+  }
+
+  private void assertOptimizeIndexFails(String indexName, String options, String expectedMessage) {
+    Exception error =
+        Assertions.assertThrows(
+            Exception.class,
+            () ->
+                spark
+                    .sql(
+                        String.format(
+                            "alter table %s optimize index %s %s", fullTable, indexName, options))
+                    .collectAsList());
+    Assertions.assertTrue(
+        exceptionChainMessages(error).contains(expectedMessage),
+        () -> "Expected error containing '" + expectedMessage + "', got: " + error);
+  }
+
+  private static String exceptionChainMessages(Throwable throwable) {
+    StringBuilder messages = new StringBuilder();
+    for (Throwable current = throwable; current != null; current = current.getCause()) {
+      if (current.getMessage() != null) {
+        messages.append(current.getMessage()).append('\n');
+      }
+    }
+    return messages.toString();
   }
 }

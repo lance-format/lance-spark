@@ -5,7 +5,7 @@ Query Lance tables using full-text search (FTS) with the `lance_match`, `lance_m
 !!! warning "Prerequisites"
     - The Lance Spark SQL extension must be enabled. See [Spark SQL Extensions](../../config.md#spark-sql-extensions).
     - The Lance catalog must be the session's default catalog (`spark.sql.defaultCatalog`). Spark resolves unqualified function names against the default catalog; if it points elsewhere, calls to `lance_match`, `lance_match_phrase`, and `lance_multi_match` fail with a "function not found" error.
-    - An FTS index must exist on the target column(s). See [CREATE INDEX — FTS Options](../ddl/create-index.md#fts-options).
+    - An FTS index must exist on the target column(s). See [CREATE INDEX — FTS Options](../ddl/create-index.md#fts-inverted-options).
     - `lance_match_phrase` requires the FTS index to be built with `with_position = true`.
 
 ## lance_match
@@ -119,6 +119,7 @@ WHERE lance_multi_match('machine learning', 'operator=AND', title, body);
 - **WHERE-filter uses full BM25 scoring (no WAND early stopping).** Every row matching the query is evaluated — `wand_factor` is not exposed because SQL WHERE semantics require returning all matching rows.
 - **One FTS predicate per query.** Only a single FTS function call is allowed per `WHERE` clause. For multi-column search, use `lance_multi_match` instead of combining multiple `lance_match` calls with OR.
 - **FTS predicates cannot appear inside OR.** `WHERE lance_match(a, 'x') OR other_condition` is not supported — OR semantics cannot be preserved when pushing a single FTS query to the scanner.
+- **On namespaces that serve queries server-side, row queries currently ignore the FTS predicate.** For a namespace whose `queryTable` is used (`dir`, and REST implementations that do not parse a structured full-text query), the connector sends the predicate as a structured query, which such implementations skip — so `SELECT * FROM t WHERE lance_match(...)` returns every row. A `COUNT(*)` that pushes down (the FTS predicate is the only filter, or all other filters push down too) is not routed server-side and does apply the predicate, so on those namespaces such a count and a row query over the same predicate can disagree. A `COUNT(*)` whose other filters cannot push down is routed server-side like a row query, and is unfiltered there as well. Catalog-only namespaces (Glue, Hive, Iceberg) are unaffected: they fall back to the local per-fragment scan, which applies the predicate on every path.
 
 ## Cost Model
 

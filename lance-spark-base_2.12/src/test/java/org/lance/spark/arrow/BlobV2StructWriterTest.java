@@ -20,21 +20,27 @@ import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.LargeVarBinaryVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.complex.ListVector;
 import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
+import org.apache.spark.sql.catalyst.util.GenericArrayData;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class BlobV2StructWriterTest {
@@ -131,6 +137,59 @@ public class BlobV2StructWriterTest {
     }
   }
 
+  @Test
+  public void testWritesArrayElementsWithBlobMetadata() {
+    StructType sparkSchema = arrayOfBlobV2Schema();
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", true);
+    try (RootAllocator allocator = new RootAllocator(Long.MAX_VALUE);
+        VectorSchemaRoot root = VectorSchemaRoot.create(arrowSchema, allocator)) {
+      LanceArrowWriter writer = LanceArrowWriter.create(root, sparkSchema);
+
+      byte[] first = "first".getBytes(StandardCharsets.UTF_8);
+      byte[] second = "second".getBytes(StandardCharsets.UTF_8);
+      byte[] third = "third".getBytes(StandardCharsets.UTF_8);
+      writer.write(
+          new GenericInternalRow(
+              new Object[] {new GenericArrayData(new Object[] {first, null, second})}));
+      writer.write(new GenericInternalRow(new Object[] {new GenericArrayData(new Object[] {})}));
+      writer.write(new GenericInternalRow(new Object[] {null}));
+      writer.write(
+          new GenericInternalRow(new Object[] {new GenericArrayData(new Object[] {third})}));
+      writer.finish();
+
+      ListVector frames = (ListVector) root.getVector("frames");
+      assertEquals(4, frames.getValueCount());
+      assertFalse(frames.isNull(0));
+      assertFalse(frames.isNull(1));
+      assertTrue(frames.isNull(2));
+      assertFalse(frames.isNull(3));
+      assertEquals(3, ((List<?>) frames.getObject(0)).size());
+      assertEquals(0, ((List<?>) frames.getObject(1)).size());
+      assertNull(frames.getObject(2));
+      assertEquals(1, ((List<?>) frames.getObject(3)).size());
+
+      StructVector elements = (StructVector) frames.getDataVector();
+      assertEquals(4, elements.getValueCount());
+      assertFalse(elements.isNull(0));
+      assertTrue(elements.isNull(1));
+      assertFalse(elements.isNull(2));
+      assertFalse(elements.isNull(3));
+
+      LargeVarBinaryVector data = (LargeVarBinaryVector) elements.getChild("data");
+      assertArrayEquals(first, data.getObject(0));
+      assertTrue(data.isNull(1));
+      assertArrayEquals(second, data.getObject(2));
+      assertArrayEquals(third, data.getObject(3));
+
+      for (String sibling : new String[] {"uri", "position", "size"}) {
+        FieldVector child = elements.getChild(sibling);
+        for (int i = 0; i < elements.getValueCount(); i++) {
+          assertTrue(child.isNull(i));
+        }
+      }
+    }
+  }
+
   private static StructType blobV2Schema() {
     StructType raw =
         new StructType(
@@ -140,5 +199,19 @@ public class BlobV2StructWriterTest {
             });
     Map<String, String> properties = ImmutableMap.of("content.lance.encoding", "blob");
     return SchemaConverter.processSchemaWithProperties(raw, properties, "2.2");
+  }
+
+  private static StructType arrayOfBlobV2Schema() {
+    Metadata elementMetadata =
+        new MetadataBuilder().putString("ARROW:extension:name", "lance.blob.v2").build();
+    Metadata arrayMetadata =
+        new MetadataBuilder()
+            .putString(LanceArrowUtils.LANCE_ELEMENT_METADATA_KEY(), elementMetadata.json())
+            .build();
+    return new StructType(
+        new StructField[] {
+          new StructField(
+              "frames", DataTypes.createArrayType(DataTypes.BinaryType, true), true, arrayMetadata)
+        });
   }
 }

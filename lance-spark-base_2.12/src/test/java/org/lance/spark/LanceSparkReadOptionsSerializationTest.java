@@ -61,18 +61,42 @@ public class LanceSparkReadOptionsSerializationTest {
   }
 
   @Test
-  public void testWithVersionPropagatesFullTextQuery() {
+  public void testWithRefPropagatesFullTextQuery() {
     FullTextQuery fts = FullTextQuery.phrase("quick brown fox", "body", 1);
     LanceSparkReadOptions options =
         LanceSparkReadOptions.builder().datasetUri("s3://bucket/path").fullTextQuery(fts).build();
 
-    LanceSparkReadOptions versioned = options.withVersion(42);
+    LanceSparkReadOptions versioned = options.withRef(LanceRef.ofMain(42));
     Assertions.assertNotNull(
-        versioned.getFullTextQuery(), "fullTextQuery must not be dropped by withVersion()");
-    Assertions.assertEquals(42, versioned.getVersion());
+        versioned.getFullTextQuery(), "fullTextQuery must not be dropped by withRef()");
+    Assertions.assertEquals(42, versioned.getRef().getVersionNumber().get());
     Assertions.assertTrue(
         org.lance.spark.utils.FullTextQueryUtils.equals(
             options.getFullTextQuery(), versioned.getFullTextQuery()));
+  }
+
+  @Test
+  public void testFromOptionsParsesBranch() {
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.from(
+            Collections.singletonMap(LanceSparkReadOptions.CONFIG_BRANCH, "audit"),
+            "s3://bucket/path");
+
+    Assertions.assertEquals(LanceRef.ofBranch("audit"), options.getRef());
+  }
+
+  @Test
+  public void testFromOptionsRejectsBranchAndVersion() {
+    Map<String, String> options = new HashMap<>();
+    options.put(LanceSparkReadOptions.CONFIG_BRANCH, "audit");
+    options.put(LanceSparkReadOptions.CONFIG_VERSION, "2");
+
+    IllegalArgumentException exception =
+        Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> LanceSparkReadOptions.from(options, "s3://bucket/path"));
+    Assertions.assertTrue(exception.getMessage().contains("branch"));
+    Assertions.assertTrue(exception.getMessage().contains("version"));
   }
 
   @Test
@@ -125,15 +149,15 @@ public class LanceSparkReadOptionsSerializationTest {
   }
 
   @Test
-  public void testWithVersionPropagatesMultiMatchQuery() {
+  public void testWithRefPropagatesMultiMatchQuery() {
     FullTextQuery fts = FullTextQuery.multiMatch("quick fox", Arrays.asList("title", "body"));
     LanceSparkReadOptions options =
         LanceSparkReadOptions.builder().datasetUri("s3://bucket/path").fullTextQuery(fts).build();
 
-    LanceSparkReadOptions versioned = options.withVersion(7);
+    LanceSparkReadOptions versioned = options.withRef(LanceRef.ofMain(7));
     Assertions.assertNotNull(
-        versioned.getFullTextQuery(), "fullTextQuery must not be dropped by withVersion()");
-    Assertions.assertEquals(7, versioned.getVersion());
+        versioned.getFullTextQuery(), "fullTextQuery must not be dropped by withRef()");
+    Assertions.assertEquals(7, versioned.getRef().getVersionNumber().get());
     Assertions.assertTrue(
         org.lance.spark.utils.FullTextQueryUtils.equals(
             options.getFullTextQuery(), versioned.getFullTextQuery()));
@@ -247,17 +271,63 @@ public class LanceSparkReadOptionsSerializationTest {
   }
 
   @Test
-  public void testExecutorCredentialRefreshPreservedByWithVersion() {
+  public void testCacheBackendConfigurationSurvivesSerialization()
+      throws IOException, ClassNotFoundException {
+    Map<String, String> catalogOpts = new HashMap<>();
+    catalogOpts.put("index_cache_backend", "moka://?capacity=1048576");
+    catalogOpts.put("metadata_cache_backend", "moka://?capacity=524288");
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder()
+            .datasetUri("s3://bucket/path")
+            .catalogName("cache-catalog")
+            .withCatalogDefaults(LanceSparkCatalogConfig.from(catalogOpts))
+            .build();
+
+    ByteArrayOutputStream output = new ByteArrayOutputStream();
+    try (ObjectOutputStream objectOutput = new ObjectOutputStream(output)) {
+      objectOutput.writeObject(options);
+    }
+
+    LanceSparkReadOptions deserialized;
+    try (ObjectInputStream objectInput =
+        new ObjectInputStream(new ByteArrayInputStream(output.toByteArray()))) {
+      deserialized = (LanceSparkReadOptions) objectInput.readObject();
+    }
+
+    Assertions.assertEquals("cache-catalog", deserialized.getCatalogName());
+    Assertions.assertEquals("moka://?capacity=1048576", deserialized.getIndexCacheBackend());
+    Assertions.assertEquals("moka://?capacity=524288", deserialized.getMetadataCacheBackend());
+  }
+
+  @Test
+  public void testWithRefPreservesCacheBackendConfiguration() {
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder()
+            .datasetUri("s3://bucket/path")
+            .catalogName("cache-catalog")
+            .indexCacheBackend("moka://?capacity=1048576")
+            .metadataCacheBackend("moka://?capacity=524288")
+            .build();
+
+    LanceSparkReadOptions pinned = options.withRef(LanceRef.ofMain(7));
+
+    Assertions.assertEquals("cache-catalog", pinned.getCatalogName());
+    Assertions.assertEquals("moka://?capacity=1048576", pinned.getIndexCacheBackend());
+    Assertions.assertEquals("moka://?capacity=524288", pinned.getMetadataCacheBackend());
+  }
+
+  @Test
+  public void testExecutorCredentialRefreshPreservedByWithRef() {
     LanceSparkReadOptions options =
         LanceSparkReadOptions.builder()
             .datasetUri("s3://bucket/path")
             .executorCredentialRefresh(false)
             .build();
 
-    LanceSparkReadOptions pinned = options.withVersion(7);
+    LanceSparkReadOptions pinned = options.withRef(LanceRef.ofMain(7));
     Assertions.assertFalse(
         pinned.isExecutorCredentialRefresh(),
-        "withVersion() must propagate the executor_credential_refresh flag");
+        "withRef() must propagate the executor_credential_refresh flag");
   }
 
   @Test

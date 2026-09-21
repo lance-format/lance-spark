@@ -195,6 +195,29 @@ How to read these together:
 - **Catalog overhead**: `datasetOpenTimeNs` accumulates per fragment opened. If many fragments are
   opened per task, this can dominate; metadata cache size and namespace caching matter most here.
 
+### Custom Write Metrics
+
+The write path reports two per-task metrics.
+
+| Metric | SQL tab | Stage metric | Description |
+|---|---|---|---|
+| `recordsWritten` | yes | `outputRecords` | Rows handed to this task's writer. |
+| `bytesWritten` | no | `outputBytes` | Total size of the Lance data files this task produced. |
+
+Spark special-cases both names: `execution.metric.CustomMetrics.updateMetrics` matches exactly
+`bytesWritten` and `recordsWritten` and forwards them to the task's output metrics, which is what
+populates stage-level `outputBytes` / `outputRecords` in the Stages UI and the history server REST
+API. That happens whether or not the connector advertises them as SQL metrics.
+
+`bytesWritten` is not advertised as a SQL metric. SQL metrics come from
+`DataWriter.currentMetricsValues()`, whose last poll is just before `commit()`, and Lance fragments
+only complete inside `commit()` unless the write is sharded. The SQL tab would therefore show 0, so
+the writer publishes the byte total straight to output metrics at the end of `commit()` instead.
+
+A failed task attempt clears its own output metrics in `abort()`. Spark folds a task's metrics into
+the stage totals whatever its end reason, so without that clear a retried write would report the
+failed attempt's partial rows on top of the retry's full count.
+
 ## Caching
 
 Lance Spark uses a multi-level caching strategy to minimize redundant I/O and improve query performance.
@@ -216,6 +239,18 @@ Lance Spark implements two levels of caching:
     - Each dataset is opened only once per worker
     - All workers read the same version for snapshot isolation
     - Fragments are pre-loaded and cached per dataset
+
+### Cache Backend
+
+The index and metadata cache backend can be selected independently for each Spark catalog. For
+example:
+
+```bash
+--conf 'spark.sql.catalog.lance.index_cache_backend=moka://?capacity=8589934592' \
+--conf 'spark.sql.catalog.lance.metadata_cache_backend=moka://?capacity=2147483648'
+```
+
+See [Cache Backends](config.md#cache-backends) for backend registration, switching, and precedence.
 
 ### Index Cache Size
 

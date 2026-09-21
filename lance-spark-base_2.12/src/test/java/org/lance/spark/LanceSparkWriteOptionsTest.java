@@ -29,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Tests for {@link LanceSparkWriteOptions}. */
@@ -37,16 +38,30 @@ public class LanceSparkWriteOptionsTest {
   private final String TEMP_URL = "file:///tmp/test";
 
   @Test
-  public void versionIsNullByDefault() {
+  public void refIsNullByDefault() {
     LanceSparkWriteOptions opts = LanceSparkWriteOptions.from(TEMP_URL);
-    assertNull(opts.getVersion());
+    assertNull(opts.getRef());
   }
 
   @Test
-  public void builderSetsVersion() {
+  public void builderSetsRef() {
     LanceSparkWriteOptions opts =
-        LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).version(7L).build();
-    assertEquals(7L, opts.getVersion());
+        LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).ref(LanceRef.ofMain(7L)).build();
+    assertEquals(7L, opts.getRef().getVersionNumber().get());
+  }
+
+  @Test
+  public void testWriteOptionsRejectBranch() {
+    Map<String, String> options = new HashMap<>();
+    options.put(LanceSparkReadOptions.CONFIG_BRANCH, "audit");
+
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(options).build());
+
+    assertTrue(exception.getMessage().contains("read-only"));
   }
 
   @Test
@@ -67,11 +82,20 @@ public class LanceSparkWriteOptionsTest {
   }
 
   @Test
-  public void withVersionCopiesOptions() {
-    LanceSparkWriteOptions base = LanceSparkWriteOptions.from(TEMP_URL);
-    LanceSparkWriteOptions pinned = base.withVersion(3L);
-    assertEquals(3L, pinned.getVersion());
-    assertNull(base.getVersion());
+  public void withRefCopiesOptions() {
+    LanceSparkWriteOptions base =
+        LanceSparkWriteOptions.builder()
+            .datasetUri(TEMP_URL)
+            .catalogName("cache-catalog")
+            .indexCacheBackend("moka://?capacity=1048576")
+            .metadataCacheBackend("moka://?capacity=524288")
+            .build();
+    LanceSparkWriteOptions pinned = base.withRef(LanceRef.ofMain(3L));
+    assertEquals(3L, pinned.getRef().getVersionNumber().get());
+    assertNull(base.getRef());
+    assertEquals("cache-catalog", pinned.getCatalogName());
+    assertEquals("moka://?capacity=1048576", pinned.getIndexCacheBackend());
+    assertEquals("moka://?capacity=524288", pinned.getMetadataCacheBackend());
   }
 
   @Test
@@ -181,6 +205,26 @@ public class LanceSparkWriteOptionsTest {
     // Catalog keys are carried into storage options as well as typed fields.
     assertEquals("512", writeOptions.getStorageOptions().get("batch_size"));
     assertEquals("8192", writeOptions.getStorageOptions().get("blob_pack_file_size_threshold"));
+  }
+
+  @Test
+  public void testWithCatalogDefaultsCopiesCacheBackends() {
+    final Map<String, String> catalogOptions = new HashMap<>();
+    catalogOptions.put("index_cache_backend", "moka://?capacity=1048576");
+    catalogOptions.put("metadata_cache_backend", "moka://?capacity=524288");
+
+    final LanceSparkWriteOptions writeOptions =
+        LanceSparkWriteOptions.builder()
+            .datasetUri(TEMP_URL)
+            .catalogName("cache-catalog")
+            .withCatalogDefaults(LanceSparkCatalogConfig.from(catalogOptions))
+            .build();
+
+    assertEquals("cache-catalog", writeOptions.getCatalogName());
+    assertEquals("moka://?capacity=1048576", writeOptions.getIndexCacheBackend());
+    assertEquals("moka://?capacity=524288", writeOptions.getMetadataCacheBackend());
+    assertFalse(writeOptions.getStorageOptions().containsKey("index_cache_backend"));
+    assertFalse(writeOptions.getStorageOptions().containsKey("metadata_cache_backend"));
   }
 
   @Test
@@ -323,7 +367,7 @@ public class LanceSparkWriteOptionsTest {
             .datasetUri(TEMP_URL)
             .fromOptions(options)
             .blobPackFileSizeThreshold(8192L)
-            .version(7L)
+            .ref(LanceRef.ofMain(7L))
             .namespace(stubNamespace)
             .build()
             .toBuilder()
@@ -346,7 +390,7 @@ public class LanceSparkWriteOptionsTest {
     assertEquals(256, copy.getBatchSize());
     assertEquals(4096L, copy.getMaxBatchBytes());
     assertEquals(Long.valueOf(8192L), copy.getBlobPackFileSizeThreshold());
-    assertEquals(7L, copy.getVersion());
+    assertEquals(7L, copy.getRef().getVersionNumber().get());
     assertNull(
         copy.getNamespace(),
         "namespace is transient: the non-null stub set above must not survive serialization");

@@ -1,13 +1,6 @@
-# Full Spark download versions for Docker images
+# Spark tarball versions
 SPARK_DOWNLOAD_VERSION_3.4 := 3.4.4
 SPARK_DOWNLOAD_VERSION_3.5 := 3.5.8
 SPARK_DOWNLOAD_VERSION_4.0 := 4.0.2
 SPARK_DOWNLOAD_VERSION_4.1 := 4.1.1
 SPARK_DOWNLOAD_VERSION_4.2 := 4.2.0
-
-# Py4J versions bundled with each Spark release
-PY4J_VERSION_3.4 := 0.10.9.7
-PY4J_VERSION_3.5 := 0.10.9.7
-PY4J_VERSION_4.0 := 0.10.9.9
-PY4J_VERSION_4.1 := 0.10.9.9
-PY4J_VERSION_4.2 := 0.10.9.9

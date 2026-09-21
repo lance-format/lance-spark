@@ -74,6 +74,7 @@ public class LancePositionDeltaDataset extends LanceDataset implements SupportsR
   @Override
   public RowLevelOperationBuilder newRowLevelOperationBuilder(
       RowLevelOperationInfo rowLevelOperationInfo) {
+    ensureWritable();
     return new LanceRowLevelOperationBuilder(
         rowLevelOperationInfo.command(),
         sparkSchema,

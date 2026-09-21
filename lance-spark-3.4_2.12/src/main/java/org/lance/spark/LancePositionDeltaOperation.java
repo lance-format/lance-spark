@@ -90,7 +90,10 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
             .datasetUri(readOptions.getDatasetUri())
             .storageOptions(readOptions.getStorageOptions())
             .namespace(readOptions.getNamespace())
-            .tableId(readOptions.getTableId());
+            .tableId(readOptions.getTableId())
+            .catalogName(readOptions.getCatalogName())
+            .indexCacheBackend(readOptions.getIndexCacheBackend())
+            .metadataCacheBackend(readOptions.getMetadataCacheBackend());
     if (fileFormatVersion != null) {
       writeOptionsBuilder.fileFormatVersion(fileFormatVersion);
     }

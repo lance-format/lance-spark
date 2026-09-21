@@ -103,7 +103,7 @@ public class UpdateColumnsConflictTest {
 
       UpdateColumnsBackfillBatchWrite updateWrite =
           new UpdateColumnsBackfillBatchWrite(
-              updateSchema, writeOptions, updateColumns, null, null, null, null);
+              updateSchema, writeOptions, updateColumns, null, null, null, null, false);
 
       // Simulate executor work: write updated column values
       DataWriterFactory factory = updateWrite.createBatchWriterFactory(() -> 1);
