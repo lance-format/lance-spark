@@ -290,9 +290,11 @@ These options control how data is written to Lance datasets. They can be set usi
 | `max_bytes_per_file`     | Long    | -        | Maximum size in bytes per Lance file.                                                |
 | `file_format_version`   | String  | -        | Lance file format version: `LEGACY` or `STABLE`.                                     |
 | `batch_size`             | Integer | `512`    | Number of rows per batch during writing.                                             |
+| `max_batch_bytes`        | Long    | `268435456` (256 MiB) | Maximum bytes per write batch. A batch flushes when either `batch_size` rows or this byte size is reached, whichever comes first, bounding memory for large rows. |
 | `use_queued_write_buffer`| Boolean | `false`  | Use pipelined write buffer for improved throughput.                                  |
 | `queue_depth`            | Integer | `8`      | Queue depth for pipelined writes (only used when `use_queued_write_buffer=true`).    |
 | `use_large_var_types`    | Boolean | `false`  | Use 64-bit offset vectors for all string/binary columns to avoid 2GB batch limit. See [Large Var Types](#large-var-types).   |
+| `enable_stable_row_ids`  | Boolean | -        | Enable stable row IDs (persistent row tracking). When unset, the value is inherited from the existing dataset's manifest. |
 | `blob_pack_file_size_threshold` | Long | `1073741824` (1 GiB) | Maximum size in bytes for blob v2 pack (`.blob`) sidecar files. When a pack file reaches this size, a new one is started. |
 
 ### Example: Controlling File Size
