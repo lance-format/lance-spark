@@ -242,7 +242,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     }
 
     // Initialize the namespace with proper configuration
-    Map<String, String> namespaceOptions = new HashMap<>(options);
+    Map<String, String> namespaceOptions = new HashMap<>(options.asCaseSensitiveMap());
 
     // Save namespace impl and properties for serialization to workers
     this.namespaceImpl = impl;
