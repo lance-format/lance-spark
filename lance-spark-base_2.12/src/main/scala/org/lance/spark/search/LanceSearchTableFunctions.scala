@@ -355,8 +355,7 @@ object LanceSearchTableFunctions {
     parsed.get(name).map(value => toFloat(literalValue(value)))
 
   private def optionalBoolean(parsed: ParsedArgs, name: String): Option[java.lang.Boolean] =
-    parsed.get(name).map(value =>
-      java.lang.Boolean.valueOf(literalValue(value).asInstanceOf[Boolean]))
+    parsed.get(name).map(value => toBoolean(literalValue(value), name))
 
   private def literalArray(expr: Expression): Seq[Any] = expr match {
     case array: CreateArray => array.children.map(literalValue)
@@ -386,6 +385,14 @@ object LanceSearchTableFunctions {
 
   private def toFloat(value: Any): java.lang.Float =
     java.lang.Float.valueOf(toNumber(value).floatValue())
+
+  private def toBoolean(value: Any, name: String): java.lang.Boolean = value match {
+    case bool: java.lang.Boolean => bool
+    case bool: Boolean => java.lang.Boolean.valueOf(bool)
+    case other =>
+      throw new IllegalArgumentException(
+        s"'$name' must be a boolean literal (true/false), got: $other")
+  }
 
   private def namedArgument(expr: Expression): Option[(String, Expression)] = {
     if (expr.getClass.getName != NamedArgumentExpressionClass) {
