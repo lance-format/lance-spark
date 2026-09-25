@@ -65,6 +65,29 @@ public class LanceSparkWriteOptionsTest {
   }
 
   @Test
+  public void testQueueDepthMustBePositive() {
+    Map<String, String> zero = new HashMap<>();
+    zero.put(LanceSparkWriteOptions.CONFIG_QUEUE_DEPTH, "0");
+    IllegalArgumentException zeroEx =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(zero).build());
+    assertTrue(zeroEx.getMessage().contains("queue_depth"));
+
+    Map<String, String> negative = new HashMap<>();
+    negative.put(LanceSparkWriteOptions.CONFIG_QUEUE_DEPTH, "-1");
+    IllegalArgumentException negativeEx =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                LanceSparkWriteOptions.builder()
+                    .datasetUri(TEMP_URL)
+                    .fromOptions(negative)
+                    .build());
+    assertTrue(negativeEx.getMessage().contains("queue_depth"));
+  }
+
+  @Test
   public void fileFormatVersionUsesValueEquality() {
     LanceSparkWriteOptions left =
         LanceSparkWriteOptions.builder()

@@ -544,7 +544,9 @@ public class LanceSparkWriteOptions implements Serializable {
             Boolean.parseBoolean(options.get(CONFIG_USE_QUEUED_WRITE_BUFFER));
       }
       if (options.containsKey(CONFIG_QUEUE_DEPTH)) {
-        this.queueDepth = Integer.parseInt(options.get(CONFIG_QUEUE_DEPTH));
+        int parsedQueueDepth = Integer.parseInt(options.get(CONFIG_QUEUE_DEPTH));
+        Preconditions.checkArgument(parsedQueueDepth > 0, "queue_depth must be positive");
+        this.queueDepth = parsedQueueDepth;
       }
       if (options.containsKey(CONFIG_BATCH_SIZE)) {
         int parsedBatchSize = Integer.parseInt(options.get(CONFIG_BATCH_SIZE));
