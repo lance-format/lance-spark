@@ -117,6 +117,107 @@ public abstract class BaseUpdateColumnsBackfillTest {
   }
 
   @Test
+  public void testUpdateAcrossArrowBatchesPreservesUnmatchedRows() {
+    spark.sql(String.format("create table %s (id bigint, name string) using lance", fullTable));
+    spark.sql(
+        String.format(
+            "insert into %s select /*+ COALESCE(1) */ id, concat('name-', id) from range(8202)",
+            fullTable));
+    spark.sql(
+        String.format(
+            "create temporary view batch_source as select _rowaddr, _fragid, "
+                + "concat(name, '-updated') as name from %s where id < 8201",
+            fullTable));
+
+    spark.sql(String.format("alter table %s update columns name from batch_source", fullTable));
+
+    assertEquals(8202L, spark.table(fullTable).count());
+    assertEquals(
+        0L,
+        spark
+            .sql(
+                String.format(
+                    "select * from %s where not (name <=> concat('name-', id, "
+                        + "case when id < 8201 then '-updated' else '' end))",
+                    fullTable))
+            .count());
+  }
+
+  @Test
+  public void testUpdateInterleavedFragmentsInOneTask() {
+    spark.conf().set("spark.sql.shuffle.partitions", "1");
+    spark.sql(String.format("create table %s (id bigint, value bigint) using lance", fullTable));
+    for (int parity = 0; parity < 2; parity++) {
+      spark.sql(
+          String.format(
+              "insert into %s select /*+ COALESCE(1) */ id * 2 + %d, 0L from range(3)",
+              fullTable, parity));
+    }
+    assertEquals(2L, spark.sql("select distinct _fragid from " + fullTable).count());
+    spark.sql(
+        String.format(
+            "create temporary view interleaved_source as select _rowaddr, _fragid, "
+                + "id * 10 as value from %s order by id",
+            fullTable));
+
+    spark.sql(
+        String.format("alter table %s update columns value from interleaved_source", fullTable));
+
+    assertEquals(6L, spark.table(fullTable).count());
+    assertEquals(0L, spark.sql("select * from " + fullTable + " where value != id * 10").count());
+  }
+
+  /**
+   * Fragment f holds ids {f, f + 6}, so ordering the source by id interleaves the fragments.
+   * Updating ids {1, 3, 5, 7} splits fragment 1 around fragments 3 and 5 and leaves fragments 0, 2
+   * and 4 alone: unmatched rows must keep their old values and the row count must not change.
+   */
+  @Test
+  public void testUpdateAcrossManyFragmentsInOneTaskPreservesUnmatched() {
+    spark.conf().set("spark.sql.shuffle.partitions", "1");
+    spark.sql(String.format("create table %s (id bigint, value bigint) using lance", fullTable));
+    for (int i = 0; i < 6; i++) {
+      spark.sql(
+          String.format(
+              "insert into %s select /*+ COALESCE(1) */ id * 6 + %d, "
+                  + "(id * 6 + %d) * 10 from range(2)",
+              fullTable, i, i));
+    }
+    assertEquals(12L, spark.table(fullTable).count());
+    assertEquals(6L, spark.sql("select distinct _fragid from " + fullTable).count());
+
+    spark.sql(
+        String.format(
+            "create temporary view many_fragments_update as select _rowaddr, _fragid, "
+                + "value + 1000 as value from %s where id in (1, 3, 5, 7) order by id",
+            fullTable));
+    spark.sql(
+        String.format("alter table %s update columns value from many_fragments_update", fullTable));
+
+    assertEquals(12L, spark.table(fullTable).count());
+    assertEquals(
+        12L, spark.sql(String.format("select count(*) from %s", fullTable)).first().getLong(0));
+    assertEquals(6L, spark.sql("select distinct _fragid from " + fullTable).count());
+    assertEquals(
+        0L,
+        spark
+            .sql(
+                String.format(
+                    "select * from %s where not (value <=> case when id in (1, 3, 5, 7) "
+                        + "then id * 10 + 1000 else id * 10 end)",
+                    fullTable))
+            .count());
+    for (Row row :
+        spark
+            .sql(String.format("select id, value from %s order by id", fullTable))
+            .collectAsList()) {
+      long id = row.getLong(0);
+      boolean matched = id == 1 || id == 3 || id == 5 || id == 7;
+      assertEquals(matched ? id * 10 + 1000 : id * 10, row.getLong(1), "value for id=" + id);
+    }
+  }
+
+  @Test
   public void testUpdateMatchingRows() {
     // Test case: target has id 1, 2, 3; source has id 2, 4
     // Expected: only id=2 is updated, id=1,3 unchanged, id=4 ignored

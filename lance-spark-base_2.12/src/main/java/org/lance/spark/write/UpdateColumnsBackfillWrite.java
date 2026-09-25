@@ -20,6 +20,7 @@ import org.apache.spark.sql.connector.distributions.Distribution;
 import org.apache.spark.sql.connector.distributions.Distributions;
 import org.apache.spark.sql.connector.expressions.Expressions;
 import org.apache.spark.sql.connector.expressions.NamedReference;
+import org.apache.spark.sql.connector.expressions.SortDirection;
 import org.apache.spark.sql.connector.expressions.SortOrder;
 import org.apache.spark.sql.connector.write.BatchWrite;
 import org.apache.spark.sql.connector.write.RequiresDistributionAndOrdering;
@@ -101,7 +102,9 @@ public class UpdateColumnsBackfillWrite implements Write, RequiresDistributionAn
 
   @Override
   public SortOrder[] requiredOrdering() {
-    return new SortOrder[0];
+    return new SortOrder[] {
+      Expressions.sort(Expressions.column(LanceConstant.FRAGMENT_ID), SortDirection.ASCENDING)
+    };
   }
 
   /** Write builder for UPDATE COLUMNS FROM command. */
