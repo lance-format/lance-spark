@@ -107,6 +107,10 @@ jobs:
           AWS_GLUE_CATALOG_ID: ${{ secrets.AWS_GLUE_CATALOG_ID }}
           AWS_GLUE_ROOT: s3://${{ secrets.AWS_S3_BUCKET_NAME }}/lance_spark_glue_test_${{ github.run_id }}_${{ github.run_attempt }}_${{ env.SPARK_VERSION }}_${{ env.SCALA_VERSION }}
           TEST_BACKENDS: ${{ env.TEST_BACKENDS }}
+          # Give each CI run its own Glue database so concurrent PR runs never
+          # collide on shared table names, and an interrupted/cancelled run can
+          # never leave orphaned table entries behind to poison later runs.
+          LANCE_TEST_NAMESPACE: lancetest_${{ github.run_id }}_${{ github.run_attempt }}
         uses: ./.github/actions/pytest-integration
         with:
           spark-version: ${{ env.SPARK_VERSION }}
@@ -120,8 +124,21 @@ jobs:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
           AWS_S3_BUCKET_NAME: ${{ secrets.AWS_S3_BUCKET_NAME }}
+          AWS_GLUE_CATALOG_ID: ${{ secrets.AWS_GLUE_CATALOG_ID }}
           AWS_GLUE_ROOT: s3://${{ secrets.AWS_S3_BUCKET_NAME }}/lance_spark_glue_test_${{ github.run_id }}_${{ github.run_attempt }}_${{ env.SPARK_VERSION }}_${{ env.SCALA_VERSION }}
+          LANCE_TEST_NAMESPACE: lancetest_${{ github.run_id }}_${{ github.run_attempt }}
         run: |
-          if [ -n "${AWS_S3_BUCKET_NAME}" ]; then
-            aws s3 rm "${AWS_GLUE_ROOT}" --recursive || true
+          if [ -z "${AWS_S3_BUCKET_NAME}" ]; then
+            exit 0
           fi
+          # Drop the per-run Glue database (and every table it still holds) so an
+          # interrupted or cancelled run can never leave orphaned table entries
+          # behind. Best-effort: cleanup must never fail the job.
+          glue_args=(--region "${AWS_REGION}" --name "${LANCE_TEST_NAMESPACE}")
+          if [ -n "${AWS_GLUE_CATALOG_ID}" ]; then
+            glue_args+=(--catalog-id "${AWS_GLUE_CATALOG_ID}")
+          fi
+          echo "Deleting Glue database ${LANCE_TEST_NAMESPACE}"
+          aws glue delete-database "${glue_args[@]}" || true
+          echo "Removing S3 data under ${AWS_GLUE_ROOT}"
+          aws s3 rm "${AWS_GLUE_ROOT}" --recursive || true
