@@ -22,6 +22,8 @@ import org.apache.spark.sql.catalyst.parser.{ParameterContext, ParseException, P
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.types.{DataType, StructType}
 
+import java.util.Locale
+
 class LanceSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserInterface {
 
   private lazy val astBuilder = new LanceSqlExtensionsAstBuilder(delegate)
@@ -114,7 +116,7 @@ class LanceSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserInt
   }
 
   private def rejectStandardCreateIndex(sqlText: String): Unit = {
-    if (sqlText.trim.toUpperCase.startsWith("CREATE INDEX")) {
+    if (sqlText.trim.toUpperCase(Locale.ROOT).startsWith("CREATE INDEX")) {
       throw new UnsupportedOperationException(
         "Lance does not support standard CREATE INDEX syntax. " +
           "Use: ALTER TABLE <table> CREATE INDEX <name> USING <method> (<columns>)")
