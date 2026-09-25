@@ -156,6 +156,15 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
           BlobSizeColumnVector sizeVector = new BlobSizeColumnVector((StructVector) blobVector);
           fieldVectors.add(sizeVector);
         }
+      } else if (fieldName.equals(LanceConstant.SCORE)) {
+        FieldVector vector = actualFields.get(fieldName);
+        if (vector == null) {
+          throw new IllegalStateException(
+              "Lance scan did not return '_score'. This indicates a full-text query was expected "
+                  + "but not applied to the native scanner. Verify that the FTS predicate rule "
+                  + "injected the query into the relation options.");
+        }
+        fieldVectors.add(new LanceArrowColumnVector(vector, false, field));
       } else {
         FieldVector vector = actualFields.get(fieldName);
         if (vector == null) {
