@@ -42,7 +42,7 @@ case class LanceDataSourceV2Strategy(session: SparkSession) extends SparkStrateg
       AddIndexExec(
         asTableCatalog(catalog),
         ident,
-        indexName.toLowerCase,
+        indexName.toLowerCase(Locale.ROOT),
         method,
         columns,
         args) :: Nil
@@ -51,7 +51,7 @@ case class LanceDataSourceV2Strategy(session: SparkSession) extends SparkStrateg
       ShowIndexesExec(asTableCatalog(catalog), ident) :: Nil
 
     case LanceDropIndex(ResolvedIdentifier(catalog, ident), indexName) =>
-      LanceDropIndexExec(asTableCatalog(catalog), ident, indexName.toLowerCase) :: Nil
+      LanceDropIndexExec(asTableCatalog(catalog), ident, indexName.toLowerCase(Locale.ROOT)) :: Nil
 
     case LanceOptimizeIndex(ResolvedIdentifier(catalog, ident), indexName, args) =>
       LanceOptimizeIndexExec(

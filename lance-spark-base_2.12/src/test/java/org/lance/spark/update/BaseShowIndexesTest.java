@@ -35,6 +35,7 @@ import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -264,5 +265,44 @@ public abstract class BaseShowIndexesTest {
     Assertions.assertEquals(1, rows.size());
     Assertions.assertEquals("test_index", rows.get(0).getString(0));
     Assertions.assertEquals("btree", rows.get(0).getString(2));
+  }
+
+  @Test
+  public void testIndexNameLoweringIsLocaleIndependent() {
+    // The index name is lowercased before it reaches Lance. That fold must use Locale.ROOT:
+    // under the Turkish locale 'I' lowercases to the dotless 'ı', so "MyIndex" would be stored
+    // as "myındex" instead of "myindex", and a CREATE/DROP/OPTIMIZE issued from a process with a
+    // different default locale would no longer resolve the same index.
+    //
+    // The dataset is built under the default locale on purpose: only the index DDL is run under
+    // the Turkish locale, to isolate the index-name fold from unrelated locale-sensitive paths.
+    prepareDataset();
+
+    Locale previous = Locale.getDefault();
+    try {
+      Locale.setDefault(new Locale("tr", "TR"));
+      spark.sql(String.format("alter table %s create index MyIndex using btree (id)", fullTable));
+    } finally {
+      Locale.setDefault(previous);
+    }
+
+    List<Row> rows = spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+    Assertions.assertEquals(1, rows.size(), "expected exactly one user index");
+    Assertions.assertEquals(
+        "myindex",
+        rows.get(0).getString(0),
+        "index name must be lowercased with Locale.ROOT, not the JVM default locale");
+
+    // DROP with the same typed name, also run under the Turkish locale, must resolve to the
+    // ROOT-lowercased index and remove it.
+    try {
+      Locale.setDefault(new Locale("tr", "TR"));
+      spark.sql(String.format("alter table %s drop index MyIndex", fullTable));
+    } finally {
+      Locale.setDefault(previous);
+    }
+    Assertions.assertTrue(
+        spark.sql(String.format("show indexes from %s", fullTable)).collectAsList().isEmpty(),
+        "DROP INDEX must remove the index regardless of the default locale");
   }
 }
