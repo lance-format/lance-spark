@@ -591,6 +591,21 @@ df = spark.read \
     .load("/path/to/dataset.lance")
 ```
 
+## Executor Credential Refresh
+
+Set `executor_credential_refresh` to `false` to stop executors from rebuilding the namespace client to refresh credentials on every fragment scan. Default is `true`.
+
+Set it to `false` for catalogs that authenticate per call and whose executors lack those credentials — notably Hive Metastore over Kerberos, where executors typically have no Kerberos TGT and the refresh call would otherwise fail with `GSS initiate failed`. Leave it at the default when the namespace vends short-lived credentials (REST/Iceberg, Polaris, Unity) and a scan may outlive the credential TTL.
+
+```python
+df = spark.read \
+    .format("lance") \
+    .option("executor_credential_refresh", "false") \
+    .load("/path/to/dataset.lance")
+```
+
+It can also be set once on the catalog via `spark.sql.catalog.{name}.executor_credential_refresh`.
+
 ## Memory Configuration
 
 Lance Spark uses Arrow for data transfer between native code and Spark, and maintains caches for improved performance.
