@@ -148,6 +148,33 @@ public abstract class BaseAddColumnsBackfillTest {
   }
 
   @Test
+  public void testNestedColumnAcrossArrowBatches() {
+    spark.sql(String.format("create table %s (id bigint, text string) using lance", fullTable));
+    spark.sql(
+        String.format(
+            "insert into %s select /*+ COALESCE(1) */ id, concat('label-', id) from range(8201)",
+            fullTable));
+    spark.sql(
+        String.format(
+            "create temporary view nested_source as select _rowaddr, _fragid, "
+                + "array(named_struct('label', text)) as labels from %s",
+            fullTable));
+
+    spark.sql(String.format("alter table %s add columns labels from nested_source", fullTable));
+
+    assertEquals(8201L, spark.table(fullTable).count());
+    assertEquals(
+        0L,
+        spark
+            .sql(
+                String.format(
+                    "select * from %s where size(labels) != 1 "
+                        + "or not (labels[0].label <=> concat('label-', id))",
+                    fullTable))
+            .count());
+  }
+
+  @Test
   public void testWithSql() {
     prepareDataset();
 
