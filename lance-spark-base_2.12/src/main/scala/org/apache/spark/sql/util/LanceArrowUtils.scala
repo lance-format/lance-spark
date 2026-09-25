@@ -51,6 +51,9 @@ object LanceArrowUtils {
   val ARROW_DATE_MILLISECOND_KEY = DateMilliUtils.ARROW_DATE_MILLISECOND_KEY
   val ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY =
     FixedSizeBinaryUtils.ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY
+  // Spark's ArrayType covers both Arrow List (32-bit offsets) and LargeList (64-bit offsets), so
+  // record which one a column was to reproduce it on writeback instead of narrowing to List.
+  val ARROW_LARGE_LIST_KEY = "arrow.large_list"
 
   // Namespaced keys used to embed child Spark Metadata on a parent StructField when the
   // child sits inside an ArrayType/MapType — Spark has no per-element metadata slot of its
@@ -262,6 +265,11 @@ object LanceArrowUtils {
         // Preserve FixedSizeBinary byte width so a subsequent write reproduces
         // FixedSizeBinary(n) instead of falling back to variable-length Binary.
         builder.putLong(ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY, fsb.getByteWidth.toLong)
+      case _: ArrowType.LargeList =>
+        // Record that this array came from an Arrow LargeList (64-bit offsets). Without the marker
+        // writeback narrows it to a 32-bit List and the write fails type validation against the
+        // existing Lance schema on any round trip, mirroring the LargeBinary marker above.
+        builder.putString(ARROW_LARGE_LIST_KEY, "true")
       case _ =>
     }
   }
@@ -419,7 +427,14 @@ object LanceArrowUtils {
             fieldType,
             Seq(elementField).asJava)
         } else {
-          val fieldType = new FieldType(nullable, ArrowType.List.INSTANCE, null, meta.asJava)
+          val listArrowType =
+            if (metadata != null && metadata.contains(ARROW_LARGE_LIST_KEY)
+              && metadata.getString(ARROW_LARGE_LIST_KEY).equalsIgnoreCase("true")) {
+              ArrowType.LargeList.INSTANCE
+            } else {
+              ArrowType.List.INSTANCE
+            }
+          val fieldType = new FieldType(nullable, listArrowType, null, meta.asJava)
           new Field(
             name,
             fieldType,
