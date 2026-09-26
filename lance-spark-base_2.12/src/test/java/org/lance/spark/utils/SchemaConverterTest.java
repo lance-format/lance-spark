@@ -704,4 +704,34 @@ public class SchemaConverterTest {
         e.getMessage().contains(expectedFragment),
         () -> "expected message to contain '" + expectedFragment + "': " + e.getMessage());
   }
+
+  @Test
+  public void testVectorSizeMustBeAPositiveInteger() {
+    // The vector size becomes a FixedSizeList length; a non-integer or non-positive value must be
+    // rejected at property-processing time with the column name, not surface as a bare
+    // NumberFormatException or silently build a zero/negative-length FixedSizeList.
+    assertValidationFailure(
+        "embeddings",
+        () -> SchemaConverter.processSchemaWithProperties(vectorSchema(), vectorSizeProps("128d")));
+    assertValidationFailure(
+        "range",
+        () -> SchemaConverter.processSchemaWithProperties(vectorSchema(), vectorSizeProps("0")));
+    assertValidationFailure(
+        "range",
+        () -> SchemaConverter.processSchemaWithProperties(vectorSchema(), vectorSizeProps("-1")));
+  }
+
+  private static StructType vectorSchema() {
+    return new StructType(
+        new StructField[] {
+          DataTypes.createStructField(
+              "embeddings", DataTypes.createArrayType(DataTypes.FloatType, false), false),
+        });
+  }
+
+  private static Map<String, String> vectorSizeProps(String size) {
+    Map<String, String> props = new HashMap<>();
+    props.put("embeddings.arrow.fixed-size-list.size", size);
+    return props;
+  }
 }
