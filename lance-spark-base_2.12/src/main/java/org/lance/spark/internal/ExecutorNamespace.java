@@ -18,6 +18,8 @@ import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.read.LanceInputPartition;
 
+import java.util.Map;
+
 /** Owns a namespace client created on an executor for one Spark task or scan handle. */
 public final class ExecutorNamespace implements AutoCloseable {
   private final LanceSparkReadOptions readOptions;
@@ -33,8 +35,20 @@ public final class ExecutorNamespace implements AutoCloseable {
    * The returned owner must be closed after every dataset or scanner using the namespace.
    */
   public static ExecutorNamespace acquire(LanceInputPartition inputPartition) {
-    LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
-    String namespaceImpl = inputPartition.getNamespaceImpl();
+    return acquire(
+        inputPartition.getReadOptions(),
+        inputPartition.getNamespaceImpl(),
+        inputPartition.getNamespaceProperties());
+  }
+
+  /**
+   * Same as {@link #acquire(LanceInputPartition)} but for callers that do not carry a {@link
+   * LanceInputPartition}, such as the distributed search partition reader.
+   */
+  public static ExecutorNamespace acquire(
+      LanceSparkReadOptions readOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties) {
     if (namespaceImpl == null || !readOptions.isExecutorCredentialRefresh()) {
       return new ExecutorNamespace(readOptions, null);
     }
@@ -44,7 +58,7 @@ public final class ExecutorNamespace implements AutoCloseable {
     }
 
     LanceNamespace namespace =
-        LanceRuntime.getOrCreateNamespace(namespaceImpl, inputPartition.getNamespaceProperties());
+        LanceRuntime.getOrCreateNamespace(namespaceImpl, namespaceProperties);
     readOptions.setNamespace(namespace);
     return new ExecutorNamespace(readOptions, namespace);
   }

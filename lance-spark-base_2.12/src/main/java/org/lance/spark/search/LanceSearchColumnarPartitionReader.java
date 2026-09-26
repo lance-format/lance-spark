@@ -95,7 +95,7 @@ public class LanceSearchColumnarPartitionReader implements PartitionReader<Colum
     }
   }
 
-  private ColumnarBatch toColumnarBatch(VectorSchemaRoot root, StructType schema) {
+  static ColumnarBatch toColumnarBatch(VectorSchemaRoot root, StructType schema) {
     Map<String, FieldVector> actualFields = new HashMap<>();
     for (FieldVector vector : root.getFieldVectors()) {
       actualFields.put(vector.getField().getName(), vector);

@@ -16,10 +16,11 @@ package org.lance.spark.search
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.{UnresolvedAttribute, UnresolvedStar}
-import org.apache.spark.sql.catalyst.expressions.{CreateArray, Descending, Expression, Literal, NamedExpression, SortOrder}
-import org.apache.spark.sql.catalyst.plans.logical.{Filter, Limit, LogicalPlan, Project, Sort}
+import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, CreateArray, Descending, Expression, ExpressionInfo, Literal, NamedExpression, SortOrder}
+import org.apache.spark.sql.catalyst.plans.logical.{Filter, GlobalLimit, Limit, LocalLimit, LogicalPlan, Offset, Project, Sort}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
+import org.apache.spark.sql.types._
 import org.apache.spark.sql.types.{DataTypes, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.lance.ipc.FullTextQuery
@@ -75,6 +76,10 @@ object LanceSearchTableFunctions {
       .tableId(resolved.table.readOptions().getTableId)
       .namespaceImpl(resolved.table.getNamespaceImpl)
       .namespaceProperties(resolved.table.getNamespaceProperties)
+      // Only the distributed path reads these: it opens the dataset itself instead of asking the
+      // namespace to run the search.
+      .readOptions(resolved.table.readOptions())
+      .initialStorageOptions(resolved.table.getInitialStorageOptions)
       .outputColumns(requestColumns.asJava)
       .vector(queryVector.asJava)
       .topK(requestK)
@@ -264,13 +269,72 @@ object LanceSearchTableFunctions {
       functionName: String,
       schema: StructType,
       query: LanceSearchQuery,
-      resolved: ResolvedLanceTable): LogicalPlan = {
-    val table = new LanceSearchTable(functionName, schema, query)
+      resolved: ResolvedLanceTable): LogicalPlan =
+    if (shouldUseDistributed(query)) {
+      distributedRelation(functionName, schema, query, resolved)
+    } else {
+      searchRelation(functionName, schema, query, resolved)
+    }
+
+  /** Search served by the namespace itself: one partition, results already globally ranked. */
+  private def searchRelation(
+      functionName: String,
+      schema: StructType,
+      query: LanceSearchQuery,
+      resolved: ResolvedLanceTable): LogicalPlan =
     DataSourceV2Relation.create(
-      table,
+      new LanceSearchTable(functionName, schema, query),
       Some(resolved.catalog),
       Some(resolved.identifier),
       CaseInsensitiveStringMap.empty())
+
+  /**
+   * Search executed by Spark tasks, one per searchable unit of the dataset. Every worker
+   * over-fetches `k + offset` rows (LanceSearchQuery.k = userK + offset, set by
+   * LanceSearchTableFunctions.vectorSearch), so the merge has to happen here: sort globally, drop
+   * the first `offset` rows, then take `userK`.
+   */
+  private def distributedRelation(
+      functionName: String,
+      schema: StructType,
+      query: LanceSearchQuery,
+      resolved: ResolvedLanceTable): LogicalPlan = {
+    val rel = DataSourceV2Relation.create(
+      new LanceDistributedSearchTable(functionName, schema, query),
+      Some(resolved.catalog),
+      Some(resolved.identifier),
+      CaseInsensitiveStringMap.empty())
+
+    val distanceAttr =
+      rel.output
+        .find(attr => attr.name == DistanceMetricColumn)
+        .getOrElse {
+          throw new IllegalStateException(
+            s"Internal column ${DistanceMetricColumn} is missing from vector_search plan.")
+        }
+    val sorted = Sort(Seq(SortOrder(distanceAttr, Ascending)), global = true, rel)
+    val totalCandidates = query.getK
+    val effectiveOffset =
+      if (query.getOffset != null) query.getOffset.intValue() else 0
+    val userK = math.max(totalCandidates - effectiveOffset, 0)
+    val candidateLimited =
+      GlobalLimit(Literal(totalCandidates), LocalLimit(Literal(totalCandidates), sorted))
+    if (effectiveOffset > 0) {
+      GlobalLimit(
+        Literal(userK),
+        LocalLimit(Literal(userK), Offset(Literal(effectiveOffset), candidateLimited)))
+    } else {
+      candidateLimited
+    }
+  }
+
+  private def shouldUseDistributed(query: LanceSearchQuery): Boolean = {
+    val spark = SparkSession.active
+    val enabled = spark.conf.get("spark.sql.lance.search.distributed.enabled", "true").toBoolean
+    if (!enabled) return false
+    if (query.getSearchType != SearchType.VECTOR) return false
+    if (java.lang.Boolean.TRUE == query.getBypassVectorIndex) return false
+    true
   }
 
   private def hybridRelation(
