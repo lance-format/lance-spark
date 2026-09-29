@@ -226,7 +226,7 @@ public abstract class BaseSparkConnectorAggPushdownTest {
   }
 
   @Test
-  public void testCountStarWithExactScalarIndexUsesLocalScan() {
+  public void testCountStarWithExactScalarIndexUsesLocalScan() throws Exception {
     String tableName = "lance.default.count_indexed_single_partition_test_dataset";
     spark
         .range(0, 100)
@@ -254,7 +254,7 @@ public abstract class BaseSparkConnectorAggPushdownTest {
   }
 
   @Test
-  public void testCountStarWithoutScalarIndexKeepsFragmentParallelism() {
+  public void testCountStarWithoutScalarIndexKeepsFragmentParallelism() throws Exception {
     String tableName = "lance.default.count_unindexed_parallel_test_dataset";
     spark
         .range(0, 100)
@@ -274,7 +274,7 @@ public abstract class BaseSparkConnectorAggPushdownTest {
   }
 
   @Test
-  public void testCountStarOnEmptyTableUsesLocalScan() {
+  public void testCountStarOnEmptyTableUsesLocalScan() throws Exception {
     String tableName = "lance.default.count_empty_filtered_test_dataset";
     spark.range(0, 0).selectExpr("id", "id % 10 as category").writeTo(tableName).create();
 
