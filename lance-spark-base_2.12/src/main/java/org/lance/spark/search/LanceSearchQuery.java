@@ -18,6 +18,7 @@ import org.lance.namespace.model.QueryTableRequestColumns;
 import org.lance.namespace.model.QueryTableRequestFullTextQuery;
 import org.lance.namespace.model.QueryTableRequestVector;
 import org.lance.namespace.model.StringFtsQuery;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.FullTextQueryConverter;
 import org.lance.spark.utils.FullTextQueryUtils;
 
@@ -26,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 public class LanceSearchQuery implements Serializable {
@@ -40,6 +42,8 @@ public class LanceSearchQuery implements Serializable {
   private final List<String> tableId;
   private final String namespaceImpl;
   private final Map<String, String> namespaceProperties;
+  private final LanceSparkReadOptions readOptions;
+  private final Map<String, String> initialStorageOptions;
   private final List<String> outputColumns;
   private final Integer k;
   private final Integer offset;
@@ -57,6 +61,7 @@ public class LanceSearchQuery implements Serializable {
   private final Boolean bypassVectorIndex;
   private final Boolean fastSearch;
   private final Boolean prefilter;
+  private final Float oversampleFactor;
   private final String textQuery;
   private final List<String> searchColumns;
   private final String fullTextQueryJson;
@@ -66,6 +71,8 @@ public class LanceSearchQuery implements Serializable {
     this.tableId = immutableList(builder.tableId);
     this.namespaceImpl = builder.namespaceImpl;
     this.namespaceProperties = immutableMap(builder.namespaceProperties);
+    this.readOptions = builder.readOptions;
+    this.initialStorageOptions = immutableMap(builder.initialStorageOptions);
     this.outputColumns = immutableList(builder.outputColumns);
     this.k = builder.k;
     this.offset = builder.offset;
@@ -83,6 +90,7 @@ public class LanceSearchQuery implements Serializable {
     this.bypassVectorIndex = builder.bypassVectorIndex;
     this.fastSearch = builder.fastSearch;
     this.prefilter = builder.prefilter;
+    this.oversampleFactor = builder.oversampleFactor;
     this.textQuery = builder.textQuery;
     this.searchColumns = immutableList(builder.searchColumns);
     this.fullTextQueryJson = builder.fullTextQueryJson;
@@ -90,6 +98,33 @@ public class LanceSearchQuery implements Serializable {
 
   public static Builder builder(SearchType searchType) {
     return new Builder(searchType);
+  }
+
+  static String canonicalizeDistanceType(String distanceType) {
+    if (distanceType == null) {
+      return null;
+    }
+    String normalized = distanceType.trim().toLowerCase(Locale.ROOT);
+    switch (normalized) {
+      case "l2":
+      case "euclidean":
+        return "l2";
+      case "cosine":
+        return "cosine";
+      case "dot":
+      case "ip":
+      case "inner_product":
+        return "dot";
+      case "hamming":
+        return "hamming";
+      default:
+        throw new IllegalArgumentException("Unsupported distance_type: " + distanceType);
+    }
+  }
+
+  /** Returns a builder initialized with every field of this query. */
+  public Builder toBuilder() {
+    return new Builder(this);
   }
 
   public SearchType getSearchType() {
@@ -106,6 +141,104 @@ public class LanceSearchQuery implements Serializable {
 
   public Map<String, String> getNamespaceProperties() {
     return namespaceProperties;
+  }
+
+  /**
+   * Read options for opening the dataset outside the driver. Only the distributed search path needs
+   * them; a search served by {@code LanceNamespace.queryTable} never opens the dataset and leaves
+   * this unset.
+   */
+  public LanceSparkReadOptions getReadOptions() {
+    return readOptions;
+  }
+
+  /** Storage options the driver already obtained, merged into the dataset open. */
+  public Map<String, String> getInitialStorageOptions() {
+    return initialStorageOptions;
+  }
+
+  public List<String> getOutputColumns() {
+    return outputColumns;
+  }
+
+  public Integer getK() {
+    return k;
+  }
+
+  public Integer getOffset() {
+    return offset;
+  }
+
+  public Long getVersion() {
+    return version;
+  }
+
+  public String getFilter() {
+    return filter;
+  }
+
+  public Boolean getWithRowId() {
+    return withRowId;
+  }
+
+  public List<Float> getVector() {
+    return vector;
+  }
+
+  public String getVectorColumn() {
+    return vectorColumn;
+  }
+
+  public String getDistanceType() {
+    return distanceType;
+  }
+
+  public Integer getNprobes() {
+    return nprobes;
+  }
+
+  public Integer getEf() {
+    return ef;
+  }
+
+  public Integer getRefineFactor() {
+    return refineFactor;
+  }
+
+  public Float getLowerBound() {
+    return lowerBound;
+  }
+
+  public Float getUpperBound() {
+    return upperBound;
+  }
+
+  public Boolean getBypassVectorIndex() {
+    return bypassVectorIndex;
+  }
+
+  public Boolean getFastSearch() {
+    return fastSearch;
+  }
+
+  public Boolean getPrefilter() {
+    return prefilter;
+  }
+
+  public Float getOversampleFactor() {
+    return oversampleFactor;
+  }
+
+  public String getTextQuery() {
+    return textQuery;
+  }
+
+  public List<String> getSearchColumns() {
+    return searchColumns;
+  }
+
+  public String getFullTextQueryJson() {
+    return fullTextQueryJson;
   }
 
   public QueryTableRequest toQueryTableRequest() {
@@ -197,6 +330,8 @@ public class LanceSearchQuery implements Serializable {
     private List<String> tableId = Collections.emptyList();
     private String namespaceImpl;
     private Map<String, String> namespaceProperties = Collections.emptyMap();
+    private LanceSparkReadOptions readOptions;
+    private Map<String, String> initialStorageOptions = Collections.emptyMap();
     private List<String> outputColumns = Collections.emptyList();
     private Integer k = 10;
     private Integer offset;
@@ -214,12 +349,43 @@ public class LanceSearchQuery implements Serializable {
     private Boolean bypassVectorIndex;
     private Boolean fastSearch;
     private Boolean prefilter;
+    private Float oversampleFactor;
     private String textQuery;
     private List<String> searchColumns = Collections.emptyList();
     private String fullTextQueryJson;
 
     private Builder(SearchType searchType) {
       this.searchType = searchType;
+    }
+
+    private Builder(LanceSearchQuery query) {
+      this.searchType = query.searchType;
+      this.tableId = query.tableId;
+      this.namespaceImpl = query.namespaceImpl;
+      this.namespaceProperties = query.namespaceProperties;
+      this.readOptions = query.readOptions;
+      this.initialStorageOptions = query.initialStorageOptions;
+      this.outputColumns = query.outputColumns;
+      this.k = query.k;
+      this.offset = query.offset;
+      this.version = query.version;
+      this.filter = query.filter;
+      this.withRowId = query.withRowId;
+      this.vector = query.vector;
+      this.vectorColumn = query.vectorColumn;
+      this.distanceType = query.distanceType;
+      this.nprobes = query.nprobes;
+      this.ef = query.ef;
+      this.refineFactor = query.refineFactor;
+      this.lowerBound = query.lowerBound;
+      this.upperBound = query.upperBound;
+      this.bypassVectorIndex = query.bypassVectorIndex;
+      this.fastSearch = query.fastSearch;
+      this.prefilter = query.prefilter;
+      this.oversampleFactor = query.oversampleFactor;
+      this.textQuery = query.textQuery;
+      this.searchColumns = query.searchColumns;
+      this.fullTextQueryJson = query.fullTextQueryJson;
     }
 
     public Builder tableId(List<String> tableId) {
@@ -234,6 +400,17 @@ public class LanceSearchQuery implements Serializable {
 
     public Builder namespaceProperties(Map<String, String> namespaceProperties) {
       this.namespaceProperties = namespaceProperties;
+      return this;
+    }
+
+    /** Required for distributed search, which opens the dataset itself; unused otherwise. */
+    public Builder readOptions(LanceSparkReadOptions readOptions) {
+      this.readOptions = readOptions;
+      return this;
+    }
+
+    public Builder initialStorageOptions(Map<String, String> initialStorageOptions) {
+      this.initialStorageOptions = initialStorageOptions;
       return this;
     }
 
@@ -278,7 +455,7 @@ public class LanceSearchQuery implements Serializable {
     }
 
     public Builder distanceType(String distanceType) {
-      this.distanceType = distanceType;
+      this.distanceType = canonicalizeDistanceType(distanceType);
       return this;
     }
 
@@ -322,6 +499,11 @@ public class LanceSearchQuery implements Serializable {
       return this;
     }
 
+    public Builder oversampleFactor(Float oversampleFactor) {
+      this.oversampleFactor = oversampleFactor;
+      return this;
+    }
+
     public Builder textQuery(String textQuery) {
       this.textQuery = textQuery;
       return this;
@@ -353,6 +535,14 @@ public class LanceSearchQuery implements Serializable {
       }
       if (offset != null && offset < 0) {
         throw new IllegalArgumentException("offset must be non-negative");
+      }
+      if (oversampleFactor != null
+          && (!Float.isFinite(oversampleFactor) || oversampleFactor < 1.0f)) {
+        throw new IllegalArgumentException("oversample_factor must be finite and at least 1.0");
+      }
+      if (Boolean.TRUE.equals(bypassVectorIndex) && Boolean.TRUE.equals(fastSearch)) {
+        throw new IllegalArgumentException(
+            "bypass_vector_index and fast_search cannot both be true");
       }
       if (searchType == SearchType.VECTOR && (vector == null || vector.isEmpty())) {
         throw new IllegalArgumentException("query_vector is required");
