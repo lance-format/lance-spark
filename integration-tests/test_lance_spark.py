@@ -28,6 +28,11 @@ requires_update_or_merge = pytest.mark.skipif(
 
 LANCE_CATALOG = "lance"
 
+# Namespace (Glue database / dir namespace) the tests operate in. Overridable via
+# LANCE_TEST_NAMESPACE so each CI run can isolate into its own namespace; defaults
+# to "default", keeping local runs and non-Glue backends byte-for-byte unchanged.
+LANCE_NAMESPACE = os.environ.get("LANCE_TEST_NAMESPACE", "default")
+
 
 def _java_hash_map(spark, values):
     java_map = spark._jvm.java.util.HashMap()
@@ -138,7 +143,7 @@ class TestDDLNamespace:
 
     def test_create_namespace(self, spark):
         """Test CREATE NAMESPACE."""
-        spark.sql("CREATE NAMESPACE IF NOT EXISTS default")
+        spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {LANCE_NAMESPACE}")
         # disabling until `SHOW NAMESPACES` correctly lists namespaces
         #namespaces = spark.sql("SHOW NAMESPACES").collect()
         #namespace_names = [row[0] for row in namespaces]
@@ -159,43 +164,43 @@ class TestDDLTable:
 
     def test_create_table(self, spark):
         """Test CREATE TABLE."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value DOUBLE
             )
         """)
 
-        tables = spark.sql("SHOW TABLES IN default").collect()
+        tables = spark.sql(f"SHOW TABLES IN {LANCE_NAMESPACE}").collect()
         table_names = [row.tableName for row in tables]
         assert "test_table" in table_names
 
     def test_show_tables(self, spark):
         """Test SHOW TABLES."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING
             )
         """)
 
-        tables = spark.sql("SHOW TABLES IN default").collect()
+        tables = spark.sql(f"SHOW TABLES IN {LANCE_NAMESPACE}").collect()
         assert len(tables) >= 1
         table_names = [row.tableName for row in tables]
         assert "test_table" in table_names
 
     def test_describe_table(self, spark):
         """Test DESCRIBE TABLE."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value DOUBLE
             )
         """)
 
-        schema = spark.sql("DESCRIBE TABLE default.test_table").collect()
+        schema = spark.sql(f"DESCRIBE TABLE {LANCE_NAMESPACE}.test_table").collect()
         col_names = [row.col_name for row in schema if row.col_name and not row.col_name.startswith("#")]
         assert "id" in col_names
         assert "name" in col_names
@@ -203,16 +208,16 @@ class TestDDLTable:
 
     def test_drop_table(self, spark):
         """Test DROP TABLE."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING
             )
         """)
 
-        spark.sql("DROP TABLE IF EXISTS default.test_table PURGE")
+        spark.sql(f"DROP TABLE IF EXISTS {LANCE_NAMESPACE}.test_table PURGE")
 
-        tables = spark.sql("SHOW TABLES IN default").collect()
+        tables = spark.sql(f"SHOW TABLES IN {LANCE_NAMESPACE}").collect()
         table_names = [row.tableName for row in tables]
         assert "test_table" not in table_names
 
@@ -227,18 +232,18 @@ class TestDDLRenameTable:
 
     def test_rename_table(self, spark):
         """Rename succeeds and data is preserved under the new name."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING
             )
         """)
-        spark.sql("INSERT INTO default.test_table VALUES (1, 'Alice'), (2, 'Bob')")
+        spark.sql(f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (1, 'Alice'), (2, 'Bob')")
 
         spark.sql(
-            "ALTER TABLE default.test_table RENAME TO default.test_table_renamed"
+            f"ALTER TABLE {LANCE_NAMESPACE}.test_table RENAME TO {LANCE_NAMESPACE}.test_table_renamed"
         )
-        result = spark.table("default.test_table_renamed").orderBy("id").collect()
+        result = spark.table(f"{LANCE_NAMESPACE}.test_table_renamed").orderBy("id").collect()
         assert len(result) == 2
         assert result[0].id == 1
         assert result[0].name == "Alice"
@@ -246,29 +251,29 @@ class TestDDLRenameTable:
         assert result[1].name == "Bob"
         # Old name no longer accessible
         with pytest.raises(Exception, match="TABLE_OR_VIEW_NOT_FOUND"):
-            spark.sql("SELECT * FROM default.test_table")
+            spark.sql(f"SELECT * FROM {LANCE_NAMESPACE}.test_table")
 
     def test_rename_nonexistent_table_fails(self, spark):
         """Renaming a non-existent table should fail with AnalysisException."""
         with pytest.raises(Exception, match="TABLE_OR_VIEW_NOT_FOUND"):
             spark.sql(
-                "ALTER TABLE default.nonexistent_table RENAME TO default.new_table"
+                f"ALTER TABLE {LANCE_NAMESPACE}.nonexistent_table RENAME TO {LANCE_NAMESPACE}.new_table"
             )
 
     def test_rename_to_existing_name_fails(self, spark):
         """Renaming to an already-existing table name should fail."""
-        spark.sql("CREATE TABLE default.test_table (id INT)")
-        spark.sql("CREATE TABLE default.test_table_renamed (id INT)")
+        spark.sql(f"CREATE TABLE {LANCE_NAMESPACE}.test_table (id INT)")
+        spark.sql(f"CREATE TABLE {LANCE_NAMESPACE}.test_table_renamed (id INT)")
 
         with pytest.raises(Exception, match="TABLE_ALREADY_EXISTS"):
             spark.sql(
-                "ALTER TABLE default.test_table RENAME TO default.test_table_renamed"
+                f"ALTER TABLE {LANCE_NAMESPACE}.test_table RENAME TO {LANCE_NAMESPACE}.test_table_renamed"
             )
 
     def test_rename_preserves_schema_and_data(self, spark):
         """After rename, schema and all data rows are intact."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value DOUBLE
@@ -276,12 +281,12 @@ class TestDDLRenameTable:
         """)
         data = [(1, "Alice", 10.5), (2, "Bob", 20.3), (3, "Charlie", 30.1)]
         df = spark.createDataFrame(data, ["id", "name", "value"])
-        df.writeTo("default.test_table").append()
+        df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
-        spark.sql("ALTER TABLE default.test_table RENAME TO default.test_table_renamed")
+        spark.sql(f"ALTER TABLE {LANCE_NAMESPACE}.test_table RENAME TO {LANCE_NAMESPACE}.test_table_renamed")
 
         # Verify schema
-        schema = spark.sql("DESCRIBE TABLE default.test_table_renamed").collect()
+        schema = spark.sql(f"DESCRIBE TABLE {LANCE_NAMESPACE}.test_table_renamed").collect()
         col_names = [
             row.col_name for row in schema
             if row.col_name and not row.col_name.startswith("#")
@@ -291,7 +296,7 @@ class TestDDLRenameTable:
         assert "value" in col_names
 
         # Verify data
-        result = spark.table("default.test_table_renamed").orderBy("id").collect()
+        result = spark.table(f"{LANCE_NAMESPACE}.test_table_renamed").orderBy("id").collect()
         assert len(result) == 3
         assert result[0].name == "Alice"
         assert result[2].value == 30.1
@@ -308,11 +313,11 @@ class TestDDLStagingTable:
         df.createOrReplaceTempView("source")
 
         # CTAS
-        spark.sql("""
-            CREATE TABLE default.test_table AS SELECT * FROM source
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table AS SELECT * FROM source
         """)
 
-        result = spark.table("default.test_table").orderBy("id").collect()
+        result = spark.table(f"{LANCE_NAMESPACE}.test_table").orderBy("id").collect()
         assert len(result) == 3
         assert result[0].id == 1
         assert result[0].name == "Alice"
@@ -406,11 +411,11 @@ class TestDDLStagingTable:
         df.createOrReplaceTempView("source")
 
         # CORTAS on non-existent table - should create it
-        spark.sql("""
-            CREATE OR REPLACE TABLE default.test_table AS SELECT * FROM source
+        spark.sql(f"""
+            CREATE OR REPLACE TABLE {LANCE_NAMESPACE}.test_table AS SELECT * FROM source
         """)
 
-        result = spark.table("default.test_table").collect()
+        result = spark.table(f"{LANCE_NAMESPACE}.test_table").collect()
         assert len(result) == 2
         ids = sorted([row.id for row in result])
         assert ids == [1, 2]
@@ -451,10 +456,10 @@ class TestDDLStagingTable:
         df.createOrReplaceTempView("source")
 
         # Run twice - both should succeed
-        spark.sql("CREATE OR REPLACE TABLE default.test_table AS SELECT * FROM source")
-        spark.sql("CREATE OR REPLACE TABLE default.test_table AS SELECT * FROM source")
+        spark.sql(f"CREATE OR REPLACE TABLE {LANCE_NAMESPACE}.test_table AS SELECT * FROM source")
+        spark.sql(f"CREATE OR REPLACE TABLE {LANCE_NAMESPACE}.test_table AS SELECT * FROM source")
 
-        result = spark.table("default.test_table").collect()
+        result = spark.table(f"{LANCE_NAMESPACE}.test_table").collect()
         assert len(result) == 2
 
     def test_replace_table_schema_only(self, spark, test_table):
@@ -498,15 +503,15 @@ class TestDDLAlterTableProperties:
 
     def test_set_tblproperties(self, spark):
         """SET TBLPROPERTIES stores properties visible via SHOW TBLPROPERTIES."""
-        spark.sql("""
-            CREATE TABLE default.test_table (id INT, name STRING, value INT)
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (id INT, name STRING, value INT)
         """)
-        spark.sql("""
-            ALTER TABLE default.test_table
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table
             SET TBLPROPERTIES ('team' = 'data-eng', 'version' = '2.0')
         """)
 
-        rows = spark.sql("SHOW TBLPROPERTIES default.test_table").collect()
+        rows = spark.sql(f"SHOW TBLPROPERTIES {LANCE_NAMESPACE}.test_table").collect()
         props = {row.key: row.value for row in rows}
 
         assert props["team"] == "data-eng"
@@ -514,17 +519,17 @@ class TestDDLAlterTableProperties:
 
     def test_unset_tblproperties(self, spark):
         """UNSET TBLPROPERTIES removes a previously set property."""
-        spark.sql("CREATE TABLE default.test_table (id INT, value INT)")
-        spark.sql("""
-            ALTER TABLE default.test_table
+        spark.sql(f"CREATE TABLE {LANCE_NAMESPACE}.test_table (id INT, value INT)")
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table
             SET TBLPROPERTIES ('team' = 'data-eng', 'env' = 'prod')
         """)
-        spark.sql("""
-            ALTER TABLE default.test_table
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table
             UNSET TBLPROPERTIES ('team')
         """)
 
-        rows = spark.sql("SHOW TBLPROPERTIES default.test_table").collect()
+        rows = spark.sql(f"SHOW TBLPROPERTIES {LANCE_NAMESPACE}.test_table").collect()
         props = {row.key: row.value for row in rows}
 
         assert "team" not in props
@@ -532,31 +537,31 @@ class TestDDLAlterTableProperties:
 
     def test_set_custom_properties(self, spark):
         """SET TBLPROPERTIES with custom key-value pairs does not break the table."""
-        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
-        spark.sql("""
-            ALTER TABLE default.test_table
+        spark.sql(f"CREATE TABLE {LANCE_NAMESPACE}.test_table (id INT, name STRING)")
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table
             SET TBLPROPERTIES ('team' = 'data-eng', 'version' = '2.0')
         """)
 
-        spark.sql("INSERT INTO default.test_table VALUES (1, 'test')")
-        result = spark.sql("SELECT * FROM default.test_table").collect()
+        spark.sql(f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (1, 'test')")
+        result = spark.sql(f"SELECT * FROM {LANCE_NAMESPACE}.test_table").collect()
 
         assert len(result) == 1
         assert result[0].id == 1
 
     def test_overwrite_existing_property(self, spark):
         """SET TBLPROPERTIES overwrites an existing property value."""
-        spark.sql("CREATE TABLE default.test_table (id INT, value INT)")
-        spark.sql("""
-            ALTER TABLE default.test_table
+        spark.sql(f"CREATE TABLE {LANCE_NAMESPACE}.test_table (id INT, value INT)")
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table
             SET TBLPROPERTIES ('env' = 'staging')
         """)
-        spark.sql("""
-            ALTER TABLE default.test_table
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table
             SET TBLPROPERTIES ('env' = 'production')
         """)
 
-        rows = spark.sql("SHOW TBLPROPERTIES default.test_table").collect()
+        rows = spark.sql(f"SHOW TBLPROPERTIES {LANCE_NAMESPACE}.test_table").collect()
         props = {row.key: row.value for row in rows}
 
         assert props["env"] == "production"
@@ -564,24 +569,24 @@ class TestDDLAlterTableProperties:
     def test_set_properties_on_nonexistent_table(self, spark):
         """SET TBLPROPERTIES on non-existent table raises an error."""
         with pytest.raises(Exception) as exc_info:
-            spark.sql("""
-                ALTER TABLE default.nonexistent_props_table
+            spark.sql(f"""
+                ALTER TABLE {LANCE_NAMESPACE}.nonexistent_props_table
                 SET TBLPROPERTIES ('key' = 'value')
             """)
         assert "TABLE_OR_VIEW_NOT_FOUND" in str(exc_info.value)
 
     def test_properties_persist_after_insert(self, spark):
         """Table properties are not lost after DML operations."""
-        spark.sql("CREATE TABLE default.test_table (id INT, value INT)")
-        spark.sql("""
-            ALTER TABLE default.test_table
+        spark.sql(f"CREATE TABLE {LANCE_NAMESPACE}.test_table (id INT, value INT)")
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table
             SET TBLPROPERTIES ('team' = 'data-eng')
         """)
 
-        spark.sql("INSERT INTO default.test_table VALUES (1, 100)")
-        spark.sql("INSERT INTO default.test_table VALUES (2, 200)")
+        spark.sql(f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (1, 100)")
+        spark.sql(f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (2, 200)")
 
-        rows = spark.sql("SHOW TBLPROPERTIES default.test_table").collect()
+        rows = spark.sql(f"SHOW TBLPROPERTIES {LANCE_NAMESPACE}.test_table").collect()
         props = {row.key: row.value for row in rows}
 
         assert props["team"] == "data-eng"
@@ -592,8 +597,8 @@ class TestDDLColumnCompression:
 
     def test_create_table_with_compression(self, spark):
         """Table with compression TBLPROPERTIES can be created and written to."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id BIGINT,
                 payload STRING,
                 ts BIGINT
@@ -604,15 +609,15 @@ class TestDDLColumnCompression:
                 'ts.lance.compression'            = 'none'
             )
         """)
-        spark.sql("INSERT INTO default.test_table VALUES (1, 'hello', 1000)")
-        result = spark.sql("SELECT * FROM default.test_table").collect()
+        spark.sql(f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (1, 'hello', 1000)")
+        result = spark.sql(f"SELECT * FROM {LANCE_NAMESPACE}.test_table").collect()
         assert len(result) == 1
         assert result[0].payload == "hello"
 
     def test_all_supported_compression_tblproperties(self, spark):
         """All five connector-supported compression TBLPROPERTIES can be set without error."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id BIGINT,
                 payload STRING,
                 ts BIGINT
@@ -625,15 +630,15 @@ class TestDDLColumnCompression:
                 'ts.lance.bss'                  = 'auto'
             )
         """)
-        spark.sql("INSERT INTO default.test_table VALUES (1, 'hello', 1000)")
-        result = spark.sql("SELECT id, ts FROM default.test_table").collect()
+        spark.sql(f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (1, 'hello', 1000)")
+        result = spark.sql(f"SELECT id, ts FROM {LANCE_NAMESPACE}.test_table").collect()
         assert result[0].ts == 1000
 
     def test_invalid_compression_scheme_rejected(self, spark):
         """Invalid compression scheme raises an error at table creation time."""
         with pytest.raises(Exception, match=r"invalid compression scheme"):
-            spark.sql("""
-                CREATE TABLE default.test_table (
+            spark.sql(f"""
+                CREATE TABLE {LANCE_NAMESPACE}.test_table (
                     id BIGINT,
                     payload STRING
                 ) USING lance
@@ -645,8 +650,8 @@ class TestDDLColumnCompression:
     def test_invalid_structural_encoding_rejected(self, spark):
         """Invalid structural-encoding value raises an error at table creation time."""
         with pytest.raises(Exception, match=r"invalid structural-encoding"):
-            spark.sql("""
-                CREATE TABLE default.test_table (
+            spark.sql(f"""
+                CREATE TABLE {LANCE_NAMESPACE}.test_table (
                     id BIGINT,
                     ts BIGINT
                 ) USING lance
@@ -657,8 +662,8 @@ class TestDDLColumnCompression:
 
     def test_deferred_dict_key_ignored(self, spark):
         """Deferred dict-divisor TBLPROPERTY does not cause an error (silently ignored)."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id BIGINT,
                 payload STRING
             ) USING lance
@@ -666,8 +671,8 @@ class TestDDLColumnCompression:
                 'payload.lance.dict-divisor' = '4'
             )
         """)
-        spark.sql("INSERT INTO default.test_table VALUES (1, 'ok')")
-        result = spark.sql("SELECT payload FROM default.test_table").collect()
+        spark.sql(f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (1, 'ok')")
+        result = spark.sql(f"SELECT payload FROM {LANCE_NAMESPACE}.test_table").collect()
         assert result[0].payload == "ok"
 
     def test_compression_metadata_reaches_lance_file(self, spark):
@@ -681,8 +686,8 @@ class TestDDLColumnCompression:
         if spark._lance_backend != "local":
             pytest.skip("lance-python file inspection only supported on local backend")
 
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id BIGINT,
                 payload STRING,
                 ts BIGINT
@@ -693,10 +698,10 @@ class TestDDLColumnCompression:
                 'ts.lance.compression'            = 'none'
             )
         """)
-        spark.sql("INSERT INTO default.test_table VALUES (1, 'hello', 1000)")
+        spark.sql(f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (1, 'hello', 1000)")
 
         location = (
-            spark.sql("DESCRIBE EXTENDED default.test_table")
+            spark.sql(f"DESCRIBE EXTENDED {LANCE_NAMESPACE}.test_table")
             .filter("col_name == 'Location'")
             .collect()[0]
             .data_type
@@ -786,8 +791,8 @@ class TestDDLIndex:
 
     def test_create_btree_index_on_int(self, spark):
         """Test CREATE INDEX with BTree on integer column."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value DOUBLE
@@ -797,11 +802,11 @@ class TestDDLIndex:
         # Insert data first (index requires data)
         data = [(i, f"Name{i}", float(i * 10)) for i in range(100)]
         df = spark.createDataFrame(data, ["id", "name", "value"])
-        df.writeTo("default.test_table").append()
+        df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
         # Create BTree index on id column
-        result = spark.sql("""
-            ALTER TABLE default.test_table
+        result = spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table
             CREATE INDEX idx_id USING btree (id)
         """).collect()
 
@@ -810,17 +815,17 @@ class TestDDLIndex:
         assert result[0][1] == "idx_id"
 
         # Verify queries still work after indexing
-        query_result = spark.sql("""
-            SELECT * FROM default.test_table WHERE id = 50
+        query_result = spark.sql(f"""
+            SELECT * FROM {LANCE_NAMESPACE}.test_table WHERE id = 50
         """).collect()
         assert len(query_result) == 1
         assert query_result[0].id == 50
-        _assert_lance_index_metadata(spark, "default.test_table", "idx_id", "BTREE")
+        _assert_lance_index_metadata(spark, f"{LANCE_NAMESPACE}.test_table", "idx_id", "BTREE")
 
     def test_create_btree_index_on_string(self, spark):
         """Test CREATE INDEX with BTree on string column."""
-        spark.sql("""
-            CREATE TABLE default.employees (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.employees (
                 id INT,
                 name STRING,
                 department STRING,
@@ -836,11 +841,11 @@ class TestDDLIndex:
             (5, "Eve", "Engineering", 60000),
         ]
         df = spark.createDataFrame(data, ["id", "name", "department", "salary"])
-        df.writeTo("default.employees").append()
+        df.writeTo(f"{LANCE_NAMESPACE}.employees").append()
 
         # Create BTree index on department column
-        result = spark.sql("""
-            ALTER TABLE default.employees
+        result = spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.employees
             CREATE INDEX idx_dept USING btree (department)
         """).collect()
 
@@ -848,16 +853,16 @@ class TestDDLIndex:
         assert result[0][1] == "idx_dept"
 
         # Query using the indexed column
-        query_result = spark.sql("""
-            SELECT * FROM default.employees WHERE department = 'Engineering'
+        query_result = spark.sql(f"""
+            SELECT * FROM {LANCE_NAMESPACE}.employees WHERE department = 'Engineering'
         """).collect()
         assert len(query_result) == 3
-        _assert_lance_index_metadata(spark, "default.employees", "idx_dept", "BTREE")
+        _assert_lance_index_metadata(spark, f"{LANCE_NAMESPACE}.employees", "idx_dept", "BTREE")
 
     def test_create_zonemap_index_on_int(self, spark):
         """Test CREATE INDEX with ZoneMap on integer column."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value DOUBLE
@@ -866,10 +871,10 @@ class TestDDLIndex:
 
         data = [(i, f"Name{i}", float(i * 10)) for i in range(100)]
         df = spark.createDataFrame(data, ["id", "name", "value"])
-        df.writeTo("default.test_table").append()
+        df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
-        result = spark.sql("""
-            ALTER TABLE default.test_table
+        result = spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table
             CREATE INDEX idx_id_zonemap USING zonemap (id)
             WITH (rows_per_zone = 8)
         """).collect()
@@ -877,32 +882,32 @@ class TestDDLIndex:
         assert len(result) == 1
         assert result[0][1] == "idx_id_zonemap"
 
-        indexes = spark.sql("""
-            SHOW INDEXES IN default.test_table
+        indexes = spark.sql(f"""
+            SHOW INDEXES IN {LANCE_NAMESPACE}.test_table
         """).collect()
         zonemap_rows = [row for row in indexes if row["name"] == "idx_id_zonemap"]
         assert len(zonemap_rows) >= 1
         assert zonemap_rows[0]["index_type"] == "zonemap"
 
-        query_result = spark.sql("""
-            SELECT * FROM default.test_table WHERE id = 50
+        query_result = spark.sql(f"""
+            SELECT * FROM {LANCE_NAMESPACE}.test_table WHERE id = 50
         """).collect()
         assert len(query_result) == 1
         assert query_result[0].id == 50
 
     def test_create_distributed_bitmap_index(self, spark):
         """Test distributed Bitmap creation with multiple fragments in one segment."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 status INT
             )
         """)
-        spark.sql("INSERT INTO default.test_table VALUES (1, 10), (2, 20)")
-        spark.sql("INSERT INTO default.test_table VALUES (3, 10), (4, 20)")
+        spark.sql(f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (1, 10), (2, 20)")
+        spark.sql(f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (3, 10), (4, 20)")
 
-        result = spark.sql("""
-            ALTER TABLE default.test_table
+        result = spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table
             CREATE INDEX idx_status_bitmap USING bitmap (status)
             WITH (num_segments = 1)
         """).collect()
@@ -911,29 +916,29 @@ class TestDDLIndex:
         assert result[0][0] >= 2
         assert result[0][1] == "idx_status_bitmap"
         _assert_lance_index_metadata(
-            spark, "default.test_table", "idx_status_bitmap", "BITMAP"
+            spark, f"{LANCE_NAMESPACE}.test_table", "idx_status_bitmap", "BITMAP"
         )
-        assert spark.sql("SELECT * FROM default.test_table").count() == 4
+        assert spark.sql(f"SELECT * FROM {LANCE_NAMESPACE}.test_table").count() == 4
 
     def test_optimize_index(self, spark):
         """Test incremental index maintenance through Spark SQL."""
-        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
-        spark.sql("INSERT INTO default.test_table VALUES (1, 'one'), (2, 'two')")
-        spark.sql("""
-            ALTER TABLE default.test_table
+        spark.sql(f"CREATE TABLE {LANCE_NAMESPACE}.test_table (id INT, name STRING)")
+        spark.sql(f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (1, 'one'), (2, 'two')")
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table
             CREATE INDEX idx_id USING zonemap (id)
         """)
-        spark.sql("INSERT INTO default.test_table VALUES (3, 'three')")
+        spark.sql(f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (3, 'three')")
 
         before = next(
             row
-            for row in spark.sql("SHOW INDEXES IN default.test_table").collect()
+            for row in spark.sql(f"SHOW INDEXES IN {LANCE_NAMESPACE}.test_table").collect()
             if row.name == "idx_id"
         )
         assert before.num_unindexed_fragments > 0
 
-        result = spark.sql("""
-            ALTER TABLE default.test_table OPTIMIZE INDEX idx_id
+        result = spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table OPTIMIZE INDEX idx_id
             WITH (num_indices_to_merge = 0)
         """).first()
 
@@ -943,15 +948,15 @@ class TestDDLIndex:
 
         after = next(
             row
-            for row in spark.sql("SHOW INDEXES IN default.test_table").collect()
+            for row in spark.sql(f"SHOW INDEXES IN {LANCE_NAMESPACE}.test_table").collect()
             if row.name == "idx_id"
         )
         assert after.num_unindexed_fragments == 0
 
     def test_create_btree_index_on_nested_literal_dot_field(self, spark):
         """Test CREATE INDEX on nested struct fields, including literal dots."""
-        spark.sql("""
-            CREATE TABLE default.nested_index_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.nested_index_table (
                 id INT,
                 left_payload STRUCT<value: INT>,
                 right_payload STRUCT<value: INT>,
@@ -959,38 +964,38 @@ class TestDDLIndex:
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.nested_index_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.nested_index_table VALUES
             (1, named_struct('value', 10), named_struct('value', 100), named_struct('literal.dot', 1000)),
             (2, named_struct('value', 20), named_struct('value', 200), named_struct('literal.dot', 2000))
         """)
 
-        spark.sql("""
-            ALTER TABLE default.nested_index_table
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.nested_index_table
             CREATE INDEX idx_left_value USING btree (left_payload.value)
         """).collect()
-        spark.sql("""
-            ALTER TABLE default.nested_index_table
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.nested_index_table
             CREATE INDEX idx_literal_dot USING btree (dot_payload.`literal.dot`)
         """).collect()
 
-        indexes = spark.sql("""
-            SHOW INDEXES IN default.nested_index_table
+        indexes = spark.sql(f"""
+            SHOW INDEXES IN {LANCE_NAMESPACE}.nested_index_table
         """).collect()
         fields_by_name = {row["name"]: list(row["fields"]) for row in indexes}
         assert fields_by_name["idx_left_value"] == ["left_payload.value"]
         assert fields_by_name["idx_literal_dot"] == ["dot_payload.`literal.dot`"]
 
-        rows = spark.sql("""
-            SELECT id FROM default.nested_index_table
+        rows = spark.sql(f"""
+            SELECT id FROM {LANCE_NAMESPACE}.nested_index_table
             WHERE left_payload.value = 20
         """).collect()
         assert [row.id for row in rows] == [2]
 
     def test_create_fts_index(self, spark):
         """Test CREATE INDEX with full-text search (FTS)."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 title STRING,
                 content STRING
@@ -1005,11 +1010,11 @@ class TestDDLIndex:
             (5, "Web Development", "Building web applications with Python"),
         ]
         df = spark.createDataFrame(data, ["id", "title", "content"])
-        df.writeTo("default.test_table").append()
+        df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
         # Create FTS index on content column
-        result = spark.sql("""
-            ALTER TABLE default.test_table
+        result = spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table
             CREATE INDEX idx_content_fts USING fts (content)
             WITH ( base_tokenizer = 'simple', language = 'English' )
         """).collect()
@@ -1017,7 +1022,7 @@ class TestDDLIndex:
         assert len(result) == 1
         assert result[0][1] == "idx_content_fts"
         metadata = _assert_lance_index_metadata(
-            spark, "default.test_table", "idx_content_fts", "INVERTED"
+            spark, f"{LANCE_NAMESPACE}.test_table", "idx_content_fts", "INVERTED"
         )
         if metadata is not None:
             assert metadata["index_version"] > 0
@@ -1031,8 +1036,8 @@ class TestDDLIndex:
         if getattr(spark, "_lance_backend", None) == "lancedb":
             pytest.skip("direct JVM dataset inspection is not configured for REST-backed tables")
 
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 content STRING
             )
@@ -1044,23 +1049,23 @@ class TestDDLIndex:
             (3, "lance spark integration"),
         ]
         df = spark.createDataFrame(data, ["id", "content"])
-        df.writeTo("default.test_table").append()
+        df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
-        spark.sql("""
-            ALTER TABLE default.test_table
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table
             CREATE INDEX idx_content_fts_v2 USING fts (content)
             WITH ( base_tokenizer = 'simple', language = 'English' )
         """)
 
         metadata = _assert_lance_index_metadata(
-            spark, "default.test_table", "idx_content_fts_v2", "INVERTED"
+            spark, f"{LANCE_NAMESPACE}.test_table", "idx_content_fts_v2", "INVERTED"
         )
         assert metadata["index_version"] == 2
 
     def test_create_index_empty_table(self, spark):
         """Test creating scalar indexes on an empty table."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING
             )
@@ -1079,18 +1084,18 @@ class TestDDLIndex:
 
         for statement in statements:
             result = spark.sql(
-                f"ALTER TABLE default.test_table {statement}"
+                f"ALTER TABLE {LANCE_NAMESPACE}.test_table {statement}"
             ).collect()
             assert result[0]["fragments_indexed"] == 0
 
-        indexes = spark.sql("SHOW INDEXES IN default.test_table").collect()
+        indexes = spark.sql(f"SHOW INDEXES IN {LANCE_NAMESPACE}.test_table").collect()
         index_names = {row["name"] for row in indexes}
         assert index_names == {"idx_id", "idx_name_zonemap", "idx_name_fts"}
 
     def test_drop_index(self, spark):
         """Test DROP INDEX removes an existing index."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value DOUBLE
@@ -1099,24 +1104,24 @@ class TestDDLIndex:
 
         data = [(i, f"Name{i}", float(i * 10)) for i in range(100)]
         df = spark.createDataFrame(data, ["id", "name", "value"])
-        df.writeTo("default.test_table").append()
+        df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
         # Create index
-        spark.sql("""
-            ALTER TABLE default.test_table
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table
             CREATE INDEX idx_id USING btree (id)
         """)
 
         # Verify index exists via SHOW INDEXES
-        indexes_before = spark.sql("""
-            SHOW INDEXES IN default.test_table
+        indexes_before = spark.sql(f"""
+            SHOW INDEXES IN {LANCE_NAMESPACE}.test_table
         """).collect()
         index_names_before = {row["name"] for row in indexes_before}
         assert "idx_id" in index_names_before
 
         # Drop the index
-        result = spark.sql("""
-            ALTER TABLE default.test_table DROP INDEX idx_id
+        result = spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table DROP INDEX idx_id
         """).collect()
 
         assert len(result) == 1
@@ -1124,16 +1129,16 @@ class TestDDLIndex:
         assert result[0]["status"] == "dropped"
 
         # Verify index no longer appears in SHOW INDEXES
-        indexes_after = spark.sql("""
-            SHOW INDEXES IN default.test_table
+        indexes_after = spark.sql(f"""
+            SHOW INDEXES IN {LANCE_NAMESPACE}.test_table
         """).collect()
         index_names_after = {row["name"] for row in indexes_after}
         assert "idx_id" not in index_names_after
 
     def test_drop_index_then_recreate(self, spark):
         """Test full lifecycle: create -> drop -> recreate index."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value DOUBLE
@@ -1142,31 +1147,31 @@ class TestDDLIndex:
 
         data = [(i, f"Name{i}", float(i * 10)) for i in range(100)]
         df = spark.createDataFrame(data, ["id", "name", "value"])
-        df.writeTo("default.test_table").append()
+        df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
         # Create -> drop -> recreate
-        spark.sql("""
-            ALTER TABLE default.test_table
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table
             CREATE INDEX idx_id USING btree (id)
         """)
-        spark.sql("""
-            ALTER TABLE default.test_table DROP INDEX idx_id
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table DROP INDEX idx_id
         """)
-        spark.sql("""
-            ALTER TABLE default.test_table
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table
             CREATE INDEX idx_id USING btree (id)
         """)
 
         # Verify recreated index exists
-        indexes = spark.sql("""
-            SHOW INDEXES IN default.test_table
+        indexes = spark.sql(f"""
+            SHOW INDEXES IN {LANCE_NAMESPACE}.test_table
         """).collect()
         index_names = {row["name"] for row in indexes}
         assert "idx_id" in index_names
 
         # Verify queries still work
-        query_result = spark.sql("""
-            SELECT * FROM default.test_table WHERE id = 50
+        query_result = spark.sql(f"""
+            SELECT * FROM {LANCE_NAMESPACE}.test_table WHERE id = 50
         """).collect()
         assert len(query_result) == 1
         assert query_result[0].id == 50
@@ -1177,8 +1182,8 @@ class TestDDLOptimize:
 
     def test_optimize_without_args(self, spark):
         """Test OPTIMIZE without options."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
@@ -1189,10 +1194,10 @@ class TestDDLOptimize:
         for batch in range(5):
             data = [(batch * 10 + i, f"Name{batch * 10 + i}", batch * 10 + i) for i in range(10)]
             df = spark.createDataFrame(data, ["id", "name", "value"])
-            df.writeTo("default.test_table").append()
+            df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
         # Run OPTIMIZE
-        result = spark.sql("OPTIMIZE default.test_table").collect()
+        result = spark.sql(f"OPTIMIZE {LANCE_NAMESPACE}.test_table").collect()
 
         # Verify output schema and that compaction occurred
         assert len(result) == 1
@@ -1204,13 +1209,13 @@ class TestDDLOptimize:
         assert row.files_added >= 0
 
         # Verify data integrity after optimization
-        count = spark.table("default.test_table").count()
+        count = spark.table(f"{LANCE_NAMESPACE}.test_table").count()
         assert count == 50  # 5 batches * 10 rows
 
     def test_optimize_with_target_rows(self, spark):
         """Test OPTIMIZE with target_rows_per_fragment option."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
@@ -1221,11 +1226,11 @@ class TestDDLOptimize:
         for batch in range(5):
             data = [(batch * 10 + i, f"Name{batch * 10 + i}", batch * 10 + i) for i in range(10)]
             df = spark.createDataFrame(data, ["id", "name", "value"])
-            df.writeTo("default.test_table").append()
+            df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
         # Optimize with target rows per fragment
-        result = spark.sql("""
-            OPTIMIZE default.test_table WITH (target_rows_per_fragment = 100)
+        result = spark.sql(f"""
+            OPTIMIZE {LANCE_NAMESPACE}.test_table WITH (target_rows_per_fragment = 100)
         """).collect()
 
         assert len(result) == 1
@@ -1234,13 +1239,13 @@ class TestDDLOptimize:
         assert row.fragments_added >= 0
 
         # Verify data integrity
-        count = spark.table("default.test_table").count()
+        count = spark.table(f"{LANCE_NAMESPACE}.test_table").count()
         assert count == 50
 
     def test_optimize_with_multiple_options(self, spark):
         """Test OPTIMIZE with multiple options."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
@@ -1251,11 +1256,11 @@ class TestDDLOptimize:
         for batch in range(3):
             data = [(batch * 20 + i, f"Name{batch * 20 + i}", batch * 20 + i) for i in range(20)]
             df = spark.createDataFrame(data, ["id", "name", "value"])
-            df.writeTo("default.test_table").append()
+            df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
         # Optimize with multiple options
-        result = spark.sql("""
-            OPTIMIZE default.test_table WITH (
+        result = spark.sql(f"""
+            OPTIMIZE {LANCE_NAMESPACE}.test_table WITH (
                 target_rows_per_fragment = 100,
                 num_threads = 2,
                 materialize_deletions = true
@@ -1268,13 +1273,13 @@ class TestDDLOptimize:
         assert row.fragments_added >= 0
 
         # Verify data integrity
-        count = spark.table("default.test_table").count()
+        count = spark.table(f"{LANCE_NAMESPACE}.test_table").count()
         assert count == 60  # 3 batches * 20 rows
 
     def test_optimize_after_deletes(self, spark):
         """Test OPTIMIZE after DELETE to materialize soft deletes."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
@@ -1284,33 +1289,33 @@ class TestDDLOptimize:
         # Insert data
         data = [(i, f"Name{i}", i) for i in range(100)]
         df = spark.createDataFrame(data, ["id", "name", "value"])
-        df.writeTo("default.test_table").append()
+        df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
         # Delete some rows
-        spark.sql("DELETE FROM default.test_table WHERE id < 20")
+        spark.sql(f"DELETE FROM {LANCE_NAMESPACE}.test_table WHERE id < 20")
 
         # Optimize to materialize deletions
-        result = spark.sql("""
-            OPTIMIZE default.test_table WITH (materialize_deletions = true)
+        result = spark.sql(f"""
+            OPTIMIZE {LANCE_NAMESPACE}.test_table WITH (materialize_deletions = true)
         """).collect()
 
         assert len(result) == 1
 
         # Verify correct row count after optimization
-        count = spark.table("default.test_table").count()
+        count = spark.table(f"{LANCE_NAMESPACE}.test_table").count()
         assert count == 80  # 100 - 20 deleted
 
     def test_optimize_empty_table(self, spark):
         """Test OPTIMIZE on empty table."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING
             )
         """)
 
         # Optimize empty table should succeed without error
-        result = spark.sql("OPTIMIZE default.test_table").collect()
+        result = spark.sql(f"OPTIMIZE {LANCE_NAMESPACE}.test_table").collect()
 
         assert len(result) == 1
         row = result[0]
@@ -1324,8 +1329,8 @@ class TestDDLVacuum:
 
     def test_vacuum_without_args(self, spark):
         """Test VACUUM without options."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
@@ -1335,10 +1340,10 @@ class TestDDLVacuum:
         # Insert data to create a version
         data = [(i, f"Name{i}", i) for i in range(10)]
         df = spark.createDataFrame(data, ["id", "name", "value"])
-        df.writeTo("default.test_table").append()
+        df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
         # Run VACUUM
-        result = spark.sql("VACUUM default.test_table").collect()
+        result = spark.sql(f"VACUUM {LANCE_NAMESPACE}.test_table").collect()
 
         # Verify output schema
         assert len(result) == 1
@@ -1349,8 +1354,8 @@ class TestDDLVacuum:
 
     def test_vacuum_with_before_version(self, spark):
         """Test VACUUM with before_version option."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
@@ -1361,11 +1366,11 @@ class TestDDLVacuum:
         for version in range(5):
             data = [(version * 10 + i, f"Name{version * 10 + i}", version * 10 + i) for i in range(10)]
             df = spark.createDataFrame(data, ["id", "name", "value"])
-            df.writeTo("default.test_table").append()
+            df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
         # Vacuum with before_version to remove old versions
-        result = spark.sql("""
-            VACUUM default.test_table WITH (before_version = 1000000)
+        result = spark.sql(f"""
+            VACUUM {LANCE_NAMESPACE}.test_table WITH (before_version = 1000000)
         """).collect()
 
         assert len(result) == 1
@@ -1375,13 +1380,13 @@ class TestDDLVacuum:
         assert row.old_versions >= 0
 
         # Verify data is still accessible
-        count = spark.table("default.test_table").count()
+        count = spark.table(f"{LANCE_NAMESPACE}.test_table").count()
         assert count == 50  # 5 versions * 10 rows
 
     def test_vacuum_with_timestamp(self, spark):
         """Test VACUUM with before_timestamp_millis option."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
@@ -1391,7 +1396,7 @@ class TestDDLVacuum:
         # Insert initial data
         data = [(i, f"Name{i}", i) for i in range(10)]
         df = spark.createDataFrame(data, ["id", "name", "value"])
-        df.writeTo("default.test_table").append()
+        df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
         # Small delay to separate versions
         time.sleep(0.1)
@@ -1401,11 +1406,11 @@ class TestDDLVacuum:
         for version in range(3):
             data = [(100 + version * 10 + i, f"NewName{version * 10 + i}", version * 10 + i) for i in range(10)]
             df = spark.createDataFrame(data, ["id", "name", "value"])
-            df.writeTo("default.test_table").append()
+            df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
         # Vacuum versions older than the timestamp
         result = spark.sql(f"""
-            VACUUM default.test_table WITH (before_timestamp_millis = {before_ts})
+            VACUUM {LANCE_NAMESPACE}.test_table WITH (before_timestamp_millis = {before_ts})
         """).collect()
 
         assert len(result) == 1
@@ -1414,13 +1419,13 @@ class TestDDLVacuum:
         assert row.old_versions >= 0
 
         # Verify current data is accessible
-        count = spark.table("default.test_table").count()
+        count = spark.table(f"{LANCE_NAMESPACE}.test_table").count()
         assert count == 40  # 10 initial + 3 versions * 10 rows
 
     def test_vacuum_after_optimize(self, spark):
         """Test VACUUM after OPTIMIZE to clean up removed fragments."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
@@ -1431,16 +1436,16 @@ class TestDDLVacuum:
         for batch in range(5):
             data = [(batch * 10 + i, f"Name{batch * 10 + i}", batch * 10 + i) for i in range(10)]
             df = spark.createDataFrame(data, ["id", "name", "value"])
-            df.writeTo("default.test_table").append()
+            df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
         # Optimize to compact fragments
-        spark.sql("""
-            OPTIMIZE default.test_table WITH (target_rows_per_fragment = 100)
+        spark.sql(f"""
+            OPTIMIZE {LANCE_NAMESPACE}.test_table WITH (target_rows_per_fragment = 100)
         """)
 
         # Vacuum to remove old fragment files
-        result = spark.sql("""
-            VACUUM default.test_table WITH (before_version = 1000000)
+        result = spark.sql(f"""
+            VACUUM {LANCE_NAMESPACE}.test_table WITH (before_version = 1000000)
         """).collect()
 
         assert len(result) == 1
@@ -1450,14 +1455,14 @@ class TestDDLVacuum:
         assert row.old_versions >= 0
 
         # Verify data integrity
-        count = spark.table("default.test_table").count()
+        count = spark.table(f"{LANCE_NAMESPACE}.test_table").count()
         assert count == 50
 
     @requires_update_or_merge
     def test_vacuum_preserves_current_data(self, spark):
         """Test VACUUM preserves all current data."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
@@ -1465,30 +1470,30 @@ class TestDDLVacuum:
         """)
 
         # Insert and update data multiple times
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 100),
             (2, 'Bob', 200),
             (3, 'Charlie', 300)
         """)
 
         # Update to create new versions
-        spark.sql("UPDATE default.test_table SET value = 150 WHERE id = 1")
-        spark.sql("UPDATE default.test_table SET value = 250 WHERE id = 2")
+        spark.sql(f"UPDATE {LANCE_NAMESPACE}.test_table SET value = 150 WHERE id = 1")
+        spark.sql(f"UPDATE {LANCE_NAMESPACE}.test_table SET value = 250 WHERE id = 2")
 
         # Delete and re-insert
-        spark.sql("DELETE FROM default.test_table WHERE id = 3")
-        spark.sql("INSERT INTO default.test_table VALUES (3, 'Charlie', 350)")
+        spark.sql(f"DELETE FROM {LANCE_NAMESPACE}.test_table WHERE id = 3")
+        spark.sql(f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (3, 'Charlie', 350)")
 
         # Vacuum
-        result = spark.sql("""
-            VACUUM default.test_table WITH (before_version = 1000000)
+        result = spark.sql(f"""
+            VACUUM {LANCE_NAMESPACE}.test_table WITH (before_version = 1000000)
         """).collect()
 
         assert len(result) == 1
 
         # Verify all current data is preserved
-        rows = spark.table("default.test_table").orderBy("id").collect()
+        rows = spark.table(f"{LANCE_NAMESPACE}.test_table").orderBy("id").collect()
         assert len(rows) == 3
         assert rows[0].id == 1 and rows[0].value == 150
         assert rows[1].id == 2 and rows[1].value == 250
@@ -1500,19 +1505,19 @@ class TestDDLPrimaryKey:
 
     def test_set_single_column_primary_key(self, spark):
         """Test setting a single-column unenforced primary key."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT NOT NULL,
                 name STRING NOT NULL,
                 value DOUBLE
             )
         """)
-        spark.sql("""
-            INSERT INTO default.test_table VALUES (1, 'Alice', 10.5), (2, 'Bob', 20.3)
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (1, 'Alice', 10.5), (2, 'Bob', 20.3)
         """)
 
-        result = spark.sql("""
-            ALTER TABLE default.test_table SET UNENFORCED PRIMARY KEY (id)
+        result = spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table SET UNENFORCED PRIMARY KEY (id)
         """).collect()
 
         assert len(result) == 1
@@ -1521,19 +1526,19 @@ class TestDDLPrimaryKey:
 
     def test_set_composite_primary_key(self, spark):
         """Test setting a composite (multi-column) unenforced primary key."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT NOT NULL,
                 name STRING NOT NULL,
                 value DOUBLE
             )
         """)
-        spark.sql("""
-            INSERT INTO default.test_table VALUES (1, 'Alice', 10.5), (2, 'Bob', 20.3)
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (1, 'Alice', 10.5), (2, 'Bob', 20.3)
         """)
 
-        result = spark.sql("""
-            ALTER TABLE default.test_table SET UNENFORCED PRIMARY KEY (id, name)
+        result = spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table SET UNENFORCED PRIMARY KEY (id, name)
         """).collect()
 
         assert len(result) == 1
@@ -1542,8 +1547,8 @@ class TestDDLPrimaryKey:
 
     def test_set_primary_key_on_nonexistent_column(self, spark):
         """Test that setting PK on a non-existent column raises an error."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT NOT NULL,
                 name STRING NOT NULL,
                 value DOUBLE
@@ -1551,14 +1556,14 @@ class TestDDLPrimaryKey:
         """)
 
         with pytest.raises(Exception, match="not found"):
-            spark.sql("""
-                ALTER TABLE default.test_table SET UNENFORCED PRIMARY KEY (nonexistent)
+            spark.sql(f"""
+                ALTER TABLE {LANCE_NAMESPACE}.test_table SET UNENFORCED PRIMARY KEY (nonexistent)
             """).collect()
 
     def test_set_primary_key_on_nullable_column(self, spark):
         """Test that setting PK on a nullable column raises an error."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT NOT NULL,
                 name STRING NOT NULL,
                 value DOUBLE
@@ -1566,54 +1571,54 @@ class TestDDLPrimaryKey:
         """)
 
         with pytest.raises(Exception, match="nullable"):
-            spark.sql("""
-                ALTER TABLE default.test_table SET UNENFORCED PRIMARY KEY (value)
+            spark.sql(f"""
+                ALTER TABLE {LANCE_NAMESPACE}.test_table SET UNENFORCED PRIMARY KEY (value)
             """).collect()
 
     def test_set_primary_key_when_already_set(self, spark):
         """Test that setting PK when one already exists raises an error."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT NOT NULL,
                 name STRING NOT NULL,
                 value DOUBLE
             )
         """)
-        spark.sql("""
-            INSERT INTO default.test_table VALUES (1, 'Alice', 10.5)
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (1, 'Alice', 10.5)
         """)
 
-        spark.sql("""
-            ALTER TABLE default.test_table SET UNENFORCED PRIMARY KEY (id)
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table SET UNENFORCED PRIMARY KEY (id)
         """).collect()
 
         with pytest.raises(Exception, match="already has unenforced primary key"):
-            spark.sql("""
-                ALTER TABLE default.test_table SET UNENFORCED PRIMARY KEY (name)
+            spark.sql(f"""
+                ALTER TABLE {LANCE_NAMESPACE}.test_table SET UNENFORCED PRIMARY KEY (name)
             """).collect()
 
     def test_data_readable_after_primary_key_set(self, spark):
         """Test that data is still fully readable after setting PK."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT NOT NULL,
                 name STRING NOT NULL,
                 value DOUBLE
             )
         """)
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 10.5),
             (2, 'Bob', 20.3),
             (3, 'Charlie', 30.1)
         """)
 
-        spark.sql("""
-            ALTER TABLE default.test_table SET UNENFORCED PRIMARY KEY (id)
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table SET UNENFORCED PRIMARY KEY (id)
         """).collect()
 
-        result = spark.sql("""
-            SELECT id, name, value FROM default.test_table ORDER BY id
+        result = spark.sql(f"""
+            SELECT id, name, value FROM {LANCE_NAMESPACE}.test_table ORDER BY id
         """).collect()
 
         assert len(result) == 3
@@ -1626,8 +1631,8 @@ class TestDDLPrimaryKey:
 
     def test_primary_key_persists_after_optimize(self, spark):
         """Test that PK metadata survives an OPTIMIZE operation."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT NOT NULL,
                 name STRING NOT NULL,
                 value DOUBLE
@@ -1637,58 +1642,58 @@ class TestDDLPrimaryKey:
         # Insert multiple batches to create fragments worth optimizing
         for batch in range(3):
             spark.sql(f"""
-                INSERT INTO default.test_table VALUES
+                INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
                 ({batch * 10 + 1}, 'Name{batch * 10 + 1}', {float(batch * 10 + 1)}),
                 ({batch * 10 + 2}, 'Name{batch * 10 + 2}', {float(batch * 10 + 2)})
             """)
 
-        spark.sql("""
-            ALTER TABLE default.test_table SET UNENFORCED PRIMARY KEY (id)
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table SET UNENFORCED PRIMARY KEY (id)
         """).collect()
 
-        spark.sql("OPTIMIZE default.test_table").collect()
+        spark.sql(f"OPTIMIZE {LANCE_NAMESPACE}.test_table").collect()
 
         # PK should still be set -- setting it again should fail
         with pytest.raises(Exception, match="already has unenforced primary key"):
-            spark.sql("""
-                ALTER TABLE default.test_table SET UNENFORCED PRIMARY KEY (id)
+            spark.sql(f"""
+                ALTER TABLE {LANCE_NAMESPACE}.test_table SET UNENFORCED PRIMARY KEY (id)
             """).collect()
 
         # Data should still be readable
-        count = spark.sql("SELECT * FROM default.test_table").collect()
+        count = spark.sql(f"SELECT * FROM {LANCE_NAMESPACE}.test_table").collect()
         assert len(count) == 6
 
     def test_primary_key_persists_after_insert(self, spark):
         """Test that PK metadata survives new data being inserted after PK is set."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT NOT NULL,
                 name STRING NOT NULL,
                 value DOUBLE
             )
         """)
-        spark.sql("""
-            INSERT INTO default.test_table VALUES (1, 'Alice', 10.5)
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (1, 'Alice', 10.5)
         """)
 
-        spark.sql("""
-            ALTER TABLE default.test_table SET UNENFORCED PRIMARY KEY (id)
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table SET UNENFORCED PRIMARY KEY (id)
         """).collect()
 
         # Insert new data after PK is set
-        spark.sql("""
-            INSERT INTO default.test_table VALUES (2, 'Bob', 20.3), (3, 'Charlie', 30.1)
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (2, 'Bob', 20.3), (3, 'Charlie', 30.1)
         """)
 
         # PK should still be set -- setting it again should fail
         with pytest.raises(Exception, match="already has unenforced primary key"):
-            spark.sql("""
-                ALTER TABLE default.test_table SET UNENFORCED PRIMARY KEY (name)
+            spark.sql(f"""
+                ALTER TABLE {LANCE_NAMESPACE}.test_table SET UNENFORCED PRIMARY KEY (name)
             """).collect()
 
         # All data should be readable
-        result = spark.sql("""
-            SELECT id FROM default.test_table ORDER BY id
+        result = spark.sql(f"""
+            SELECT id FROM {LANCE_NAMESPACE}.test_table ORDER BY id
         """).collect()
         assert len(result) == 3
         assert [row.id for row in result] == [1, 2, 3]
@@ -1706,23 +1711,23 @@ class TestDQLSearchTableFunctions:
         """Test VECTOR_SEARCH against namespace query execution."""
         _require_sql_search_backend(spark)
 
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT NOT NULL,
                 vector ARRAY<FLOAT> NOT NULL
             ) USING lance
             TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '4')
         """)
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (0, array(0.0, 0.0, 0.0, 0.0)),
             (1, array(1.0, 1.0, 1.0, 1.0)),
             (2, array(10.0, 10.0, 10.0, 10.0))
         """)
 
-        rows = spark.sql("""
+        rows = spark.sql(f"""
             SELECT id, _distance
-            FROM VECTOR_SEARCH('default.test_table', array(0.0, 0.0, 0.0, 0.0), 2)
+            FROM VECTOR_SEARCH('{LANCE_NAMESPACE}.test_table', array(0.0, 0.0, 0.0, 0.0), 2)
             ORDER BY _distance, id
         """).collect()
 
@@ -1740,20 +1745,20 @@ class TestDQLSearchTableFunctions:
         """Test SEARCH against a Lance FTS index."""
         _require_sql_search_backend(spark)
 
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT NOT NULL,
                 body STRING
             ) USING lance
         """)
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'lance vector search'),
             (2, 'spark connector table function'),
             (3, 'lance full text search')
         """)
-        spark.sql("""
-            ALTER TABLE default.test_table
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table
             CREATE INDEX body_fts USING fts (body)
             WITH (
                 base_tokenizer='simple',
@@ -1767,10 +1772,10 @@ class TestDQLSearchTableFunctions:
             )
         """)
 
-        rows = spark.sql("""
+        rows = spark.sql(f"""
             SELECT id, body, _score
             FROM SEARCH(
-                table => 'default.test_table',
+                table => '{LANCE_NAMESPACE}.test_table',
                 query => 'lance',
                 search_columns => array('body'),
                 k => 10
@@ -1786,22 +1791,22 @@ class TestDQLSearchTableFunctions:
         """Test HYBRID_SEARCH client-side RRF fusion over namespace results."""
         _require_sql_search_backend(spark)
 
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT NOT NULL,
                 body STRING,
                 vector ARRAY<FLOAT> NOT NULL
             ) USING lance
             TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '4')
         """)
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'lance vector search', array(0.0, 0.0, 0.0, 0.0)),
             (2, 'spark connector table function', array(1.0, 1.0, 1.0, 1.0)),
             (3, 'lance full text search', array(10.0, 10.0, 10.0, 10.0))
         """)
-        spark.sql("""
-            ALTER TABLE default.test_table
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table
             CREATE INDEX body_fts USING fts (body)
             WITH (
                 base_tokenizer='simple',
@@ -1815,9 +1820,9 @@ class TestDQLSearchTableFunctions:
             )
         """)
 
-        rows = spark.sql("""
+        rows = spark.sql(f"""
             SELECT id, body, _distance, _score, _relevance_score
-            FROM HYBRID_SEARCH('default.test_table', array(0.0, 0.0, 0.0, 0.0), 'lance', 3)
+            FROM HYBRID_SEARCH('{LANCE_NAMESPACE}.test_table', array(0.0, 0.0, 0.0, 0.0), 'lance', 3)
             ORDER BY _relevance_score DESC, id
         """).collect()
 
@@ -1835,24 +1840,24 @@ class TestDQLSearchTableFunctions:
         if SPARK_VERSION < Version("3.5"):
             pytest.skip("named table function arguments require Spark 3.5+")
 
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT NOT NULL,
                 vector ARRAY<FLOAT> NOT NULL
             ) USING lance
             TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '4')
         """)
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (0, array(0.0, 0.0, 0.0, 0.0)),
             (1, array(1.0, 1.0, 1.0, 1.0)),
             (2, array(10.0, 10.0, 10.0, 10.0))
         """)
 
-        rows = spark.sql("""
+        rows = spark.sql(f"""
             SELECT id, _rowid, _distance
             FROM VECTOR_SEARCH(
-                table => 'default.test_table',
+                table => '{LANCE_NAMESPACE}.test_table',
                 query_vector => array(0.0, 0.0, 0.0, 0.0),
                 vector_column => 'vector',
                 columns => array('id'),
@@ -1885,8 +1890,8 @@ class TestDQLSelect:
 
     def test_select_all(self, spark):
         """Test SELECT * query."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value DOUBLE
@@ -1895,9 +1900,9 @@ class TestDQLSelect:
 
         data = [(1, "Alice", 10.5), (2, "Bob", 20.3), (3, "Charlie", 30.1)]
         df = spark.createDataFrame(data, ["id", "name", "value"])
-        df.writeTo("default.test_table").append()
+        df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
-        result = spark.sql("SELECT * FROM default.test_table").collect()
+        result = spark.sql(f"SELECT * FROM {LANCE_NAMESPACE}.test_table").collect()
         assert len(result) == 3
 
         ids = sorted([row.id for row in result])
@@ -1905,8 +1910,8 @@ class TestDQLSelect:
 
     def test_select_with_where(self, spark):
         """Test SELECT with WHERE clause."""
-        spark.sql("""
-            CREATE TABLE default.employees (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.employees (
                 id INT,
                 name STRING,
                 age INT,
@@ -1923,10 +1928,10 @@ class TestDQLSelect:
             (5, "Eve", 32, "HR", 60000),
         ]
         df = spark.createDataFrame(data, ["id", "name", "age", "department", "salary"])
-        df.writeTo("default.employees").append()
+        df.writeTo(f"{LANCE_NAMESPACE}.employees").append()
 
-        result = spark.sql("""
-            SELECT * FROM default.employees
+        result = spark.sql(f"""
+            SELECT * FROM {LANCE_NAMESPACE}.employees
             WHERE department = 'Engineering'
         """).collect()
 
@@ -1936,8 +1941,8 @@ class TestDQLSelect:
 
     def test_select_with_group_by(self, spark):
         """Test SELECT with GROUP BY aggregation."""
-        spark.sql("""
-            CREATE TABLE default.employees (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.employees (
                 id INT,
                 name STRING,
                 age INT,
@@ -1954,11 +1959,11 @@ class TestDQLSelect:
             (5, "Eve", 32, "HR", 60000),
         ]
         df = spark.createDataFrame(data, ["id", "name", "age", "department", "salary"])
-        df.writeTo("default.employees").append()
+        df.writeTo(f"{LANCE_NAMESPACE}.employees").append()
 
-        result = spark.sql("""
+        result = spark.sql(f"""
             SELECT department, COUNT(*) as count, AVG(salary) as avg_salary
-            FROM default.employees
+            FROM {LANCE_NAMESPACE}.employees
             GROUP BY department
             ORDER BY count DESC
         """).collect()
@@ -1969,8 +1974,8 @@ class TestDQLSelect:
 
     def test_select_with_order_by(self, spark):
         """Test SELECT with ORDER BY clause."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value DOUBLE
@@ -1979,10 +1984,10 @@ class TestDQLSelect:
 
         data = [(3, "Charlie", 30.1), (1, "Alice", 10.5), (2, "Bob", 20.3)]
         df = spark.createDataFrame(data, ["id", "name", "value"])
-        df.writeTo("default.test_table").append()
+        df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
-        result = spark.sql("""
-            SELECT * FROM default.test_table ORDER BY id ASC
+        result = spark.sql(f"""
+            SELECT * FROM {LANCE_NAMESPACE}.test_table ORDER BY id ASC
         """).collect()
 
         ids = [row.id for row in result]
@@ -1990,8 +1995,8 @@ class TestDQLSelect:
 
     def test_select_with_limit(self, spark):
         """Test SELECT with LIMIT clause."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value DOUBLE
@@ -2000,18 +2005,18 @@ class TestDQLSelect:
 
         data = [(i, f"Name{i}", float(i)) for i in range(10)]
         df = spark.createDataFrame(data, ["id", "name", "value"])
-        df.writeTo("default.test_table").append()
+        df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
-        result = spark.sql("""
-            SELECT * FROM default.test_table LIMIT 5
+        result = spark.sql(f"""
+            SELECT * FROM {LANCE_NAMESPACE}.test_table LIMIT 5
         """).collect()
 
         assert len(result) == 5
 
     def test_select_data_types(self, spark):
         """Test SELECT with various data types: INT, BIGINT, FLOAT, DOUBLE, STRING, BOOLEAN."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 int_col INT,
                 long_col BIGINT,
                 float_col FLOAT,
@@ -2026,9 +2031,9 @@ class TestDQLSelect:
             data,
             ["int_col", "long_col", "float_col", "double_col", "string_col", "bool_col"]
         )
-        df.writeTo("default.test_table").append()
+        df.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
-        result = spark.table("default.test_table").collect()[0]
+        result = spark.table(f"{LANCE_NAMESPACE}.test_table").collect()[0]
         assert result.int_col == 1
         assert result.long_col == 100000000000
         assert abs(result.float_col - 1.5) < 0.01
@@ -2046,8 +2051,8 @@ class TestDMLInsert:
 
     def test_insert_into_values(self, spark):
         """Test INSERT INTO with VALUES clause."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value DOUBLE
@@ -2055,14 +2060,14 @@ class TestDMLInsert:
         """)
 
         # Insert using VALUES
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 10.5),
             (2, 'Bob', 20.3),
             (3, 'Charlie', 30.1)
         """)
 
-        result = spark.table("default.test_table").collect()
+        result = spark.table(f"{LANCE_NAMESPACE}.test_table").collect()
         assert len(result) == 3
 
         ids = sorted([row.id for row in result])
@@ -2070,8 +2075,8 @@ class TestDMLInsert:
 
     def test_insert_into_select(self, spark):
         """Test INSERT INTO with SELECT clause."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value DOUBLE
@@ -2079,20 +2084,20 @@ class TestDMLInsert:
         """)
 
         # Insert initial data
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 10.5),
             (2, 'Bob', 20.3)
         """)
 
         # Insert from select (duplicate the data with modified ids)
-        spark.sql("""
-            INSERT INTO default.test_table
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table
             SELECT id + 10, name, value * 2
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
         """)
 
-        result = spark.table("default.test_table").collect()
+        result = spark.table(f"{LANCE_NAMESPACE}.test_table").collect()
         assert len(result) == 4
 
         ids = sorted([row.id for row in result])
@@ -2100,8 +2105,8 @@ class TestDMLInsert:
 
     def test_insert_append_data(self, spark):
         """Test INSERT by appending data with DataFrame API."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value DOUBLE
@@ -2110,13 +2115,13 @@ class TestDMLInsert:
 
         data1 = [(1, "Alice", 10.5), (2, "Bob", 20.3)]
         df1 = spark.createDataFrame(data1, ["id", "name", "value"])
-        df1.writeTo("default.test_table").append()
+        df1.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
         data2 = [(3, "Charlie", 30.1), (4, "Diana", 40.2)]
         df2 = spark.createDataFrame(data2, ["id", "name", "value"])
-        df2.writeTo("default.test_table").append()
+        df2.writeTo(f"{LANCE_NAMESPACE}.test_table").append()
 
-        count = spark.table("default.test_table").count()
+        count = spark.table(f"{LANCE_NAMESPACE}.test_table").count()
         assert count == 4
 
 
@@ -2126,28 +2131,28 @@ class TestDMLUpdate:
 
     def test_update_single_column(self, spark):
         """Test UPDATE SET single column."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 10),
             (2, 'Bob', 20),
             (3, 'Charlie', 30)
         """)
 
         # Update value for specific id
-        spark.sql("""
-            UPDATE default.test_table SET value = 100 WHERE id = 2
+        spark.sql(f"""
+            UPDATE {LANCE_NAMESPACE}.test_table SET value = 100 WHERE id = 2
         """)
 
-        result = spark.sql("""
-            SELECT * FROM default.test_table WHERE id = 2
+        result = spark.sql(f"""
+            SELECT * FROM {LANCE_NAMESPACE}.test_table WHERE id = 2
         """).collect()
 
         assert len(result) == 1
@@ -2155,16 +2160,16 @@ class TestDMLUpdate:
 
     def test_update_multiple_rows(self, spark):
         """Test UPDATE SET affecting multiple rows."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 10),
             (2, 'Bob', 20),
             (3, 'Charlie', 30),
@@ -2172,11 +2177,11 @@ class TestDMLUpdate:
         """)
 
         # Update all rows where value < 30
-        spark.sql("""
-            UPDATE default.test_table SET value = value + 100 WHERE value < 30
+        spark.sql(f"""
+            UPDATE {LANCE_NAMESPACE}.test_table SET value = value + 100 WHERE value < 30
         """)
 
-        result = spark.table("default.test_table").orderBy("id").collect()
+        result = spark.table(f"{LANCE_NAMESPACE}.test_table").orderBy("id").collect()
 
         assert result[0].value == 110  # id=1: 10 + 100
         assert result[1].value == 120  # id=2: 20 + 100
@@ -2189,16 +2194,16 @@ class TestDMLDelete:
 
     def test_delete_with_condition(self, spark):
         """Test DELETE FROM with WHERE clause."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value DOUBLE
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 10.5),
             (2, 'Bob', 20.3),
             (3, 'Charlie', 30.1),
@@ -2207,11 +2212,11 @@ class TestDMLDelete:
         """)
 
         # Delete rows where id > 3
-        spark.sql("""
-            DELETE FROM default.test_table WHERE id > 3
+        spark.sql(f"""
+            DELETE FROM {LANCE_NAMESPACE}.test_table WHERE id > 3
         """)
 
-        result = spark.table("default.test_table").collect()
+        result = spark.table(f"{LANCE_NAMESPACE}.test_table").collect()
         assert len(result) == 3
 
         ids = sorted([row.id for row in result])
@@ -2219,8 +2224,8 @@ class TestDMLDelete:
 
     def test_delete_with_string_condition(self, spark):
         """Test DELETE FROM with string column condition."""
-        spark.sql("""
-            CREATE TABLE default.employees (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.employees (
                 id INT,
                 name STRING,
                 department STRING,
@@ -2228,8 +2233,8 @@ class TestDMLDelete:
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.employees VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.employees VALUES
             (1, 'Alice', 'Engineering', 75000),
             (2, 'Bob', 'Marketing', 65000),
             (3, 'Charlie', 'Engineering', 70000),
@@ -2237,11 +2242,11 @@ class TestDMLDelete:
         """)
 
         # Delete all Marketing employees
-        spark.sql("""
-            DELETE FROM default.employees WHERE department = 'Marketing'
+        spark.sql(f"""
+            DELETE FROM {LANCE_NAMESPACE}.employees WHERE department = 'Marketing'
         """)
 
-        result = spark.table("default.employees").collect()
+        result = spark.table(f"{LANCE_NAMESPACE}.employees").collect()
         assert len(result) == 3
 
         departments = [row.department for row in result]
@@ -2255,16 +2260,16 @@ class TestDMLMerge:
     def test_merge_into(self, spark):
         """Test MERGE INTO with WHEN MATCHED and WHEN NOT MATCHED."""
         # Create target table
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 10),
             (2, 'Bob', 20),
             (3, 'Charlie', 30)
@@ -2276,15 +2281,15 @@ class TestDMLMerge:
         source_df.createOrReplaceTempView("source")
 
         # Merge: update matching rows, insert new rows
-        spark.sql("""
-            MERGE INTO default.test_table t
+        spark.sql(f"""
+            MERGE INTO {LANCE_NAMESPACE}.test_table t
             USING source s
             ON t.id = s.id
             WHEN MATCHED THEN UPDATE SET name = s.name, value = s.value
             WHEN NOT MATCHED THEN INSERT (id, name, value) VALUES (s.id, s.name, s.value)
         """)
 
-        result = spark.table("default.test_table").orderBy("id").collect()
+        result = spark.table(f"{LANCE_NAMESPACE}.test_table").orderBy("id").collect()
 
         assert len(result) == 4
 
@@ -2304,8 +2309,8 @@ class TestDMLAddColumn:
 
     def test_add_blob_v2_binary_column(self, spark):
         """Test adding a BINARY column with blob v2 encoding."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING
             )
@@ -2314,8 +2319,8 @@ class TestDMLAddColumn:
             )
         """)
 
-        spark.sql("""
-            ALTER TABLE default.test_table
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table
             SET TBLPROPERTIES (
                 'content.lance.encoding' = 'blob',
                 'invalid_content.lance.encoding' = 'blob'
@@ -2325,29 +2330,29 @@ class TestDMLAddColumn:
         first_content = b"alpha"
         second_content = b"bravo-charlie"
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'alpha')
         """)
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (2, 'bravo-charlie')
         """)
 
-        spark.sql("""
+        spark.sql(f"""
             CREATE TEMPORARY VIEW tmp_view AS
             SELECT _rowaddr, _fragid, CAST(name AS BINARY) AS content
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
         """)
 
-        spark.sql("""
-            ALTER TABLE default.test_table ADD COLUMNS content FROM tmp_view
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table ADD COLUMNS content FROM tmp_view
         """)
 
         content_field = next(
             row
-            for row in spark.sql("DESCRIBE default.test_table").collect()
+            for row in spark.sql(f"DESCRIBE {LANCE_NAMESPACE}.test_table").collect()
             if row.col_name == "content"
         )
         content_type = content_field.data_type.lower()
@@ -2355,9 +2360,9 @@ class TestDMLAddColumn:
         assert "kind" in content_type
         assert "blob_uri" in content_type
 
-        rows = spark.sql("""
+        rows = spark.sql(f"""
             SELECT id, content.size, content.kind
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
             ORDER BY id
         """).collect()
 
@@ -2366,19 +2371,19 @@ class TestDMLAddColumn:
             (2, len(second_content), 0),
         ]
 
-        spark.sql("""
+        spark.sql(f"""
             CREATE OR REPLACE TEMPORARY VIEW tmp_view AS
             SELECT _rowaddr, _fragid, name AS invalid_content
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
         """)
 
         with pytest.raises(Exception, match="must have BINARY type"):
-            spark.sql("""
-                ALTER TABLE default.test_table
+            spark.sql(f"""
+                ALTER TABLE {LANCE_NAMESPACE}.test_table
                 ADD COLUMNS invalid_content FROM tmp_view
             """)
 
-        field_names = [field.name for field in spark.table("default.test_table").schema.fields]
+        field_names = [field.name for field in spark.table(f"{LANCE_NAMESPACE}.test_table").schema.fields]
         assert "invalid_content" not in field_names
 
     def test_add_blob_column_without_encoding_property_stays_binary(self, spark, test_table):
@@ -2473,37 +2478,37 @@ class TestDMLAddColumn:
 
     def test_add_column_from_view(self, spark):
         """Test ALTER TABLE ADD COLUMNS FROM with single column."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 100),
             (2, 'Bob', 200),
             (3, 'Charlie', 300)
         """)
 
         # Create temp view with _rowaddr, _fragid, and new column
-        spark.sql("""
+        spark.sql(f"""
             CREATE TEMPORARY VIEW tmp_view AS
             SELECT _rowaddr, _fragid, value * 2 as doubled_value
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
         """)
 
         # Add column from the view
-        spark.sql("""
-            ALTER TABLE default.test_table ADD COLUMNS doubled_value FROM tmp_view
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table ADD COLUMNS doubled_value FROM tmp_view
         """)
 
         # Verify the new column was added with correct values
-        result = spark.sql("""
+        result = spark.sql(f"""
             SELECT id, name, value, doubled_value
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
             ORDER BY id
         """).collect()
 
@@ -2514,40 +2519,40 @@ class TestDMLAddColumn:
 
     def test_add_multiple_columns(self, spark):
         """Test ALTER TABLE ADD COLUMNS FROM with multiple columns."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 100),
             (2, 'Bob', 200),
             (3, 'Charlie', 300)
         """)
 
         # Create temp view with multiple new columns
-        spark.sql("""
+        spark.sql(f"""
             CREATE TEMPORARY VIEW tmp_view AS
             SELECT _rowaddr, _fragid,
                    value * 2 as doubled,
                    value + 50 as plus_fifty,
                    CONCAT(name, '_suffix') as name_with_suffix
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
         """)
 
         # Add multiple columns
-        spark.sql("""
-            ALTER TABLE default.test_table ADD COLUMNS doubled, plus_fifty, name_with_suffix FROM tmp_view
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table ADD COLUMNS doubled, plus_fifty, name_with_suffix FROM tmp_view
         """)
 
         # Verify all columns were added
-        result = spark.sql("""
+        result = spark.sql(f"""
             SELECT id, doubled, plus_fifty, name_with_suffix
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
             ORDER BY id
         """).collect()
 
@@ -2561,16 +2566,16 @@ class TestDMLAddColumn:
 
     def test_add_column_partial_rows(self, spark):
         """Test ADD COLUMNS FROM with data for only some rows (others get null)."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 100),
             (2, 'Bob', 200),
             (3, 'Charlie', 300),
@@ -2579,21 +2584,21 @@ class TestDMLAddColumn:
         """)
 
         # Create temp view with data for only some rows
-        spark.sql("""
+        spark.sql(f"""
             CREATE TEMPORARY VIEW tmp_view AS
             SELECT _rowaddr, _fragid, CONCAT('special_', name) as special_name
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
             WHERE id IN (1, 3, 5)
         """)
 
         # Add column - rows not in view should get null
-        spark.sql("""
-            ALTER TABLE default.test_table ADD COLUMNS special_name FROM tmp_view
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table ADD COLUMNS special_name FROM tmp_view
         """)
 
-        result = spark.sql("""
+        result = spark.sql(f"""
             SELECT id, special_name
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
             ORDER BY id
         """).collect()
 
@@ -2606,8 +2611,8 @@ class TestDMLAddColumn:
 
     def test_add_column_computed_values(self, spark):
         """Test ADD COLUMNS FROM with computed/derived values."""
-        spark.sql("""
-            CREATE TABLE default.employees (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.employees (
                 id INT,
                 name STRING,
                 salary INT,
@@ -2615,28 +2620,28 @@ class TestDMLAddColumn:
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.employees VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.employees VALUES
             (1, 'Alice', 50000, 10),
             (2, 'Bob', 60000, 15),
             (3, 'Charlie', 70000, 20)
         """)
 
         # Compute total compensation as a new column
-        spark.sql("""
+        spark.sql(f"""
             CREATE TEMPORARY VIEW tmp_view AS
             SELECT _rowaddr, _fragid,
                    salary + (salary * bonus_percent / 100) as total_compensation
-            FROM default.employees
+            FROM {LANCE_NAMESPACE}.employees
         """)
 
-        spark.sql("""
-            ALTER TABLE default.employees ADD COLUMNS total_compensation FROM tmp_view
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.employees ADD COLUMNS total_compensation FROM tmp_view
         """)
 
-        result = spark.sql("""
+        result = spark.sql(f"""
             SELECT id, name, salary, bonus_percent, total_compensation
-            FROM default.employees
+            FROM {LANCE_NAMESPACE}.employees
             ORDER BY id
         """).collect()
 
@@ -2728,36 +2733,36 @@ class TestDMLUpdateColumn:
 
     def test_update_single_column(self, spark):
         """Test ALTER TABLE UPDATE COLUMNS FROM with a single column."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 100),
             (2, 'Bob', 200),
             (3, 'Charlie', 300)
         """)
 
         # Create temp view that updates value for id=2 only
-        spark.sql("""
+        spark.sql(f"""
             CREATE TEMPORARY VIEW tmp_view AS
             SELECT _rowaddr, _fragid, 999 as value
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
             WHERE id = 2
         """)
 
-        spark.sql("""
-            ALTER TABLE default.test_table UPDATE COLUMNS value FROM tmp_view
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table UPDATE COLUMNS value FROM tmp_view
         """)
 
-        result = spark.sql("""
+        result = spark.sql(f"""
             SELECT id, name, value
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
             ORDER BY id
         """).collect()
 
@@ -2768,36 +2773,36 @@ class TestDMLUpdateColumn:
 
     def test_update_multiple_columns(self, spark):
         """Test ALTER TABLE UPDATE COLUMNS FROM with multiple columns."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 100),
             (2, 'Bob', 200),
             (3, 'Charlie', 300)
         """)
 
         # Update both name and value for id=2
-        spark.sql("""
+        spark.sql(f"""
             CREATE TEMPORARY VIEW tmp_view AS
             SELECT _rowaddr, _fragid, 'Bob_Updated' as name, 999 as value
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
             WHERE id = 2
         """)
 
-        spark.sql("""
-            ALTER TABLE default.test_table UPDATE COLUMNS name, value FROM tmp_view
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table UPDATE COLUMNS name, value FROM tmp_view
         """)
 
-        result = spark.sql("""
+        result = spark.sql(f"""
             SELECT id, name, value
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
             ORDER BY id
         """).collect()
 
@@ -2808,36 +2813,36 @@ class TestDMLUpdateColumn:
 
     def test_update_multiple_rows(self, spark):
         """Test ALTER TABLE UPDATE COLUMNS FROM affecting multiple rows."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 100),
             (2, 'Bob', 200),
             (3, 'Charlie', 300)
         """)
 
         # Update value for id=1 and id=3
-        spark.sql("""
+        spark.sql(f"""
             CREATE TEMPORARY VIEW tmp_view AS
             SELECT _rowaddr, _fragid, value * 10 as value
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
             WHERE id IN (1, 3)
         """)
 
-        spark.sql("""
-            ALTER TABLE default.test_table UPDATE COLUMNS value FROM tmp_view
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.test_table UPDATE COLUMNS value FROM tmp_view
         """)
 
-        result = spark.sql("""
+        result = spark.sql(f"""
             SELECT id, name, value
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
             ORDER BY id
         """).collect()
 
@@ -2848,8 +2853,8 @@ class TestDMLUpdateColumn:
 
     def test_update_computed_values(self, spark):
         """Test UPDATE COLUMNS FROM with computed/derived values."""
-        spark.sql("""
-            CREATE TABLE default.employees (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.employees (
                 id INT,
                 name STRING,
                 salary INT,
@@ -2857,27 +2862,27 @@ class TestDMLUpdateColumn:
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.employees VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.employees VALUES
             (1, 'Alice', 50000, 5000),
             (2, 'Bob', 60000, 6000),
             (3, 'Charlie', 70000, 7000)
         """)
 
         # Recompute bonus as 15% of salary for all employees
-        spark.sql("""
+        spark.sql(f"""
             CREATE TEMPORARY VIEW tmp_view AS
             SELECT _rowaddr, _fragid, CAST(salary * 0.15 AS INT) as bonus
-            FROM default.employees
+            FROM {LANCE_NAMESPACE}.employees
         """)
 
-        spark.sql("""
-            ALTER TABLE default.employees UPDATE COLUMNS bonus FROM tmp_view
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.employees UPDATE COLUMNS bonus FROM tmp_view
         """)
 
-        result = spark.sql("""
+        result = spark.sql(f"""
             SELECT id, salary, bonus
-            FROM default.employees
+            FROM {LANCE_NAMESPACE}.employees
             ORDER BY id
         """).collect()
 
@@ -2892,8 +2897,8 @@ class TestDMLInsertOverwrite:
 
     def test_insert_overwrite_values(self, spark):
         """Test INSERT OVERWRITE with VALUES clause replaces all data."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
@@ -2901,38 +2906,38 @@ class TestDMLInsertOverwrite:
         """)
 
         # Insert initial data
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 10),
             (2, 'Bob', 20),
             (3, 'Charlie', 30)
         """)
-        assert spark.table("default.test_table").count() == 3
+        assert spark.table(f"{LANCE_NAMESPACE}.test_table").count() == 3
 
         # Overwrite with new data
-        spark.sql("""
-            INSERT OVERWRITE default.test_table VALUES
+        spark.sql(f"""
+            INSERT OVERWRITE {LANCE_NAMESPACE}.test_table VALUES
             (100, 'NewUser1', 1000),
             (200, 'NewUser2', 2000)
         """)
 
-        result = spark.table("default.test_table").orderBy("id").collect()
+        result = spark.table(f"{LANCE_NAMESPACE}.test_table").orderBy("id").collect()
         assert len(result) == 2
         assert result[0].id == 100
         assert result[1].id == 200
 
     def test_insert_overwrite_from_select(self, spark):
         """Test INSERT OVERWRITE from a SELECT query."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 10),
             (2, 'Bob', 20),
             (3, 'Charlie', 30)
@@ -2943,12 +2948,12 @@ class TestDMLInsertOverwrite:
         source_df = spark.createDataFrame(source_data, ["id", "name", "value"])
         source_df.createOrReplaceTempView("source")
 
-        spark.sql("""
-            INSERT OVERWRITE default.test_table
+        spark.sql(f"""
+            INSERT OVERWRITE {LANCE_NAMESPACE}.test_table
             SELECT * FROM source
         """)
 
-        result = spark.table("default.test_table").orderBy("id").collect()
+        result = spark.table(f"{LANCE_NAMESPACE}.test_table").orderBy("id").collect()
         assert len(result) == 2
         assert result[0].name == "Transformed1"
         assert result[1].name == "Transformed2"
@@ -2959,57 +2964,57 @@ class TestDQLTimeTravel:
 
     def test_version_as_of(self, spark):
         """Test SELECT with VERSION AS OF to query historical data."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING
             )
         """)
 
         # Version 2: first insert
-        spark.sql("INSERT INTO default.test_table VALUES (1, 'v1')")
+        spark.sql(f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (1, 'v1')")
         # Version 3: second insert
-        spark.sql("INSERT INTO default.test_table VALUES (2, 'v2')")
+        spark.sql(f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (2, 'v2')")
 
         # Current version should have 2 rows
-        assert spark.table("default.test_table").count() == 2
+        assert spark.table(f"{LANCE_NAMESPACE}.test_table").count() == 2
 
         # Version 2 (after first insert) should have 1 row
-        result = spark.sql("""
-            SELECT * FROM default.test_table VERSION AS OF 2
+        result = spark.sql(f"""
+            SELECT * FROM {LANCE_NAMESPACE}.test_table VERSION AS OF 2
         """).collect()
         assert len(result) == 1
         assert result[0].id == 1
 
     def test_tag_as_of_excludes_data_inserted_after_tag_creation(self, spark):
         """Test that a tag remains on its snapshot after the main table advances."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING
             )
         """)
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'before_tag_1'),
             (2, 'before_tag_2')
         """)
-        spark.sql("ALTER TABLE default.test_table CREATE TAG stable")
+        spark.sql(f"ALTER TABLE {LANCE_NAMESPACE}.test_table CREATE TAG stable")
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (3, 'after_tag_1'),
             (4, 'after_tag_2')
         """)
 
-        tagged = spark.sql("""
+        tagged = spark.sql(f"""
             SELECT id, name
-            FROM default.test_table VERSION AS OF 'stable'
+            FROM {LANCE_NAMESPACE}.test_table VERSION AS OF 'stable'
             ORDER BY id
         """).collect()
-        current = spark.sql("""
+        current = spark.sql(f"""
             SELECT id, name
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
             ORDER BY id
         """).collect()
 
@@ -3027,94 +3032,94 @@ class TestDQLTimeTravel:
     @requires_update_or_merge
     def test_version_as_of_after_update(self, spark):
         """Test VERSION AS OF returns data before an update."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 100),
             (2, 'Bob', 200)
         """)
 
         # Update a row (creates a new version)
-        spark.sql("UPDATE default.test_table SET value = 999 WHERE id = 1")
+        spark.sql(f"UPDATE {LANCE_NAMESPACE}.test_table SET value = 999 WHERE id = 1")
 
         # Current version should show the updated value
-        current = spark.sql("SELECT value FROM default.test_table WHERE id = 1").collect()
+        current = spark.sql(f"SELECT value FROM {LANCE_NAMESPACE}.test_table WHERE id = 1").collect()
         assert current[0].value == 999
 
         # Version 2 (before update) should show the original value
-        historical = spark.sql("""
-            SELECT value FROM default.test_table VERSION AS OF 2 WHERE id = 1
+        historical = spark.sql(f"""
+            SELECT value FROM {LANCE_NAMESPACE}.test_table VERSION AS OF 2 WHERE id = 1
         """).collect()
         assert historical[0].value == 100
 
     def test_version_as_of_after_delete(self, spark):
         """Test VERSION AS OF returns data that was subsequently deleted."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice'),
             (2, 'Bob'),
             (3, 'Charlie')
         """)
 
         # Delete a row
-        spark.sql("DELETE FROM default.test_table WHERE id = 2")
+        spark.sql(f"DELETE FROM {LANCE_NAMESPACE}.test_table WHERE id = 2")
 
         # Current version should have 2 rows
-        assert spark.table("default.test_table").count() == 2
+        assert spark.table(f"{LANCE_NAMESPACE}.test_table").count() == 2
 
         # Version 2 (before delete) should have 3 rows
-        result = spark.sql("""
-            SELECT * FROM default.test_table VERSION AS OF 2
+        result = spark.sql(f"""
+            SELECT * FROM {LANCE_NAMESPACE}.test_table VERSION AS OF 2
         """).collect()
         assert len(result) == 3
 
 
 class TestDQLBranchRead:
     def test_branch_identifier_matches_option_and_path(self, spark):
-        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql(f"CREATE TABLE {LANCE_NAMESPACE}.test_table (id INT, name STRING)")
         spark.sql(
-            "INSERT INTO default.test_table VALUES (1, 'a'), (2, 'b')"
+            f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (1, 'a'), (2, 'b')"
         )
         expected = [(1, "a"), (2, "b")]
         spark.sql(
-            "ALTER TABLE default.test_table CREATE BRANCH test_branch"
+            f"ALTER TABLE {LANCE_NAMESPACE}.test_table CREATE BRANCH test_branch"
         )
         spark.sql(
-            "INSERT INTO default.test_table VALUES (3, 'c'), (4, 'd')"
+            f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (3, 'c'), (4, 'd')"
         )
 
         identifier = spark.sql(
-            "SELECT * FROM default.test_table.branch_test_branch ORDER BY id"
+            f"SELECT * FROM {LANCE_NAMESPACE}.test_table.branch_test_branch ORDER BY id"
         ).collect()
         option_table = (
             spark.read.option("branch", "test_branch")
-            .table("default.test_table")
+            .table(f"{LANCE_NAMESPACE}.test_table")
             .orderBy("id")
             .collect()
         )
         option_path = (
             spark.read.format("lance")
             .option("branch", "test_branch")
-            .load(_table_location(spark, "default.test_table"))
+            .load(_table_location(spark, f"{LANCE_NAMESPACE}.test_table"))
             .orderBy("id")
             .collect()
         )
         main = spark.sql(
-            "SELECT * FROM default.test_table ORDER BY id"
+            f"SELECT * FROM {LANCE_NAMESPACE}.test_table ORDER BY id"
         ).collect()
 
         assert [(row.id, row.name) for row in identifier] == expected
@@ -3123,59 +3128,59 @@ class TestDQLBranchRead:
         assert [(row.id, row.name) for row in main] == expected + [(3, "c"), (4, "d")]
 
     def test_branch_identifier_rejects_as_of_and_conflicting_options(self, spark):
-        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
-        spark.sql("INSERT INTO default.test_table VALUES (1, 'main')")
-        spark.sql("ALTER TABLE default.test_table CREATE BRANCH audit")
+        spark.sql(f"CREATE TABLE {LANCE_NAMESPACE}.test_table (id INT, name STRING)")
+        spark.sql(f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (1, 'main')")
+        spark.sql(f"ALTER TABLE {LANCE_NAMESPACE}.test_table CREATE BRANCH audit")
 
         with pytest.raises(Exception, match="Cannot combine"):
             spark.sql(
-                "SELECT * FROM default.test_table.branch_audit VERSION AS OF 1"
+                f"SELECT * FROM {LANCE_NAMESPACE}.test_table.branch_audit VERSION AS OF 1"
             ).collect()
         with pytest.raises(Exception, match="Cannot combine"):
             spark.sql(
-                "SELECT * FROM default.test_table.branch_audit TIMESTAMP AS OF now()"
+                f"SELECT * FROM {LANCE_NAMESPACE}.test_table.branch_audit TIMESTAMP AS OF now()"
             ).collect()
         with pytest.raises(Exception):
             spark.read.option("branch", "audit").option("version", "1").table(
-                "default.test_table"
+                f"{LANCE_NAMESPACE}.test_table"
             ).collect()
         with pytest.raises(Exception, match="no_such_branch"):
             spark.read.option("branch", "no_such_branch").table(
-                "default.test_table"
+                f"{LANCE_NAMESPACE}.test_table"
             ).collect()
 
     def test_branch_identifier_is_read_only(self, spark):
-        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
-        spark.sql("INSERT INTO default.test_table VALUES (1, 'main')")
-        spark.sql("ALTER TABLE default.test_table CREATE BRANCH audit")
+        spark.sql(f"CREATE TABLE {LANCE_NAMESPACE}.test_table (id INT, name STRING)")
+        spark.sql(f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (1, 'main')")
+        spark.sql(f"ALTER TABLE {LANCE_NAMESPACE}.test_table CREATE BRANCH audit")
 
         with pytest.raises(Exception):
             spark.sql(
-                "INSERT INTO default.test_table.branch_audit VALUES (2, 'branch')"
+                f"INSERT INTO {LANCE_NAMESPACE}.test_table.branch_audit VALUES (2, 'branch')"
             ).collect()
 
-        assert spark.table("default.test_table").count() == 1
-        assert spark.table("default.test_table.branch_audit").count() == 1
+        assert spark.table(f"{LANCE_NAMESPACE}.test_table").count() == 1
+        assert spark.table(f"{LANCE_NAMESPACE}.test_table.branch_audit").count() == 1
 
     def test_existing_table_wins_over_branch_identifier(self, spark):
         if getattr(spark, "_lance_backend", None) == "glue":
             pytest.skip("Glue table identifiers are database.table")
-        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
-        spark.sql("INSERT INTO default.test_table VALUES (1, 'branch_row')")
-        spark.sql("ALTER TABLE default.test_table CREATE BRANCH audit")
+        spark.sql(f"CREATE TABLE {LANCE_NAMESPACE}.test_table (id INT, name STRING)")
+        spark.sql(f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (1, 'branch_row')")
+        spark.sql(f"ALTER TABLE {LANCE_NAMESPACE}.test_table CREATE BRANCH audit")
         spark.sql(
-            "CREATE TABLE default.test_table.branch_audit (id INT, name STRING)"
+            f"CREATE TABLE {LANCE_NAMESPACE}.test_table.branch_audit (id INT, name STRING)"
         )
         spark.sql(
-            "INSERT INTO default.test_table.branch_audit VALUES (99, 'literal')"
+            f"INSERT INTO {LANCE_NAMESPACE}.test_table.branch_audit VALUES (99, 'literal')"
         )
 
-        rows = spark.table("default.test_table.branch_audit").collect()
+        rows = spark.table(f"{LANCE_NAMESPACE}.test_table.branch_audit").collect()
         assert [(row.id, row.name) for row in rows] == [(99, "literal")]
         assert [
             row.id
             for row in spark.read.option("branch", "audit")
-            .table("default.test_table")
+            .table(f"{LANCE_NAMESPACE}.test_table")
             .collect()
         ] == [1]
 
@@ -3186,16 +3191,16 @@ class TestDMLMergeDelete:
 
     def test_merge_with_delete(self, spark):
         """Test MERGE INTO with WHEN MATCHED THEN DELETE clause."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 10),
             (2, 'Bob', 20),
             (3, 'Charlie', 30),
@@ -3207,30 +3212,30 @@ class TestDMLMergeDelete:
         source_df = spark.createDataFrame(source_data, ["id", "name", "value"])
         source_df.createOrReplaceTempView("source")
 
-        spark.sql("""
-            MERGE INTO default.test_table t
+        spark.sql(f"""
+            MERGE INTO {LANCE_NAMESPACE}.test_table t
             USING source s
             ON t.id = s.id
             WHEN MATCHED THEN DELETE
         """)
 
-        result = spark.table("default.test_table").orderBy("id").collect()
+        result = spark.table(f"{LANCE_NAMESPACE}.test_table").orderBy("id").collect()
         assert len(result) == 2
         assert result[0].id == 1
         assert result[1].id == 3
 
     def test_merge_with_all_clauses(self, spark):
         """Test MERGE INTO with UPDATE, DELETE, and INSERT clauses together."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 10),
             (2, 'Bob', 20),
             (3, 'Charlie', 30)
@@ -3241,8 +3246,8 @@ class TestDMLMergeDelete:
         source_df = spark.createDataFrame(source_data, ["id", "name", "value"])
         source_df.createOrReplaceTempView("source")
 
-        spark.sql("""
-            MERGE INTO default.test_table t
+        spark.sql(f"""
+            MERGE INTO {LANCE_NAMESPACE}.test_table t
             USING source s
             ON t.id = s.id
             WHEN MATCHED AND s.value = 0 THEN DELETE
@@ -3250,7 +3255,7 @@ class TestDMLMergeDelete:
             WHEN NOT MATCHED THEN INSERT (id, name, value) VALUES (s.id, s.name, s.value)
         """)
 
-        result = spark.table("default.test_table").orderBy("id").collect()
+        result = spark.table(f"{LANCE_NAMESPACE}.test_table").orderBy("id").collect()
         assert len(result) == 3
 
         # id=1 updated
@@ -3303,24 +3308,24 @@ class TestStableRowIds:
 
     def test_tblproperties_enable_stable_row_ids(self, spark):
         """Test that TBLPROPERTIES enables CDF version columns."""
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
             ) TBLPROPERTIES ('enable_stable_row_ids' = 'true')
         """)
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 100),
             (2, 'Bob', 200),
             (3, 'Charlie', 300)
         """)
 
-        result = spark.sql("""
+        result = spark.sql(f"""
             SELECT id, _row_created_at_version, _row_last_updated_at_version
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
             ORDER BY id
         """).collect()
 
@@ -3336,23 +3341,23 @@ class TestStableRowIds:
         _row_created_at_version and _row_last_updated_at_version, but
         returns a baseline value of 1 instead of the actual operation version.
         """
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
             )
         """)
 
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 100),
             (2, 'Bob', 200)
         """)
 
-        result = spark.sql("""
+        result = spark.sql(f"""
             SELECT id, _row_created_at_version, _row_last_updated_at_version
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
             ORDER BY id
         """).collect()
 
@@ -3369,8 +3374,8 @@ class TestStableRowIds:
         Simulates a CDC pipeline that tracks the last processed version and
         incrementally processes changes using version tracking columns.
         """
-        spark.sql("""
-            CREATE TABLE default.test_table (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.test_table (
                 id INT,
                 name STRING,
                 value INT
@@ -3378,8 +3383,8 @@ class TestStableRowIds:
         """)
 
         # v2: Initial data load
-        spark.sql("""
-            INSERT INTO default.test_table VALUES
+        spark.sql(f"""
+            INSERT INTO {LANCE_NAMESPACE}.test_table VALUES
             (1, 'Alice', 100),
             (2, 'Bob', 200),
             (3, 'Charlie', 300)
@@ -3389,7 +3394,7 @@ class TestStableRowIds:
         last_processed_version = 1
         batch1 = spark.sql(f"""
             SELECT id, name, value, _row_created_at_version, _row_last_updated_at_version
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
             WHERE (_row_created_at_version > {last_processed_version})
                OR (_row_last_updated_at_version > {last_processed_version})
             ORDER BY id
@@ -3400,13 +3405,13 @@ class TestStableRowIds:
         last_processed_version = 2
 
         # v3: Update one row, v4: Insert new row
-        spark.sql("UPDATE default.test_table SET value = value + 50 WHERE id = 1")
-        spark.sql("INSERT INTO default.test_table VALUES (4, 'David', 400)")
+        spark.sql(f"UPDATE {LANCE_NAMESPACE}.test_table SET value = value + 50 WHERE id = 1")
+        spark.sql(f"INSERT INTO {LANCE_NAMESPACE}.test_table VALUES (4, 'David', 400)")
 
         # CDC Pipeline: Process batch 2 (changes since v2)
         batch2 = spark.sql(f"""
             SELECT id, name, value, _row_created_at_version, _row_last_updated_at_version
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
             WHERE (_row_created_at_version > {last_processed_version})
                OR (_row_last_updated_at_version > {last_processed_version})
             ORDER BY id
@@ -3426,12 +3431,12 @@ class TestStableRowIds:
         last_processed_version = 4
 
         # v5: More updates
-        spark.sql("UPDATE default.test_table SET value = value + 100 WHERE id IN (2, 3)")
+        spark.sql(f"UPDATE {LANCE_NAMESPACE}.test_table SET value = value + 100 WHERE id IN (2, 3)")
 
         # CDC Pipeline: Process batch 3 (changes since v4)
         batch3 = spark.sql(f"""
             SELECT id, name, value, _row_created_at_version, _row_last_updated_at_version
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
             WHERE (_row_created_at_version > {last_processed_version})
                OR (_row_last_updated_at_version > {last_processed_version})
             ORDER BY id
@@ -3448,12 +3453,12 @@ class TestStableRowIds:
         last_processed_version = 5
 
         # v6: Update entire table
-        spark.sql("UPDATE default.test_table SET value = value * 2")
+        spark.sql(f"UPDATE {LANCE_NAMESPACE}.test_table SET value = value * 2")
 
         # CDC Pipeline: Process batch 4 (changes since v5)
         batch4 = spark.sql(f"""
             SELECT id, name, value, _row_created_at_version, _row_last_updated_at_version
-            FROM default.test_table
+            FROM {LANCE_NAMESPACE}.test_table
             WHERE (_row_created_at_version > {last_processed_version})
                OR (_row_last_updated_at_version > {last_processed_version})
             ORDER BY id
@@ -3503,6 +3508,11 @@ class TestStableRowIds:
         """Test that catalog-level enable_stable_row_ids enables version columns without TBLPROPERTIES."""
         catalog_name = self._register_cdf_catalog(spark)
 
+        # NOTE: this test uses a *separate*, dir-backed catalog whose root is
+        # unique per run (derived from the main catalog root), so its "default"
+        # namespace is already isolated across runs and is intentionally NOT
+        # routed through LANCE_TEST_NAMESPACE, which isolates only the shared
+        # Glue catalog.
         try:
             # CREATE TABLE without TBLPROPERTIES — relies on catalog-level default
             spark.sql(f"""
@@ -3596,8 +3606,8 @@ class TestDQLFullTextSearch:
     @pytest.fixture(autouse=True)
     def fts_table(self, spark):
         """Create a table with FTS indexes on body (with_position=true) and title columns."""
-        spark.sql("""
-            CREATE TABLE default.fts_docs (
+        spark.sql(f"""
+            CREATE TABLE {LANCE_NAMESPACE}.fts_docs (
                 id INT,
                 title STRING,
                 body STRING
@@ -3612,11 +3622,11 @@ class TestDQLFullTextSearch:
             (6, "Slop Test", "Apache unified spark processing framework"),
         ]
         df = spark.createDataFrame(data, ["id", "title", "body"])
-        df.writeTo("default.fts_docs").append()
+        df.writeTo(f"{LANCE_NAMESPACE}.fts_docs").append()
 
         # FTS index on body with positions (required for lance_match_phrase)
-        spark.sql("""
-            ALTER TABLE default.fts_docs
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.fts_docs
             CREATE INDEX fts_body USING fts (body) WITH (
                 base_tokenizer = 'simple', language = 'English',
                 max_token_length = 40, lower_case = true,
@@ -3625,8 +3635,8 @@ class TestDQLFullTextSearch:
             )
         """)
         # FTS index on title
-        spark.sql("""
-            ALTER TABLE default.fts_docs
+        spark.sql(f"""
+            ALTER TABLE {LANCE_NAMESPACE}.fts_docs
             CREATE INDEX fts_title USING fts (title) WITH (
                 base_tokenizer = 'simple', language = 'English',
                 max_token_length = 40, lower_case = true,
@@ -3635,12 +3645,12 @@ class TestDQLFullTextSearch:
             )
         """)
         yield
-        spark.sql("DROP TABLE IF EXISTS default.fts_docs PURGE")
+        spark.sql(f"DROP TABLE IF EXISTS {LANCE_NAMESPACE}.fts_docs PURGE")
 
     def test_lance_match_basic(self, spark):
         """lance_match returns rows matching keyword query."""
         rows = spark.sql(
-            "SELECT id FROM default.fts_docs WHERE lance_match(body, 'spark')"
+            f"SELECT id FROM {LANCE_NAMESPACE}.fts_docs WHERE lance_match(body, 'spark')"
         ).collect()
         ids = sorted([r.id for r in rows])
         # "spark" appears in body of rows 1 and 4
@@ -3650,7 +3660,7 @@ class TestDQLFullTextSearch:
     def test_lance_match_with_options(self, spark):
         """lance_match accepts options string."""
         rows = spark.sql(
-            "SELECT id FROM default.fts_docs "
+            f"SELECT id FROM {LANCE_NAMESPACE}.fts_docs "
             "WHERE lance_match(body, 'spark', 'operator=AND,boost=1.5')"
         ).collect()
         ids = sorted([r.id for r in rows])
@@ -3662,7 +3672,7 @@ class TestDQLFullTextSearch:
     def test_lance_match_phrase_basic(self, spark):
         """lance_match_phrase returns rows with exact phrase match."""
         rows = spark.sql(
-            "SELECT id FROM default.fts_docs WHERE lance_match_phrase(body, 'apache spark')"
+            f"SELECT id FROM {LANCE_NAMESPACE}.fts_docs WHERE lance_match_phrase(body, 'apache spark')"
         ).collect()
         ids = [r.id for r in rows]
         assert 1 in ids
@@ -3681,7 +3691,7 @@ class TestDQLFullTextSearch:
         rows to remain correct under both backends.
         """
         exact_rows = spark.sql(
-            "SELECT id FROM default.fts_docs WHERE lance_match_phrase(body, 'apache spark')"
+            f"SELECT id FROM {LANCE_NAMESPACE}.fts_docs WHERE lance_match_phrase(body, 'apache spark')"
         ).collect()
         exact_ids = {r.id for r in exact_rows}
         # Rows 1 and 4 have the exact phrase "Apache Spark"
@@ -3690,7 +3700,7 @@ class TestDQLFullTextSearch:
 
         # slop=1 — must include at least everything slop=0 matched
         slop_rows = spark.sql(
-            "SELECT id FROM default.fts_docs WHERE lance_match_phrase(body, 'apache spark', 1)"
+            f"SELECT id FROM {LANCE_NAMESPACE}.fts_docs WHERE lance_match_phrase(body, 'apache spark', 1)"
         ).collect()
         slop_ids = {r.id for r in slop_rows}
         assert 1 in slop_ids
@@ -3703,7 +3713,7 @@ class TestDQLFullTextSearch:
     def test_lance_multi_match_or(self, spark):
         """lance_multi_match with default OR returns rows matching in any column."""
         rows = spark.sql(
-            "SELECT id FROM default.fts_docs "
+            f"SELECT id FROM {LANCE_NAMESPACE}.fts_docs "
             "WHERE lance_multi_match('spark', title, body)"
         ).collect()
         ids = sorted([r.id for r in rows])
@@ -3714,7 +3724,7 @@ class TestDQLFullTextSearch:
     def test_lance_multi_match_with_operator(self, spark):
         """lance_multi_match with explicit operator=OR option."""
         rows = spark.sql(
-            "SELECT id FROM default.fts_docs "
+            f"SELECT id FROM {LANCE_NAMESPACE}.fts_docs "
             "WHERE lance_multi_match('spark', 'operator=OR', title, body)"
         ).collect()
         ids = sorted([r.id for r in rows])
