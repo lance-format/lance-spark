@@ -274,6 +274,20 @@ public abstract class BaseSparkConnectorAggPushdownTest {
   }
 
   @Test
+  public void testCountStarOnEmptyTableUsesLocalScan() {
+    String tableName = "lance.default.count_empty_filtered_test_dataset";
+    spark.range(0, 0).selectExpr("id", "id % 10 as category").writeTo(tableName).create();
+
+    Dataset<Row> emptyCount = spark.table(tableName).filter("category = 5").selectExpr("count(*)");
+
+    assertEquals(0L, emptyCount.first().getLong(0));
+    String plan = emptyCount.queryExecution().executedPlan().toString();
+    assertTrue(
+        plan.contains("LocalTableScan") || plan.contains("LanceLocalScan"),
+        "An empty filtered COUNT(*) should not plan a distributed scan. Plan: " + plan);
+  }
+
+  @Test
   public void testCountStarWithPartialScalarIndexKeepsDistributedScan() throws Exception {
     String tableName = "lance.default.count_partial_index_test_dataset";
     spark

@@ -345,26 +345,44 @@ public class LanceScanBuilder
     return hasLookup ? fieldId : null;
   }
 
-  /** Finds a BTREE or BITMAP index that covers every live fragment for the lookup predicates. */
-  private Optional<String> findFullyCoveringExactLookupIndex(Dataset dataset) {
+  /**
+   * Filter passed to {@code Dataset.countIndexedRows} for a predicate set already accepted by
+   * {@link #exactLookupFilterFieldId}. Drops same-column {@code IS NOT NULL} conjuncts. Equality
+   * and {@code IN} already exclude nulls, and Lance's sargable scalar lookup has {@code IsNull} but
+   * no {@code IsNotNull}, so the extra conjunct falls through to a column recheck.
+   */
+  static Optional<String> compileExactLookupCountFilter(Predicate[] predicates) {
+    List<Predicate> lookupPredicates = new ArrayList<>(predicates.length);
+    for (Predicate predicate : predicates) {
+      if (!"IS_NOT_NULL".equals(predicate.name())) {
+        lookupPredicates.add(predicate);
+      }
+    }
+    return FilterPushDown.compileFiltersToSqlWhereClause(
+        lookupPredicates.toArray(new Predicate[0]));
+  }
+
+  /**
+   * Cost gate for a driver-side filtered count. lance-core 12.0.0 ignores the index name passed to
+   * {@code countIndexedRows} and counts with a filtered scanner, which already applies the deletion
+   * mask and reads unindexed fragments. This lookup does not force that index and is not what keeps
+   * the count correct. It only decides whether the driver count is likely to stay on a fully
+   * covering BTREE or BITMAP; otherwise the distributed scan is cheaper.
+   */
+  private ExactLookupCount findFullyCoveringExactLookupIndex(Dataset dataset) {
     if (!readOptions.isUseScalarIndex()
         || readOptions.getFullTextQuery() != null
         || pushedPredicates.length == 0) {
-      return Optional.empty();
+      return ExactLookupCount.miss();
     }
 
     Integer filterFieldId = exactLookupFilterFieldId(dataset.getLanceSchema(), pushedPredicates);
     if (filterFieldId == null) {
-      return Optional.empty();
+      return ExactLookupCount.miss();
     }
 
-    FragmentStatistics fragmentStatistics = dataset.getFragmentStatistics();
-    Set<Integer> liveFragmentIds =
-        Arrays.stream(fragmentStatistics.getIds()).boxed().collect(Collectors.toSet());
-    if (liveFragmentIds.isEmpty()) {
-      return Optional.empty();
-    }
-
+    // Indexes decide whether a driver count can be cheap. Skip fragment statistics when none of
+    // them can serve this lookup; build() still plans fragments for the distributed fallback.
     Map<String, List<Index>> candidateSegments = new HashMap<>();
     for (Index segment : dataset.getIndexes()) {
       List<Integer> fields = segment.fields();
@@ -377,7 +395,24 @@ public class LanceScanBuilder
             .add(segment);
       }
     }
+    if (candidateSegments.isEmpty()) {
+      return ExactLookupCount.miss();
+    }
 
+    FragmentStatistics fragmentStatistics = dataset.getFragmentStatistics();
+    int[] fragmentIds = fragmentStatistics.getIds();
+    if (fragmentIds.length == 0) {
+      return ExactLookupCount.empty();
+    }
+    Set<Integer> liveFragmentIds = new HashSet<>(fragmentIds.length);
+    for (int fragmentId : fragmentIds) {
+      liveFragmentIds.add(fragmentId);
+    }
+
+    // HashMap iteration order is not the selection. Fewest segments, then name, so the plan and
+    // the log stay stable if core later honors indexName.
+    String selectedName = null;
+    int selectedSegments = Integer.MAX_VALUE;
     for (Map.Entry<String, List<Index>> candidate : candidateSegments.entrySet()) {
       Set<Integer> coveredFragments = new HashSet<>();
       boolean hasCompleteCoverageMetadata = true;
@@ -388,16 +423,60 @@ public class LanceScanBuilder
         }
         coveredFragments.addAll(segment.fragments().get());
       }
-      if (hasCompleteCoverageMetadata && coveredFragments.containsAll(liveFragmentIds)) {
-        LOG.info(
-            "Using fully covering index '{}' for filtered COUNT(*) ({} segments, {} fragments)",
-            candidate.getKey(),
-            candidate.getValue().size(),
-            liveFragmentIds.size());
-        return Optional.of(candidate.getKey());
+      if (!hasCompleteCoverageMetadata || !coveredFragments.containsAll(liveFragmentIds)) {
+        continue;
+      }
+      int segments = candidate.getValue().size();
+      String name = candidate.getKey();
+      if (selectedName == null
+          || segments < selectedSegments
+          || (segments == selectedSegments && name.compareTo(selectedName) < 0)) {
+        selectedName = name;
+        selectedSegments = segments;
       }
     }
-    return Optional.empty();
+    if (selectedName == null) {
+      return ExactLookupCount.miss();
+    }
+    LOG.info(
+        "Using fully covering index '{}' for filtered COUNT(*)"
+            + " ({} segments, {} fragments; fewest segments, then name)",
+        selectedName,
+        selectedSegments,
+        liveFragmentIds.size());
+    return ExactLookupCount.index(selectedName);
+  }
+
+  /**
+   * Driver-side filtered {@code COUNT(*)} decision. {@link #indexName} is set only for {@link
+   * Kind#INDEX}.
+   */
+  private static final class ExactLookupCount {
+    enum Kind {
+      MISS,
+      EMPTY,
+      INDEX
+    }
+
+    final Kind kind;
+    final String indexName;
+
+    private ExactLookupCount(Kind kind, String indexName) {
+      this.kind = kind;
+      this.indexName = indexName;
+    }
+
+    static ExactLookupCount miss() {
+      return new ExactLookupCount(Kind.MISS, null);
+    }
+
+    static ExactLookupCount empty() {
+      return new ExactLookupCount(Kind.EMPTY, null);
+    }
+
+    static ExactLookupCount index(String indexName) {
+      return new ExactLookupCount(Kind.INDEX, indexName);
+    }
   }
 
   boolean shouldNamespaceFtsScan() {
@@ -567,32 +646,59 @@ public class LanceScanBuilder
       // carried in the read options rather than as a pushed predicate, because the FTS rule moves
       // the predicate out of the Filter and into the relation options, so it must be checked
       // separately or COUNT(*) would answer from the manifest and ignore the FTS query.
+      Dataset dataset = getOrOpenDataset();
       if (pushedPredicates.length == 0 && readOptions.getFullTextQuery() == null) {
-        Optional<Long> metadataCount = getCountFromMetadata(getOrOpenDataset());
+        Optional<Long> metadataCount = getCountFromMetadata(dataset);
         if (metadataCount.isPresent()) {
           setLocalCount(metadataCount.get());
           return true;
         }
       }
 
+      // No fragments means the filtered count is zero. total_rows is not a safe signal: fragments
+      // with an unknown deletion count are omitted from that sum. total_fragments is the fragment
+      // list length, so this skips scan planning only for a dataset that has nothing to scan.
+      if (hasNoFragments(dataset)) {
+        setLocalCount(0L);
+        return true;
+      }
+
       // A scan partition is normally planned for every fragment. Lance's logical scalar index
       // spans all of its physical segments, so asking every partition to evaluate the same indexed
-      // predicate repeats those segment lookups. For an exact, fully covered lookup, use the core
-      // index-count API once on the driver and expose the result as a LocalScan.
-      Dataset dataset = getOrOpenDataset();
-      Optional<String> indexName = findFullyCoveringExactLookupIndex(dataset);
-      Optional<String> filter = FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);
-      if (indexName.isPresent() && filter.isPresent()) {
-        try {
-          long indexedCount =
-              dataset.countIndexedRows(indexName.get(), filter.get(), java.util.Optional.empty());
-          setLocalCount(indexedCount);
-          return true;
-        } catch (RuntimeException e) {
-          LOG.warn(
-              "Failed to count rows with scalar index '{}'; falling back to a distributed scan: {}",
-              indexName.get(),
-              e.getMessage());
+      // predicate repeats those segment lookups. For an exact, fully covered lookup, count once
+      // on the driver. pushAggregation runs during planning, so EXPLAIN executes this count too;
+      // the unfiltered path above only reads the manifest.
+      ExactLookupCount lookup = findFullyCoveringExactLookupIndex(dataset);
+      if (lookup.kind == ExactLookupCount.Kind.EMPTY) {
+        setLocalCount(0L);
+        return true;
+      }
+      if (lookup.kind == ExactLookupCount.Kind.INDEX) {
+        Optional<String> filter = compileExactLookupCountFilter(pushedPredicates);
+        if (filter.isPresent()) {
+          try {
+            // lance-core ignores indexName. A negative count is the JNI error sentinel
+            // (ok_or_throw_with_return!); it should already have thrown, but do not publish it.
+            long indexedCount =
+                dataset.countIndexedRows(
+                    lookup.indexName, filter.get(), java.util.Optional.empty());
+            if (indexedCount < 0) {
+              LOG.warn(
+                  "Scalar index '{}' returned a negative row count ({});"
+                      + " falling back to a distributed scan",
+                  lookup.indexName,
+                  indexedCount);
+            } else {
+              setLocalCount(indexedCount);
+              return true;
+            }
+          } catch (RuntimeException e) {
+            LOG.warn(
+                "Failed to count rows with scalar index '{}';"
+                    + " falling back to a distributed scan: {}",
+                lookup.indexName,
+                e.getMessage());
+          }
         }
       }
       // Fall back to scan-based count (with filters, a full-text query, or metadata unavailable)
@@ -616,6 +722,14 @@ public class LanceScanBuilder
       return Optional.of(summary.getTotalRows());
     } catch (Exception e) {
       return Optional.empty();
+    }
+  }
+
+  private static boolean hasNoFragments(Dataset dataset) {
+    try {
+      return dataset.getVersion().getManifestSummary().getTotalFragments() == 0L;
+    } catch (Exception e) {
+      return false;
     }
   }
 
