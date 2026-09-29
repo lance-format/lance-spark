@@ -205,6 +205,31 @@ public abstract class BaseSparkSearchTableFunctionTest {
   }
 
   @Test
+  public void testNonBooleanOptionNamesTheOption() {
+    Assumptions.assumeTrue(supportsNamedArguments());
+    String fullName = createVectorTable();
+
+    Exception exception =
+        assertThrows(
+            Exception.class,
+            () ->
+                spark
+                    .sql(
+                        "SELECT * FROM VECTOR_SEARCH("
+                            + "table => '"
+                            + fullName
+                            + "', "
+                            + "query_vector => array(0.0, 0.0, 0.0, 0.0), "
+                            + "num_results => 1, "
+                            + "with_row_id => 1)")
+                    .collectAsList());
+    // The bad value used to surface as a bare ClassCastException that never named the option.
+    String message = getDeepMessage(exception);
+    assertTrue(message.contains("with_row_id"), "error should name the option, got: " + message);
+    assertTrue(message.contains("boolean"), "error should say boolean, got: " + message);
+  }
+
+  @Test
   @Disabled(
       "Mixes VECTOR_SEARCH/HYBRID_SEARCH (still working) with SEARCH, which now routes to"
           + " queryTable and fails until lance-core dir.rs supports structured_query. TODO: split"
