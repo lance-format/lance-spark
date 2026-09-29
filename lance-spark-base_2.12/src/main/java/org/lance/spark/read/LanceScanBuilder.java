@@ -18,6 +18,8 @@ import org.lance.Fragment;
 import org.lance.FragmentStatistics;
 import org.lance.ManifestSummary;
 import org.lance.index.Index;
+import org.lance.index.IndexCriteria;
+import org.lance.index.IndexDescription;
 import org.lance.index.IndexType;
 import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
@@ -101,6 +103,7 @@ public class LanceScanBuilder
   private Optional<List<ColumnOrdering>> topNSortOrders = Optional.empty();
   private Optional<Aggregation> pushedAggregation = Optional.empty();
   private LanceLocalScan localScan = null;
+  private LanceIndexedCountScan indexedCountScan = null;
 
   // Lazily opened dataset for reuse during scan building
   private Dataset lazyDataset = null;
@@ -172,6 +175,9 @@ public class LanceScanBuilder
       // Return LocalScan if we have a metadata-only aggregation result
       if (localScan != null) {
         return localScan;
+      }
+      if (indexedCountScan != null) {
+        return indexedCountScan;
       }
 
       // Namespace-configured full-text search executes server-side via queryTable (single
@@ -309,13 +315,15 @@ public class LanceScanBuilder
     }
   }
 
-  /** Returns the indexed field id for a single-column equality/IN lookup, or null. */
-  private static Integer exactLookupFilterFieldId(LanceSchema lanceSchema, Predicate[] predicates) {
+  /** Returns the lookup column for a single-column equality/IN filter, or null. */
+  private static ExactLookupColumn exactLookupColumn(
+      LanceSchema lanceSchema, Predicate[] predicates) {
     if (predicates.length == 0) {
       return null;
     }
 
     Integer fieldId = null;
+    String columnPath = null;
     boolean hasLookup = false;
     for (Predicate predicate : predicates) {
       // Spark may supply IS_NOT_NULL alongside an equality predicate. It is safe only when the
@@ -341,15 +349,16 @@ public class LanceScanBuilder
         return null;
       }
       fieldId = predicateFieldId;
+      columnPath = String.join(".", references[0].fieldNames());
     }
-    return hasLookup ? fieldId : null;
+    return hasLookup ? new ExactLookupColumn(fieldId, columnPath) : null;
   }
 
   /**
    * Filter passed to {@code Dataset.countIndexedRows} for a predicate set already accepted by
-   * {@link #exactLookupFilterFieldId}. Drops same-column {@code IS NOT NULL} conjuncts. Equality
-   * and {@code IN} already exclude nulls, and Lance's sargable scalar lookup has {@code IsNull} but
-   * no {@code IsNotNull}, so the extra conjunct falls through to a column recheck.
+   * {@link #exactLookupColumn}. Drops same-column {@code IS NOT NULL} conjuncts. Equality and
+   * {@code IN} already exclude nulls, and Lance's sargable scalar lookup has {@code IsNull} but no
+   * {@code IsNotNull}, so the extra conjunct falls through to a column recheck.
    */
   static Optional<String> compileExactLookupCountFilter(Predicate[] predicates) {
     List<Predicate> lookupPredicates = new ArrayList<>(predicates.length);
@@ -363,11 +372,11 @@ public class LanceScanBuilder
   }
 
   /**
-   * Cost gate for a driver-side filtered count. lance-core 12.0.0 ignores the index name passed to
+   * Cost gate for a single-task filtered count. lance-core 12.0.0 ignores the index name passed to
    * {@code countIndexedRows} and counts with a filtered scanner, which already applies the deletion
    * mask and reads unindexed fragments. This lookup does not force that index and is not what keeps
-   * the count correct. It only decides whether the driver count is likely to stay on a fully
-   * covering BTREE or BITMAP; otherwise the distributed scan is cheaper.
+   * the count correct. It only decides whether that count is likely to stay on a fully covering
+   * BTREE or BITMAP; otherwise the distributed scan is cheaper.
    */
   private ExactLookupCount findFullyCoveringExactLookupIndex(Dataset dataset) {
     if (!readOptions.isUseScalarIndex()
@@ -376,23 +385,24 @@ public class LanceScanBuilder
       return ExactLookupCount.miss();
     }
 
-    Integer filterFieldId = exactLookupFilterFieldId(dataset.getLanceSchema(), pushedPredicates);
-    if (filterFieldId == null) {
+    ExactLookupColumn column = exactLookupColumn(dataset.getLanceSchema(), pushedPredicates);
+    if (column == null) {
       return ExactLookupCount.miss();
     }
 
-    // Indexes decide whether a driver count can be cheap. Skip fragment statistics when none of
-    // them can serve this lookup; build() still plans fragments for the distributed fallback.
+    // describeIndices still reads the manifest index list. The column and exact-equality criteria
+    // avoid exporting unrelated indexes, including vector indexes, as full segment metadata.
+    // Fragment statistics are loaded only after a candidate exists.
+    IndexCriteria criteria =
+        new IndexCriteria.Builder()
+            .forColumn(column.columnPath)
+            .mustSupportExactEquality(true)
+            .build();
     Map<String, List<Index>> candidateSegments = new HashMap<>();
-    for (Index segment : dataset.getIndexes()) {
-      List<Integer> fields = segment.fields();
-      if ((segment.indexType() == IndexType.BTREE || segment.indexType() == IndexType.BITMAP)
-          && fields != null
-          && fields.size() == 1
-          && fields.get(0).equals(filterFieldId)) {
-        candidateSegments
-            .computeIfAbsent(segment.name(), ignored -> new ArrayList<>())
-            .add(segment);
+    for (IndexDescription description : dataset.describeIndices(criteria)) {
+      List<Index> segments = scalarLookupSegments(description, column.fieldId);
+      if (segments != null) {
+        candidateSegments.put(description.getName(), segments);
       }
     }
     if (candidateSegments.isEmpty()) {
@@ -400,13 +410,9 @@ public class LanceScanBuilder
     }
 
     FragmentStatistics fragmentStatistics = dataset.getFragmentStatistics();
-    int[] fragmentIds = fragmentStatistics.getIds();
-    if (fragmentIds.length == 0) {
+    Set<Integer> nonemptyFragmentIds = nonemptyFragmentIds(fragmentStatistics);
+    if (nonemptyFragmentIds == null) {
       return ExactLookupCount.empty();
-    }
-    Set<Integer> liveFragmentIds = new HashSet<>(fragmentIds.length);
-    for (int fragmentId : fragmentIds) {
-      liveFragmentIds.add(fragmentId);
     }
 
     // HashMap iteration order is not the selection. Fewest segments, then name, so the plan and
@@ -423,7 +429,7 @@ public class LanceScanBuilder
         }
         coveredFragments.addAll(segment.fragments().get());
       }
-      if (!hasCompleteCoverageMetadata || !coveredFragments.containsAll(liveFragmentIds)) {
+      if (!hasCompleteCoverageMetadata || !coveredFragments.containsAll(nonemptyFragmentIds)) {
         continue;
       }
       int segments = candidate.getValue().size();
@@ -438,17 +444,60 @@ public class LanceScanBuilder
     if (selectedName == null) {
       return ExactLookupCount.miss();
     }
-    LOG.info(
+    LOG.debug(
         "Using fully covering index '{}' for filtered COUNT(*)"
             + " ({} segments, {} fragments; fewest segments, then name)",
         selectedName,
         selectedSegments,
-        liveFragmentIds.size());
+        nonemptyFragmentIds.size());
     return ExactLookupCount.index(selectedName);
   }
 
+  /** BTREE/BITMAP segments for this field, or null when the description is not an exact lookup. */
+  private static List<Index> scalarLookupSegments(IndexDescription description, int fieldId) {
+    List<Index> segments = description.getSegments();
+    if (segments == null || segments.isEmpty()) {
+      return null;
+    }
+    for (Index segment : segments) {
+      List<Integer> fields = segment.fields();
+      if ((segment.indexType() != IndexType.BTREE && segment.indexType() != IndexType.BITMAP)
+          || fields == null
+          || fields.size() != 1
+          || !fields.get(0).equals(fieldId)) {
+        return null;
+      }
+    }
+    return segments;
+  }
+
   /**
-   * Driver-side filtered {@code COUNT(*)} decision. {@link #indexName} is set only for {@link
+   * Fragment ids that still have rows. Statistics list every manifest fragment, including ones
+   * whose rows are all deleted. Those empty fragments do not need index coverage: the filtered
+   * scanner already applies the deletion mask. Returns null when every fragment is empty, and an
+   * empty set is not used for that so callers can tell "no rows" from "no statistics".
+   *
+   * <p>When row counts are missing, every id is required. Skipping an unknown fragment would hide
+   * rows.
+   */
+  private static Set<Integer> nonemptyFragmentIds(FragmentStatistics fragmentStatistics) {
+    int[] fragmentIds = fragmentStatistics.getIds();
+    if (fragmentIds.length == 0) {
+      return null;
+    }
+    long[] rowCounts = fragmentStatistics.getRowCounts();
+    boolean rowCountsAligned = rowCounts != null && rowCounts.length == fragmentIds.length;
+    Set<Integer> nonempty = new HashSet<>();
+    for (int i = 0; i < fragmentIds.length; i++) {
+      if (!rowCountsAligned || rowCounts[i] > 0) {
+        nonempty.add(fragmentIds[i]);
+      }
+    }
+    return nonempty.isEmpty() ? null : nonempty;
+  }
+
+  /**
+   * Single-task filtered {@code COUNT(*)} decision. {@link #indexName} is set only for {@link
    * Kind#INDEX}.
    */
   private static final class ExactLookupCount {
@@ -476,6 +525,17 @@ public class LanceScanBuilder
 
     static ExactLookupCount index(String indexName) {
       return new ExactLookupCount(Kind.INDEX, indexName);
+    }
+  }
+
+  /** Column accepted by {@link #exactLookupColumn}. */
+  private static final class ExactLookupColumn {
+    final int fieldId;
+    final String columnPath;
+
+    private ExactLookupColumn(int fieldId, String columnPath) {
+      this.fieldId = fieldId;
+      this.columnPath = columnPath;
     }
   }
 
@@ -665,10 +725,19 @@ public class LanceScanBuilder
 
       // A scan partition is normally planned for every fragment. Lance's logical scalar index
       // spans all of its physical segments, so asking every partition to evaluate the same indexed
-      // predicate repeats those segment lookups. For an exact, fully covered lookup, count once
-      // on the driver. pushAggregation runs during planning, so EXPLAIN executes this count too;
-      // the unfiltered path above only reads the manifest.
-      ExactLookupCount lookup = findFullyCoveringExactLookupIndex(dataset);
+      // predicate repeats those segment lookups. For an exact, fully covered lookup, plan one
+      // partition that counts at execution time. The unfiltered path above only reads the manifest.
+      // This branch only reads index and fragment metadata; EXPLAIN does not run the count.
+      ExactLookupCount lookup;
+      try {
+        lookup = findFullyCoveringExactLookupIndex(dataset);
+      } catch (RuntimeException e) {
+        LOG.warn(
+            "Failed to inspect scalar indexes for filtered COUNT(*);"
+                + " falling back to a distributed scan: {}",
+            e.getMessage());
+        lookup = ExactLookupCount.miss();
+      }
       if (lookup.kind == ExactLookupCount.Kind.EMPTY) {
         setLocalCount(0L);
         return true;
@@ -677,24 +746,20 @@ public class LanceScanBuilder
         Optional<String> filter = compileExactLookupCountFilter(pushedPredicates);
         if (filter.isPresent()) {
           try {
-            // lance-core ignores indexName. A negative count is the JNI error sentinel
-            // (ok_or_throw_with_return!); it should already have thrown, but do not publish it.
-            long indexedCount =
-                dataset.countIndexedRows(
-                    lookup.indexName, filter.get(), java.util.Optional.empty());
-            if (indexedCount < 0) {
-              LOG.warn(
-                  "Scalar index '{}' returned a negative row count ({});"
-                      + " falling back to a distributed scan",
-                  lookup.indexName,
-                  indexedCount);
-            } else {
-              setLocalCount(indexedCount);
-              return true;
-            }
+            LanceSparkReadOptions pinned =
+                readOptions.withRef(Utils.pinOpenedRef(dataset, readOptions.getRef()));
+            this.indexedCountScan =
+                new LanceIndexedCountScan(
+                    pinned,
+                    lookup.indexName,
+                    filter.get(),
+                    initialStorageOptions,
+                    namespaceImpl,
+                    namespaceProperties);
+            return true;
           } catch (RuntimeException e) {
             LOG.warn(
-                "Failed to count rows with scalar index '{}';"
+                "Failed to plan an indexed COUNT(*) with scalar index '{}';"
                     + " falling back to a distributed scan: {}",
                 lookup.indexName,
                 e.getMessage());

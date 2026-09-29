@@ -27,6 +27,7 @@ import java.nio.file.Path;
 import java.util.Arrays;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public abstract class BaseSparkConnectorAggPushdownTest {
@@ -226,7 +227,7 @@ public abstract class BaseSparkConnectorAggPushdownTest {
   }
 
   @Test
-  public void testCountStarWithExactScalarIndexUsesLocalScan() throws Exception {
+  public void testCountStarWithExactScalarIndexUsesSingleTask() throws Exception {
     String tableName = "lance.default.count_indexed_single_partition_test_dataset";
     spark
         .range(0, 100)
@@ -246,11 +247,15 @@ public abstract class BaseSparkConnectorAggPushdownTest {
     Dataset<Row> indexedCount =
         spark.table(tableName).filter("category = 5").selectExpr("count(*)");
 
-    assertEquals(10L, indexedCount.first().getLong(0));
-    String plan = indexedCount.queryExecution().executedPlan().toString();
+    org.apache.spark.sql.execution.SparkPlan executed =
+        indexedCount.queryExecution().executedPlan();
+    String plan = executed.toString();
     assertTrue(
-        plan.contains("LocalTableScan") || plan.contains("LanceLocalScan"),
-        "A fully indexed equality COUNT(*) should query the index on the driver. Plan: " + plan);
+        plan.contains(LanceIndexedCountScan.PLAN_MARKER),
+        "A fully indexed equality COUNT(*) should be one indexed-count task. Plan: " + plan);
+    assertFalse(plan.contains("LocalTableScan"), plan);
+    assertEquals(1, indexedCountPartitions(executed), plan);
+    assertEquals(10L, indexedCount.first().getLong(0));
   }
 
   @Test
@@ -271,6 +276,7 @@ public abstract class BaseSparkConnectorAggPushdownTest {
     assertTrue(
         plan.contains("BatchScan"),
         "An unindexed filtered COUNT(*) should retain a distributed scan. Plan: " + plan);
+    assertFalse(plan.contains(LanceIndexedCountScan.PLAN_MARKER), plan);
   }
 
   @Test
@@ -282,8 +288,9 @@ public abstract class BaseSparkConnectorAggPushdownTest {
 
     assertEquals(0L, emptyCount.first().getLong(0));
     String plan = emptyCount.queryExecution().executedPlan().toString();
-    assertTrue(
-        plan.contains("LocalTableScan") || plan.contains("LanceLocalScan"),
+    assertTrue(plan.contains("LocalTableScan"), plan);
+    assertFalse(
+        plan.contains("BatchScan"),
         "An empty filtered COUNT(*) should not plan a distributed scan. Plan: " + plan);
   }
 
@@ -319,5 +326,31 @@ public abstract class BaseSparkConnectorAggPushdownTest {
     assertTrue(
         plan.contains("BatchScan"),
         "A partially indexed COUNT(*) must scan unindexed fragments. Plan: " + plan);
+    assertFalse(plan.contains(LanceIndexedCountScan.PLAN_MARKER), plan);
+  }
+
+  /** Partitions of the indexed-count scan, or -1 when that scan is absent. */
+  private static int indexedCountPartitions(org.apache.spark.sql.execution.SparkPlan plan) {
+    if (plan instanceof org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec) {
+      return indexedCountPartitions(
+          ((org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec) plan).inputPlan());
+    }
+    if (plan instanceof org.apache.spark.sql.execution.datasources.v2.BatchScanExec) {
+      org.apache.spark.sql.connector.read.Scan scan =
+          ((org.apache.spark.sql.execution.datasources.v2.BatchScanExec) plan).scan();
+      if (scan instanceof org.apache.spark.sql.connector.read.Batch
+          && scan.description().contains(LanceIndexedCountScan.PLAN_MARKER)) {
+        return ((org.apache.spark.sql.connector.read.Batch) scan).planInputPartitions().length;
+      }
+    }
+    scala.collection.Iterator<org.apache.spark.sql.execution.SparkPlan> children =
+        plan.children().iterator();
+    while (children.hasNext()) {
+      int found = indexedCountPartitions(children.next());
+      if (found >= 0) {
+        return found;
+      }
+    }
+    return -1;
   }
 }
