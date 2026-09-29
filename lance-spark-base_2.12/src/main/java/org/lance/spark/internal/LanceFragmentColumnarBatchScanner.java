@@ -162,6 +162,13 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
           throw new IllegalStateException(
               "Lance scan did not return expected field '" + fieldName + "'");
         }
+        // Pass the Spark field so the column vector reports the blob v2 descriptor schema when
+        // applicable and binds nested struct children by the Spark schema's names and order.
+        // Lance's native scan does not push down nested struct projection, so Arrow always
+        // carries on-disk struct children in physical order; schema-aware binding is required
+        // when the partition schema differs from that order (e.g. nested struct pruning). See
+        // GitHub issue #499. The trailing false keeps the vector reusable across batches (it is
+        // owned and closed by the reader, not this column vector). See GitHub issue #545.
         LanceArrowColumnVector colVec = new LanceArrowColumnVector(vector, false, field);
 
         // Set blob reference context so getBinary() produces blob references
