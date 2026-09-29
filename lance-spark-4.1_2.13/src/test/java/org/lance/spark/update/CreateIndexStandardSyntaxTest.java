@@ -16,6 +16,8 @@ package org.lance.spark.update;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.util.Locale;
+
 /**
  * Verifies that standard {@code CREATE INDEX} syntax is intercepted on Spark 4.0+ with a helpful
  * error message directing users to the Lance-specific {@code ALTER TABLE ... CREATE INDEX} syntax.
@@ -35,5 +37,30 @@ public class CreateIndexStandardSyntaxTest extends BaseAddIndexTest {
     Assertions.assertTrue(
         exception.getMessage().contains("ALTER TABLE"),
         "Expected error message to mention ALTER TABLE syntax, got: " + exception.getMessage());
+  }
+
+  @Test
+  public void testCreateIndexInterceptedUnderTurkishLocale() {
+    // In the Turkish locale "index".toUpperCase() is "İNDEX", so a locale-sensitive uppercase makes
+    // the CREATE INDEX guard miss and the statement falls through to the native path this intercept
+    // exists to prevent. Locale.ROOT keeps the check stable.
+    Locale previous = Locale.getDefault();
+    Locale.setDefault(new Locale("tr", "TR"));
+    try {
+      spark.sql(String.format("create table %s (id int, text string) using lance;", fullTable));
+
+      UnsupportedOperationException exception =
+          Assertions.assertThrows(
+              UnsupportedOperationException.class,
+              () ->
+                  spark.sql(
+                      String.format("create index std_idx on %s (id) using btree", fullTable)));
+
+      Assertions.assertTrue(
+          exception.getMessage().contains("ALTER TABLE"),
+          "Expected error message to mention ALTER TABLE syntax, got: " + exception.getMessage());
+    } finally {
+      Locale.setDefault(previous);
+    }
   }
 }
