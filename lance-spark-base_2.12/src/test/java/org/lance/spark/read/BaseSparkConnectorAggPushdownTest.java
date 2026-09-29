@@ -41,6 +41,8 @@ public abstract class BaseSparkConnectorAggPushdownTest {
             .appName("LanceAggregatePushDownTest")
             .master("local[*]")
             .config("spark.ui.enabled", "false")
+            .config(
+                "spark.sql.extensions", "org.lance.spark.extensions.LanceSparkSessionExtensions")
             .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
             .config("spark.sql.catalog.lance.impl", "dir")
             .config("spark.sql.catalog.lance.root", tempDir.toString())
@@ -221,5 +223,87 @@ public abstract class BaseSparkConnectorAggPushdownTest {
     // Verify the count is correct (ids 11 to 49 = 39 rows)
     long count = countDataset.first().getLong(0);
     assertEquals(39L, count, "Filtered count should be 39");
+  }
+
+  @Test
+  public void testCountStarWithExactScalarIndexUsesLocalScan() {
+    String tableName = "lance.default.count_indexed_single_partition_test_dataset";
+    spark
+        .range(0, 100)
+        .selectExpr("id", "id % 10 as category")
+        .repartition(4)
+        .writeTo(tableName)
+        .create();
+
+    spark
+        .sql(
+            "ALTER TABLE "
+                + tableName
+                + " CREATE INDEX category_bitmap USING BITMAP(category) WITH (num_segments = 2)")
+        .collectAsList();
+    spark.catalog().refreshTable(tableName);
+
+    Dataset<Row> indexedCount =
+        spark.table(tableName).filter("category = 5").selectExpr("count(*)");
+
+    assertEquals(10L, indexedCount.first().getLong(0));
+    String plan = indexedCount.queryExecution().executedPlan().toString();
+    assertTrue(
+        plan.contains("LocalTableScan") || plan.contains("LanceLocalScan"),
+        "A fully indexed equality COUNT(*) should query the index on the driver. Plan: " + plan);
+  }
+
+  @Test
+  public void testCountStarWithoutScalarIndexKeepsFragmentParallelism() {
+    String tableName = "lance.default.count_unindexed_parallel_test_dataset";
+    spark
+        .range(0, 100)
+        .selectExpr("id", "id % 10 as category")
+        .repartition(4)
+        .writeTo(tableName)
+        .create();
+
+    Dataset<Row> unindexedCount =
+        spark.table(tableName).filter("category = 5").selectExpr("count(*)");
+
+    assertEquals(10L, unindexedCount.first().getLong(0));
+    String plan = unindexedCount.queryExecution().executedPlan().toString();
+    assertTrue(
+        plan.contains("BatchScan"),
+        "An unindexed filtered COUNT(*) should retain a distributed scan. Plan: " + plan);
+  }
+
+  @Test
+  public void testCountStarWithPartialScalarIndexKeepsDistributedScan() throws Exception {
+    String tableName = "lance.default.count_partial_index_test_dataset";
+    spark
+        .range(0, 40)
+        .selectExpr("id", "id % 10 as category")
+        .repartition(2)
+        .writeTo(tableName)
+        .create();
+
+    spark
+        .sql(
+            "ALTER TABLE "
+                + tableName
+                + " CREATE INDEX category_bitmap USING BITMAP(category) WITH (num_segments = 1)")
+        .collectAsList();
+    spark
+        .range(40, 100)
+        .selectExpr("id", "id % 10 as category")
+        .repartition(2)
+        .writeTo(tableName)
+        .append();
+    spark.catalog().refreshTable(tableName);
+
+    Dataset<Row> partiallyIndexedCount =
+        spark.table(tableName).filter("category = 5").selectExpr("count(*)");
+
+    assertEquals(10L, partiallyIndexedCount.first().getLong(0));
+    String plan = partiallyIndexedCount.queryExecution().executedPlan().toString();
+    assertTrue(
+        plan.contains("BatchScan"),
+        "A partially indexed COUNT(*) must scan unindexed fragments. Plan: " + plan);
   }
 }

@@ -15,7 +15,10 @@ package org.lance.spark.read;
 
 import org.lance.Dataset;
 import org.lance.Fragment;
+import org.lance.FragmentStatistics;
 import org.lance.ManifestSummary;
+import org.lance.index.Index;
+import org.lance.index.IndexType;
 import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.memwal.ShardingField;
@@ -29,6 +32,7 @@ import org.lance.spark.search.LanceSearchQuery;
 import org.lance.spark.search.LanceSearchScan;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
 import org.lance.spark.utils.BlobUtils;
+import org.lance.spark.utils.FieldPathUtils;
 import org.lance.spark.utils.FullTextQueryUtils;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.Utils;
@@ -59,6 +63,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -279,7 +284,6 @@ public class LanceScanBuilder
       }
 
       LanceSparkReadOptions resolvedReadOptions = readOptions.withRef(scanPlan.getRef());
-
       Optional<String> whereCondition =
           FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);
       return new LanceScan(
@@ -303,6 +307,97 @@ public class LanceScanBuilder
     } finally {
       closeLazyDataset();
     }
+  }
+
+  /** Returns the indexed field id for a single-column equality/IN lookup, or null. */
+  private static Integer exactLookupFilterFieldId(LanceSchema lanceSchema, Predicate[] predicates) {
+    if (predicates.length == 0) {
+      return null;
+    }
+
+    Integer fieldId = null;
+    boolean hasLookup = false;
+    for (Predicate predicate : predicates) {
+      // Spark may supply IS_NOT_NULL alongside an equality predicate. It is safe only when the
+      // same column also has an equality/IN lookup; never coalesce IS_NOT_NULL by itself.
+      if ("=".equals(predicate.name()) || "IN".equals(predicate.name())) {
+        hasLookup = true;
+      } else if (!"IS_NOT_NULL".equals(predicate.name())) {
+        return null;
+      }
+
+      NamedReference[] references = predicate.references();
+      if (references.length != 1) {
+        return null;
+      }
+      String path = FieldPathUtils.canonicalPath(Arrays.asList(references[0].fieldNames()));
+      int predicateFieldId;
+      try {
+        predicateFieldId = FieldPathUtils.resolveLeafField(lanceSchema, path).getId();
+      } catch (IllegalArgumentException e) {
+        return null;
+      }
+      if (fieldId != null && fieldId != predicateFieldId) {
+        return null;
+      }
+      fieldId = predicateFieldId;
+    }
+    return hasLookup ? fieldId : null;
+  }
+
+  /** Finds a BTREE or BITMAP index that covers every live fragment for the lookup predicates. */
+  private Optional<String> findFullyCoveringExactLookupIndex(Dataset dataset) {
+    if (!readOptions.isUseScalarIndex()
+        || readOptions.getFullTextQuery() != null
+        || pushedPredicates.length == 0) {
+      return Optional.empty();
+    }
+
+    Integer filterFieldId = exactLookupFilterFieldId(dataset.getLanceSchema(), pushedPredicates);
+    if (filterFieldId == null) {
+      return Optional.empty();
+    }
+
+    FragmentStatistics fragmentStatistics = dataset.getFragmentStatistics();
+    Set<Integer> liveFragmentIds =
+        Arrays.stream(fragmentStatistics.getIds()).boxed().collect(Collectors.toSet());
+    if (liveFragmentIds.isEmpty()) {
+      return Optional.empty();
+    }
+
+    Map<String, List<Index>> candidateSegments = new HashMap<>();
+    for (Index segment : dataset.getIndexes()) {
+      List<Integer> fields = segment.fields();
+      if ((segment.indexType() == IndexType.BTREE || segment.indexType() == IndexType.BITMAP)
+          && fields != null
+          && fields.size() == 1
+          && fields.get(0).equals(filterFieldId)) {
+        candidateSegments
+            .computeIfAbsent(segment.name(), ignored -> new ArrayList<>())
+            .add(segment);
+      }
+    }
+
+    for (Map.Entry<String, List<Index>> candidate : candidateSegments.entrySet()) {
+      Set<Integer> coveredFragments = new HashSet<>();
+      boolean hasCompleteCoverageMetadata = true;
+      for (Index segment : candidate.getValue()) {
+        if (!segment.fragments().isPresent()) {
+          hasCompleteCoverageMetadata = false;
+          break;
+        }
+        coveredFragments.addAll(segment.fragments().get());
+      }
+      if (hasCompleteCoverageMetadata && coveredFragments.containsAll(liveFragmentIds)) {
+        LOG.info(
+            "Using fully covering index '{}' for filtered COUNT(*) ({} segments, {} fragments)",
+            candidate.getKey(),
+            candidate.getValue().size(),
+            liveFragmentIds.size());
+        return Optional.of(candidate.getKey());
+      }
+    }
+    return Optional.empty();
   }
 
   boolean shouldNamespaceFtsScan() {
@@ -475,12 +570,29 @@ public class LanceScanBuilder
       if (pushedPredicates.length == 0 && readOptions.getFullTextQuery() == null) {
         Optional<Long> metadataCount = getCountFromMetadata(getOrOpenDataset());
         if (metadataCount.isPresent()) {
-          // Create LocalScan with pre-computed count result
-          StructType countSchema = new StructType().add("count", DataTypes.LongType);
-          InternalRow[] rows = new InternalRow[1];
-          rows[0] = new GenericInternalRow(new Object[] {metadataCount.get()});
-          this.localScan = new LanceLocalScan(countSchema, rows, readOptions.getDatasetUri());
+          setLocalCount(metadataCount.get());
           return true;
+        }
+      }
+
+      // A scan partition is normally planned for every fragment. Lance's logical scalar index
+      // spans all of its physical segments, so asking every partition to evaluate the same indexed
+      // predicate repeats those segment lookups. For an exact, fully covered lookup, use the core
+      // index-count API once on the driver and expose the result as a LocalScan.
+      Dataset dataset = getOrOpenDataset();
+      Optional<String> indexName = findFullyCoveringExactLookupIndex(dataset);
+      Optional<String> filter = FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);
+      if (indexName.isPresent() && filter.isPresent()) {
+        try {
+          long indexedCount =
+              dataset.countIndexedRows(indexName.get(), filter.get(), java.util.Optional.empty());
+          setLocalCount(indexedCount);
+          return true;
+        } catch (RuntimeException e) {
+          LOG.warn(
+              "Failed to count rows with scalar index '{}'; falling back to a distributed scan: {}",
+              indexName.get(),
+              e.getMessage());
         }
       }
       // Fall back to scan-based count (with filters, a full-text query, or metadata unavailable)
@@ -489,6 +601,13 @@ public class LanceScanBuilder
     }
 
     return false;
+  }
+
+  private void setLocalCount(long count) {
+    StructType countSchema = new StructType().add("count", DataTypes.LongType);
+    InternalRow[] rows = new InternalRow[1];
+    rows[0] = new GenericInternalRow(new Object[] {count});
+    this.localScan = new LanceLocalScan(countSchema, rows, readOptions.getDatasetUri());
   }
 
   private static Optional<Long> getCountFromMetadata(Dataset dataset) {
