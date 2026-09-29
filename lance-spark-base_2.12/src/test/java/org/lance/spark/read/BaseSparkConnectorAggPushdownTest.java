@@ -325,7 +325,7 @@ public abstract class BaseSparkConnectorAggPushdownTest {
     String plan = partiallyIndexedCount.queryExecution().executedPlan().toString();
     assertTrue(
         plan.contains("BatchScan"),
-        "A partially indexed COUNT(*) must scan unindexed fragments. Plan: " + plan);
+        "The partially indexed COUNT(*) plan should stay on BatchScan. Plan: " + plan);
     assertFalse(plan.contains(LanceIndexedCountScan.PLAN_MARKER), plan);
   }
 

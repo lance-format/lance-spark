@@ -33,15 +33,8 @@ import java.util.Collections;
 import java.util.Map;
 
 /**
- * One-partition filtered {@code COUNT(*)} evaluated when the task runs, not while Spark is
- * planning. {@link org.apache.spark.sql.connector.read.LocalScan#rows()} is pulled into {@code
- * LocalTableScanExec} during physical planning, so {@code EXPLAIN} would run the count.
- *
- * <p>lance-core 12.0.0 ignores {@code indexName} and counts with a filtered scanner. That scanner
- * can materialize a row-address mask. A low-selectivity equality on a large table may therefore use
- * more memory on this single task than the per-fragment distributed scan. There is no cheaper
- * selectivity estimate than the count itself, and a total-row cutoff would also reject the
- * selective lookups this path exists for.
+ * LocalScan copies its rows into the physical plan, so it would run the count during planning. The
+ * filtered scanner can build a row-address mask on this one task.
  */
 public class LanceIndexedCountScan implements Scan, Batch {
   static final String PLAN_MARKER = "LanceIndexedCount";
@@ -163,7 +156,7 @@ public class LanceIndexedCountScan implements Scan, Batch {
     }
 
     private long countIndexedRows() throws IOException {
-      // lance-core ignores indexName. A negative count is the JNI error sentinel.
+      // A negative count is the JNI error sentinel.
       try (ExecutorNamespace ignored =
               ExecutorNamespace.acquire(
                   partition.readOptions, partition.namespaceImpl, partition.namespaceProperties);

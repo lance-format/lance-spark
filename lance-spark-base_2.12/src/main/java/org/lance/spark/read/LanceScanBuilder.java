@@ -315,7 +315,6 @@ public class LanceScanBuilder
     }
   }
 
-  /** Returns the lookup column for a single-column equality/IN filter, or null. */
   private static ExactLookupColumn exactLookupColumn(
       LanceSchema lanceSchema, Predicate[] predicates) {
     if (predicates.length == 0) {
@@ -326,8 +325,7 @@ public class LanceScanBuilder
     String columnPath = null;
     boolean hasLookup = false;
     for (Predicate predicate : predicates) {
-      // Spark may supply IS_NOT_NULL alongside an equality predicate. It is safe only when the
-      // same column also has an equality/IN lookup; never coalesce IS_NOT_NULL by itself.
+      // IS_NOT_NULL may accompany an exact lookup but is not an exact lookup by itself.
       if ("=".equals(predicate.name()) || "IN".equals(predicate.name())) {
         hasLookup = true;
       } else if (!"IS_NOT_NULL".equals(predicate.name())) {
@@ -354,12 +352,6 @@ public class LanceScanBuilder
     return hasLookup ? new ExactLookupColumn(fieldId, columnPath) : null;
   }
 
-  /**
-   * Filter passed to {@code Dataset.countIndexedRows} for a predicate set already accepted by
-   * {@link #exactLookupColumn}. Drops same-column {@code IS NOT NULL} conjuncts. Equality and
-   * {@code IN} already exclude nulls, and Lance's sargable scalar lookup has {@code IsNull} but no
-   * {@code IsNotNull}, so the extra conjunct falls through to a column recheck.
-   */
   static Optional<String> compileExactLookupCountFilter(Predicate[] predicates) {
     List<Predicate> lookupPredicates = new ArrayList<>(predicates.length);
     for (Predicate predicate : predicates) {
@@ -371,13 +363,6 @@ public class LanceScanBuilder
         lookupPredicates.toArray(new Predicate[0]));
   }
 
-  /**
-   * Cost gate for a single-task filtered count. lance-core 12.0.0 ignores the index name passed to
-   * {@code countIndexedRows} and counts with a filtered scanner, which already applies the deletion
-   * mask and reads unindexed fragments. This lookup does not force that index and is not what keeps
-   * the count correct. It only decides whether that count is likely to stay on a fully covering
-   * BTREE or BITMAP; otherwise the distributed scan is cheaper.
-   */
   private ExactLookupCount findFullyCoveringExactLookupIndex(Dataset dataset) {
     if (!readOptions.isUseScalarIndex()
         || readOptions.getFullTextQuery() != null
@@ -390,9 +375,7 @@ public class LanceScanBuilder
       return ExactLookupCount.miss();
     }
 
-    // describeIndices still reads the manifest index list. The column and exact-equality criteria
-    // avoid exporting unrelated indexes, including vector indexes, as full segment metadata.
-    // Fragment statistics are loaded only after a candidate exists.
+    // Avoid exporting unrelated indexes, including vector indexes, as full segment metadata.
     IndexCriteria criteria =
         new IndexCriteria.Builder()
             .forColumn(column.columnPath)
@@ -415,8 +398,6 @@ public class LanceScanBuilder
       return ExactLookupCount.empty();
     }
 
-    // HashMap iteration order is not the selection. Fewest segments, then name, so the plan and
-    // the log stay stable if core later honors indexName.
     String selectedName = null;
     int selectedSegments = Integer.MAX_VALUE;
     for (Map.Entry<String, List<Index>> candidate : candidateSegments.entrySet()) {
@@ -453,7 +434,6 @@ public class LanceScanBuilder
     return ExactLookupCount.index(selectedName);
   }
 
-  /** BTREE/BITMAP segments for this field, or null when the description is not an exact lookup. */
   private static List<Index> scalarLookupSegments(IndexDescription description, int fieldId) {
     List<Index> segments = description.getSegments();
     if (segments == null || segments.isEmpty()) {
@@ -471,15 +451,8 @@ public class LanceScanBuilder
     return segments;
   }
 
-  /**
-   * Fragment ids that still have rows. Statistics list every manifest fragment, including ones
-   * whose rows are all deleted. Those empty fragments do not need index coverage: the filtered
-   * scanner already applies the deletion mask. Returns null when every fragment is empty, and an
-   * empty set is not used for that so callers can tell "no rows" from "no statistics".
-   *
-   * <p>When row counts are missing, every id is required. Skipping an unknown fragment would hide
-   * rows.
-   */
+  // Returns null for no fragments or when every aligned row count is zero. Missing or unaligned
+  // row counts conservatively retain every fragment id.
   private static Set<Integer> nonemptyFragmentIds(FragmentStatistics fragmentStatistics) {
     int[] fragmentIds = fragmentStatistics.getIds();
     if (fragmentIds.length == 0) {
@@ -496,10 +469,6 @@ public class LanceScanBuilder
     return nonempty.isEmpty() ? null : nonempty;
   }
 
-  /**
-   * Single-task filtered {@code COUNT(*)} decision. {@link #indexName} is set only for {@link
-   * Kind#INDEX}.
-   */
   private static final class ExactLookupCount {
     enum Kind {
       MISS,
@@ -528,7 +497,6 @@ public class LanceScanBuilder
     }
   }
 
-  /** Column accepted by {@link #exactLookupColumn}. */
   private static final class ExactLookupColumn {
     final int fieldId;
     final String columnPath;
@@ -715,19 +683,13 @@ public class LanceScanBuilder
         }
       }
 
-      // No fragments means the filtered count is zero. total_rows is not a safe signal: fragments
-      // with an unknown deletion count are omitted from that sum. total_fragments is the fragment
-      // list length, so this skips scan planning only for a dataset that has nothing to scan.
+      // total_rows omits fragments with unknown deletion counts, so only total_fragments can prove
+      // that the dataset has no fragments.
       if (hasNoFragments(dataset)) {
         setLocalCount(0L);
         return true;
       }
 
-      // A scan partition is normally planned for every fragment. Lance's logical scalar index
-      // spans all of its physical segments, so asking every partition to evaluate the same indexed
-      // predicate repeats those segment lookups. For an exact, fully covered lookup, plan one
-      // partition that counts at execution time. The unfiltered path above only reads the manifest.
-      // This branch only reads index and fragment metadata; EXPLAIN does not run the count.
       ExactLookupCount lookup;
       try {
         lookup = findFullyCoveringExactLookupIndex(dataset);
