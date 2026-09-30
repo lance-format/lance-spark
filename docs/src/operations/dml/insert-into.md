@@ -291,7 +291,7 @@ These options control how data is written to Lance datasets. They can be set usi
 | `file_format_version`   | String  | -        | Lance file format version: `LEGACY` or `STABLE`.                                     |
 | `batch_size`             | Integer | `8192`   | Number of rows per batch during writing.                                             |
 | `use_queued_write_buffer`| Boolean | `false`  | Use pipelined write buffer for improved throughput.                                  |
-| `queue_depth`            | Integer | `8`      | Queue depth for pipelined writes (only used when `use_queued_write_buffer=true`).    |
+| `queue_depth`            | Integer | `8`      | Queue depth for pipelined writes; only consumed when `use_queued_write_buffer=true`, but must be a positive integer and is validated whenever supplied. |
 | `use_large_var_types`    | Boolean | `false`  | Use 64-bit offset vectors for all string/binary columns to avoid 2GB batch limit. See [Large Var Types](#large-var-types).   |
 | `blob_pack_file_size_threshold` | Long | `1073741824` (1 GiB) | Maximum size in bytes for blob v2 pack (`.blob`) sidecar files. When a pack file reaches this size, a new one is started. |
 
