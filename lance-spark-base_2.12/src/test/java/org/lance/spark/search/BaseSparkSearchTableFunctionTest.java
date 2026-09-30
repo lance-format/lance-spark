@@ -185,6 +185,122 @@ public abstract class BaseSparkSearchTableFunctionTest {
   }
 
   @Test
+  public void testBatchVectorSearch() {
+    String fullName = createVectorTable();
+
+    Dataset<Row> result =
+        spark.sql(
+            "SELECT query_index, id, _distance FROM VECTOR_SEARCH('"
+                + fullName
+                + "', array(array(0.0, 0.0, 0.0, 0.0), array(10.0, 10.0, 10.0, 10.0)), 2)"
+                + " ORDER BY query_index, _distance");
+
+    assertEquals("query_index", result.schema().fields()[0].name());
+    assertTrue(!result.schema().fields()[0].nullable());
+    List<Row> rows = result.collectAsList();
+    // k applies to each query vector.
+    assertEquals(4, rows.size());
+    assertEquals(java.util.Arrays.asList(0, 0, 1, 1), column(rows, 0));
+    assertEquals(java.util.Arrays.asList(0, 1, 2, 1), column(rows, 1));
+    assertEquals(0.0f, rows.get(0).getFloat(2), 0.001f);
+    assertEquals(0.0f, rows.get(2).getFloat(2), 0.001f);
+  }
+
+  @Test
+  public void testBatchVectorSearchWithColumnsAndFilter() {
+    Assumptions.assumeTrue(supportsNamedArguments());
+    String fullName = createVectorTable();
+
+    Dataset<Row> result =
+        spark.sql(
+            "SELECT * FROM VECTOR_SEARCH("
+                + "table => '"
+                + fullName
+                + "', "
+                + "query_vector => array(array(0.0, 0.0, 0.0, 0.0), array(10.0, 10.0, 10.0, 10.0)),"
+                + " columns => array('id'), "
+                + "filter => 'id > 0', "
+                + "prefilter => true, "
+                + "k => 1)");
+
+    assertEquals(
+        java.util.Arrays.asList("query_index", "id", "_distance"),
+        java.util.Arrays.asList(result.schema().fieldNames()));
+    List<Row> rows = result.orderBy("query_index").collectAsList();
+    assertEquals(2, rows.size());
+    assertEquals(java.util.Arrays.asList(0, 1), column(rows, 0));
+    assertEquals(java.util.Arrays.asList(1, 2), column(rows, 1));
+  }
+
+  @Test
+  public void testBatchVectorSearchRejectsMismatchedDimensions() {
+    String fullName = createVectorTable();
+
+    Exception exception =
+        assertThrows(
+            Exception.class,
+            () ->
+                spark
+                    .sql(
+                        "SELECT * FROM VECTOR_SEARCH('"
+                            + fullName
+                            + "', array(array(0.0, 0.0, 0.0, 0.0), array(1.0, 1.0)), 2)")
+                    .collectAsList());
+    assertTrue(
+        getDeepMessage(exception)
+            .contains("query_vector[0] has 4 values but query_vector[1] has 2"),
+        getDeepMessage(exception));
+  }
+
+  @Test
+  public void testBatchVectorSearchRejectsOffset() {
+    Assumptions.assumeTrue(supportsNamedArguments());
+    String fullName = createVectorTable();
+
+    Exception exception =
+        assertThrows(
+            Exception.class,
+            () ->
+                spark
+                    .sql(
+                        "SELECT * FROM VECTOR_SEARCH("
+                            + "table => '"
+                            + fullName
+                            + "', "
+                            + "query_vector => array(array(0.0, 0.0, 0.0, 0.0)), "
+                            + "k => 1, "
+                            + "offset => 1)")
+                    .collectAsList());
+    assertTrue(
+        getDeepMessage(exception).contains("offset is not supported with multiple query vectors"),
+        getDeepMessage(exception));
+  }
+
+  @Test
+  public void testBatchVectorSearchRejectsQueryIndexColumn() {
+    String fullName = fullTableName("query_index_table");
+    spark.sql(
+        "CREATE TABLE "
+            + fullName
+            + " (query_index INT NOT NULL, vector ARRAY<FLOAT> NOT NULL) USING lance "
+            + "TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '2')");
+    spark.sql("INSERT INTO " + fullName + " VALUES (0, array(0.0, 0.0))");
+
+    Exception exception =
+        assertThrows(
+            Exception.class,
+            () ->
+                spark
+                    .sql(
+                        "SELECT * FROM VECTOR_SEARCH('"
+                            + fullName
+                            + "', array(array(0.0, 0.0), array(1.0, 1.0)), 1)")
+                    .collectAsList());
+    assertTrue(
+        getDeepMessage(exception).contains("'query_index' column"), getDeepMessage(exception));
+  }
+
+  @Test
   public void testVectorSearchRequiresQueryVector() {
     Assumptions.assumeTrue(supportsNamedArguments());
     String fullName = createVectorTable();
@@ -373,6 +489,10 @@ public abstract class BaseSparkSearchTableFunctionTest {
     assertTrue(hybridRows.get(0).getFloat(2) > 0.0f);
     assertTrue(hybridRows.get(0).getFloat(3) > hybridRows.get(1).getFloat(3));
     assertTrue(hybridRows.get(0).getLong(4) >= 0);
+  }
+
+  private static List<Integer> column(List<Row> rows, int index) {
+    return rows.stream().map(row -> row.getInt(index)).collect(Collectors.toList());
   }
 
   private String createVectorTable() {
