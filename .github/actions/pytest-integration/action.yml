@@ -79,12 +79,16 @@ runs:
         dest="${{ github.workspace }}/.minio-bin"
         mkdir -p "$dest"
         if [ ! -x "$dest/minio" ]; then
-          docker rm -f minio-extract >/dev/null 2>&1 || true
-          docker pull quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-          docker create --name minio-extract quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-          docker cp minio-extract:/usr/bin/minio "$dest/minio"
-          docker rm minio-extract
-          chmod +x "$dest/minio"
+          case "${{ runner.arch }}" in
+            X64) asset=minio.linux-amd64.RELEASE.2025-09-07T16-13-09Z ;;
+            ARM64) asset=minio.linux-arm64.RELEASE.2025-09-07T16-13-09Z ;;
+            *) echo "unsupported runner arch: ${{ runner.arch }}" >&2; exit 1 ;;
+          esac
+          tmp="$(mktemp "$dest/minio.XXXXXX")"
+          curl -fsSL --retry 3 --retry-all-errors -o "$tmp" \
+            "https://github.com/minio/minio/releases/download/RELEASE.2025-09-07T16-13-09Z/${asset}"
+          chmod +x "$tmp"
+          mv "$tmp" "$dest/minio"
         fi
         echo "$dest" >> "$GITHUB_PATH"
 
