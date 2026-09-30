@@ -18,9 +18,10 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.{UnresolvedAttribute, UnresolvedStar}
 import org.apache.spark.sql.catalyst.expressions.{CreateArray, Descending, Expression, Literal, NamedExpression, SortOrder}
 import org.apache.spark.sql.catalyst.plans.logical.{Filter, Limit, LogicalPlan, Project, Sort}
+import org.apache.spark.sql.catalyst.util.ArrayData
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
-import org.apache.spark.sql.types.{DataTypes, StructField, StructType}
+import org.apache.spark.sql.types.{ArrayType, DataType, DataTypes, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.lance.ipc.FullTextQuery
 import org.lance.spark.{LanceDataset, LanceSparkReadOptions}
@@ -44,13 +45,15 @@ object LanceSearchTableFunctions {
   private val FtsScoreColumn = "_score"
   private val HybridScoreColumn = "_relevance_score"
   private val RowIdColumn = "_rowid"
+  private val QueryIndexColumn = "query_index"
+  private val DefaultVectorColumn = "vector"
   private val NamedArgumentExpressionClass =
     "org.apache.spark.sql.catalyst.expressions.NamedArgumentExpression"
 
   def vectorSearch(args: Seq[Expression]): LogicalPlan = {
     val parsed = parseArgs("VECTOR_SEARCH", args, Seq(TableArg, QueryVectorArg, "k"))
     val tableName = requiredString(parsed, TableArg)
-    val queryVector = requiredFloatArray(parsed, QueryVectorArg)
+    val queryVectors = requiredQueryVectors(parsed, QueryVectorArg)
     val k = optionalInt(parsed, "num_results")
       .orElse(optionalInt(parsed, "limit"))
       .orElse(optionalInt(parsed, "k"))
@@ -67,8 +70,15 @@ object LanceSearchTableFunctions {
     val schemaColumns =
       requestOutputColumns(resolved.table.schema(), outputColumns, DistanceMetricColumn)
     val requestColumns = namespaceOutputColumns(schemaColumns)
-    val schema =
+    val vectorColumn = optionalString(parsed, "vector_column").orNull
+    val baseSchema =
       outputSchema(resolved.table.schema(), schemaColumns, DistanceMetricColumn, withRowId)
+    val schema = queryVectors match {
+      case Right(_) =>
+        validateBatchVectorColumn(resolved.table.schema(), vectorColumn)
+        batchVectorOutputSchema(baseSchema)
+      case Left(_) => baseSchema
+    }
 
     val builder = LanceSearchQuery
       .builder(SearchType.VECTOR)
@@ -76,9 +86,8 @@ object LanceSearchTableFunctions {
       .namespaceImpl(resolved.table.getNamespaceImpl)
       .namespaceProperties(resolved.table.getNamespaceProperties)
       .outputColumns(requestColumns.asJava)
-      .vector(queryVector.asJava)
       .topK(requestK)
-      .vectorColumn(optionalString(parsed, "vector_column").orNull)
+      .vectorColumn(vectorColumn)
       .distanceType(optionalString(parsed, "distance_type").orNull)
       .filter(filter)
       .offset(offset.orNull)
@@ -93,8 +102,65 @@ object LanceSearchTableFunctions {
       .fastSearch(optionalBoolean(parsed, "fast_search").orNull)
       .prefilter(optionalBoolean(parsed, "prefilter").orNull)
 
+    queryVectors match {
+      case Left(vector) => builder.vector(vector.asJava)
+      case Right(vectors) => builder.vectors(vectors.map(_.asJava).asJava)
+    }
+
     relation("VECTOR_SEARCH", schema, builder.build(), resolved)
   }
+
+  /**
+   * Parses `query_vector` as either one vector (`array(...)`, returned as `Left`) or multiple
+   * query vectors for a batch search (`array(array(...), ...)`, returned as `Right`).
+   */
+  private def requiredQueryVectors(
+      parsed: ParsedArgs,
+      name: String): Either[Seq[java.lang.Float], Seq[Seq[java.lang.Float]]] = {
+    val expr = parsed.get(name).getOrElse(throw new IllegalArgumentException(s"$name is required"))
+    val values = literalArray(expr)
+    if (values.nonEmpty && values.forall(isArrayValue)) {
+      Right(values.map(value => arrayElements(value).map(toFloat)))
+    } else if (values.exists(isArrayValue)) {
+      throw new IllegalArgumentException(
+        s"$name must be an array of numbers or an array of arrays of numbers")
+    } else {
+      Left(values.map(toFloat))
+    }
+  }
+
+  private def isArrayValue(value: Any): Boolean = value match {
+    case _: Seq[_] | _: Array[_] => true
+    case _ => false
+  }
+
+  private def arrayElements(value: Any): Seq[Any] = value match {
+    case values: Seq[_] => values
+    case values: Array[_] => values.toSeq
+    case other => throw new IllegalArgumentException(s"Expected array literal, got $other")
+  }
+
+  // Lance treats a list of query vectors against a multivector column as a single multivector
+  // query, which would not produce per-query results.
+  private def validateBatchVectorColumn(schema: StructType, vectorColumn: String): Unit = {
+    val columnName = Option(vectorColumn).getOrElse(DefaultVectorColumn)
+    schema.fields.find(_.name.equalsIgnoreCase(columnName)).map(_.dataType).foreach {
+      case ArrayType(_: ArrayType, _) =>
+        throw new IllegalArgumentException(
+          s"Multiple query vectors are not supported for multivector column '$columnName'")
+      case _ =>
+    }
+    if (schema.fields.exists(_.name.equalsIgnoreCase(QueryIndexColumn))) {
+      throw new IllegalArgumentException(
+        s"Multiple query vectors are not supported for tables with a '$QueryIndexColumn' " +
+          "column because the batch search adds a column with the same name")
+    }
+  }
+
+  private def batchVectorOutputSchema(schema: StructType): StructType =
+    new StructType(
+      (StructField(QueryIndexColumn, DataTypes.IntegerType, nullable = false) +:
+        schema.fields.filterNot(_.name.equalsIgnoreCase(QueryIndexColumn))).toArray)
 
   def search(args: Seq[Expression]): LogicalPlan = {
     val parsed = parseArgs("SEARCH", args, Seq(TableArg, QueryArg, "k"))
@@ -371,11 +437,18 @@ object LanceSearchTableFunctions {
   }
 
   private def literalValue(expr: Expression): Any = expr match {
-    case literal: Literal => literal.value
+    case literal: Literal => toScalaValue(literal.value, literal.dataType)
     case array: CreateArray => array.children.map(literalValue)
-    case other if other.foldable => other.eval(InternalRow.empty)
+    case other if other.foldable => toScalaValue(other.eval(InternalRow.empty), other.dataType)
     case other =>
       throw new IllegalArgumentException(s"Argument must be a foldable literal: ${other.sql}")
+  }
+
+  // Folded array literals (for example nested query vectors) arrive as Catalyst ArrayData.
+  private def toScalaValue(value: Any, dataType: DataType): Any = (value, dataType) match {
+    case (array: ArrayData, ArrayType(elementType, _)) =>
+      array.toSeq[Any](elementType).map(toScalaValue(_, elementType))
+    case _ => value
   }
 
   private def toNumber(value: Any): Number = value match {
