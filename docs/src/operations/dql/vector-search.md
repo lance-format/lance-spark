@@ -61,7 +61,7 @@ Pass an array of query vectors to search for several vectors in one Lance scan. 
     ORDER BY query_index, _distance;
     ```
 
-Lance runs the batch search natively and shares index partition scans across the query vectors. All query vectors must have the same dimension. Batch search does not support `offset`, multivector columns, or tables that already have a `query_index` column. Batch search needs a Lance version whose namespace `queryTable` treats `multi_vector` as a batch search.
+Lance runs all query vectors in a single native search request. All query vectors must have the same dimension. Batch search does not support `offset`, multivector columns, or tables that already have a `query_index` column. Batch search needs a Lance version whose namespace `queryTable` treats `multi_vector` as a batch search.
 
 ## Arguments
 
