@@ -51,6 +51,7 @@ public class LanceSearchQuery implements Serializable {
   private final String filter;
   private final Boolean withRowId;
   private final List<Float> vector;
+  private final List<List<Float>> vectors;
   private final String vectorColumn;
   private final String distanceType;
   private final Integer nprobes;
@@ -79,6 +80,13 @@ public class LanceSearchQuery implements Serializable {
     this.filter = builder.filter;
     this.withRowId = builder.withRowId;
     this.vector = immutableList(builder.vector);
+    List<List<Float>> copiedVectors = new ArrayList<>();
+    if (builder.vectors != null) {
+      for (List<Float> row : builder.vectors) {
+        copiedVectors.add(immutableList(row));
+      }
+    }
+    this.vectors = Collections.unmodifiableList(copiedVectors);
     this.vectorColumn = builder.vectorColumn;
     this.distanceType = builder.distanceType;
     this.nprobes = builder.nprobes;
@@ -231,6 +239,11 @@ public class LanceSearchQuery implements Serializable {
     return fullTextQueryJson;
   }
 
+  /** Whether this is a batch vector search over multiple query vectors. */
+  public boolean isBatchVectorSearch() {
+    return searchType == SearchType.VECTOR && !vectors.isEmpty();
+  }
+
   public QueryTableRequest toQueryTableRequest() {
     QueryTableRequest request = new QueryTableRequest().id(tableId).k(k);
     request.vector(new QueryTableRequestVector());
@@ -255,7 +268,11 @@ public class LanceSearchQuery implements Serializable {
     }
 
     if (searchType == SearchType.VECTOR) {
-      request.vector(new QueryTableRequestVector().singleVector(vector));
+      if (isBatchVectorSearch()) {
+        request.vector(new QueryTableRequestVector().multiVector(vectors));
+      } else {
+        request.vector(new QueryTableRequestVector().singleVector(vector));
+      }
       if (vectorColumn != null) {
         request.vectorColumn(vectorColumn);
       }
@@ -329,6 +346,7 @@ public class LanceSearchQuery implements Serializable {
     private String filter;
     private Boolean withRowId;
     private List<Float> vector = Collections.emptyList();
+    private List<List<Float>> vectors = Collections.emptyList();
     private String vectorColumn;
     private String distanceType;
     private Integer nprobes;
@@ -437,6 +455,15 @@ public class LanceSearchQuery implements Serializable {
       return this;
     }
 
+    /**
+     * Sets multiple query vectors for a batch vector search. Each vector returns up to {@code k}
+     * results, tagged with its position in a {@code query_index} column.
+     */
+    public Builder vectors(List<List<Float>> vectors) {
+      this.vectors = vectors;
+      return this;
+    }
+
     public Builder vectorColumn(String vectorColumn) {
       this.vectorColumn = vectorColumn;
       return this;
@@ -503,6 +530,37 @@ public class LanceSearchQuery implements Serializable {
       return this;
     }
 
+    private void validateBatchVectors() {
+      if (offset != null && offset > 0) {
+        throw new IllegalArgumentException(
+            "offset is not supported with multiple query vectors: it would apply to the combined"
+                + " result instead of each query");
+      }
+      int dim = -1;
+      for (int i = 0; i < vectors.size(); i++) {
+        List<Float> row = vectors.get(i);
+        if (row == null || row.isEmpty()) {
+          throw new IllegalArgumentException("query_vector[" + i + "] must not be empty");
+        }
+        if (dim < 0) {
+          dim = row.size();
+        } else if (row.size() != dim) {
+          throw new IllegalArgumentException(
+              "All query vectors must have the same dimension: query_vector[0] has "
+                  + dim
+                  + " values but query_vector["
+                  + i
+                  + "] has "
+                  + row.size());
+        }
+        for (Float value : row) {
+          if (value == null) {
+            throw new IllegalArgumentException("query_vector[" + i + "] contains a null value");
+          }
+        }
+      }
+    }
+
     public LanceSearchQuery build() {
       if (searchType == null) {
         throw new IllegalArgumentException("search type is required");
@@ -523,8 +581,17 @@ public class LanceSearchQuery implements Serializable {
         throw new IllegalArgumentException(
             "bypass_vector_index and fast_search cannot both be true");
       }
-      if (searchType == SearchType.VECTOR && (vector == null || vector.isEmpty())) {
+      boolean hasVector = vector != null && !vector.isEmpty();
+      boolean hasVectors = vectors != null && !vectors.isEmpty();
+      if (searchType == SearchType.VECTOR && !hasVector && !hasVectors) {
         throw new IllegalArgumentException("query_vector is required");
+      }
+      if (hasVector && hasVectors) {
+        throw new IllegalArgumentException(
+            "Set either a single query vector or multiple query vectors, not both");
+      }
+      if (hasVectors) {
+        validateBatchVectors();
       }
       if (searchType == SearchType.FULL_TEXT
           && (textQuery == null || textQuery.isEmpty())
