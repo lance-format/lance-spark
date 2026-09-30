@@ -93,6 +93,17 @@ object LanceArrowWriter {
           resolver)
         new ArrayWriter(vector, elementWriter)
 
+      // LargeList (64-bit offsets) restored by LanceArrowUtils#toArrowField from the large-list
+      // marker. Spark's ArrayType carries no offset width, so without this writer a round-tripped
+      // LargeList column falls through to the unsupported-type default at writer initialization.
+      case (ArrayType(elementType, _), vector: LargeListVector) =>
+        val elementWriter = createFieldWriter(
+          vector.getDataVector(),
+          elementType,
+          arrayElementMetadata(metadata),
+          resolver)
+        new LargeArrayWriter(vector, elementWriter)
+
       case (BooleanType, vector: BitVector) => new BooleanWriter(vector)
       case (ByteType, vector: TinyIntVector) => new ByteWriter(vector)
       case (ShortType, vector: SmallIntVector) => new ShortWriter(vector)
@@ -438,6 +449,33 @@ private[arrow] class TimestampNTZWriter(val valueVector: TimeStampMicroVector)
 
 private[arrow] class ArrayWriter(
     val valueVector: ListVector,
+    val elementWriter: LanceArrowFieldWriter) extends LanceArrowFieldWriter {
+  override def setNull(): Unit = {}
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    val array = input.getArray(ordinal)
+    var i = 0
+    valueVector.startNewValue(count)
+    while (i < array.numElements()) {
+      elementWriter.write(array, i)
+      i += 1
+    }
+    valueVector.endValue(count, array.numElements())
+  }
+  override def finish(): Unit = {
+    super.finish()
+    elementWriter.finish()
+  }
+  override def estimatedBufferedBytes: Long = elementWriter.estimatedBufferedBytes
+  override def reset(): Unit = {
+    super.reset()
+    elementWriter.reset()
+  }
+}
+
+// Mirror of ArrayWriter for LargeListVector: the same per-row element loop, but the vector uses
+// 64-bit offsets, so startNewValue takes a long index and endValue a long element count.
+private[arrow] class LargeArrayWriter(
+    val valueVector: LargeListVector,
     val elementWriter: LanceArrowFieldWriter) extends LanceArrowFieldWriter {
   override def setNull(): Unit = {}
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {

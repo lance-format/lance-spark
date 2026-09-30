@@ -16,6 +16,7 @@ package org.lance.spark.utils;
 import com.google.common.collect.ImmutableMap;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
@@ -25,6 +26,7 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -703,5 +705,42 @@ public class SchemaConverterTest {
     assertTrue(
         e.getMessage().contains(expectedFragment),
         () -> "expected message to contain '" + expectedFragment + "': " + e.getMessage());
+  }
+
+  @Test
+  public void testLargeListSurvivesSchemaRoundTrip() {
+    // Spark's ArrayType covers both Arrow List (32-bit offsets) and LargeList (64-bit). Without a
+    // marker the writeback narrows a LargeList column to a 32-bit List, and the write then fails
+    // type validation against the existing Lance schema on any round trip.
+    Schema arrowSchema =
+        new Schema(
+            Arrays.asList(
+                new Field(
+                    "large",
+                    new FieldType(true, new ArrowType.LargeList(), null, null),
+                    Collections.singletonList(intItem())),
+                new Field(
+                    "small",
+                    new FieldType(true, ArrowType.List.INSTANCE, null, null),
+                    Collections.singletonList(intItem()))));
+
+    StructType sparkSchema = LanceArrowUtils.fromArrowSchema(arrowSchema);
+    Schema back = LanceArrowUtils.toArrowSchema(sparkSchema, null, true);
+
+    // The LargeList column comes back as LargeList; the plain List column must stay a List, so the
+    // marker cannot widen an unrelated array column.
+    assertTrue(
+        back.findField("large").getType() instanceof ArrowType.LargeList,
+        () -> "expected LargeList, got " + back.findField("large").getType());
+    assertTrue(
+        back.findField("small").getType() instanceof ArrowType.List,
+        () -> "expected List, got " + back.findField("small").getType());
+  }
+
+  private static Field intItem() {
+    return new Field(
+        "item",
+        new FieldType(true, new ArrowType.Int(32, true), null, null),
+        Collections.emptyList());
   }
 }
