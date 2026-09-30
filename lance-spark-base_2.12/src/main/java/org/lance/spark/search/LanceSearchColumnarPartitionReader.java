@@ -106,6 +106,12 @@ public class LanceSearchColumnarPartitionReader implements PartitionReader<Colum
     for (int i = 0; i < fields.length; i++) {
       String fieldName = fields[i].name();
       FieldVector vector = actualFields.get(fieldName);
+      if (vector == null && "query_index".equals(fieldName)) {
+        throw new IllegalStateException(
+            "Lance search did not return 'query_index' for a query with multiple query vectors."
+                + " The Lance namespace only ran the first vector; batch VECTOR_SEARCH needs a"
+                + " Lance version whose namespace queryTable runs multi_vector as a batch search.");
+      }
       if (vector == null) {
         throw new IllegalStateException(
             "Lance search did not return expected field '" + fieldName + "'");
