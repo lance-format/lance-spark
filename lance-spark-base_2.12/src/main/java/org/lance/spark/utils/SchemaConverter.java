@@ -101,7 +101,7 @@ public class SchemaConverter {
           // Validate element type is FloatType or DoubleType
           if (elementType instanceof FloatType || elementType instanceof DoubleType) {
             // Add metadata for FixedSizeList
-            long vectorSize = Long.parseLong(properties.get(vectorSizeProperty));
+            int vectorSize = parseVectorSize(field.name(), properties.get(vectorSizeProperty));
             Metadata newMetadata =
                 new MetadataBuilder()
                     .withMetadata(field.metadata())
@@ -352,6 +352,38 @@ public class SchemaConverter {
     }
 
     return new StructType(newFields);
+  }
+
+  /**
+   * Parses and validates a vector-column size property value. The size becomes an Arrow {@code
+   * FixedSizeList} length, which requires a positive int; a non-integer, {@code 0}, negatives, and
+   * values above {@link Integer#MAX_VALUE} would otherwise surface as a cryptic {@code
+   * NumberFormatException} without the column name or, worse, silently build a FixedSizeList of
+   * zero/negative length. Reject at property-processing time with the column name.
+   */
+  private static int parseVectorSize(String columnName, String raw) {
+    long vectorSize;
+    try {
+      vectorSize = Long.parseLong(raw);
+    } catch (NumberFormatException e) {
+      throw new IllegalArgumentException(
+          "Vector column '"
+              + columnName
+              + "' size property must be an integer, found: '"
+              + raw
+              + "'",
+          e);
+    }
+    if (vectorSize <= 0 || vectorSize > Integer.MAX_VALUE) {
+      throw new IllegalArgumentException(
+          "Vector column '"
+              + columnName
+              + "' size must be in the range [1, "
+              + Integer.MAX_VALUE
+              + "], found: "
+              + vectorSize);
+    }
+    return (int) vectorSize;
   }
 
   /**
