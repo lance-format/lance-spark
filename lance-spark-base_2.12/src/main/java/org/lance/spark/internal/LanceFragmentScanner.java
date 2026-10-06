@@ -41,16 +41,9 @@ public class LanceFragmentScanner implements AutoCloseable {
   private final Dataset dataset;
   private final LanceScanner scanner;
   private final int fragmentId;
-  private final boolean withFragmentId;
   private final LanceInputPartition inputPartition;
   private final long datasetOpenTimeNs;
   private final long scannerCreateTimeNs;
-
-  /**
-   * Whether the scanner requested _rowaddr for blob reference support. When true, the _rowaddr
-   * column in the Arrow batch was implicitly added and should be stripped from user-visible output.
-   */
-  private final boolean withRowAddrForBlobs;
 
   /** The names of blob columns in the projected schema. */
   private final Set<String> blobColumnNames;
@@ -59,20 +52,16 @@ public class LanceFragmentScanner implements AutoCloseable {
       Dataset dataset,
       LanceScanner scanner,
       int fragmentId,
-      boolean withFragmentId,
       LanceInputPartition inputPartition,
       long datasetOpenTimeNs,
       long scannerCreateTimeNs,
-      boolean withRowAddrForBlobs,
       Set<String> blobColumnNames) {
     this.dataset = dataset;
     this.scanner = scanner;
     this.fragmentId = fragmentId;
-    this.withFragmentId = withFragmentId;
     this.inputPartition = inputPartition;
     this.datasetOpenTimeNs = datasetOpenTimeNs;
     this.scannerCreateTimeNs = scannerCreateTimeNs;
-    this.withRowAddrForBlobs = withRowAddrForBlobs;
     this.blobColumnNames = blobColumnNames;
   }
 
@@ -110,7 +99,6 @@ public class LanceFragmentScanner implements AutoCloseable {
 
       // Request _rowaddr when blob columns are present so we can build blob references.
       boolean userRequestedRowAddr = hasField(scanSchema, LanceConstant.ROW_ADDRESS);
-      boolean withRowAddrForBlobs = hasBlobColumns && !userRequestedRowAddr;
       if (hasBlobColumns || userRequestedRowAddr) {
         scanOptions.withRowAddress(true);
       }
@@ -137,7 +125,6 @@ public class LanceFragmentScanner implements AutoCloseable {
       // Collect scan stats
       scanOptions.collectStats(true);
 
-      boolean withFragmentId = scanSchema.getFieldIndex(LanceConstant.FRAGMENT_ID).nonEmpty();
       long scanCreateStart = System.nanoTime();
       lanceScanner = fragment.newScan(scanOptions.build());
       long scanCreateTimeNs = System.nanoTime() - scanCreateStart;
@@ -145,11 +132,9 @@ public class LanceFragmentScanner implements AutoCloseable {
           dataset,
           lanceScanner,
           fragmentId,
-          withFragmentId,
           inputPartition,
           dsOpenTimeNs,
           scanCreateTimeNs,
-          withRowAddrForBlobs,
           blobColumnNames);
     } catch (Throwable throwable) {
       if (lanceScanner != null) {
@@ -238,10 +223,6 @@ public class LanceFragmentScanner implements AutoCloseable {
     return fragmentId;
   }
 
-  public boolean withFragmentId() {
-    return withFragmentId;
-  }
-
   public LanceInputPartition getInputPartition() {
     return inputPartition;
   }
@@ -252,11 +233,6 @@ public class LanceFragmentScanner implements AutoCloseable {
 
   public long getScannerCreateTimeNs() {
     return scannerCreateTimeNs;
-  }
-
-  /** Whether the scanner implicitly requested _rowaddr for blob reference support. */
-  public boolean isWithRowAddrForBlobs() {
-    return withRowAddrForBlobs;
   }
 
   /** Returns the blob column names in the projected schema. */
