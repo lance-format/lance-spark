@@ -72,23 +72,4 @@ public class FragmentAwareJoinUtilsTest {
     assertFalse(FragmentAwareJoinUtils.isRowAddressOrIdColumn("rowaddr"));
     assertFalse(FragmentAwareJoinUtils.isRowAddressOrIdColumn("col1"));
   }
-
-  @Test
-  public void testLongRange() {
-    FragmentAwareJoinUtils.LongRange range = new FragmentAwareJoinUtils.LongRange(100, 200);
-
-    assertEquals(100, range.getStart());
-    assertEquals(200, range.getEnd());
-
-    assertTrue(range.contains(100));
-    assertTrue(range.contains(150));
-    assertTrue(range.contains(200));
-
-    assertFalse(range.contains(99));
-    assertFalse(range.contains(201));
-    assertFalse(range.contains(0));
-    assertFalse(range.contains(1000));
-
-    assertEquals("[100, 200]", range.toString());
-  }
 }

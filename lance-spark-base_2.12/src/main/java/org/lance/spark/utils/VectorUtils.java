@@ -17,105 +17,10 @@ import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DoubleType;
 import org.apache.spark.sql.types.FloatType;
-import org.apache.spark.sql.types.StructField;
 
 public class VectorUtils {
 
   public static final String ARROW_FIXED_SIZE_LIST_SIZE_KEY = "arrow.fixed-size-list.size";
-
-  /**
-   * Check if a Spark field is a vector field (FixedSizeList) based on its metadata.
-   *
-   * @param field the Spark struct field to check
-   * @return true if the field is a vector field, false otherwise
-   */
-  public static boolean isVectorField(StructField field) {
-    if (field == null) {
-      return false;
-    }
-
-    // Check if it's an array type with numeric elements
-    if (!(field.dataType() instanceof ArrayType)) {
-      return false;
-    }
-
-    ArrayType arrayType = (ArrayType) field.dataType();
-    DataType elementType = arrayType.elementType();
-
-    // Vectors must have float or double elements
-    if (!(elementType instanceof FloatType || elementType instanceof DoubleType)) {
-      return false;
-    }
-
-    // Check for fixed-size-list metadata
-    if (field.metadata() == null) {
-      return false;
-    }
-
-    return field.metadata().contains(ARROW_FIXED_SIZE_LIST_SIZE_KEY);
-  }
-
-  /**
-   * Get the vector dimension from a Spark field's metadata.
-   *
-   * @param field the Spark struct field
-   * @return the vector dimension, or -1 if not a vector field
-   */
-  public static long getVectorDimension(StructField field) {
-    if (!isVectorField(field)) {
-      return -1;
-    }
-
-    try {
-      return field.metadata().getLong(ARROW_FIXED_SIZE_LIST_SIZE_KEY);
-    } catch (Exception e) {
-      return -1;
-    }
-  }
-
-  /**
-   * Check if an Arrow field is a vector field (FixedSizeList).
-   *
-   * @param field the Arrow field to check
-   * @return true if the field is a vector field, false otherwise
-   */
-  public static boolean isVectorArrowField(org.apache.arrow.vector.types.pojo.Field field) {
-    if (field == null) {
-      return false;
-    }
-
-    // Check if the Arrow type is FixedSizeList
-    if (!(field.getType() instanceof org.apache.arrow.vector.types.pojo.ArrowType.FixedSizeList)) {
-      return false;
-    }
-
-    // Optionally check if children have numeric types
-    if (field.getChildren().isEmpty()) {
-      return false;
-    }
-
-    org.apache.arrow.vector.types.pojo.Field childField = field.getChildren().get(0);
-    org.apache.arrow.vector.types.pojo.ArrowType childType = childField.getType();
-
-    // Check if child is a numeric type (Float or Double)
-    return childType instanceof org.apache.arrow.vector.types.pojo.ArrowType.FloatingPoint;
-  }
-
-  /**
-   * Get the vector dimension from an Arrow FixedSizeList field.
-   *
-   * @param field the Arrow field
-   * @return the vector dimension, or -1 if not a vector field
-   */
-  public static int getVectorArrowDimension(org.apache.arrow.vector.types.pojo.Field field) {
-    if (!isVectorArrowField(field)) {
-      return -1;
-    }
-
-    org.apache.arrow.vector.types.pojo.ArrowType.FixedSizeList fixedSizeList =
-        (org.apache.arrow.vector.types.pojo.ArrowType.FixedSizeList) field.getType();
-    return fixedSizeList.getListSize();
-  }
 
   /**
    * Check if a Spark DataType should be treated as a FixedSizeList based on metadata.

@@ -491,20 +491,6 @@ public final class LanceRuntime {
   }
 
   /**
-   * Clears the global allocator. This is primarily for testing purposes.
-   *
-   * <p>WARNING: This closes the global allocator. Do not call while it may be in use.
-   */
-  static void clearGlobalAllocator() {
-    synchronized (LanceRuntime.class) {
-      if (GLOBAL_ALLOCATOR != null) {
-        GLOBAL_ALLOCATOR.close();
-        GLOBAL_ALLOCATOR = null;
-      }
-    }
-  }
-
-  /**
    * Clears all catalog sessions. This is primarily for testing purposes.
    *
    * <p>WARNING: This closes all sessions. Do not call while they may be in use.

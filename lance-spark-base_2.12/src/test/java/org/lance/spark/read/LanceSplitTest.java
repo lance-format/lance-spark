@@ -20,8 +20,6 @@ import org.lance.spark.utils.Utils;
 
 import org.junit.jupiter.api.Test;
 
-import java.util.List;
-
 import static org.junit.jupiter.api.Assertions.*;
 
 public class LanceSplitTest {
@@ -95,13 +93,5 @@ public class LanceSplitTest {
             .getRef()
             .getVersionNumber()
             .get());
-  }
-
-  @SuppressWarnings("deprecation")
-  @Test
-  public void testGenerateLanceSplitsDeprecated() {
-    List<LanceSplit> splits =
-        LanceSplit.generateLanceSplits(TestUtils.TestTable1Config.readOptions);
-    assertFalse(splits.isEmpty());
   }
 }

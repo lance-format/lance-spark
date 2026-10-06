@@ -92,10 +92,6 @@ public class LanceSearchQuery implements Serializable {
     return new Builder(searchType);
   }
 
-  public SearchType getSearchType() {
-    return searchType;
-  }
-
   public List<String> getTableId() {
     return tableId;
   }
