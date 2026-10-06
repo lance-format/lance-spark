@@ -15,7 +15,12 @@ package org.lance.spark.read;
 
 import org.lance.Dataset;
 import org.lance.Fragment;
+import org.lance.FragmentStatistics;
 import org.lance.ManifestSummary;
+import org.lance.index.Index;
+import org.lance.index.IndexCriteria;
+import org.lance.index.IndexDescription;
+import org.lance.index.IndexType;
 import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.memwal.ShardingField;
@@ -29,6 +34,7 @@ import org.lance.spark.search.LanceSearchQuery;
 import org.lance.spark.search.LanceSearchScan;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
 import org.lance.spark.utils.BlobUtils;
+import org.lance.spark.utils.FieldPathUtils;
 import org.lance.spark.utils.FullTextQueryUtils;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.Utils;
@@ -59,6 +65,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -96,6 +103,7 @@ public class LanceScanBuilder
   private Optional<List<ColumnOrdering>> topNSortOrders = Optional.empty();
   private Optional<Aggregation> pushedAggregation = Optional.empty();
   private LanceLocalScan localScan = null;
+  private LanceIndexedCountScan indexedCountScan = null;
 
   // Lazily opened dataset for reuse during scan building
   private Dataset lazyDataset = null;
@@ -167,6 +175,9 @@ public class LanceScanBuilder
       // Return LocalScan if we have a metadata-only aggregation result
       if (localScan != null) {
         return localScan;
+      }
+      if (indexedCountScan != null) {
+        return indexedCountScan;
       }
 
       // Namespace-configured full-text search executes server-side via queryTable (single
@@ -247,15 +258,22 @@ public class LanceScanBuilder
                 .orElse(null);
       }
 
-      // Scale rows and full size by the zonemap fragment-pruning ratio first, then let
+      // Scale rows and full size by the surviving-row ratio first, then let
       // LanceStatistics.estimateProjected apply the column-width ratio on top
       // (when the projected schema is narrower than the full schema).
       long projectedRows = summary.getTotalRows();
       long projectedFullSize = summary.getTotalFilesSize();
-      if (survivingFragmentIds != null && summary.getTotalFragments() > 0) {
-        double ratio = (double) survivingFragmentIds.size() / summary.getTotalFragments();
-        projectedRows = (long) (projectedRows * ratio);
-        projectedFullSize = (long) (projectedFullSize * ratio);
+      if (survivingFragmentIds != null && !scanPlan.getFragmentRowCounts().isEmpty()) {
+        long survivingRows =
+            survivingFragmentIds.stream()
+                .mapToLong(
+                    fragmentId -> scanPlan.getFragmentRowCounts().getOrDefault(fragmentId, 0L))
+                .sum();
+        LanceStatistics postPruning =
+            LanceStatistics.estimatePostPruningByRows(
+                summary.getTotalRows(), summary.getTotalFilesSize(), survivingRows);
+        projectedRows = postPruning.numRows().getAsLong();
+        projectedFullSize = postPruning.sizeInBytes().getAsLong();
       }
       LanceStatistics statistics =
           LanceStatistics.estimateProjected(projectedRows, projectedFullSize, fullSchema, schema);
@@ -272,7 +290,6 @@ public class LanceScanBuilder
       }
 
       LanceSparkReadOptions resolvedReadOptions = readOptions.withRef(scanPlan.getRef());
-
       Optional<String> whereCondition =
           FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);
       return new LanceScan(
@@ -295,6 +312,198 @@ public class LanceScanBuilder
           namespaceProperties);
     } finally {
       closeLazyDataset();
+    }
+  }
+
+  private static ExactLookupColumn exactLookupColumn(
+      LanceSchema lanceSchema, Predicate[] predicates) {
+    if (predicates.length == 0) {
+      return null;
+    }
+
+    Integer fieldId = null;
+    String columnPath = null;
+    boolean hasLookup = false;
+    for (Predicate predicate : predicates) {
+      // IS_NOT_NULL may accompany an exact lookup but is not an exact lookup by itself.
+      if ("=".equals(predicate.name()) || "IN".equals(predicate.name())) {
+        hasLookup = true;
+      } else if (!"IS_NOT_NULL".equals(predicate.name())) {
+        return null;
+      }
+
+      NamedReference[] references = predicate.references();
+      if (references.length != 1) {
+        return null;
+      }
+      String path = FieldPathUtils.canonicalPath(Arrays.asList(references[0].fieldNames()));
+      int predicateFieldId;
+      try {
+        predicateFieldId = FieldPathUtils.resolveLeafField(lanceSchema, path).getId();
+      } catch (IllegalArgumentException e) {
+        return null;
+      }
+      if (fieldId != null && fieldId != predicateFieldId) {
+        return null;
+      }
+      fieldId = predicateFieldId;
+      columnPath = String.join(".", references[0].fieldNames());
+    }
+    return hasLookup ? new ExactLookupColumn(fieldId, columnPath) : null;
+  }
+
+  static Optional<String> compileExactLookupCountFilter(Predicate[] predicates) {
+    List<Predicate> lookupPredicates = new ArrayList<>(predicates.length);
+    for (Predicate predicate : predicates) {
+      if (!"IS_NOT_NULL".equals(predicate.name())) {
+        lookupPredicates.add(predicate);
+      }
+    }
+    return FilterPushDown.compileFiltersToSqlWhereClause(
+        lookupPredicates.toArray(new Predicate[0]));
+  }
+
+  private ExactLookupCount findFullyCoveringExactLookupIndex(Dataset dataset) {
+    if (!readOptions.isUseScalarIndex()
+        || readOptions.getFullTextQuery() != null
+        || pushedPredicates.length == 0) {
+      return ExactLookupCount.miss();
+    }
+
+    ExactLookupColumn column = exactLookupColumn(dataset.getLanceSchema(), pushedPredicates);
+    if (column == null) {
+      return ExactLookupCount.miss();
+    }
+
+    // Avoid exporting unrelated indexes, including vector indexes, as full segment metadata.
+    IndexCriteria criteria =
+        new IndexCriteria.Builder()
+            .forColumn(column.columnPath)
+            .mustSupportExactEquality(true)
+            .build();
+    Map<String, List<Index>> candidateSegments = new HashMap<>();
+    for (IndexDescription description : dataset.describeIndices(criteria)) {
+      List<Index> segments = scalarLookupSegments(description, column.fieldId);
+      if (segments != null) {
+        candidateSegments.put(description.getName(), segments);
+      }
+    }
+    if (candidateSegments.isEmpty()) {
+      return ExactLookupCount.miss();
+    }
+
+    FragmentStatistics fragmentStatistics = dataset.getFragmentStatistics();
+    Set<Integer> nonemptyFragmentIds = nonemptyFragmentIds(fragmentStatistics);
+    if (nonemptyFragmentIds == null) {
+      return ExactLookupCount.empty();
+    }
+
+    String selectedName = null;
+    int selectedSegments = Integer.MAX_VALUE;
+    for (Map.Entry<String, List<Index>> candidate : candidateSegments.entrySet()) {
+      Set<Integer> coveredFragments = new HashSet<>();
+      boolean hasCompleteCoverageMetadata = true;
+      for (Index segment : candidate.getValue()) {
+        if (!segment.fragments().isPresent()) {
+          hasCompleteCoverageMetadata = false;
+          break;
+        }
+        coveredFragments.addAll(segment.fragments().get());
+      }
+      if (!hasCompleteCoverageMetadata || !coveredFragments.containsAll(nonemptyFragmentIds)) {
+        continue;
+      }
+      int segments = candidate.getValue().size();
+      String name = candidate.getKey();
+      if (selectedName == null
+          || segments < selectedSegments
+          || (segments == selectedSegments && name.compareTo(selectedName) < 0)) {
+        selectedName = name;
+        selectedSegments = segments;
+      }
+    }
+    if (selectedName == null) {
+      return ExactLookupCount.miss();
+    }
+    LOG.debug(
+        "Using fully covering index '{}' for filtered COUNT(*)"
+            + " ({} segments, {} fragments; fewest segments, then name)",
+        selectedName,
+        selectedSegments,
+        nonemptyFragmentIds.size());
+    return ExactLookupCount.index(selectedName);
+  }
+
+  private static List<Index> scalarLookupSegments(IndexDescription description, int fieldId) {
+    List<Index> segments = description.getSegments();
+    if (segments == null || segments.isEmpty()) {
+      return null;
+    }
+    for (Index segment : segments) {
+      List<Integer> fields = segment.fields();
+      if ((segment.indexType() != IndexType.BTREE && segment.indexType() != IndexType.BITMAP)
+          || fields == null
+          || fields.size() != 1
+          || !fields.get(0).equals(fieldId)) {
+        return null;
+      }
+    }
+    return segments;
+  }
+
+  // Returns null for no fragments or when every aligned row count is zero. Missing or unaligned
+  // row counts conservatively retain every fragment id.
+  private static Set<Integer> nonemptyFragmentIds(FragmentStatistics fragmentStatistics) {
+    int[] fragmentIds = fragmentStatistics.getIds();
+    if (fragmentIds.length == 0) {
+      return null;
+    }
+    long[] rowCounts = fragmentStatistics.getRowCounts();
+    boolean rowCountsAligned = rowCounts != null && rowCounts.length == fragmentIds.length;
+    Set<Integer> nonempty = new HashSet<>();
+    for (int i = 0; i < fragmentIds.length; i++) {
+      if (!rowCountsAligned || rowCounts[i] > 0) {
+        nonempty.add(fragmentIds[i]);
+      }
+    }
+    return nonempty.isEmpty() ? null : nonempty;
+  }
+
+  private static final class ExactLookupCount {
+    enum Kind {
+      MISS,
+      EMPTY,
+      INDEX
+    }
+
+    final Kind kind;
+    final String indexName;
+
+    private ExactLookupCount(Kind kind, String indexName) {
+      this.kind = kind;
+      this.indexName = indexName;
+    }
+
+    static ExactLookupCount miss() {
+      return new ExactLookupCount(Kind.MISS, null);
+    }
+
+    static ExactLookupCount empty() {
+      return new ExactLookupCount(Kind.EMPTY, null);
+    }
+
+    static ExactLookupCount index(String indexName) {
+      return new ExactLookupCount(Kind.INDEX, indexName);
+    }
+  }
+
+  private static final class ExactLookupColumn {
+    final int fieldId;
+    final String columnPath;
+
+    private ExactLookupColumn(int fieldId, String columnPath) {
+      this.fieldId = fieldId;
+      this.columnPath = columnPath;
     }
   }
 
@@ -465,15 +674,58 @@ public class LanceScanBuilder
       // carried in the read options rather than as a pushed predicate, because the FTS rule moves
       // the predicate out of the Filter and into the relation options, so it must be checked
       // separately or COUNT(*) would answer from the manifest and ignore the FTS query.
+      Dataset dataset = getOrOpenDataset();
       if (pushedPredicates.length == 0 && readOptions.getFullTextQuery() == null) {
-        Optional<Long> metadataCount = getCountFromMetadata(getOrOpenDataset());
+        Optional<Long> metadataCount = getCountFromMetadata(dataset);
         if (metadataCount.isPresent()) {
-          // Create LocalScan with pre-computed count result
-          StructType countSchema = new StructType().add("count", DataTypes.LongType);
-          InternalRow[] rows = new InternalRow[1];
-          rows[0] = new GenericInternalRow(new Object[] {metadataCount.get()});
-          this.localScan = new LanceLocalScan(countSchema, rows, readOptions.getDatasetUri());
+          setLocalCount(metadataCount.get());
           return true;
+        }
+      }
+
+      // total_rows omits fragments with unknown deletion counts, so only total_fragments can prove
+      // that the dataset has no fragments.
+      if (hasNoFragments(dataset)) {
+        setLocalCount(0L);
+        return true;
+      }
+
+      ExactLookupCount lookup;
+      try {
+        lookup = findFullyCoveringExactLookupIndex(dataset);
+      } catch (RuntimeException e) {
+        LOG.warn(
+            "Failed to inspect scalar indexes for filtered COUNT(*);"
+                + " falling back to a distributed scan: {}",
+            e.getMessage());
+        lookup = ExactLookupCount.miss();
+      }
+      if (lookup.kind == ExactLookupCount.Kind.EMPTY) {
+        setLocalCount(0L);
+        return true;
+      }
+      if (lookup.kind == ExactLookupCount.Kind.INDEX) {
+        Optional<String> filter = compileExactLookupCountFilter(pushedPredicates);
+        if (filter.isPresent()) {
+          try {
+            LanceSparkReadOptions pinned =
+                readOptions.withRef(Utils.pinOpenedRef(dataset, readOptions.getRef()));
+            this.indexedCountScan =
+                new LanceIndexedCountScan(
+                    pinned,
+                    lookup.indexName,
+                    filter.get(),
+                    initialStorageOptions,
+                    namespaceImpl,
+                    namespaceProperties);
+            return true;
+          } catch (RuntimeException e) {
+            LOG.warn(
+                "Failed to plan an indexed COUNT(*) with scalar index '{}';"
+                    + " falling back to a distributed scan: {}",
+                lookup.indexName,
+                e.getMessage());
+          }
         }
       }
       // Fall back to scan-based count (with filters, a full-text query, or metadata unavailable)
@@ -484,12 +736,27 @@ public class LanceScanBuilder
     return false;
   }
 
+  private void setLocalCount(long count) {
+    StructType countSchema = new StructType().add("count", DataTypes.LongType);
+    InternalRow[] rows = new InternalRow[1];
+    rows[0] = new GenericInternalRow(new Object[] {count});
+    this.localScan = new LanceLocalScan(countSchema, rows, readOptions.getDatasetUri());
+  }
+
   private static Optional<Long> getCountFromMetadata(Dataset dataset) {
     try {
       ManifestSummary summary = dataset.getVersion().getManifestSummary();
       return Optional.of(summary.getTotalRows());
     } catch (Exception e) {
       return Optional.empty();
+    }
+  }
+
+  private static boolean hasNoFragments(Dataset dataset) {
+    try {
+      return dataset.getVersion().getManifestSummary().getTotalFragments() == 0L;
+    } catch (Exception e) {
+      return false;
     }
   }
 

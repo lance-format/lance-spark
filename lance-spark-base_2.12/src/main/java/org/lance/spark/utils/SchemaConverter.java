@@ -215,22 +215,24 @@ public class SchemaConverter {
     StructField[] newFields = new StructField[sparkSchema.fields().length];
     for (int i = 0; i < sparkSchema.fields().length; i++) {
       StructField field = sparkSchema.fields()[i];
-      String blobEncodingProperty = field.name() + ".lance.encoding";
+      String blobEncodingProperty = field.name() + BlobUtils.BLOB_ENCODING_PROPERTY_SUFFIX;
 
       if (properties.containsKey(blobEncodingProperty)) {
         // This field should be a blob column
         String encodingValue = properties.get(blobEncodingProperty);
-        if ("blob".equalsIgnoreCase(encodingValue)) {
+        if (BlobUtils.BLOB_ENCODING_PROPERTY_VALUE.equalsIgnoreCase(encodingValue)) {
           if (field.dataType() instanceof BinaryType) {
             // Add metadata for blob encoding
             boolean useV2 = BlobUtils.fileFormatSupportsBlobV2(fileFormatVersion);
             String metaKey = useV2 ? ARROW_EXTENSION_NAME_KEY : LANCE_ENCODING_BLOB_KEY;
             String metaVal = useV2 ? ARROW_EXTENSION_BLOB_V2 : LANCE_ENCODING_BLOB_VALUE;
-            Metadata newMetadata =
-                new MetadataBuilder()
-                    .withMetadata(field.metadata())
-                    .putString(metaKey, metaVal)
-                    .build();
+            // A field can arrive already tagged for the other encoding when its schema was read
+            // from an existing blob table. Keeping both markers would describe a column Lance
+            // cannot store, so the stale one is dropped.
+            String staleKey = useV2 ? LANCE_ENCODING_BLOB_KEY : ARROW_EXTENSION_NAME_KEY;
+            MetadataBuilder metadataBuilder = new MetadataBuilder().withMetadata(field.metadata());
+            metadataBuilder.remove(staleKey);
+            Metadata newMetadata = metadataBuilder.putString(metaKey, metaVal).build();
             newFields[i] =
                 new StructField(field.name(), field.dataType(), field.nullable(), newMetadata);
           } else {

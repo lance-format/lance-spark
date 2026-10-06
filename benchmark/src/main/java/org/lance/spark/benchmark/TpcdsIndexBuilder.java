@@ -78,6 +78,7 @@ public class TpcdsIndexBuilder {
           "org.lance.spark.LanceNamespaceSparkCatalog");
     }
 
+    int failed = 0;
     try {
       List<String> statements = loadIndexStatements(lanceRoot);
 
@@ -89,7 +90,6 @@ public class TpcdsIndexBuilder {
       System.out.flush();
 
       int succeeded = 0;
-      int failed = 0;
 
       for (int i = 0; i < statements.size(); i++) {
         String sql = statements.get(i);
@@ -113,11 +113,19 @@ public class TpcdsIndexBuilder {
       }
 
       System.out.println();
-      System.out.println("=== Index creation complete ===");
+      System.out.println(failed == 0
+          ? "=== Index creation complete ==="
+          : "=== Index creation finished with failures ===");
       System.out.println("Succeeded: " + succeeded + ", Failed: " + failed);
       System.out.flush();
     } finally {
       spark.stop();
+    }
+
+    // Every statement is attempted so the operator sees which ones failed, but the job must not
+    // report success: benchmarking unindexed tables silently measures the wrong thing.
+    if (failed > 0) {
+      System.exit(1);
     }
   }
 

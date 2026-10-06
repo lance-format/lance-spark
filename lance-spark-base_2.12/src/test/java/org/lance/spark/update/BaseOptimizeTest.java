@@ -322,4 +322,54 @@ public abstract class BaseOptimizeTest {
     }
     return messages.toString();
   }
+
+  @Test
+  public void testMaterializeDeletionsThresholdAcceptsAnyNumericLiteral() {
+    prepareDataset();
+
+    for (String threshold : new String[] {"1", "0.5", "0.5d", "0.5f"}) {
+      Dataset<Row> result =
+          spark.sql(
+              String.format(
+                  "optimize %s with (materialize_deletions=true, "
+                      + "materialize_deletions_threshold=%s)",
+                  fullTable, threshold));
+      Assertions.assertEquals(
+          1,
+          result.collectAsList().size(),
+          "threshold literal " + threshold + " should be accepted");
+    }
+  }
+
+  @Test
+  public void testNonNumericOptionNamesTheOption() {
+    prepareDataset();
+
+    Exception exception =
+        Assertions.assertThrows(
+            Exception.class,
+            () ->
+                spark.sql(
+                    String.format(
+                        "optimize %s with (materialize_deletions_threshold='half')", fullTable)));
+    Assertions.assertTrue(
+        exception.getMessage().contains("'materialize_deletions_threshold'"),
+        "error should name the option, got: " + exception.getMessage());
+  }
+
+  @Test
+  public void testFractionalLongOptionIsRejectedNotTruncated() {
+    prepareDataset();
+
+    // num_threads is documented as Long. Accepting a fractional literal here would run the
+    // compaction with a silently truncated value, so it has to be rejected outright.
+    Exception exception =
+        Assertions.assertThrows(
+            Exception.class,
+            () -> spark.sql(String.format("optimize %s with (num_threads=2.5)", fullTable)));
+    Assertions.assertTrue(
+        exception.getMessage().contains("'num_threads'")
+            && exception.getMessage().contains("integer literal"),
+        "error should name the option and ask for an integer, got: " + exception.getMessage());
+  }
 }

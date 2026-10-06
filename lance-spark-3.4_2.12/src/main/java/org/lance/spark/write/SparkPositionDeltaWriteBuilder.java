@@ -56,6 +56,11 @@ public class SparkPositionDeltaWriteBuilder implements DeltaWriteBuilder {
     this.tableId = tableId;
   }
 
+  /** Returns the write options used by this builder. Visible for testing. */
+  LanceSparkWriteOptions getWriteOptions() {
+    return writeOptions;
+  }
+
   public DeltaWrite build() {
     return new SparkPositionDeltaWrite(
         sparkSchema,

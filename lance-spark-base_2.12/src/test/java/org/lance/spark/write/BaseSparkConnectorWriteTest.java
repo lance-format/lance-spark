@@ -59,6 +59,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 public abstract class BaseSparkConnectorWriteTest {
+  /** Version Lance's STABLE release selector resolves to (lance-format/lance#8657). */
+  private static final String STABLE_FILE_FORMAT_VERSION = "2.2";
+
   private static SparkSession spark;
   private static Dataset<Row> testData;
   @TempDir static Path dbPath;
@@ -554,11 +557,8 @@ public abstract class BaseSparkConnectorWriteTest {
 
     try (org.lance.Dataset ds =
         org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
-      // STABLE maps to 2.0 or 2.1 depending on lance version
-      String version = ds.getLanceFileFormatVersion();
-      assertTrue(
-          version.equals("2.0") || version.equals("2.1"),
-          "Expected STABLE version (2.0 or 2.1), got: " + version);
+      // STABLE is a release selector; lance resolves it at write time
+      assertEquals(STABLE_FILE_FORMAT_VERSION, ds.getLanceFileFormatVersion());
     }
   }
 
@@ -678,10 +678,7 @@ public abstract class BaseSparkConnectorWriteTest {
 
     try (org.lance.Dataset ds =
         org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
-      String version = ds.getLanceFileFormatVersion();
-      assertTrue(
-          version.equals("2.0") || version.equals("2.1"),
-          "Expected STABLE version (2.0 or 2.1), got: " + version);
+      assertEquals(STABLE_FILE_FORMAT_VERSION, ds.getLanceFileFormatVersion());
     }
   }
 

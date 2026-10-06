@@ -30,6 +30,7 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 
 public class LancePositionDeltaOperation implements RowLevelOperation, SupportsDelta {
@@ -131,19 +132,30 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
   @Override
   public DeltaWriteBuilder newWriteBuilder(LogicalWriteInfo logicalWriteInfo) {
     rejectBlobV2Descriptors(logicalWriteInfo.schema());
+    // Mirror LanceDataset#newWriteBuilder: the option map has to go through fromOptions so that
+    // catalog-level and per-write settings (max_row_per_file, use_large_var_types, batch_size, ...)
+    // reach their typed Builder fields. Passing it to storageOptions alone left every typed field
+    // at its default, so options that took effect on INSERT were dropped on UPDATE/DELETE/MERGE.
+    Map<String, String> mergedOptions = new HashMap<>(readOptions.getStorageOptions());
+    mergedOptions.putAll(logicalWriteInfo.options().asCaseSensitiveMap());
+    // Internal-only option (see LanceBlobSourceContextRule); never forward it as a storage option.
+    mergedOptions.remove(LanceConstant.BLOB_SOURCE_CONTEXTS_KEY);
     LanceSparkWriteOptions.Builder writeOptionsBuilder =
         LanceSparkWriteOptions.builder()
             .datasetUri(readOptions.getDatasetUri())
-            .storageOptions(readOptions.getStorageOptions())
             .namespace(readOptions.getNamespace())
             .tableId(readOptions.getTableId())
             .catalogName(readOptions.getCatalogName())
             .indexCacheBackend(readOptions.getIndexCacheBackend())
-            .metadataCacheBackend(readOptions.getMetadataCacheBackend());
-    if (fileFormatVersion != null) {
+            .metadataCacheBackend(readOptions.getMetadataCacheBackend())
+            .fromOptions(mergedOptions);
+    // Use the table's file format version unless the options set one explicitly.
+    if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)
+        && fileFormatVersion != null) {
       writeOptionsBuilder.fileFormatVersion(fileFormatVersion);
     }
-    if (tableProperties != null) {
+    if (tableProperties != null
+        && !mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS)) {
       String stableRowIds =
           tableProperties.get(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS);
       if (stableRowIds != null) {

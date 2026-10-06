@@ -25,6 +25,7 @@ statement
     | ALTER TABLE multipartIdentifier DROP INDEX indexName=identifier                           #dropIndex
     | ALTER TABLE multipartIdentifier OPTIMIZE INDEX indexName=identifier
         (WITH '(' (namedArgument (',' namedArgument)*)? ')')?                                   #optimizeIndex
+    | ALTER TABLE multipartIdentifier REFRESH INDEX indexName=identifier (WITH '(' (namedArgument (',' namedArgument)*)? ')')? #refreshIndex
     | ALTER TABLE multipartIdentifier CREATE BRANCH (IF NOT EXISTS)? branchName=identifier
         (AS OF VERSION refMainVersion=versionNumber)?                                           #createBranchRefMain
     | ALTER TABLE multipartIdentifier CREATE BRANCH (IF NOT EXISTS)? branchName=identifier
@@ -115,6 +116,7 @@ NOT: 'NOT';
 OF: 'OF';
 OPTIMIZE: 'OPTIMIZE';
 PRIMARY: 'PRIMARY';
+REFRESH: 'REFRESH';
 SET: 'SET';
 SHOW: 'SHOW';
 TABLE: 'TABLE';

@@ -18,6 +18,8 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
@@ -631,13 +633,40 @@ public class SchemaConverterTest {
   }
 
   @Test
-  public void testBlobEncodingAtNamedFileFormatVersionResolvesToBlobV1() {
-    assertBlobV1Field(blobSchemaWithVersion("stable").apply("data"));
+  public void testBlobEncodingAtStableFileFormatVersionResolvesToBlobV2() {
+    assertBlobV2Field(blobSchemaWithVersion("stable").apply("data"));
+  }
+
+  @Test
+  public void testBlobEncodingAtLegacyFileFormatVersionResolvesToBlobV1() {
+    assertBlobV1Field(blobSchemaWithVersion("legacy").apply("data"));
   }
 
   @Test
   public void testBlobEncodingAtMalformedFileFormatVersionResolvesToBlobV1() {
     assertBlobV1Field(blobSchemaWithVersion("2.x").apply("data"));
+  }
+
+  @Test
+  public void testBlobEncodingDropsStaleV1MarkerWhenResolvingToBlobV2() {
+    // Both markers on one field would describe a column Lance cannot store.
+    Metadata v1 =
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build();
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.IntegerType, false),
+              new StructField("data", DataTypes.BinaryType, true, v1),
+            });
+    Map<String, String> properties = ImmutableMap.of("data.lance.encoding", "blob");
+
+    StructField field =
+        SchemaConverter.processSchemaWithProperties(schema, properties, "2.2").apply("data");
+
+    assertTrue(BlobUtils.isBlobV2SparkField(field));
+    assertFalse(field.metadata().contains(BlobUtils.LANCE_ENCODING_BLOB_KEY));
   }
 
   private static StructType blobSchemaWithVersion(String fileFormatVersion) {

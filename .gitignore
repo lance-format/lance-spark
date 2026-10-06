@@ -80,6 +80,7 @@ docker/.spark-home/
 
 # Pytest
 integration-tests/.data/
+integration-tests/.data_cdf/
 integration-tests/.rest-data/
 integration-tests/.jars/
 integration-tests/.cache/

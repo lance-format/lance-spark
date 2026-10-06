@@ -1,5 +1,6 @@
-pytest
-pytest-timeout
-packaging
-azure-storage-blob
-boto3
+# Pinned for reproducible integration-test CI; bump when intentionally upgrading.
+pytest==9.1.1
+pytest-timeout==2.4.0
+packaging==26.3
+azure-storage-blob==12.30.3
+boto3==1.43.100

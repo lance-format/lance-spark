@@ -36,23 +36,41 @@ case class OptimizeExec(
     val argsMap = args.map(t => (t.name, t)).toMap
 
     argsMap.get("target_rows_per_fragment").map(t =>
-      builder.withTargetRowsPerFragment(t.value.asInstanceOf[Long]))
-    argsMap.get("max_rows_per_group").map(t =>
-      builder.withMaxRowsPerGroup(t.value.asInstanceOf[Long]))
-    argsMap.get("max_bytes_per_file").map(t =>
-      builder.withMaxBytesPerFile(t.value.asInstanceOf[Long]))
+      builder.withTargetRowsPerFragment(longArg(t)))
+    argsMap.get("max_rows_per_group").map(t => builder.withMaxRowsPerGroup(longArg(t)))
+    argsMap.get("max_bytes_per_file").map(t => builder.withMaxBytesPerFile(longArg(t)))
     argsMap.get("materialize_deletions").map(t =>
-      builder.withMaterializeDeletions(t.value.asInstanceOf[Boolean]))
+      builder.withMaterializeDeletions(booleanArg(t)))
     argsMap.get("materialize_deletions_threshold").map(t =>
-      builder.withMaterializeDeletionsThreshold(t.value.asInstanceOf[Float]))
-    argsMap.get("num_threads").map(t => builder.withNumThreads(t.value.asInstanceOf[Long]))
-    argsMap.get("batch_size").map(t => builder.withBatchSize(t.value.asInstanceOf[Long]))
-    argsMap.get("defer_index_remap").map(t =>
-      builder.withDeferIndexRemap(t.value.asInstanceOf[Boolean]))
-    argsMap.get("max_source_fragments").map(t =>
-      builder.withMaxSourceFragments(t.value.asInstanceOf[Long]))
+      builder.withMaterializeDeletionsThreshold(floatArg(t)))
+    argsMap.get("num_threads").map(t => builder.withNumThreads(longArg(t)))
+    argsMap.get("batch_size").map(t => builder.withBatchSize(longArg(t)))
+    argsMap.get("defer_index_remap").map(t => builder.withDeferIndexRemap(booleanArg(t)))
+    argsMap.get("max_source_fragments").map(t => builder.withMaxSourceFragments(longArg(t)))
 
     builder.build()
+  }
+
+  private def floatArg(arg: LanceNamedArgument): Float = arg.value match {
+    case n: java.lang.Number => n.floatValue()
+    case other =>
+      throw new IllegalArgumentException(
+        s"'${arg.name}' option must be a numeric literal, got: $other")
+  }
+
+  // Long-only: reject a fractional literal rather than truncating it (longValue would make 2.5 a 2).
+  private def longArg(arg: LanceNamedArgument): Long = arg.value match {
+    case l: java.lang.Long => l.longValue()
+    case other =>
+      throw new IllegalArgumentException(
+        s"'${arg.name}' option must be an integer literal, got: $other")
+  }
+
+  private def booleanArg(arg: LanceNamedArgument): Boolean = arg.value match {
+    case b: java.lang.Boolean => b.booleanValue()
+    case other =>
+      throw new IllegalArgumentException(
+        s"'${arg.name}' option must be a boolean literal (true/false), got: $other")
   }
 
   override protected def run(): Seq[InternalRow] = {

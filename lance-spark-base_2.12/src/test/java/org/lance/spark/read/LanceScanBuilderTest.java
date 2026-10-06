@@ -18,6 +18,7 @@ import org.lance.spark.LanceRef;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 import org.lance.spark.utils.BlobUtils;
+import org.lance.spark.utils.Optional;
 
 import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.FieldReference;
@@ -282,6 +283,19 @@ public class LanceScanBuilderTest {
     Aggregation countStar =
         new Aggregation(new AggregateFunc[] {new CountStar()}, new Expression[] {});
     assertTrue(builder.pushAggregation(countStar));
+  }
+
+  @Test
+  public void testExactLookupCountFilterDropsRedundantNotNull() {
+    Predicate[] equality =
+        new Predicate[] {TestPredicates.isNotNull("category"), TestPredicates.eq("category", 5)};
+    Optional<String> equalityFilter = LanceScanBuilder.compileExactLookupCountFilter(equality);
+    assertEquals(Optional.of("(category == 5)"), equalityFilter);
+
+    Predicate[] inList =
+        new Predicate[] {TestPredicates.isNotNull("category"), TestPredicates.in("category", 1, 2)};
+    Optional<String> inFilter = LanceScanBuilder.compileExactLookupCountFilter(inList);
+    assertEquals(Optional.of("(category IN (1,2))"), inFilter);
   }
 
   @Test

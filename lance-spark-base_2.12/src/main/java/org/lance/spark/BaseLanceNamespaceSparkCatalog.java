@@ -26,7 +26,6 @@ import org.lance.namespace.errors.TableNotFoundException;
 import org.lance.namespace.model.DeclareTableRequest;
 import org.lance.namespace.model.DeclareTableResponse;
 import org.lance.namespace.model.DeregisterTableRequest;
-import org.lance.namespace.model.DescribeNamespaceRequest;
 import org.lance.namespace.model.DescribeTableRequest;
 import org.lance.namespace.model.DescribeTableResponse;
 import org.lance.namespace.model.DropNamespaceRequest;
@@ -428,26 +427,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
       if (e.getErrorCode() == ErrorCode.NAMESPACE_NOT_FOUND) {
         return false;
       }
-      if (e.getErrorCode() == ErrorCode.UNSUPPORTED) {
-        return namespaceExistsViaDescribe(request.getId());
-      }
-      throw e;
-    }
-  }
-
-  private boolean namespaceExistsViaDescribe(List<String> namespaceId) {
-    DescribeNamespaceRequest request = new DescribeNamespaceRequest();
-    request.setId(namespaceId);
-    try {
-      namespace.describeNamespace(request);
-      return true;
-    } catch (LanceNamespaceException e) {
-      if (e.getErrorCode() == ErrorCode.NAMESPACE_NOT_FOUND) {
-        return false;
-      }
-      if (e.getErrorCode() == ErrorCode.TABLE_NOT_FOUND) {
-        return false;
-      }
       throw e;
     }
   }
@@ -579,8 +558,12 @@ public abstract class BaseLanceNamespaceSparkCatalog
     try {
       this.namespace.tableExists(request);
       return true;
-    } catch (Exception e) {
-      return false;
+    } catch (LanceNamespaceException e) {
+      if (e.getErrorCode() == ErrorCode.TABLE_NOT_FOUND
+          || e.getErrorCode() == ErrorCode.NAMESPACE_NOT_FOUND) {
+        return false;
+      }
+      throw e;
     }
   }
 
@@ -770,14 +753,25 @@ public abstract class BaseLanceNamespaceSparkCatalog
       ShardingSpec shardingSpec) {
     Identifier actualIdent = transformIdentifierForApi(ident);
     List<String> tableIdList = buildTableId(actualIdent);
-    CreateTableSpec spec = resolveCreateSpec(schema, properties);
-    StructType processedSchema = spec.schema();
     Map<String, String> tableProperties = copyUserTableProperties(properties);
 
-    if (lanceDatasetExists(userLocation)) {
+    Optional<ExistingDataset> existing = readExistingDataset(userLocation);
+    if (existing.isPresent()) {
+      // The dataset is registered as it is on storage. Using the schema and version resolved from
+      // the CREATE statement would describe it wrongly -- a v1 blob dataset would be presented as
+      // blob v2, and a null version would let a later write pick Lance's default instead of the
+      // version the dataset actually uses.
       return registerExistingTable(
-          userLocation, tableIdList, processedSchema, tableProperties, null, shardingSpec);
+          userLocation,
+          tableIdList,
+          existing.get().schema,
+          tableProperties,
+          existing.get().fileFormatVersion,
+          shardingSpec);
     }
+
+    CreateTableSpec spec = resolveCreateSpec(schema, properties);
+    StructType processedSchema = spec.schema();
 
     // Create a new dataset at the requested location.
     // We use the server-returned location (not userLocation) for both reads and writes so that
@@ -899,16 +893,37 @@ public abstract class BaseLanceNamespaceSparkCatalog
   }
 
   /** Probe whether a Lance dataset already exists at the given location. */
-  private boolean lanceDatasetExists(String location) {
+  /**
+   * Reads the schema and file format version of a Lance dataset that already exists at {@code
+   * location}, or empty when there is none.
+   *
+   * <p>Registering an existing dataset must describe it as it is: its own schema and version, not
+   * the ones a {@code CREATE TABLE} statement asked for. This mirrors why {@link
+   * #registerExistingTable} does not persist table properties either.
+   */
+  private Optional<ExistingDataset> readExistingDataset(String location) {
     try {
       LanceSparkReadOptions probeOptions =
           createReadOptions(
               location, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
       try (Dataset ds = Utils.openDatasetBuilder(probeOptions).build()) {
-        return true;
+        return Optional.of(
+            new ExistingDataset(
+                LanceArrowUtils.fromArrowSchema(ds.getSchema()), ds.getLanceFileFormatVersion()));
       }
     } catch (IllegalArgumentException e) {
-      return false;
+      return Optional.empty();
+    }
+  }
+
+  /** Schema and file format version read off a dataset that already exists on storage. */
+  private static final class ExistingDataset {
+    private final StructType schema;
+    private final String fileFormatVersion;
+
+    ExistingDataset(StructType schema, String fileFormatVersion) {
+      this.schema = schema;
+      this.fileFormatVersion = fileFormatVersion;
     }
   }
 

@@ -13,6 +13,7 @@
  */
 package org.lance.spark.arrow;
 
+import org.lance.spark.utils.BlobReference;
 import org.lance.spark.utils.SchemaConverter;
 
 import com.google.common.collect.ImmutableMap;
@@ -188,6 +189,27 @@ public class BlobV2StructWriterTest {
         }
       }
     }
+  }
+
+  @Test
+  public void testEstimatedBufferedBytesReportsResolvedBlobSizes() {
+    StructType sparkSchema = blobV2Schema();
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", true);
+    try (RootAllocator allocator = new RootAllocator(Long.MAX_VALUE);
+        VectorSchemaRoot root = VectorSchemaRoot.create(arrowSchema, allocator)) {
+      LanceArrowWriter writer = LanceArrowWriter.create(root, sparkSchema);
+
+      // Shuffled blob references are ~200 bytes each but carry the size they resolve to. The write
+      // buffer budgets the batch against this sum, so it has to reach the root writer.
+      writer.write(new GenericInternalRow(new Object[] {0, blobReference(4096)}));
+      writer.write(new GenericInternalRow(new Object[] {1, blobReference(1024)}));
+
+      assertEquals(4096L + 1024L, writer.estimatedBufferedBytes());
+    }
+  }
+
+  private static byte[] blobReference(long size) {
+    return new BlobReference("/tmp/blob-v2-source.lance", "content", 1L, size).serialize();
   }
 
   private static StructType blobV2Schema() {

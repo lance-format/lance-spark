@@ -94,8 +94,9 @@ class LanceSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserInt
     delegate.parseQuery(sqlText)
   }
 
-  override def parseRoutineParam(sqlText: String): StructType =
-    throw new UnsupportedOperationException()
+  override def parseRoutineParam(sqlText: String): StructType = {
+    delegate.parseRoutineParam(sqlText)
+  }
 
   protected def parse(command: String): LogicalPlan = {
     val lexer =

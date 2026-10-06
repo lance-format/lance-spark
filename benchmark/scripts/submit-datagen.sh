@@ -211,7 +211,7 @@ esac
 # Build benchmark jar if needed
 # ---------------------------------------------------------------------------
 if [[ -z "${BENCHMARK_JAR}" ]]; then
-    BENCHMARK_JAR="${BENCHMARK_DIR}/target/lance-spark-benchmark-0.3.0-beta.1.jar"
+    BENCHMARK_JAR="${BENCHMARK_DIR}/target/lance-spark-benchmark.jar"
 fi
 
 if [[ ! -f "${BENCHMARK_JAR}" ]]; then

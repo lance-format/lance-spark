@@ -63,8 +63,11 @@ jobs:
           github.event_name == 'release' ||
           inputs.mode == 'release'
         run: |
-          echo "use-agent" >> ~/.gnupg/gpg.conf
-          echo "pinentry-mode loopback" >> ~/.gnupg/gpg.conf
+          # setup-java 6 imports the signing key into an isolated GNUPGHOME.
+          gpg_home="${GNUPGHOME:-$HOME/.gnupg}"
+          mkdir -p "$gpg_home"
+          chmod 700 "$gpg_home"
+          printf '%s\n' "use-agent" "pinentry-mode loopback" >> "$gpg_home/gpg.conf"
           export GPG_TTY=$(tty)
           mvn --batch-mode -DskipTests -DpushChanges=false -Dgpg.passphrase=${{ secrets.GPG_PASSPHRASE }} deploy -P deploy-to-ossrh
         env:

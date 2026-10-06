@@ -523,6 +523,11 @@ private[arrow] class BlobV2StructWriter(
 
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = ()
 
+  // The data child buffers unresolved blob references, which resolve to far larger bytes on finish.
+  // Without delegating, the per-batch byte budget in the write buffer sees 0 for a blob v2 column
+  // and the batch grows until resolution materializes everything at once.
+  override def estimatedBufferedBytes: Long = dataWriter.estimatedBufferedBytes
+
   override def finish(): Unit = {
     super.finish()
     dataWriter.finish()

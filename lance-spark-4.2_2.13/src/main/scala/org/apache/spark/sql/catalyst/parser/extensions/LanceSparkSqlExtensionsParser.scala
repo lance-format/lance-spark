@@ -18,7 +18,7 @@ import org.antlr.v4.runtime.atn.PredictionMode
 import org.antlr.v4.runtime.misc.{Interval, ParseCancellationException}
 import org.apache.spark.sql.catalyst.{FunctionIdentifier, TableIdentifier}
 import org.apache.spark.sql.catalyst.expressions.Expression
-import org.apache.spark.sql.catalyst.parser.{ParseException, ParserInterface}
+import org.apache.spark.sql.catalyst.parser.{ParameterContext, ParseException, ParserInterface}
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.types.{DataType, StructType}
 
@@ -78,13 +78,28 @@ class LanceSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserInt
    * Parse a string to a LogicalPlan.
    */
   override def parsePlan(sqlText: String): LogicalPlan = {
-    if (sqlText.trim.toUpperCase.startsWith("CREATE INDEX")) {
-      throw new UnsupportedOperationException(
-        "Lance does not support standard CREATE INDEX syntax. " +
-          "Use: ALTER TABLE <table> CREATE INDEX <name> USING <method> (<columns>)")
-    }
+    rejectStandardCreateIndex(sqlText)
     try {
       delegate.parsePlan(sqlText)
+    } catch {
+      case _: ParseException => parse(sqlText)
+    }
+  }
+
+  /**
+   * Parse a string to a LogicalPlan, binding the parameters of a parameterized query.
+   *
+   * The `ParserInterface` default implementation forwards to `parsePlan` and drops the parameters,
+   * so `sql(text, args)` loses them unless this is delegated explicitly. Lance's own extension
+   * grammar has no parameter markers, so the fallback parses the statement without them, exactly
+   * as `parsePlan` does.
+   */
+  override def parsePlanWithParameters(
+      sqlText: String,
+      parameterContext: ParameterContext): LogicalPlan = {
+    rejectStandardCreateIndex(sqlText)
+    try {
+      delegate.parsePlanWithParameters(sqlText, parameterContext)
     } catch {
       case _: ParseException => parse(sqlText)
     }
@@ -94,8 +109,17 @@ class LanceSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserInt
     delegate.parseQuery(sqlText)
   }
 
-  override def parseRoutineParam(sqlText: String): StructType =
-    throw new UnsupportedOperationException()
+  override def parseRoutineParam(sqlText: String): StructType = {
+    delegate.parseRoutineParam(sqlText)
+  }
+
+  private def rejectStandardCreateIndex(sqlText: String): Unit = {
+    if (sqlText.trim.toUpperCase.startsWith("CREATE INDEX")) {
+      throw new UnsupportedOperationException(
+        "Lance does not support standard CREATE INDEX syntax. " +
+          "Use: ALTER TABLE <table> CREATE INDEX <name> USING <method> (<columns>)")
+    }
+  }
 
   protected def parse(command: String): LogicalPlan = {
     val lexer =

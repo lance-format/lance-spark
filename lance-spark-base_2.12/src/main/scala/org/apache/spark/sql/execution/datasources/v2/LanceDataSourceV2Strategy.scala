@@ -60,6 +60,13 @@ case class LanceDataSourceV2Strategy(session: SparkSession) extends SparkStrateg
         indexName.toLowerCase(Locale.ROOT),
         args) :: Nil
 
+    case RefreshIndex(ResolvedIdentifier(catalog, ident), indexName, args) =>
+      RefreshIndexExec(
+        asTableCatalog(catalog),
+        ident,
+        indexName.toLowerCase(Locale.ROOT),
+        args) :: Nil
+
     case LanceCreateBranch(ResolvedIdentifier(catalog, ident), branchName, ref, ifNotExists) =>
       LanceCreateBranchExec(asTableCatalog(catalog), ident, branchName, ref, ifNotExists) :: Nil
 

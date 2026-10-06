@@ -43,6 +43,9 @@ import static org.junit.jupiter.api.Assertions.*;
  * address) are serialized through Spark's shuffle instead of the actual blob bytes. On the write
  * side, the blob references are resolved by opening the source dataset and fetching the actual blob
  * content via {@code Dataset.takeBlobs()}.
+ *
+ * <p>These tables pin {@code file_format_version = '2.1'} to keep their blob columns on the legacy
+ * (v1) encoding.
  */
 public abstract class BaseBlobJoinTest {
   private SparkSession spark;
@@ -91,7 +94,8 @@ public abstract class BaseBlobJoinTest {
         "CREATE TABLE IF NOT EXISTS "
             + fqSource
             + " (id INT NOT NULL, data BINARY) USING lance "
-            + "TBLPROPERTIES ('data.lance.encoding' = 'blob')");
+            + "TBLPROPERTIES ('data.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.1')");
 
     // Insert known data into the source
     byte[] blobContent1 = "hello-blob-world-12345".getBytes(StandardCharsets.UTF_8);
@@ -119,7 +123,8 @@ public abstract class BaseBlobJoinTest {
         "CREATE TABLE IF NOT EXISTS "
             + fqTarget
             + " (id INT NOT NULL, data BINARY) USING lance "
-            + "TBLPROPERTIES ('data.lance.encoding' = 'blob')");
+            + "TBLPROPERTIES ('data.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.1')");
 
     // INSERT INTO target SELECT FROM source
     spark.sql("INSERT INTO " + fqTarget + " SELECT id, data FROM " + fqSource);
@@ -183,14 +188,16 @@ public abstract class BaseBlobJoinTest {
         "CREATE TABLE IF NOT EXISTS "
             + fqA
             + " (id INT NOT NULL, blob_a BINARY) USING lance "
-            + "TBLPROPERTIES ('blob_a.lance.encoding' = 'blob')");
+            + "TBLPROPERTIES ('blob_a.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.1')");
 
     // Create table B with blob column
     spark.sql(
         "CREATE TABLE IF NOT EXISTS "
             + fqB
             + " (id INT NOT NULL, blob_b BINARY) USING lance "
-            + "TBLPROPERTIES ('blob_b.lance.encoding' = 'blob')");
+            + "TBLPROPERTIES ('blob_b.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.1')");
 
     // Insert data into table A
     List<Row> rowsA = new ArrayList<>();
@@ -248,7 +255,8 @@ public abstract class BaseBlobJoinTest {
             + " (id INT NOT NULL, blob_a BINARY, blob_b BINARY) USING lance "
             + "TBLPROPERTIES ("
             + "'blob_a.lance.encoding' = 'blob', "
-            + "'blob_b.lance.encoding' = 'blob')");
+            + "'blob_b.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.1')");
 
     // JOIN and INSERT
     spark.sql(
@@ -333,7 +341,8 @@ public abstract class BaseBlobJoinTest {
         "CREATE TABLE IF NOT EXISTS "
             + fqBlob
             + " (id INT NOT NULL, blob_a BINARY) USING lance "
-            + "TBLPROPERTIES ('blob_a.lance.encoding' = 'blob')");
+            + "TBLPROPERTIES ('blob_a.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.1')");
 
     byte[] blob1 = "blob-for-id-1".getBytes(StandardCharsets.UTF_8);
     byte[] blob2 = "blob-for-id-2".getBytes(StandardCharsets.UTF_8);
@@ -368,7 +377,8 @@ public abstract class BaseBlobJoinTest {
         "CREATE TABLE IF NOT EXISTS "
             + fqTarget
             + " (id INT NOT NULL, blob_a BINARY, tag STRING) USING lance "
-            + "TBLPROPERTIES ('blob_a.lance.encoding' = 'blob')");
+            + "TBLPROPERTIES ('blob_a.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.1')");
 
     spark.sql(
         "INSERT INTO "
@@ -422,7 +432,8 @@ public abstract class BaseBlobJoinTest {
         "CREATE TABLE IF NOT EXISTS "
             + fqA
             + " (id INT NOT NULL, name STRING, blob_a BINARY) USING lance "
-            + "TBLPROPERTIES ('blob_a.lance.encoding' = 'blob')");
+            + "TBLPROPERTIES ('blob_a.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.1')");
 
     // Create table B with a score column
     spark.sql("CREATE TABLE IF NOT EXISTS " + fqB + " (id INT NOT NULL, score DOUBLE) USING lance");
@@ -471,7 +482,8 @@ public abstract class BaseBlobJoinTest {
         "CREATE TABLE IF NOT EXISTS "
             + fqTarget
             + " (id INT NOT NULL, name STRING, score DOUBLE, blob_a BINARY) USING lance "
-            + "TBLPROPERTIES ('blob_a.lance.encoding' = 'blob')");
+            + "TBLPROPERTIES ('blob_a.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.1')");
 
     // JOIN and INSERT — non-blob columns should survive, blob data should be preserved
     spark.sql(

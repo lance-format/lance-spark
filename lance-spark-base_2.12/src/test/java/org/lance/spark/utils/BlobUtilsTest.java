@@ -143,6 +143,10 @@ public class BlobUtilsTest {
     assertTrue(BlobUtils.fileFormatSupportsBlobV2("2.10"));
     assertTrue(BlobUtils.fileFormatSupportsBlobV2("3.0"));
     assertTrue(BlobUtils.fileFormatSupportsBlobV2(" 2.2 "));
+    // Lance's release selectors resolve to 2.2 or newer at write time.
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2("stable"));
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2("next"));
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2("STABLE"));
   }
 
   @Test
@@ -156,10 +160,44 @@ public class BlobUtilsTest {
 
   @Test
   public void fileFormatSupportsBlobV2RejectsNamedAndMalformedVersions() {
-    assertFalse(BlobUtils.fileFormatSupportsBlobV2("stable"));
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2("legacy"));
     assertFalse(BlobUtils.fileFormatSupportsBlobV2(""));
     assertFalse(BlobUtils.fileFormatSupportsBlobV2("."));
     assertFalse(BlobUtils.fileFormatSupportsBlobV2("2.x"));
+  }
+
+  @Test
+  public void knownToRejectBlobV1OnlyAnswersForVersionsLanceRecognizes() {
+    assertTrue(BlobUtils.knownToRejectBlobV1("2.2"));
+    assertTrue(BlobUtils.knownToRejectBlobV1("2.3"));
+    assertTrue(BlobUtils.knownToRejectBlobV1("stable"));
+    assertTrue(BlobUtils.knownToRejectBlobV1("NEXT"));
+    assertFalse(BlobUtils.knownToRejectBlobV1("2.1"));
+    assertFalse(BlobUtils.knownToRejectBlobV1("legacy"));
+    assertFalse(BlobUtils.knownToRejectBlobV1(null));
+    // Lance parses versions against a closed set, so these do not name a newer format at all.
+    assertFalse(BlobUtils.knownToRejectBlobV1("2.4"));
+    assertFalse(BlobUtils.knownToRejectBlobV1("3.0"));
+  }
+
+  private static StructField blobV1Field(String name) {
+    return new StructField(
+        name,
+        DataTypes.BinaryType,
+        true,
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build());
+  }
+
+  private static StructField blobV2Field(String name) {
+    return new StructField(
+        name,
+        DataTypes.BinaryType,
+        true,
+        new MetadataBuilder()
+            .putString(BlobUtils.ARROW_EXTENSION_NAME_KEY, BlobUtils.ARROW_EXTENSION_BLOB_V2)
+            .build());
   }
 
   private static StructField field(String name, org.apache.spark.sql.types.DataType dt) {

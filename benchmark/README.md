@@ -133,14 +133,14 @@ make docker-up
 docker exec spark-lance spark-submit \
   --class org.lance.spark.benchmark.TpcdsDataGenerator \
   --master local[*] \
-  /home/lance/benchmark/lance-spark-benchmark-0.3.0-beta.1.jar \
+  /home/lance/benchmark/lance-spark-benchmark.jar \
   --data-dir /home/lance/data --scale-factor 1 --formats parquet,lance
 
 # Run TPC-DS benchmark queries (inside the container)
 docker exec spark-lance spark-submit \
   --class org.lance.spark.benchmark.TpcdsBenchmarkRunner \
   --master local[*] \
-  /home/lance/benchmark/lance-spark-benchmark-0.3.0-beta.1.jar \
+  /home/lance/benchmark/lance-spark-benchmark.jar \
   --data-dir /home/lance/data --results-dir /home/lance/results \
   --formats parquet,lance --iterations 3
 
@@ -148,14 +148,14 @@ docker exec spark-lance spark-submit \
 docker exec spark-lance spark-submit \
   --class org.lance.spark.benchmark.TpchDataGenerator \
   --master local[*] \
-  /home/lance/benchmark/lance-spark-benchmark-0.3.0-beta.1.jar \
+  /home/lance/benchmark/lance-spark-benchmark.jar \
   --data-dir /home/lance/data/tpch --scale-factor 1 --formats parquet,lance
 
 # Run TPC-H benchmark queries (inside the container)
 docker exec spark-lance spark-submit \
   --class org.lance.spark.benchmark.TpchBenchmarkRunner \
   --master local[*] \
-  /home/lance/benchmark/lance-spark-benchmark-0.3.0-beta.1.jar \
+  /home/lance/benchmark/lance-spark-benchmark.jar \
   --data-dir /home/lance/data/tpch --results-dir /home/lance/results \
   --formats parquet,lance --iterations 3
 
@@ -206,7 +206,7 @@ spark-submit \
   --conf spark.sql.extensions=org.lance.spark.extensions.LanceSparkSessionExtensions \
   --conf spark.hadoop.fs.s3a.access.key=YOUR_KEY \
   --conf spark.hadoop.fs.s3a.secret.key=YOUR_SECRET \
-  benchmark/target/lance-spark-benchmark-*.jar \
+  benchmark/target/lance-spark-benchmark.jar \
   --data-dir s3a://my-bucket/tpcds/sf10 \
   --scale-factor 10 \
   --formats parquet,lance
@@ -220,7 +220,7 @@ spark-submit \
   --conf spark.sql.extensions=org.lance.spark.extensions.LanceSparkSessionExtensions \
   --conf spark.hadoop.fs.s3a.access.key=YOUR_KEY \
   --conf spark.hadoop.fs.s3a.secret.key=YOUR_SECRET \
-  benchmark/target/lance-spark-benchmark-*.jar \
+  benchmark/target/lance-spark-benchmark.jar \
   --data-dir s3a://my-bucket/tpch/sf10 \
   --scale-factor 10 \
   --formats parquet,lance
@@ -255,7 +255,7 @@ spark-submit \
   --conf spark.sql.adaptive.enabled=true \
   --conf spark.hadoop.fs.s3a.access.key=YOUR_KEY \
   --conf spark.hadoop.fs.s3a.secret.key=YOUR_SECRET \
-  benchmark/target/lance-spark-benchmark-*.jar \
+  benchmark/target/lance-spark-benchmark.jar \
   --data-dir s3a://my-bucket/tpcds/sf10 \
   --results-dir s3a://my-bucket/tpcds/sf10/results \
   --formats parquet,lance \
@@ -277,7 +277,7 @@ spark-submit \
   --conf spark.sql.adaptive.enabled=true \
   --conf spark.hadoop.fs.s3a.access.key=YOUR_KEY \
   --conf spark.hadoop.fs.s3a.secret.key=YOUR_SECRET \
-  benchmark/target/lance-spark-benchmark-*.jar \
+  benchmark/target/lance-spark-benchmark.jar \
   --data-dir s3a://my-bucket/tpch/sf10 \
   --results-dir s3a://my-bucket/tpch/sf10/results \
   --formats parquet,lance \

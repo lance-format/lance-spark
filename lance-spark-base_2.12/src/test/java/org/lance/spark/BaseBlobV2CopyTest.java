@@ -840,6 +840,10 @@ public abstract class BaseBlobV2CopyTest extends AbstractBlobV2CopyTest {
     }
   }
 
+  /**
+   * Covers the release selector path: `stable` resolves to 2.2, so the source is a blob v2 table.
+   * Dedicated v1 source coverage lives in {@link #v1BlobSourceIntoV2Target_copiesBlobBytes()}.
+   */
   @Test
   public void namedVersionSourceIntoV2Target_copiesBlobBytes() throws Exception {
     String src = "v2_e2e_namedver_src_" + System.currentTimeMillis();
