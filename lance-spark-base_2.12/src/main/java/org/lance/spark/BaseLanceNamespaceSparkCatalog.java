@@ -26,7 +26,6 @@ import org.lance.namespace.errors.TableNotFoundException;
 import org.lance.namespace.model.DeclareTableRequest;
 import org.lance.namespace.model.DeclareTableResponse;
 import org.lance.namespace.model.DeregisterTableRequest;
-import org.lance.namespace.model.DescribeNamespaceRequest;
 import org.lance.namespace.model.DescribeTableRequest;
 import org.lance.namespace.model.DescribeTableResponse;
 import org.lance.namespace.model.DropNamespaceRequest;
@@ -428,26 +427,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
       if (e.getErrorCode() == ErrorCode.NAMESPACE_NOT_FOUND) {
         return false;
       }
-      if (e.getErrorCode() == ErrorCode.UNSUPPORTED) {
-        return namespaceExistsViaDescribe(request.getId());
-      }
-      throw e;
-    }
-  }
-
-  private boolean namespaceExistsViaDescribe(List<String> namespaceId) {
-    DescribeNamespaceRequest request = new DescribeNamespaceRequest();
-    request.setId(namespaceId);
-    try {
-      namespace.describeNamespace(request);
-      return true;
-    } catch (LanceNamespaceException e) {
-      if (e.getErrorCode() == ErrorCode.NAMESPACE_NOT_FOUND) {
-        return false;
-      }
-      if (e.getErrorCode() == ErrorCode.TABLE_NOT_FOUND) {
-        return false;
-      }
       throw e;
     }
   }
@@ -579,8 +558,12 @@ public abstract class BaseLanceNamespaceSparkCatalog
     try {
       this.namespace.tableExists(request);
       return true;
-    } catch (Exception e) {
-      return false;
+    } catch (LanceNamespaceException e) {
+      if (e.getErrorCode() == ErrorCode.TABLE_NOT_FOUND
+          || e.getErrorCode() == ErrorCode.NAMESPACE_NOT_FOUND) {
+        return false;
+      }
+      throw e;
     }
   }
 
