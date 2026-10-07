@@ -14,8 +14,11 @@
 package org.lance.spark.write;
 
 import org.lance.Dataset;
+import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.WriteParams;
+import org.lance.WriteParams.WriteMode;
+import org.lance.schema.LanceField;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
@@ -23,6 +26,7 @@ import org.lance.spark.TestUtils;
 import org.apache.arrow.dataset.scanner.Scanner;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.arrow.vector.types.pojo.ArrowType;
@@ -47,6 +51,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -63,6 +68,18 @@ public class LanceBatchWriteTest {
         assertThrows(NullPointerException.class, () -> LanceBatchWrite.taskCommit(null));
 
     assertEquals("fragments must not be null", error.getMessage());
+  }
+
+  @Test
+  public void testTaskCommitRejectsNullFragmentElements() {
+    FragmentMetadata fragment = new FragmentMetadata(1, Collections.emptyList(), 0L, null, null);
+
+    NullPointerException error =
+        assertThrows(
+            NullPointerException.class,
+            () -> LanceBatchWrite.taskCommit(Arrays.asList(fragment, null)));
+
+    assertEquals("fragments must not contain null", error.getMessage());
   }
 
   @Test
@@ -146,53 +163,173 @@ public class LanceBatchWriteTest {
     }
   }
 
+  /**
+   * Appends fragments written directly through the Lance API, the way an external columnar writer
+   * such as Apache Gluten does, to a table whose field ids are not contiguous.
+   */
   @Test
-  public void testTaskCommitCommitsMultipleFragments(TestInfo testInfo) throws Exception {
+  public void testTaskCommitAppendsExternallyWrittenFragments(TestInfo testInfo) throws Exception {
     String datasetName = testInfo.getTestMethod().get().getName();
     String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
-      Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
-      Schema schema = new Schema(Collections.singletonList(field));
-      Dataset.create(allocator, datasetUri, schema, new WriteParams.Builder().build()).close();
+      Schema schema = createTableWithDroppedMiddleColumn(allocator, datasetUri);
+      LanceBatchWrite batchWrite = newBatchWrite(schema, datasetUri, false);
 
-      LanceSparkWriteOptions writeOptions =
-          LanceSparkWriteOptions.builder().datasetUri(datasetUri).maxRowsPerFile(32).build();
-      StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
-      LanceBatchWrite lanceBatchWrite =
-          new LanceBatchWrite(
-              sparkSchema,
-              writeOptions,
-              false,
-              null, // initialStorageOptions
-              null, // namespaceImpl
-              null, // namespaceProperties
-              null, // tableId
-              false, // managedVersioning
-              null); // stagedCommit
-      DataWriterFactory factory = lanceBatchWrite.createBatchWriterFactory(() -> 1);
+      // Two tasks, each writing several fragments in APPEND mode.
+      List<FragmentMetadata> first =
+          writeFragments(allocator, datasetUri, schema, WriteMode.APPEND, 0, 25);
+      List<FragmentMetadata> second =
+          writeFragments(allocator, datasetUri, schema, WriteMode.APPEND, 25, 25);
+      assertTrue(first.size() > 1);
+      assertTrue(second.size() > 1);
 
-      int rows = 132;
-      WriterCommitMessage writerMessage;
-      try (DataWriter<InternalRow> writer = factory.createWriter(0, 0)) {
-        for (int i = 0; i < rows; i++) {
-          writer.write(new GenericInternalRow(new Object[] {i}));
-        }
-        writerMessage = writer.commit();
-      }
+      batchWrite.commit(
+          new WriterCommitMessage[] {
+            LanceBatchWrite.taskCommit(first), LanceBatchWrite.taskCommit(second)
+          });
 
-      LanceBatchWrite.TaskCommit writerTaskCommit =
-          assertInstanceOf(LanceBatchWrite.TaskCommit.class, writerMessage);
-      List<FragmentMetadata> fragments = writerTaskCommit.getFragments();
-      assertTrue(fragments.size() > 1);
-
-      WriterCommitMessage externalMessage = LanceBatchWrite.taskCommit(fragments);
-      lanceBatchWrite.commit(new WriterCommitMessage[] {externalMessage});
-
+      assertEquals(expectedRows(0, 50), readRows(allocator, datasetUri));
       try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
-        assertEquals(rows, dataset.countRows());
-        assertEquals(fragments.size(), dataset.getFragments().size());
+        assertEquals(first.size() + second.size(), dataset.getFragments().size());
       }
     }
+  }
+
+  /**
+   * Overwrites a table whose field ids are not contiguous with fragments written directly through
+   * the Lance API in OVERWRITE mode, without passing the table's schema.
+   */
+  @Test
+  public void testTaskCommitOverwritesWithExternallyWrittenFragments(TestInfo testInfo)
+      throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Schema schema = createTableWithDroppedMiddleColumn(allocator, datasetUri);
+
+      // Seed rows that the overwrite must replace.
+      newBatchWrite(schema, datasetUri, false)
+          .commit(
+              new WriterCommitMessage[] {
+                LanceBatchWrite.taskCommit(
+                    writeFragments(allocator, datasetUri, schema, WriteMode.APPEND, 0, 5))
+              });
+      assertEquals(expectedRows(0, 5), readRows(allocator, datasetUri));
+
+      LanceBatchWrite batchWrite = newBatchWrite(schema, datasetUri, true);
+
+      // Two tasks, each writing several fragments in OVERWRITE mode.
+      List<FragmentMetadata> first =
+          writeFragments(allocator, datasetUri, schema, WriteMode.OVERWRITE, 100, 25);
+      List<FragmentMetadata> second =
+          writeFragments(allocator, datasetUri, schema, WriteMode.OVERWRITE, 125, 25);
+      assertTrue(first.size() > 1);
+      assertTrue(second.size() > 1);
+
+      batchWrite.commit(
+          new WriterCommitMessage[] {
+            LanceBatchWrite.taskCommit(first), LanceBatchWrite.taskCommit(second)
+          });
+
+      assertEquals(expectedRows(100, 50), readRows(allocator, datasetUri));
+      try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
+        assertEquals(first.size() + second.size(), dataset.getFragments().size());
+      }
+    }
+  }
+
+  private static Field intField(String name) {
+    return new Field(name, FieldType.nullable(new ArrowType.Int(32, true)), null);
+  }
+
+  /**
+   * Creates an empty table {@code (a, b, c)} and drops {@code b}, which leaves the field ids {@code
+   * a=0, c=2}. Returns the remaining columns as an Arrow schema without field ids.
+   */
+  private static Schema createTableWithDroppedMiddleColumn(
+      BufferAllocator allocator, String datasetUri) {
+    Schema tableSchema = new Schema(Arrays.asList(intField("a"), intField("b"), intField("c")));
+    try (Dataset dataset =
+        Dataset.create(allocator, datasetUri, tableSchema, new WriteParams.Builder().build())) {
+      dataset.dropColumns(Collections.singletonList("b"));
+    }
+    try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
+      List<Integer> fieldIds =
+          dataset.getLanceSchema().fields().stream()
+              .map(LanceField::getId)
+              .collect(Collectors.toList());
+      assertEquals(Arrays.asList(0, 2), fieldIds);
+    }
+    return new Schema(Arrays.asList(intField("a"), intField("c")));
+  }
+
+  private static LanceBatchWrite newBatchWrite(
+      Schema schema, String datasetUri, boolean overwrite) {
+    return new LanceBatchWrite(
+        LanceArrowUtils.fromArrowSchema(schema),
+        LanceSparkWriteOptions.from(datasetUri),
+        overwrite,
+        null, // initialStorageOptions
+        null, // namespaceImpl
+        null, // namespaceProperties
+        null, // tableId
+        false, // managedVersioning
+        null); // stagedCommit
+  }
+
+  /** Writes rows {@code a = start, start + 1, ...} with {@code c = 10 * a} as fragments. */
+  private static List<FragmentMetadata> writeFragments(
+      BufferAllocator allocator,
+      String datasetUri,
+      Schema schema,
+      WriteMode mode,
+      int start,
+      int rows) {
+    try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+      IntVector a = (IntVector) root.getVector("a");
+      IntVector c = (IntVector) root.getVector("c");
+      a.allocateNew(rows);
+      c.allocateNew(rows);
+      for (int i = 0; i < rows; i++) {
+        a.set(i, start + i);
+        c.set(i, 10 * (start + i));
+      }
+      root.setRowCount(rows);
+      return Fragment.write()
+          .datasetUri(datasetUri)
+          .allocator(allocator)
+          .data(root)
+          .mode(mode)
+          .maxRowsPerFile(10)
+          .execute();
+    }
+  }
+
+  private static Map<Integer, Integer> expectedRows(int start, int rows) {
+    Map<Integer, Integer> expected = new HashMap<>();
+    for (int i = start; i < start + rows; i++) {
+      expected.put(i, 10 * i);
+    }
+    return expected;
+  }
+
+  /** Reads the table as {@code a -> c}; a column with mismatched field ids reads back as null. */
+  private static Map<Integer, Integer> readRows(BufferAllocator allocator, String datasetUri)
+      throws Exception {
+    Map<Integer, Integer> rows = new HashMap<>();
+    try (Dataset dataset = Dataset.open(datasetUri, allocator);
+        Scanner scanner = dataset.newScan();
+        ArrowReader reader = scanner.scanBatches()) {
+      VectorSchemaRoot root = reader.getVectorSchemaRoot();
+      while (reader.loadNextBatch()) {
+        for (int i = 0; i < root.getRowCount(); i++) {
+          rows.put(
+              (Integer) root.getVector("a").getObject(i),
+              (Integer) root.getVector("c").getObject(i));
+        }
+      }
+    }
+    return rows;
   }
 
   /**

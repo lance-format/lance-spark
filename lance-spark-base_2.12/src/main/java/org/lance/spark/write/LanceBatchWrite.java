@@ -255,14 +255,30 @@ public class LanceBatchWrite implements BatchWrite {
    * <p>The returned message must be passed to {@link #commit(WriterCommitMessage[])} on a {@code
    * LanceBatchWrite} for the same target dataset.
    *
+   * <p>{@code commit} does not check that the field ids in the fragments' data files match the
+   * schema it commits, and a mismatched column silently reads back as null. An append keeps the
+   * table's current schema, while an overwrite commits a schema whose field ids are reassigned by
+   * position. Write the fragments the same way {@link LanceDataWriter} does:
+   *
+   * <ul>
+   *   <li>for an append, write in {@code WriteMode.APPEND}, not the default {@code
+   *       WriteMode.CREATE}; and
+   *   <li>for an overwrite, write in {@code WriteMode.OVERWRITE} without passing the table's schema
+   *       to {@code WriteFragmentBuilder.schema(...)}.
+   * </ul>
+   *
    * @param fragments uncommitted fragments produced by a task
    * @return a message accepted by {@link #commit(WriterCommitMessage[])}
-   * @throws NullPointerException if {@code fragments} is null
+   * @throws NullPointerException if {@code fragments} is null or contains a null element
    */
   @Evolving
   public static WriterCommitMessage taskCommit(List<FragmentMetadata> fragments) {
-    return new TaskCommit(
-        new ArrayList<>(Objects.requireNonNull(fragments, "fragments must not be null")));
+    Objects.requireNonNull(fragments, "fragments must not be null");
+    List<FragmentMetadata> copy = new ArrayList<>(fragments.size());
+    for (FragmentMetadata fragment : fragments) {
+      copy.add(Objects.requireNonNull(fragment, "fragments must not contain null"));
+    }
+    return new TaskCommit(copy);
   }
 
   public static class TaskCommit implements WriterCommitMessage {
