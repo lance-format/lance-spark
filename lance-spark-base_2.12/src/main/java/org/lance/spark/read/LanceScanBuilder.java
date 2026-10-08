@@ -88,8 +88,7 @@ public class LanceScanBuilder
   /** Full table schema before column pruning; used to widen nested structs for vectorized reads. */
   private final StructType fullSchema;
 
-  /** Blob v2 column names in the read schema. Filters on these cannot push to Lance. */
-  private final Set<String> blobV2Columns;
+  private final Set<String> residualFilterColumns;
 
   private StructType schema;
 
@@ -138,7 +137,18 @@ public class LanceScanBuilder
       java.util.Map<String, String> namespaceProperties,
       ShardingSpec shardingSpec) {
     this.fullSchema = BlobUtils.applyBlobV2DescriptorSchema(schema);
-    this.blobV2Columns = BlobUtils.blobV2ColumnNames(this.fullSchema);
+    this.residualFilterColumns = new HashSet<>(BlobUtils.blobV2ColumnNames(this.fullSchema));
+    if (readOptions.getFullTextQuery() != null) {
+      for (StructField field : this.fullSchema.fields()) {
+        if (Utils.isStoredScoreColumn(field) && !field.dataType().equals(DataTypes.FloatType)) {
+          throw new UnsupportedOperationException(
+              "Full-text search requires a FLOAT stored '_score' column, but found "
+                  + field.dataType().simpleString()
+                  + ". Rename the stored column to use FTS with the current Lance engine.");
+        }
+      }
+      this.residualFilterColumns.add(LanceConstant.SCORE);
+    }
     this.schema = this.fullSchema;
     this.readOptions = readOptions;
     this.initialStorageOptions = initialStorageOptions;
@@ -178,6 +188,18 @@ public class LanceScanBuilder
       }
       if (indexedCountScan != null) {
         return indexedCountScan;
+      }
+
+      // Reject _score without an active FTS query. The metadata column is advertised
+      // unconditionally (analyzer resolves it before the FTS rule runs), so validation
+      // must happen here at build time, after the optimizer fixed-point has finalized
+      // the relation options.
+      if (hasScoreMetadataColumn(schema) && readOptions.getFullTextQuery() == null) {
+        throw new IllegalArgumentException(
+            "Column '_score' requires a full-text search predicate (lance_match, "
+                + "lance_match_phrase, or lance_multi_match) in the WHERE clause. "
+                + "_score is a relevance score computed by the Lance FTS index and has no "
+                + "value without an active full-text query.");
       }
 
       // Namespace-configured full-text search executes server-side via queryTable (single
@@ -515,7 +537,8 @@ public class LanceScanBuilder
 
     return readOptions.getFullTextQuery() != null
         && LanceRuntime.supportsQueryTable(namespaceImpl)
-        && !pushedAggregation.isPresent();
+        && !pushedAggregation.isPresent()
+        && Arrays.stream(schema.fields()).noneMatch(Utils::isStoredScoreColumn);
   }
 
   /**
@@ -557,6 +580,7 @@ public class LanceScanBuilder
             .topK(k)
             .offset(pushedOffset)
             .filter(whereCondition.isPresent() ? whereCondition.get() : null)
+            .prefilter(true)
             .version(
                 readOptions.getRef() == null || readOptions.getRef().getVersionNumber().isEmpty()
                     ? null
@@ -581,11 +605,9 @@ public class LanceScanBuilder
     } else {
       List<Predicate> pushedList = new ArrayList<>();
       List<Predicate> residualList = new ArrayList<>();
-      // Push supported predicates unless they touch a blob v2 column. Those read back as descriptor
-      // structs, so Lance cannot evaluate filters on them. Normal-column filters still prune.
       for (Predicate predicate : predicates) {
         if (FilterPushDown.isPredicateSupported(predicate)
-            && !FilterPushDown.referencesAny(predicate, blobV2Columns)) {
+            && !FilterPushDown.referencesAny(predicate, residualFilterColumns)) {
           pushedList.add(predicate);
         } else {
           residualList.add(predicate);
@@ -638,12 +660,20 @@ public class LanceScanBuilder
 
   @Override
   public boolean pushTopN(SortOrder[] orders, int limit) {
-    // The Order by operator will use compute thread in lance.
-    // So it's better to have an option to enable it.
     if (!readOptions.isTopNPushDown() || hasResidualPredicates) {
       return false;
     }
-    this.limit = Optional.of(limit);
+    if (readOptions.getFullTextQuery() != null) {
+      if (orders.length != 1
+          || !(orders[0].expression() instanceof FieldReference)
+          || !((FieldReference) orders[0].expression()).fieldNames()[0].equals(LanceConstant.SCORE)
+          || orders[0].direction() != SortDirection.DESCENDING
+          || !shouldNamespaceFtsScan()) {
+        return false;
+      }
+      this.limit = Optional.of(limit);
+      return true;
+    }
     List<ColumnOrdering> topNSortOrders = new ArrayList<>();
     for (SortOrder sortOrder : orders) {
       ColumnOrdering.Builder builder = new ColumnOrdering.Builder();
@@ -653,9 +683,11 @@ public class LanceScanBuilder
         return false;
       }
       FieldReference reference = (FieldReference) sortOrder.expression();
-      builder.setColumnName(reference.fieldNames()[0]);
+      String columnName = reference.fieldNames()[0];
+      builder.setColumnName(columnName);
       topNSortOrders.add(builder.build());
     }
+    this.limit = Optional.of(limit);
     this.topNSortOrders = Optional.of(topNSortOrders);
     return true;
   }
@@ -733,6 +765,15 @@ public class LanceScanBuilder
       return true;
     }
 
+    return false;
+  }
+
+  private static boolean hasScoreMetadataColumn(StructType schema) {
+    for (StructField field : schema.fields()) {
+      if (Utils.isScoreMetadataColumn(field)) {
+        return true;
+      }
+    }
     return false;
   }
 

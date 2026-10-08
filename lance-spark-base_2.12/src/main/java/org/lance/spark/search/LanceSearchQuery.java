@@ -123,6 +123,9 @@ public class LanceSearchQuery implements Serializable {
     if (withRowId != null) {
       request.withRowId(withRowId);
     }
+    if (prefilter != null) {
+      request.prefilter(prefilter);
+    }
 
     if (searchType == SearchType.VECTOR) {
       request.vector(new QueryTableRequestVector().singleVector(vector));
@@ -152,9 +155,6 @@ public class LanceSearchQuery implements Serializable {
       }
       if (fastSearch != null) {
         request.fastSearch(fastSearch);
-      }
-      if (prefilter != null) {
-        request.prefilter(prefilter);
       }
     } else if (fullTextQueryJson != null) {
       // Unified path: a structured FullTextQuery carried through the shared scan spec.
