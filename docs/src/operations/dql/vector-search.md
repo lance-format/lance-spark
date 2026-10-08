@@ -42,14 +42,35 @@ Use positional arguments for simple calls and Spark 3.4 compatibility.
     FROM VECTOR_SEARCH('lance.default.items', array(0.12, 0.34, 0.56), 5);
     ```
 
+## Batch Query Vectors
+
+Pass an array of query vectors to search for several vectors in one Lance scan. Every query vector returns up to `num_results` rows. A non-null `query_index` integer column comes first in the output and holds the zero-based position of the query vector that produced each row.
+
+=== "SQL"
+    ```sql
+    SELECT query_index, id, _distance
+    FROM VECTOR_SEARCH(
+        table => 'lance.default.items',
+        query_vector => array(
+            array(0.12, 0.34, 0.56, 0.78),
+            array(0.90, 0.10, 0.20, 0.30)
+        ),
+        vector_column => 'embedding',
+        num_results => 10
+    )
+    ORDER BY query_index, _distance;
+    ```
+
+Lance runs all query vectors in a single native search request. All query vectors must have the same dimension. Batch search does not support `offset`, multivector columns, or tables that already have a `query_index` column. Batch search needs a Lance version whose namespace `queryTable` treats `multi_vector` as a batch search.
+
 ## Arguments
 
 | Argument | Type | Required | Description |
 |----------|------|----------|-------------|
 | `table` | String | Yes | Catalog table name to search. |
-| `query_vector` | Array numeric literal | Yes | Query vector. |
+| `query_vector` | Array numeric literal, or array of array numeric literals | Yes | Query vector, or several query vectors for a [batch search](#batch-query-vectors). |
 | `vector_column` | String | No | Vector column name. Lance defaults to `vector` when omitted. |
-| `num_results`, `limit`, or `k` | Integer | No | Number of results. Defaults to `10`. |
+| `num_results`, `limit`, or `k` | Integer | No | Number of results per query vector. Defaults to `10`. |
 | `distance_type` | String | No | Distance metric such as `l2`, `cosine`, or `dot`. |
 | `columns` | Array string literal | No | Output table columns. `_distance` is always included. Use `array('*')` or omit this argument for all table columns. |
 | `filter` | String | No | SQL filter expression evaluated by Lance. |
@@ -61,7 +82,7 @@ Use positional arguments for simple calls and Spark 3.4 compatibility.
 
 ## Output
 
-The result includes the requested table columns and a nullable `_distance` float column. If `with_row_id => true`, or if `_rowid` is listed in `columns`, the result also includes Lance row ids.
+The result includes the requested table columns and a nullable `_distance` float column. Batch searches also include a leading `query_index` column. If `with_row_id => true`, or if `_rowid` is listed in `columns`, the result also includes Lance row ids.
 
 ## Execution
 
