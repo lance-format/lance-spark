@@ -29,6 +29,7 @@ import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.spark.annotation.Evolving;
 import org.apache.spark.sql.connector.write.BatchWrite;
 import org.apache.spark.sql.connector.write.DataWriterFactory;
 import org.apache.spark.sql.connector.write.PhysicalWriteInfo;
@@ -38,6 +39,7 @@ import org.apache.spark.sql.util.LanceArrowUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -245,6 +247,38 @@ public class LanceBatchWrite implements BatchWrite {
   @Override
   public String toString() {
     return String.format("LanceBatchWrite(datasetUri=%s)", writeOptions.getDatasetUri());
+  }
+
+  /**
+   * Creates an opaque commit message for uncommitted fragments written for a target dataset.
+   *
+   * <p>The returned message must be passed to {@link #commit(WriterCommitMessage[])} on a {@code
+   * LanceBatchWrite} for the same target dataset.
+   *
+   * <p>{@code commit} does not check that the field ids in the fragments' data files match the
+   * schema it commits, and a mismatched column silently reads back as null. An append keeps the
+   * table's current schema, while an overwrite commits a schema whose field ids are reassigned by
+   * position. Write the fragments the same way {@link LanceDataWriter} does:
+   *
+   * <ul>
+   *   <li>for an append, write in {@code WriteMode.APPEND}, not the default {@code
+   *       WriteMode.CREATE}; and
+   *   <li>for an overwrite, write in {@code WriteMode.OVERWRITE} without passing the table's schema
+   *       to {@code WriteFragmentBuilder.schema(...)}.
+   * </ul>
+   *
+   * @param fragments uncommitted fragments produced by a task
+   * @return a message accepted by {@link #commit(WriterCommitMessage[])}
+   * @throws NullPointerException if {@code fragments} is null or contains a null element
+   */
+  @Evolving
+  public static WriterCommitMessage taskCommit(List<FragmentMetadata> fragments) {
+    Objects.requireNonNull(fragments, "fragments must not be null");
+    List<FragmentMetadata> copy = new ArrayList<>(fragments.size());
+    for (FragmentMetadata fragment : fragments) {
+      copy.add(Objects.requireNonNull(fragment, "fragments must not contain null"));
+    }
+    return new TaskCommit(copy);
   }
 
   public static class TaskCommit implements WriterCommitMessage {
