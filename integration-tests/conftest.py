@@ -178,6 +178,11 @@ def minio():
 # ---------------------------------------------------------------------------
 CATALOG = "lance"
 
+# Namespace (Glue database / dir namespace) the tests operate in. Overridable via
+# LANCE_TEST_NAMESPACE so each CI run can isolate into its own namespace; defaults
+# to "default", keeping local runs and non-Glue backends byte-for-byte unchanged.
+LANCE_NAMESPACE = os.environ.get("LANCE_TEST_NAMESPACE", "default")
+
 # LanceDB Cloud configuration (optional – set env vars to enable)
 LANCEDB_DB = os.environ.get("LANCEDB_DB")
 LANCEDB_API_KEY = os.environ.get("LANCEDB_API_KEY")
@@ -381,7 +386,7 @@ def spark(request):
     session = builder.getOrCreate()
     session.sql(f"SET spark.sql.defaultCatalog={CATALOG}")
     # Create default namespace for multi-level namespace mode
-    session.sql("CREATE NAMESPACE IF NOT EXISTS default")
+    session.sql(f"CREATE NAMESPACE IF NOT EXISTS {LANCE_NAMESPACE}")
     # Store backend name for marker-based test skipping
     session._lance_backend = backend
     yield session
@@ -443,7 +448,7 @@ def test_table(request, spark):
     """
     # Create unique table name from test name (sanitize special chars)
     test_name = request.node.name.replace("[", "_").replace("]", "_").replace("-", "_")
-    table_name = f"default.test_{test_name}"
+    table_name = f"{LANCE_NAMESPACE}.test_{test_name}"
 
     # Cleanup before test
     spark.sql(f"DROP TABLE IF EXISTS {table_name} PURGE")
@@ -468,28 +473,28 @@ def _skip_by_backend(request, spark):
 @pytest.fixture(autouse=True)
 def cleanup_tables(spark):
     """Clean up test tables before and after each test."""
-    spark.sql("DROP TABLE IF EXISTS default.test_table PURGE")
-    spark.sql("DROP TABLE IF EXISTS default.test_table_renamed PURGE")
-    spark.sql("DROP TABLE IF EXISTS default.test_table_new PURGE")
-    spark.sql("DROP TABLE IF EXISTS default.nested_index_table PURGE")
-    spark.sql("DROP TABLE IF EXISTS default.employees PURGE")
-    spark.sql("DROP TABLE IF EXISTS default.test_blob_v2 PURGE")
-    spark.sql("DROP TABLE IF EXISTS default.test_blob_v2_bad_insert PURGE")
-    spark.sql("DROP TABLE IF EXISTS default.fts_docs PURGE")
+    spark.sql(f"DROP TABLE IF EXISTS {LANCE_NAMESPACE}.test_table PURGE")
+    spark.sql(f"DROP TABLE IF EXISTS {LANCE_NAMESPACE}.test_table_renamed PURGE")
+    spark.sql(f"DROP TABLE IF EXISTS {LANCE_NAMESPACE}.test_table_new PURGE")
+    spark.sql(f"DROP TABLE IF EXISTS {LANCE_NAMESPACE}.nested_index_table PURGE")
+    spark.sql(f"DROP TABLE IF EXISTS {LANCE_NAMESPACE}.employees PURGE")
+    spark.sql(f"DROP TABLE IF EXISTS {LANCE_NAMESPACE}.test_blob_v2 PURGE")
+    spark.sql(f"DROP TABLE IF EXISTS {LANCE_NAMESPACE}.test_blob_v2_bad_insert PURGE")
+    spark.sql(f"DROP TABLE IF EXISTS {LANCE_NAMESPACE}.fts_docs PURGE")
     # TODO - reenable once `tableExists` works on Spark 4.0
     #spark.catalog.dropTempView("source") if spark.catalog.tableExists("source") else None
     #spark.catalog.dropTempView("tmp_view") if spark.catalog.tableExists("tmp_view") else None
     spark.catalog.dropTempView("source")
     spark.catalog.dropTempView("tmp_view")
     yield
-    spark.sql("DROP TABLE IF EXISTS default.test_table PURGE")
-    spark.sql("DROP TABLE IF EXISTS default.test_table_renamed PURGE")
-    spark.sql("DROP TABLE IF EXISTS default.test_table_new PURGE")
-    spark.sql("DROP TABLE IF EXISTS default.nested_index_table PURGE")
-    spark.sql("DROP TABLE IF EXISTS default.employees PURGE")
-    spark.sql("DROP TABLE IF EXISTS default.test_blob_v2 PURGE")
-    spark.sql("DROP TABLE IF EXISTS default.test_blob_v2_bad_insert PURGE")
-    spark.sql("DROP TABLE IF EXISTS default.fts_docs PURGE")
+    spark.sql(f"DROP TABLE IF EXISTS {LANCE_NAMESPACE}.test_table PURGE")
+    spark.sql(f"DROP TABLE IF EXISTS {LANCE_NAMESPACE}.test_table_renamed PURGE")
+    spark.sql(f"DROP TABLE IF EXISTS {LANCE_NAMESPACE}.test_table_new PURGE")
+    spark.sql(f"DROP TABLE IF EXISTS {LANCE_NAMESPACE}.nested_index_table PURGE")
+    spark.sql(f"DROP TABLE IF EXISTS {LANCE_NAMESPACE}.employees PURGE")
+    spark.sql(f"DROP TABLE IF EXISTS {LANCE_NAMESPACE}.test_blob_v2 PURGE")
+    spark.sql(f"DROP TABLE IF EXISTS {LANCE_NAMESPACE}.test_blob_v2_bad_insert PURGE")
+    spark.sql(f"DROP TABLE IF EXISTS {LANCE_NAMESPACE}.fts_docs PURGE")
     # TODO - reenable once `tableExists` works on Spark 4.0
     #spark.catalog.dropTempView("source") if spark.catalog.tableExists("source") else None
     #spark.catalog.dropTempView("tmp_view") if spark.catalog.tableExists("tmp_view") else None
