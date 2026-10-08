@@ -21,6 +21,8 @@ import org.lance.index.scalar.ScalarIndexParams;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Utils;
 
+import org.apache.spark.scheduler.SparkListener;
+import org.apache.spark.scheduler.SparkListenerJobStart;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
@@ -36,11 +38,14 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-/** Base test for SHOW INDEXES command. */
 public abstract class BaseShowIndexesTest {
+  private static final String DISTRIBUTED_STATISTICS_ENABLED =
+      "spark.lance.indexStatistics.distributed.enabled";
   protected String catalogName = "lance_test";
   protected String tableName = "show_indexes_test";
   protected String fullTable = catalogName + ".default." + tableName;
@@ -83,7 +88,6 @@ public abstract class BaseShowIndexesTest {
 
   private void prepareDataset() {
     spark.sql(String.format("create table %s (id int, text string) using lance;", fullTable));
-    // First insert to create initial fragments
     spark.sql(
         String.format(
             "insert into %s (id, text) values %s ;",
@@ -92,7 +96,6 @@ public abstract class BaseShowIndexesTest {
                 .boxed()
                 .map(i -> String.format("(%d, 'text_%d')", i, i))
                 .collect(Collectors.joining(","))));
-    // Second insert to ensure multiple fragments
     spark.sql(
         String.format(
             "insert into %s (id, text) values %s ;",
@@ -101,6 +104,114 @@ public abstract class BaseShowIndexesTest {
                 .boxed()
                 .map(i -> String.format("(%d, 'text_%d')", i, i))
                 .collect(Collectors.joining(","))));
+  }
+
+  @Test
+  public void testDistributedStatisticsWithinOneIndex() throws InterruptedException {
+    assertDistributedStatistics(true, 1);
+  }
+
+  @Test
+  public void testDistributedStatisticsAcrossIndexesWithoutCredentialRefresh()
+      throws InterruptedException {
+    assertDistributedStatistics(false, 2);
+  }
+
+  @Test
+  public void testDistributedStatisticsBatchesSegmentsWithBoundedParallelism()
+      throws InterruptedException {
+    assertDistributedStatistics(true, 6);
+  }
+
+  private void assertDistributedStatistics(boolean credentialRefresh, int indexCount)
+      throws InterruptedException {
+    spark
+        .conf()
+        .set(
+            "spark.sql.catalog."
+                + catalogName
+                + "."
+                + LanceSparkReadOptions.CONFIG_EXECUTOR_CREDENTIAL_REFRESH,
+            Boolean.toString(credentialRefresh));
+    prepareDataset();
+    for (int indexNumber = 0; indexNumber < indexCount; indexNumber++) {
+      spark.sql(
+          String.format(
+              "alter table %s create index test_index_%d using btree (id) with (num_segments = 2)",
+              fullTable, indexNumber));
+    }
+    spark.sql(String.format("insert into %s values (20, 'unindexed')", fullTable));
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build()) {
+      dataset.delete("id = 0");
+    }
+    List<Row> expected =
+        spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+    Assertions.assertEquals(indexCount, expected.size());
+    for (Row row : expected) {
+      Assertions.assertEquals(2L, row.getLong(8));
+      Assertions.assertTrue(row.getLong(6) > 0L);
+    }
+
+    String jobGroup = "distributed-statistics-" + UUID.randomUUID();
+    int expectedTasks = Math.min(2 * indexCount, spark.sparkContext().defaultParallelism());
+    CountDownLatch segmentTasksScheduled = new CountDownLatch(1);
+    SparkListener listener =
+        new SparkListener() {
+          @Override
+          public void onJobStart(SparkListenerJobStart event) {
+            if (event.properties() != null
+                && jobGroup.equals(event.properties().getProperty("spark.jobGroup.id"))) {
+              for (int stageIndex = 0; stageIndex < event.stageInfos().size(); stageIndex++) {
+                if (event.stageInfos().apply(stageIndex).numTasks() == expectedTasks) {
+                  segmentTasksScheduled.countDown();
+                }
+              }
+            }
+          }
+        };
+    spark.sparkContext().addSparkListener(listener);
+    spark.sparkContext().setJobGroup(jobGroup, "Distributed index statistics", false);
+    spark.conf().set(DISTRIBUTED_STATISTICS_ENABLED, "true");
+    try {
+      List<Row> actual =
+          spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+      Assertions.assertEquals(expected, actual);
+      Assertions.assertTrue(
+          segmentTasksScheduled.await(10, TimeUnit.SECONDS),
+          "Statistics must schedule segment tasks, not just one task per index name");
+    } finally {
+      spark.conf().unset(DISTRIBUTED_STATISTICS_ENABLED);
+      spark.sparkContext().clearJobGroup();
+      spark.sparkContext().removeSparkListener(listener);
+    }
+  }
+
+  @Test
+  public void testDistributedStatisticsWithNoIndexes() {
+    prepareDataset();
+    spark.conf().set(DISTRIBUTED_STATISTICS_ENABLED, "true");
+    try {
+      Assertions.assertTrue(
+          spark.sql(String.format("show indexes from %s", fullTable)).collectAsList().isEmpty());
+    } finally {
+      spark.conf().unset(DISTRIBUTED_STATISTICS_ENABLED);
+    }
+  }
+
+  @Test
+  public void testDistributedStatisticsForEmptyIndex() {
+    spark.sql(String.format("create table %s (id int, text string) using lance", fullTable));
+    spark.sql(String.format("alter table %s create index test_index using btree (id)", fullTable));
+    List<Row> expected =
+        spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+    spark.conf().set(DISTRIBUTED_STATISTICS_ENABLED, "true");
+    try {
+      Assertions.assertEquals(
+          expected, spark.sql(String.format("show indexes from %s", fullTable)).collectAsList());
+    } finally {
+      spark.conf().unset(DISTRIBUTED_STATISTICS_ENABLED);
+    }
   }
 
   @Test
