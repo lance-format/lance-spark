@@ -13,4 +13,4 @@
  */
 package org.lance.spark.arrow;
 
-public class TimestampMilliWriteTest extends BaseTimestampMilliWriteTest {}
+public class TimestampUnitWriteTest extends BaseTimestampUnitWriteTest {}
