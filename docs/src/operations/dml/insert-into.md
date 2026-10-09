@@ -2,6 +2,10 @@
 
 Add data to existing Lance tables using SQL or DataFrames.
 
+For existing timezone-free `timestamp[ms]` columns (exposed as `TIMESTAMP_NTZ`),
+writes preserve the millisecond storage unit and round values down to millisecond
+precision. New `TIMESTAMP_NTZ` columns continue to use microseconds.
+
 ## Basic Insert
 
 === "SQL"

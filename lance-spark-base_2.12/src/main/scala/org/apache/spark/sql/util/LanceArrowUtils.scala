@@ -53,6 +53,10 @@ object LanceArrowUtils {
   val ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY =
     FixedSizeBinaryUtils.ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY
 
+  // Original Arrow types widened or normalized by Spark. Keep these markers internal so
+  // restoring the type does not add synthetic metadata to the persisted Arrow field.
+  val LANCE_TIMESTAMP_UNIT_KEY = "_lance.timestamp_unit"
+
   // Namespaced keys used to embed child Spark Metadata on a parent StructField when the
   // child sits inside an ArrayType/MapType — Spark has no per-element metadata slot of its
   // own. The value is the child Metadata serialized as JSON (the same shape produced by
@@ -70,6 +74,7 @@ object LanceArrowUtils {
   val LANCE_UDT_CLASS_KEY = "__udt"
 
   private val LANCE_INTERNAL_METADATA_KEYS = Set(
+    LANCE_TIMESTAMP_UNIT_KEY,
     LANCE_ELEMENT_METADATA_KEY,
     LANCE_MAP_KEY_METADATA_KEY,
     LANCE_MAP_VALUE_METADATA_KEY,
@@ -242,6 +247,10 @@ object LanceArrowUtils {
 
   private def augmentTypeMarkers(builder: MetadataBuilder, field: Field): Unit = {
     field.getType match {
+      case ts: ArrowType.Timestamp
+          if ts.getUnit == TimeUnit.MILLISECOND &&
+            (ts.getTimezone == null || ts.getTimezone.isEmpty) =>
+        builder.putString(LANCE_TIMESTAMP_UNIT_KEY, ts.getUnit.name())
       case fixedSizeList: ArrowType.FixedSizeList =>
         builder.putLong(ARROW_FIXED_SIZE_LIST_SIZE_KEY, fixedSizeList.getListSize.toLong)
         if (Float16Utils.isFloat16ArrowField(field)) {
@@ -497,6 +506,15 @@ object LanceArrowUtils {
           case _ =>
             toArrowField(name, udt.sqlType, nullable, timeZoneId, metadata, largeVarTypes)
         }
+      case TimestampNTZType
+          if metadata != null && metadata.contains(LANCE_TIMESTAMP_UNIT_KEY) &&
+            metadata.getString(LANCE_TIMESTAMP_UNIT_KEY) == TimeUnit.MILLISECOND.name() =>
+        val fieldType = new FieldType(
+          nullable,
+          new ArrowType.Timestamp(TimeUnit.MILLISECOND, null),
+          null,
+          meta.asJava)
+        new Field(name, fieldType, Seq.empty[Field].asJava)
       case DateType if DateMilliUtils.hasDateMilliMetadata(metadata) =>
         val fieldType = new FieldType(
           nullable,

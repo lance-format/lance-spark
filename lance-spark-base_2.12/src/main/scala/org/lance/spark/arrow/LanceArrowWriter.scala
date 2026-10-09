@@ -122,6 +122,7 @@ object LanceArrowWriter {
       case (DateType, vector: DateMilliVector) => new DateMilliWriter(vector)
       case (TimestampType, vector: TimeStampMicroTZVector) => new TimestampWriter(vector)
       case (TimestampNTZType, vector: TimeStampMicroVector) => new TimestampNTZWriter(vector)
+      case (TimestampNTZType, vector: TimeStampMilliVector) => new TimestampMilliNTZWriter(vector)
       case (MapType(_, _, _), vector: MapVector) =>
         val structVector = vector.getDataVector.asInstanceOf[StructVector]
         val keyWriter = createFieldWriter(
@@ -433,6 +434,16 @@ private[arrow] class TimestampNTZWriter(val valueVector: TimeStampMicroVector)
   override def setNull(): Unit = {}
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
     valueVector.setSafe(count, input.getLong(ordinal))
+  }
+}
+
+private[arrow] class TimestampMilliNTZWriter(val valueVector: TimeStampMilliVector)
+  extends LanceArrowFieldWriter {
+  override def setNull(): Unit = valueVector.setNull(count)
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    // Match Spark's microsToMillis: floor rather than truncate towards zero so timestamps
+    // before the epoch lose sub-millisecond precision in the same way as positive values.
+    valueVector.setSafe(count, Math.floorDiv(input.getLong(ordinal), 1000L))
   }
 }
 
