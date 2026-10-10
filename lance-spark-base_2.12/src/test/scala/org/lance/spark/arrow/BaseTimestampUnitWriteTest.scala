@@ -66,11 +66,12 @@ abstract class BaseTimestampUnitWriteTest {
 
   private def withTable(original: Schema)(body: (SparkSession, String, String) => Unit): Unit = {
     val uri = tempDir.resolve("timestamps.lance").toString
-    Dataset.create(
-      LanceRuntime.allocator(),
-      uri,
-      original,
-      new WriteParams.Builder().build()).close()
+    Dataset.write()
+      .allocator(LanceRuntime.allocator())
+      .uri(uri)
+      .schema(original)
+      .mode(WriteParams.WriteMode.CREATE)
+      .execute().close()
     val spark = SparkSession.builder()
       .appName("timestamp-unit-write-test")
       .master("local[1]")
