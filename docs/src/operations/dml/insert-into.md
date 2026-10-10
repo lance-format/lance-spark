@@ -2,6 +2,12 @@
 
 Add data to existing Lance tables using SQL or DataFrames.
 
+Writes to existing timestamp columns preserve their Arrow unit and timezone.
+Spark uses microsecond precision: second/millisecond columns round values down,
+while nanosecond values lose sub-microsecond precision when read through Spark.
+Conversions outside the target unit's range are rejected. New timestamp columns
+continue to use microseconds.
+
 ## Basic Insert
 
 === "SQL"
