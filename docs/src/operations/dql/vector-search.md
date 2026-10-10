@@ -50,14 +50,15 @@ Use positional arguments for simple calls and Spark 3.4 compatibility.
 | `query_vector` | Array numeric literal | Yes | Query vector. |
 | `vector_column` | String | No | Vector column name. Lance defaults to `vector` when omitted. |
 | `num_results`, `limit`, or `k` | Integer | No | Number of results. Defaults to `10`. |
-| `distance_type` | String | No | Distance metric such as `l2`, `cosine`, or `dot`. |
+| `distance_type` | String | No | Distance metric: `l2` (`euclidean`), `cosine`, `dot` (`ip`, `inner_product`), or `hamming`. Aliases are normalized to the canonical name. |
 | `columns` | Array string literal | No | Output table columns. `_distance` is always included. Use `array('*')` or omit this argument for all table columns. |
 | `filter` | String | No | SQL filter expression evaluated by Lance. |
 | `offset` | Integer | No | Number of results to skip. Lance Spark requests `num_results + offset` rows from Lance before applying the offset. |
 | `version` | Long | No | Lance table version to search. |
-| `nprobes`, `ef`, `refine_factor` | Integer | No | Vector index search tuning parameters. |
+| `nprobes`, `ef` | Integer | No | Vector index search tuning parameters. Raise `nprobes` to probe more IVF partitions, which is what recovers recall lost to an approximate search. |
+| `refine_factor` | Integer | No | Over-fetch `num_results * refine_factor` candidates from the index, then re-score them against the original vectors and keep the best `num_results`. Improves accuracy for quantized indexes such as IVF_PQ, at the cost of reading the vectors back. |
 | `lower_bound`, `upper_bound` | Float | No | Distance bounds. |
-| `bypass_vector_index`, `fast_search`, `prefilter`, `with_row_id` | Boolean | No | Lance query options. `with_row_id` adds `_rowid` to the output. |
+| `bypass_vector_index`, `fast_search`, `prefilter`, `with_row_id` | Boolean | No | Lance query options. `with_row_id` adds `_rowid` to the output. `bypass_vector_index` and `fast_search` cannot both be true. |
 
 ## Output
 
@@ -65,7 +66,24 @@ The result includes the requested table columns and a nullable `_distance` float
 
 ## Execution
 
-Spark plans `VECTOR_SEARCH` as a DataSource V2 batch read with one input partition. The partition reader calls the Lance namespace `queryTable` API. With a directory namespace the search runs in the Spark process executing that reader; with a REST namespace the REST server handles the namespace request.
+By default, Spark plans `VECTOR_SEARCH` with one input partition and calls the Lance namespace
+`queryTable` API. When `spark.sql.lance.search.distributed.enabled=true`, Spark instead opens the
+dataset from its executors, searches vector-index segments and uncovered fragments in parallel,
+and globally merges their candidates. The merge sorts by the distance each task reported, so each
+task returns only its own top `num_results + offset` rows: a row outside a task's local top k
+cannot enter the global top k. `nprobes` and `refine_factor` apply per task.
+
+Distributed execution treats `nprobes` as an exact probe count. A namespace server can instead
+forward it as a lower bound and let the search probe further, in which case the two paths reach
+different recall for the same tuning. Re-check recall after enabling the flag; raise `nprobes`, or
+use `bypass_vector_index => true` for an exact baseline, if the results need to be comparable.
+
+A filtered distributed search must pass `prefilter=true`, which returns the true filtered top k.
+Namespace execution defaults to `prefilter=false` and applies the filter after choosing the top k,
+which usually returns fewer rows; a distributed plan cannot reproduce that, so omitting `prefilter`
+with a `filter` fails during planning instead of silently changing the result. `lower_bound` and
+`upper_bound` are not supported either. Disable distributed execution to run any of these through
+the namespace.
 
 ## Validation
 
