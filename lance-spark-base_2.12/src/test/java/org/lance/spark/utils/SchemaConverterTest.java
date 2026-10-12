@@ -16,7 +16,9 @@ package org.lance.spark.utils;
 import com.google.common.collect.ImmutableMap;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.MetadataBuilder;
@@ -25,6 +27,7 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -667,6 +670,63 @@ public class SchemaConverterTest {
 
     assertTrue(BlobUtils.isBlobV2SparkField(field));
     assertFalse(field.metadata().contains(BlobUtils.LANCE_ENCODING_BLOB_KEY));
+  }
+
+  @Test
+  public void testUInt32SchemaRoundtrip() {
+    ArrowType.Int uint32 = new ArrowType.Int(32, false);
+    Field value =
+        new Field(
+            "u",
+            new FieldType(
+                true, uint32, null, Collections.singletonMap("description", "unsigned count")),
+            null);
+    Field entries =
+        new Field(
+            "entries",
+            FieldType.notNullable(ArrowType.Struct.INSTANCE),
+            Arrays.asList(
+                new Field("key", FieldType.notNullable(uint32), null),
+                new Field("value", FieldType.nullable(uint32), null)));
+    Schema original =
+        new Schema(
+            Arrays.asList(
+                value,
+                new Field("signed", FieldType.nullable(new ArrowType.Int(64, true)), null),
+                new Field(
+                    "s",
+                    FieldType.nullable(ArrowType.Struct.INSTANCE),
+                    Collections.singletonList(value)),
+                new Field(
+                    "a",
+                    FieldType.nullable(ArrowType.List.INSTANCE),
+                    Collections.singletonList(value)),
+                new Field(
+                    "m",
+                    FieldType.nullable(new ArrowType.Map(false)),
+                    Collections.singletonList(entries))));
+
+    StructType sparkSchema = LanceArrowUtils.fromArrowSchema(original);
+    assertEquals(DataTypes.LongType, sparkSchema.apply("u").dataType());
+    Metadata metadata = sparkSchema.apply("u").metadata();
+    assertTrue(metadata.getBoolean(LanceArrowUtils.LANCE_UINT32_KEY()));
+    Schema restored = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false);
+    assertEquals(original, restored);
+    assertFalse(
+        restored.findField("u").getMetadata().containsKey(LanceArrowUtils.LANCE_UINT32_KEY()));
+
+    StructType plain = new StructType().add("u", DataTypes.LongType);
+    assertEquals(
+        new ArrowType.Int(64, true),
+        LanceArrowUtils.toArrowSchema(plain, "UTC", false).findField("u").getType());
+    for (DataType type :
+        Arrays.asList(DataTypes.IntegerType, DataTypes.DoubleType, DataTypes.StringType)) {
+      Field changed = LanceArrowUtils.toArrowField("changed", type, true, "UTC", metadata, false);
+      assertEquals(
+          LanceArrowUtils.toArrowField("changed", type, true, "UTC", null, false).getType(),
+          changed.getType());
+      assertFalse(changed.getMetadata().containsKey(LanceArrowUtils.LANCE_UINT32_KEY()));
+    }
   }
 
   private static StructType blobSchemaWithVersion(String fileFormatVersion) {

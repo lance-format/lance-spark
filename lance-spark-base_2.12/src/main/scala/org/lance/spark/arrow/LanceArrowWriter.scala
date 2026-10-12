@@ -98,6 +98,7 @@ object LanceArrowWriter {
       case (ShortType, vector: SmallIntVector) => new ShortWriter(vector)
       case (IntegerType, vector: IntVector) => new IntegerWriter(vector)
       case (LongType, vector: BigIntVector) => new LongWriter(vector)
+      case (LongType, vector: UInt4Vector) => new UInt32Writer(vector)
       case (LongType, vector: UInt8Vector) => new UnsignedLongWriter(vector)
       case (FloatType, vector)
           if vector.getClass.getName == "org.apache.arrow.vector.Float2Vector" =>
@@ -297,6 +298,19 @@ private[arrow] class LongWriter(val valueVector: BigIntVector) extends LanceArro
   override def setNull(): Unit = {}
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
     valueVector.setSafe(count, input.getLong(ordinal))
+  }
+}
+
+private[arrow] class UInt32Writer(val valueVector: UInt4Vector) extends LanceArrowFieldWriter {
+  override def setNull(): Unit = {}
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    val value = input.getLong(ordinal)
+    require(
+      value >= 0L && value <= 4294967295L,
+      s"Value $value is out of range for UInt32 field '${valueVector.getName}': " +
+        "expected 0..4294967295")
+    // UInt4Vector accepts an Int carrying the unsigned value's original 32 bits.
+    valueVector.setSafe(count, value.toInt)
   }
 }
 
