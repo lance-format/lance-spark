@@ -18,7 +18,7 @@ import org.lance.Fragment;
 import org.lance.index.Index;
 import org.lance.index.IndexCriteria;
 import org.lance.index.IndexDescription;
-import org.lance.schema.LanceField;
+import org.lance.spark.utils.FieldPathUtils;
 import org.lance.spark.utils.Utils;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -240,15 +240,12 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
       return Optional.empty();
     }
 
-    Integer columnFieldId = null;
-    for (LanceField field : dataset.getLanceSchema().fields()) {
-      if (column.equals(field.getName())) {
-        columnFieldId = field.getId();
-        break;
-      }
-    }
-    if (columnFieldId == null) {
-      return Optional.empty();
+    int columnFieldId;
+    try {
+      columnFieldId = FieldPathUtils.resolveField(dataset.getLanceSchema(), column).getId();
+    } catch (IllegalArgumentException e) {
+      throw new IllegalArgumentException(
+          "Cannot find vector column '" + column + "' in the Lance schema", e);
     }
 
     // A column can carry several vector indexes, so the choice has to match lance-core's.

@@ -27,13 +27,20 @@ import org.lance.index.vector.VectorTrainer;
 import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.search.LanceSearchQuery.SearchType;
+import org.lance.spark.utils.VectorUtils;
 
 import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.PartitionReader;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.MetadataBuilder;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -69,6 +76,7 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
   private static final String CATALOG_NAME = "lance_dist_idx";
   private static final String INDEX_NAME = "vec_idx";
   private static final String VECTOR_COLUMN = "vector";
+  private static final String NESTED_VECTOR_COLUMN = "payload.vec";
   private static final int DIM = 8;
   private static final int ROWS_PER_INSERT = 64;
   private static final int NUM_PARTITIONS = 2;
@@ -628,6 +636,49 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
     }
   }
 
+  /**
+   * lance-core and the namespace resolve {@code vector_column} by path, so the planner has to as
+   * well: a nested column matched only against top-level names would plan no unit at all under
+   * {@code fast_search}, and brute-force the whole table without it.
+   */
+  @Test
+  void nestedVectorColumnSearchesThroughItsIndex() throws Exception {
+    String table = createNestedVectorTable("idx_nested_vec");
+    List<Integer> fragments = fragmentIds(table);
+    buildSegmentPerFragment(table, fragments, NESTED_VECTOR_COLUMN, DistanceType.L2);
+
+    InputPartition[] parts =
+        planPartitions(table, 10, Boolean.TRUE, null, null, false, NESTED_VECTOR_COLUMN);
+    assertEquals(fragments.size(), parts.length, "one indexed unit per segment");
+    for (InputPartition part : parts) {
+      assertFalse(
+          ((LanceDistributedSearchInputPartition) part).getIndexSegments().isEmpty(),
+          "a nested vector column must still resolve to its index");
+    }
+
+    String sql =
+        vectorSearchSql(
+            table, 5, ", vector_column => '" + NESTED_VECTOR_COLUMN + "', fast_search => true");
+    List<Integer> expected = java.util.Arrays.asList(0, 1, 2, 3, 4);
+    assertEquals(
+        expected, ids(collect(sql, false)), "sanity: the namespace path searches the index");
+    assertEquals(expected, ids(collect(sql, true)));
+  }
+
+  @Test
+  void unresolvableVectorColumnFailsDuringPlanning() throws Exception {
+    String table = createNestedVectorTable("idx_nested_missing");
+    buildSegmentPerFragment(table, fragmentIds(table), NESTED_VECTOR_COLUMN, DistanceType.L2);
+
+    IllegalArgumentException error =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> planPartitions(table, 10, null, null, null, false, "payload.absent"));
+    assertTrue(
+        error.getMessage().contains("payload.absent"),
+        "the error must name the column that could not be resolved, got: " + error.getMessage());
+  }
+
   private String createTable(String name, int inserts) {
     String fullName = CATALOG_NAME + ".default." + name;
     spark.sql(
@@ -652,6 +703,50 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
               + ", "
               + (start + ROWS_PER_INSERT)
               + ", 1, 1)");
+    }
+    return fullName;
+  }
+
+  /**
+   * Spark DDL cannot declare a nested fixed-size-list, so the vector size travels as field metadata
+   * on {@code payload.vec} and the table is created from the DataFrame schema.
+   */
+  private String createNestedVectorTable(String name) throws Exception {
+    String fullName = CATALOG_NAME + ".default." + name;
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              new StructField("id", DataTypes.IntegerType, false, Metadata.empty()),
+              new StructField(
+                  "payload",
+                  new StructType(
+                      new StructField[] {
+                        new StructField(
+                            "vec",
+                            DataTypes.createArrayType(DataTypes.FloatType, false),
+                            false,
+                            new MetadataBuilder()
+                                .putLong(VectorUtils.ARROW_FIXED_SIZE_LIST_SIZE_KEY, DIM)
+                                .build())
+                      }),
+                  false,
+                  Metadata.empty())
+            });
+    for (int insert = 0; insert < 4; insert++) {
+      List<Row> rows = new ArrayList<>();
+      for (int id = insert * ROWS_PER_INSERT; id < (insert + 1) * ROWS_PER_INSERT; id++) {
+        List<Float> vector = new ArrayList<>();
+        for (int i = 0; i < DIM; i++) {
+          vector.add((float) id);
+        }
+        rows.add(RowFactory.create(id, RowFactory.create(vector)));
+      }
+      org.apache.spark.sql.Dataset<Row> batch = spark.createDataFrame(rows, schema).coalesce(1);
+      if (insert == 0) {
+        batch.writeTo(fullName).using("lance").create();
+      } else {
+        batch.writeTo(fullName).append();
+      }
     }
     return fullName;
   }
@@ -780,9 +875,13 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
   }
 
   private IndexParams indexParams(Dataset ds, DistanceType distanceType) {
+    return indexParams(ds, VECTOR_COLUMN, distanceType);
+  }
+
+  private IndexParams indexParams(Dataset ds, String column, DistanceType distanceType) {
     IvfBuildParams trainParams =
         new IvfBuildParams.Builder().setNumPartitions(NUM_PARTITIONS).setMaxIters(2).build();
-    float[] centroids = VectorTrainer.trainIvfCentroids(ds, VECTOR_COLUMN, trainParams);
+    float[] centroids = VectorTrainer.trainIvfCentroids(ds, column, trainParams);
     IvfBuildParams ivfParams =
         new IvfBuildParams.Builder()
             .setNumPartitions(NUM_PARTITIONS)
@@ -803,19 +902,24 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
 
   private List<Index> buildSegmentPerFragment(
       String table, List<Integer> fragments, DistanceType distanceType) throws Exception {
+    return buildSegmentPerFragment(table, fragments, VECTOR_COLUMN, distanceType);
+  }
+
+  private List<Index> buildSegmentPerFragment(
+      String table, List<Integer> fragments, String column, DistanceType distanceType)
+      throws Exception {
     try (Dataset ds = openDataset(table)) {
-      IndexParams params = indexParams(ds, distanceType);
+      IndexParams params = indexParams(ds, column, distanceType);
       List<Index> segments = new ArrayList<>();
       for (Integer fragmentId : fragments) {
         segments.add(
             ds.createIndex(
-                IndexOptions.builder(
-                        Collections.singletonList(VECTOR_COLUMN), IndexType.IVF_FLAT, params)
+                IndexOptions.builder(Collections.singletonList(column), IndexType.IVF_FLAT, params)
                     .withIndexName(INDEX_NAME)
                     .withFragmentIds(Collections.singletonList(fragmentId))
                     .build()));
       }
-      List<Index> committed = ds.commitExistingIndexSegments(INDEX_NAME, VECTOR_COLUMN, segments);
+      List<Index> committed = ds.commitExistingIndexSegments(INDEX_NAME, column, segments);
       assertTrue(ds.listIndexes().contains(INDEX_NAME), "index must be visible after commit");
       spark.sql("REFRESH TABLE " + table);
       return committed;
@@ -836,6 +940,19 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
       String distanceType,
       boolean bypassVectorIndex)
       throws Exception {
+    return planPartitions(
+        table, k, fastSearch, filter, distanceType, bypassVectorIndex, VECTOR_COLUMN);
+  }
+
+  private InputPartition[] planPartitions(
+      String table,
+      int k,
+      Boolean fastSearch,
+      String filter,
+      String distanceType,
+      boolean bypassVectorIndex,
+      String vectorColumn)
+      throws Exception {
     LanceDataset lanceTable = lanceTable(table);
     List<Float> queryVector = new ArrayList<>();
     for (int i = 0; i < DIM; i++) {
@@ -851,7 +968,7 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
             .outputColumns(Collections.singletonList("id"))
             .vector(queryVector)
             .topK(k)
-            .vectorColumn(VECTOR_COLUMN)
+            .vectorColumn(vectorColumn)
             .nprobes(NUM_PARTITIONS)
             .distanceType(distanceType)
             .filter(filter)

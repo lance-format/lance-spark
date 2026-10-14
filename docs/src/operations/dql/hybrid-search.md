@@ -49,7 +49,7 @@ Use positional arguments for simple calls and Spark 3.4 compatibility.
 | `table` | String | Yes | Catalog table name to search. |
 | `query_vector` | Array numeric literal | Yes | Query vector. |
 | `query` or `search_query` | String | Yes | Full-text query string. |
-| `vector_column` | String | No | Vector column name. Lance defaults to `vector` when omitted. |
+| `vector_column` | String | No | Vector column name, or a path such as `payload.vec` for a nested column. Lance defaults to `vector` when omitted. |
 | `search_columns` | Array string literal | No | Text columns to search. When omitted, Lance uses the indexed columns configured for the FTS index. |
 | `num_results`, `limit`, or `k` | Integer | No | Number of final reranked results. Defaults to `10`. |
 | `candidates`, `num_candidates`, or `candidate_count` | Integer | No | Number of rows to fetch from each side before reranking. Defaults to `num_results + offset`. Values below `num_results + offset` are raised to that minimum. |

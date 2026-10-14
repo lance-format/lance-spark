@@ -48,7 +48,7 @@ Use positional arguments for simple calls and Spark 3.4 compatibility.
 |----------|------|----------|-------------|
 | `table` | String | Yes | Catalog table name to search. |
 | `query_vector` | Array numeric literal | Yes | Query vector. |
-| `vector_column` | String | No | Vector column name. Lance defaults to `vector` when omitted. |
+| `vector_column` | String | No | Vector column name, or a path such as `payload.vec` for a nested column. Lance defaults to `vector` when omitted. |
 | `num_results`, `limit`, or `k` | Integer | No | Number of results. Defaults to `10`. |
 | `distance_type` | String | No | Distance metric: `l2` (`euclidean`), `cosine`, `dot` (`ip`, `inner_product`), or `hamming`. Aliases are normalized to the canonical name. |
 | `columns` | Array string literal | No | Output table columns. `_distance` is always included. Use `array('*')` or omit this argument for all table columns. |
