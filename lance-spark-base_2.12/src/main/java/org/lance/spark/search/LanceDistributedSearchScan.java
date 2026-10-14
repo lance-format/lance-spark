@@ -398,13 +398,6 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
   }
 
   /**
-   * Splitting a search into indexed and flat units needs to know which fragments each index segment
-   * covers. Indices written before Lance 0.8 did not persist that bitmap, and lance-core refuses
-   * the same plan for the same reason - {@code Dataset::unindexed_fragments} in
-   * rust/lance/src/index.rs returns "Please upgrade lance to 0.8+ to use this function" - so
-   * namespace execution fails on these datasets too.
-   */
-  /**
    * Whether an index may answer a query asking for {@code requested}. An omitted metric accepts any
    * index. A requested one needs a resolved, equal index metric: an unverified segment handed to
    * {@code indexSegments(...)} makes lance-core fail the task rather than fall back, so losing the
@@ -418,6 +411,13 @@ public class LanceDistributedSearchScan implements Scan, Batch, Serializable {
     return indexMetric.isPresent() && requested.equals(indexMetric.get());
   }
 
+  /**
+   * Splitting a search into indexed and flat units needs to know which fragments each index segment
+   * covers. Indices written before Lance 0.8 did not persist that bitmap, and lance-core refuses
+   * the same plan for the same reason - {@code Dataset::unindexed_fragments} in
+   * rust/lance/src/index.rs returns "Please upgrade lance to 0.8+ to use this function" - so
+   * namespace execution fails on these datasets too.
+   */
   static Set<Integer> requireFragmentCoverage(
       String indexName, Optional<List<Integer>> fragmentIds) {
     return fragmentIds

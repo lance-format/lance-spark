@@ -139,8 +139,8 @@ public class LanceSearchQuery implements Serializable {
 
   /**
    * Read options for opening the dataset outside the driver. Only the distributed search path needs
-   * them; a search served by {@code LanceNamespace.queryTable} never opens the dataset and leaves
-   * this unset.
+   * them, but {@code vectorSearch} sets them before knowing which path runs, so the single
+   * namespace partition carries them too. The hybrid and full-text paths leave this unset.
    */
   public LanceSparkReadOptions getReadOptions() {
     return readOptions;
