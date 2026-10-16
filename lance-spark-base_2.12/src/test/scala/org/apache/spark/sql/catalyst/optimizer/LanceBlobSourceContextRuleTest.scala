@@ -136,7 +136,8 @@ class LanceBlobSourceContextRuleTest {
     // every (command, relation) configuration.
     val target = lanceTable("file:///target.lance", blobSchema)
     val source = lanceTable("file:///src.lance", blobSchema)
-    val carried = Map("dataset_uri" -> "file:///target.lance")
+    // Mixed case: Spark compares the relation's case-sensitive keys to the command's.
+    val carried = Map("Dataset_URI" -> "file:///target.lance")
     val configs = Seq(
       (Map.empty[String, String], Map.empty[String, String]), // SQL / writeTo without options
       (carried, carried), // V1 save(): both channels, equal
@@ -152,7 +153,12 @@ class LanceBlobSourceContextRuleTest {
       val plan = AppendData.byName(targetRelation, relation(source), commandOptions)
       val result = rule(plan).asInstanceOf[AppendData]
       val command = result.writeOptions
-      val ds = result.table.asInstanceOf[DataSourceV2Relation].options.asScala.toMap
+      val ds = result.table
+        .asInstanceOf[DataSourceV2Relation]
+        .options
+        .asCaseSensitiveMap()
+        .asScala
+        .toMap
       assertTrue(
         command.contains(key) || ds.contains(key),
         s"context not attached for command=$commandOptions relation=$relationOptions")
@@ -160,25 +166,6 @@ class LanceBlobSourceContextRuleTest {
         command == ds || command.isEmpty || ds.isEmpty,
         s"V2Writes.mergeOptions invariant violated: command=$command ds=$ds")
     }
-  }
-
-  @Test
-  def annotationPreservesRelationOptionKeyCase(): Unit = {
-    // V2Writes.mergeOptions (Spark 4.x) compares keys case-sensitively, so lowercasing them breaks
-    // the write.
-    val targetRelation = DataSourceV2Relation.create(
-      lanceTable("file:///target.lance", blobSchema),
-      None,
-      None,
-      new CaseInsensitiveStringMap(Map("Dataset_URI" -> "file:///target.lance").asJava))
-    val plan = AppendData.byName(
-      targetRelation,
-      relation(lanceTable("file:///src.lance", blobSchema)),
-      Map.empty[String, String])
-    val result = rule(plan).asInstanceOf[AppendData]
-    val keys = result.table.asInstanceOf[DataSourceV2Relation].options.asCaseSensitiveMap().keySet()
-    assertTrue(keys.contains("Dataset_URI"), s"original key casing lost: $keys")
-    assertTrue(keys.contains(key))
   }
 
   @Test
