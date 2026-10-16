@@ -163,6 +163,25 @@ class LanceBlobSourceContextRuleTest {
   }
 
   @Test
+  def annotationPreservesRelationOptionKeyCase(): Unit = {
+    // V2Writes.mergeOptions (Spark 4.x) compares keys case-sensitively, so lowercasing them breaks
+    // the write.
+    val targetRelation = DataSourceV2Relation.create(
+      lanceTable("file:///target.lance", blobSchema),
+      None,
+      None,
+      new CaseInsensitiveStringMap(Map("Dataset_URI" -> "file:///target.lance").asJava))
+    val plan = AppendData.byName(
+      targetRelation,
+      relation(lanceTable("file:///src.lance", blobSchema)),
+      Map.empty[String, String])
+    val result = rule(plan).asInstanceOf[AppendData]
+    val keys = result.table.asInstanceOf[DataSourceV2Relation].options.asCaseSensitiveMap().keySet()
+    assertTrue(keys.contains("Dataset_URI"), s"original key casing lost: $keys")
+    assertTrue(keys.contains(key))
+  }
+
+  @Test
   def annotatesExactlyTheSupportedWriteCommands(): Unit = {
     // The blob-write command matrix (single source of truth: BlobPlanUtils.V2BlobWrite):
     //   AppendData                 -> context here, copy rewrite in LanceBlobV2CopyThroughRule
