@@ -16,6 +16,7 @@ package org.lance.spark.utils;
 import com.google.common.collect.ImmutableMap;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
@@ -25,6 +26,7 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -703,5 +705,54 @@ public class SchemaConverterTest {
     assertTrue(
         e.getMessage().contains(expectedFragment),
         () -> "expected message to contain '" + expectedFragment + "': " + e.getMessage());
+  }
+
+  @Test
+  public void testUnsignedIntWidthSurvivesSchemaRoundTrip() {
+    // Spark has no unsigned integer types, so a Lance UInt column is widened to a signed Spark
+    // type on read. Without a width marker the writeback silently emits a signed Arrow type, which
+    // then fails validation against the existing Lance schema on any round trip (UPDATE, ADD
+    // COLUMNS FROM, read -> transform -> write).
+    Schema arrowSchema =
+        new Schema(
+            Arrays.asList(
+                unsignedIntField("u8", 8, false),
+                unsignedIntField("u16", 16, false),
+                unsignedIntField("u32", 32, false),
+                unsignedIntField("u64", 64, false),
+                unsignedIntField("i64", 64, true)));
+
+    // Read widens every unsigned width to the smallest signed Spark type that holds it.
+    StructType sparkSchema = LanceArrowUtils.fromArrowSchema(arrowSchema);
+    assertEquals(DataTypes.ShortType, sparkSchema.apply("u8").dataType());
+    assertEquals(DataTypes.IntegerType, sparkSchema.apply("u16").dataType());
+    assertEquals(DataTypes.LongType, sparkSchema.apply("u32").dataType());
+    assertEquals(DataTypes.LongType, sparkSchema.apply("u64").dataType());
+    assertEquals(DataTypes.LongType, sparkSchema.apply("i64").dataType());
+
+    // Writeback reproduces the original unsigned Arrow types.
+    Schema back = LanceArrowUtils.toArrowSchema(sparkSchema, null, true);
+    assertUnsignedInt(back, "u8", 8);
+    assertUnsignedInt(back, "u16", 16);
+    assertUnsignedInt(back, "u32", 32);
+    assertUnsignedInt(back, "u64", 64);
+    // The genuinely signed int64 carries no marker and must stay signed, so a marker copied onto
+    // an unrelated column cannot mint a bogus unsigned type.
+    ArrowType.Int i64 = (ArrowType.Int) back.findField("i64").getType();
+    assertEquals(64, i64.getBitWidth());
+    assertTrue(i64.getIsSigned());
+  }
+
+  private static Field unsignedIntField(String name, int bitWidth, boolean signed) {
+    return new Field(
+        name,
+        new FieldType(true, new ArrowType.Int(bitWidth, signed), null, null),
+        Collections.emptyList());
+  }
+
+  private static void assertUnsignedInt(Schema schema, String name, int expectedWidth) {
+    ArrowType.Int type = (ArrowType.Int) schema.findField(name).getType();
+    assertEquals(expectedWidth, type.getBitWidth());
+    assertFalse(type.getIsSigned());
   }
 }
