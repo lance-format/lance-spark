@@ -7,7 +7,11 @@ Declare primary key columns on a Lance table.
 
 ## Overview
 
-The `SET UNENFORCED PRIMARY KEY` command records the primary key columns of a table as schema field metadata. Uniqueness is **not** enforced: no write path validates the declared columns, so duplicate values are accepted.
+The `SET UNENFORCED PRIMARY KEY` command records the primary key columns of a table as schema field metadata. The declaration does **not** enforce uniqueness or remove existing duplicates.
+
+Position-delta writes use the declared key to detect concurrent inserts of the same key. For example, concurrent `MERGE INTO` statements cannot both commit inserts of the same previously absent key. A conflicting commit fails instead of creating duplicate rows.
+
+Small writes use an exact set of key hashes. Large writes use a bounded Bloom filter, which can report conflicts for disjoint keys. This protection does not validate duplicates within one input or enforce uniqueness for ordinary appends.
 
 ## Syntax
 
