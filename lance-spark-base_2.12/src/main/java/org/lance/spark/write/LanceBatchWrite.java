@@ -165,9 +165,7 @@ public class LanceBatchWrite implements BatchWrite {
             .flatMap(List::stream)
             .collect(Collectors.toList());
 
-    Schema arrowSchema =
-        LanceArrowUtils.toArrowSchema(schema, "UTC", true, writeOptions.isUseLargeVarTypes());
-    boolean isOverwrite = overwrite || writeOptions.isOverwrite();
+    Schema arrowSchema = getCommitSchema();
 
     // Boxed: null means unset (inherit in lance-core); see LanceSparkWriteOptions.
     final Boolean enableStableRowIds = writeOptions.getEnableStableRowIds();
@@ -200,7 +198,7 @@ public class LanceBatchWrite implements BatchWrite {
               .get();
       try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
         Operation operation;
-        if (isOverwrite) {
+        if (isOverwrite()) {
           operation = Overwrite.builder().fragments(fragments).schema(arrowSchema).build();
         } else {
           operation = Append.builder().fragments(fragments).build();
@@ -250,21 +248,44 @@ public class LanceBatchWrite implements BatchWrite {
   }
 
   /**
+   * Returns whether {@link #commit(WriterCommitMessage[])} replaces the table's schema with {@link
+   * #getCommitSchema()}. This is true for an overwrite, including one requested through the {@code
+   * write_mode} option while the query appends, and for a staged create or replace, which always
+   * commits as an overwrite. Otherwise the commit appends and keeps the table's schema.
+   */
+  @Evolving
+  public boolean isOverwrite() {
+    return stagedCommit != null || overwrite || writeOptions.isOverwrite();
+  }
+
+  /**
+   * Returns the Arrow schema that {@link #commit(WriterCommitMessage[])} commits when {@link
+   * #isOverwrite()} is true. It is derived from the write's Spark schema and resolved options, such
+   * as {@code use_large_var_types}, which an external writer cannot see otherwise.
+   */
+  @Evolving
+  public Schema getCommitSchema() {
+    return LanceArrowUtils.toArrowSchema(schema, "UTC", true, writeOptions.isUseLargeVarTypes());
+  }
+
+  /**
    * Creates an opaque commit message for uncommitted fragments written for a target dataset.
    *
    * <p>The returned message must be passed to {@link #commit(WriterCommitMessage[])} on a {@code
    * LanceBatchWrite} for the same target dataset.
    *
-   * <p>{@code commit} does not check that the field ids in the fragments' data files match the
-   * schema it commits, and a mismatched column silently reads back as null. An append keeps the
-   * table's current schema, while an overwrite commits a schema whose field ids are reassigned by
-   * position. Write the fragments the same way {@link LanceDataWriter} does:
+   * <p>{@code commit} does not check that the fragments match what it commits, and a mismatch can
+   * silently read back as wrong values or leave the table unreadable. Write the fragments the same
+   * way {@link LanceDataWriter} does, and pick the write mode from {@link #isOverwrite()} rather
+   * than from the query:
    *
    * <ul>
-   *   <li>for an append, write in {@code WriteMode.APPEND}, not the default {@code
-   *       WriteMode.CREATE}; and
-   *   <li>for an overwrite, write in {@code WriteMode.OVERWRITE} without passing the table's schema
-   *       to {@code WriteFragmentBuilder.schema(...)}.
+   *   <li>if {@link #isOverwrite()} is false, write in {@code WriteMode.APPEND}, not the default
+   *       {@code WriteMode.CREATE}, so the data files use the table's field ids; and
+   *   <li>if it is true, write in {@code WriteMode.OVERWRITE} without passing the table's schema to
+   *       {@code WriteFragmentBuilder.schema(...)}, and with the column types of {@link
+   *       #getCommitSchema()}. Timestamps must use the same unit, and strings and binaries the same
+   *       offset width. The stream may leave out a timestamp's time zone.
    * </ul>
    *
    * @param fragments uncommitted fragments produced by a task
