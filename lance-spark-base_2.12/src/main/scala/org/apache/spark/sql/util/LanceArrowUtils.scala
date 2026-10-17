@@ -53,6 +53,9 @@ object LanceArrowUtils {
   val ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY =
     FixedSizeBinaryUtils.ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY
 
+  // Preserve the original UInt32 type while Spark represents its values as LongType.
+  val LANCE_UINT32_KEY = "_lance.uint32"
+
   // Namespaced keys used to embed child Spark Metadata on a parent StructField when the
   // child sits inside an ArrayType/MapType — Spark has no per-element metadata slot of its
   // own. The value is the child Metadata serialized as JSON (the same shape produced by
@@ -70,6 +73,7 @@ object LanceArrowUtils {
   val LANCE_UDT_CLASS_KEY = "__udt"
 
   private val LANCE_INTERNAL_METADATA_KEYS = Set(
+    LANCE_UINT32_KEY,
     LANCE_ELEMENT_METADATA_KEY,
     LANCE_MAP_KEY_METADATA_KEY,
     LANCE_MAP_VALUE_METADATA_KEY,
@@ -224,7 +228,7 @@ object LanceArrowUtils {
   /**
    * Build Spark Metadata for the given Arrow field, capturing type information that Spark's
    * DataType cannot represent on its own (Date(MILLISECOND), LargeUtf8, Float16, FixedSizeList
-   * size). For Arrow types that nest a Spark DataType lacking a metadata slot for its element
+   * size, UInt32). For Arrow types that nest a Spark DataType lacking a metadata slot for its element
    * (List, FixedSizeList, Map), the child's Spark Metadata is serialized as JSON under
    * `_lance.element`, `_lance.key`, and `_lance.value` so writeback can reconstruct it.
    */
@@ -242,6 +246,8 @@ object LanceArrowUtils {
 
   private def augmentTypeMarkers(builder: MetadataBuilder, field: Field): Unit = {
     field.getType match {
+      case int: ArrowType.Int if !int.getIsSigned && int.getBitWidth == 32 =>
+        builder.putBoolean(LANCE_UINT32_KEY, true)
       case fixedSizeList: ArrowType.FixedSizeList =>
         builder.putLong(ARROW_FIXED_SIZE_LIST_SIZE_KEY, fixedSizeList.getListSize.toLong)
         if (Float16Utils.isFloat16ArrowField(field)) {
@@ -497,6 +503,11 @@ object LanceArrowUtils {
           case _ =>
             toArrowField(name, udt.sqlType, nullable, timeZoneId, metadata, largeVarTypes)
         }
+      case LongType
+          if metadata != null && metadata.contains(LANCE_UINT32_KEY)
+            && metadata.getBoolean(LANCE_UINT32_KEY) =>
+        val fieldType = new FieldType(nullable, new ArrowType.Int(32, false), null, meta.asJava)
+        new Field(name, fieldType, Seq.empty[Field].asJava)
       case DateType if DateMilliUtils.hasDateMilliMetadata(metadata) =>
         val fieldType = new FieldType(
           nullable,

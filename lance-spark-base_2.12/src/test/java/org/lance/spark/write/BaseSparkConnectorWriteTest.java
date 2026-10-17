@@ -20,9 +20,12 @@ import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.UInt4Vector;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
@@ -48,7 +51,9 @@ import java.nio.file.Path;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 import static org.apache.spark.sql.functions.col;
@@ -57,6 +62,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.lance.Dataset.write;
 
 public abstract class BaseSparkConnectorWriteTest {
   /** Version Lance's STABLE release selector resolves to (lance-format/lance#8657). */
@@ -866,5 +872,172 @@ public abstract class BaseSparkConnectorWriteTest {
         org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
       assertEquals("element", ds.getSchema().findField("tags").getChildren().get(0).getName());
     }
+  }
+
+  @Test
+  public void appendAfterTransformPreservesUInt32(TestInfo testInfo) throws Exception {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
+    String table = "lance.`" + path + "`";
+    Schema schema = uint32Schema();
+    createDataset(path, schema);
+    spark.sql(
+        "INSERT INTO "
+            + table
+            + " VALUES (0, NULL), (1, 0L), (2, 2147483647L), "
+            + "(3, 2147483648L), (4, 4294967295L)");
+    // Transform values as well as ids: the existing target supplies the UInt32 type.
+    spark
+        .table(table)
+        .filter("id <= 2")
+        .selectExpr("id + 5 AS id", "u + 2147483648L AS u")
+        .writeTo(table)
+        .append();
+    List<Long> expected =
+        Arrays.asList(
+            null, 0L, 2147483647L, 2147483648L, 4294967295L, null, 2147483648L, 4294967295L);
+    assertUInt32Dataset(path, schema, expected);
+
+    // A new dataset has no target schema, so a direct reference must carry its own type metadata.
+    String copyPath = path + "_copy";
+    spark
+        .read()
+        .format(LanceDataSource.name)
+        .load(path)
+        .selectExpr("id", "u AS u")
+        .write()
+        .format(LanceDataSource.name)
+        .save(copyPath);
+    assertUInt32Dataset(copyPath, schema, expected);
+  }
+
+  @Test
+  public void uint32OutOfRangeWriteDoesNotCommit(TestInfo testInfo) throws Exception {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
+    String table = "lance.`" + path + "`";
+    Schema schema = uint32Schema();
+    createDataset(path, schema);
+    spark.sql("INSERT INTO " + table + " VALUES (0, 0L)");
+    LanceSparkReadOptions options = LanceSparkReadOptions.builder().datasetUri(path).build();
+    long version;
+    try (var dataset = Utils.openDatasetBuilder(options).build()) {
+      version = dataset.version();
+    }
+    for (long value : new long[] {-1L, 4294967296L}) {
+      Exception error =
+          assertThrows(
+              Exception.class,
+              () ->
+                  spark.sql(
+                      "INSERT INTO "
+                          + table
+                          + " VALUES (1, 1L), (2, CAST("
+                          + value
+                          + " AS BIGINT))"));
+      Throwable cause = error;
+      while (cause.getCause() != null) {
+        cause = cause.getCause();
+      }
+      assertTrue(cause instanceof IllegalArgumentException);
+      assertTrue(
+          cause.getMessage().contains("Value " + value + " is out of range for UInt32 field 'u'"));
+      assertTrue(cause.getMessage().contains("0..4294967295"));
+      try (var dataset = Utils.openDatasetBuilder(options).build()) {
+        assertEquals(version, dataset.version());
+      }
+      assertUInt32Dataset(path, schema, Collections.singletonList(0L));
+    }
+  }
+
+  @Test
+  public void insertPreservesNestedUInt32(TestInfo testInfo) {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
+    String table = "lance.`" + path + "`";
+    Field value = new Field("u", FieldType.nullable(new ArrowType.Int(32, false)), null);
+    Schema schema =
+        new Schema(
+            Arrays.asList(
+                uint32Schema().findField("id"),
+                new Field(
+                    "s",
+                    FieldType.nullable(ArrowType.Struct.INSTANCE),
+                    Collections.singletonList(value)),
+                new Field(
+                    "a",
+                    FieldType.nullable(ArrowType.List.INSTANCE),
+                    Collections.singletonList(new Field("item", value.getFieldType(), null)))));
+    createDataset(path, schema);
+    spark.sql(
+        "INSERT INTO "
+            + table
+            + " VALUES "
+            + "(0, CAST(NULL AS STRUCT<u: BIGINT>), CAST(NULL AS ARRAY<BIGINT>)), "
+            + "(1, named_struct('u', 4294967295L), array(NULL, 4294967295L)), "
+            + "(2, named_struct('u', 2147483648L), CAST(array() AS ARRAY<BIGINT>))");
+    List<Row> rows = spark.table(table).selectExpr("id", "s.u", "a").orderBy("id").collectAsList();
+    assertEquals(3, rows.size());
+    assertTrue(rows.get(0).isNullAt(1));
+    assertTrue(rows.get(0).isNullAt(2));
+    assertEquals(4294967295L, rows.get(1).getLong(1));
+    assertEquals(Arrays.asList(null, 4294967295L), rows.get(1).getList(2));
+    assertEquals(2147483648L, rows.get(2).getLong(1));
+    assertTrue(rows.get(2).getList(2).isEmpty());
+    try (var dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.builder().datasetUri(path).build())
+            .build()) {
+      assertEquals(schema, dataset.getSchema());
+      assertEquals(3L, dataset.countRows());
+    }
+  }
+
+  private static Schema uint32Schema() {
+    return new Schema(
+        Arrays.asList(
+            new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
+            new Field("u", FieldType.nullable(new ArrowType.Int(32, false)), null)));
+  }
+
+  private static void createDataset(String path, Schema schema) {
+    write()
+        .allocator(LanceRuntime.allocator())
+        .uri(path)
+        .schema(schema)
+        .mode(WriteParams.WriteMode.CREATE)
+        .execute()
+        .close();
+  }
+
+  private static void assertUInt32Dataset(String path, Schema schema, List<Long> expected)
+      throws Exception {
+    Map<Integer, Long> nativeValues = new HashMap<>();
+    try (var dataset =
+            Utils.openDatasetBuilder(LanceSparkReadOptions.builder().datasetUri(path).build())
+                .build();
+        var scanner = dataset.newScan();
+        var reader = scanner.scanBatches()) {
+      assertEquals(schema, dataset.getSchema());
+      assertEquals(expected.size(), dataset.countRows());
+      while (reader.loadNextBatch()) {
+        var batch = reader.getVectorSchemaRoot();
+        IntVector ids = (IntVector) batch.getVector("id");
+        UInt4Vector values = (UInt4Vector) batch.getVector("u");
+        for (int i = 0; i < batch.getRowCount(); i++) {
+          nativeValues.put(
+              ids.get(i), values.isNull(i) ? null : Integer.toUnsignedLong(values.get(i)));
+        }
+      }
+    }
+    Map<Integer, Long> expectedValues = new HashMap<>();
+    for (int i = 0; i < expected.size(); i++) {
+      expectedValues.put(i, expected.get(i));
+    }
+    assertEquals(expectedValues, nativeValues);
+    assertEquals(
+        expected,
+        spark.read().format(LanceDataSource.name).load(path).orderBy("id").collectAsList().stream()
+            .map(row -> row.isNullAt(1) ? null : row.getLong(1))
+            .collect(Collectors.toList()));
   }
 }
