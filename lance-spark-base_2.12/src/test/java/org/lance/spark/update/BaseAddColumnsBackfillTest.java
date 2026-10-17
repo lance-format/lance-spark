@@ -148,6 +148,94 @@ public abstract class BaseAddColumnsBackfillTest {
   }
 
   @Test
+  public void testNestedColumnAcrossArrowBatches() {
+    spark.sql(String.format("create table %s (id bigint, text string) using lance", fullTable));
+    spark.sql(
+        String.format(
+            "insert into %s select /*+ COALESCE(1) */ id, concat('label-', id) from range(8201)",
+            fullTable));
+    spark.sql(
+        String.format(
+            "create temporary view nested_source as select _rowaddr, _fragid, "
+                + "array(named_struct('label', text)) as labels from %s",
+            fullTable));
+
+    spark.sql(String.format("alter table %s add columns labels from nested_source", fullTable));
+
+    assertEquals(8201L, spark.table(fullTable).count());
+    assertEquals(
+        0L,
+        spark
+            .sql(
+                String.format(
+                    "select * from %s where size(labels) != 1 "
+                        + "or not (labels[0].label <=> concat('label-', id))",
+                    fullTable))
+            .count());
+  }
+
+  /**
+   * Fragment f holds ids {f, f + 6}, so ordering the source by id interleaves the fragments and
+   * only the connector's own {@code _fragid} ordering hands each fragment to the single write task
+   * in one run. ADD COLUMNS must backfill every fragment exactly once, keep the row count and the
+   * existing values, and carry NULL values in the new nested column through.
+   */
+  @Test
+  public void testAddColumnsAcrossManyFragmentsInOneTask() {
+    spark.conf().set("spark.sql.shuffle.partitions", "1");
+    spark.sql(String.format("create table %s (id bigint, text string) using lance", fullTable));
+    for (int i = 0; i < 6; i++) {
+      spark.sql(
+          String.format(
+              "insert into %s select /*+ COALESCE(1) */ id * 6 + %d, "
+                  + "concat('text-', id * 6 + %d) from range(2)",
+              fullTable, i, i));
+    }
+    assertEquals(12L, spark.table(fullTable).count());
+    assertEquals(6L, spark.sql("select distinct _fragid from " + fullTable).count());
+
+    spark.sql(
+        String.format(
+            "create temporary view many_fragments_source as select _rowaddr, _fragid, "
+                + "case when id %% 2 = 1 then null "
+                + "else array(named_struct('label', concat('label-', id))) end as labels "
+                + "from %s order by id",
+            fullTable));
+    spark.sql(
+        String.format("alter table %s add columns labels from many_fragments_source", fullTable));
+
+    assertEquals(12L, spark.table(fullTable).count());
+    assertEquals(
+        12L, spark.sql(String.format("select count(*) from %s", fullTable)).first().getLong(0));
+    assertEquals(
+        0L,
+        spark
+            .sql(
+                String.format(
+                    "select * from %s where not (labels <=> case when id %% 2 = 1 then null "
+                        + "else array(named_struct('label', concat('label-', id))) end)",
+                    fullTable))
+            .count());
+    for (Row row :
+        spark
+            .sql(
+                String.format(
+                    "select id, text, labels is null, labels[0].label from %s order by id",
+                    fullTable))
+            .collectAsList()) {
+      long id = row.getLong(0);
+      assertEquals("text-" + id, row.getString(1), "text column for id=" + id);
+      if (id % 2 == 1) {
+        assertTrue(row.getBoolean(2), "labels must stay NULL for id=" + id);
+        assertTrue(row.isNullAt(3), "labels[0].label must be NULL for id=" + id);
+      } else {
+        assertTrue(!row.getBoolean(2), "labels must not be NULL for id=" + id);
+        assertEquals("label-" + id, row.getString(3), "labels[0].label for id=" + id);
+      }
+    }
+  }
+
+  @Test
   public void testWithSql() {
     prepareDataset();
 
