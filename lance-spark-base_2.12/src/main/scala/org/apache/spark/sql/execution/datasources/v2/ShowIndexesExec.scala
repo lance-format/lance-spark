@@ -19,16 +19,15 @@ import org.apache.spark.sql.catalyst.plans.logical.ShowIndexesOutputType
 import org.apache.spark.sql.catalyst.util.GenericArrayData
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.unsafe.types.UTF8String
-import org.lance.spark.LanceDataset
+import org.lance.index.IndexSegmentStatistics
+import org.lance.spark.{LanceDataset, LanceSparkReadOptions}
+import org.lance.spark.internal.ExecutorNamespace
 import org.lance.spark.utils.{FieldPathUtils, Utils}
+
+import java.util.UUID
 
 import scala.collection.JavaConverters._
 
-/**
- * Physical execution of SHOW INDEXES for Lance datasets.
- *
- * This command lists all indexes defined on the underlying Lance table.
- */
 case class ShowIndexesExec(
     catalog: TableCatalog,
     ident: Identifier) extends LeafV2CommandExec {
@@ -43,6 +42,9 @@ case class ShowIndexesExec(
     }
 
     val readOptions = lanceDataset.readOptions()
+    val distributed = session.conf
+      .get(ShowIndexesExec.DISTRIBUTED_STATISTICS_ENABLED, "false")
+      .toBoolean
 
     val dataset = Utils.openDatasetBuilder(readOptions).build()
     try {
@@ -52,6 +54,30 @@ case class ShowIndexesExec(
         .toSeq
         .sortBy(_._1)
       val lanceSchema = dataset.getLanceSchema()
+      val statisticsByName: Map[String, Seq[IndexSegmentStatistics]] =
+        if (distributed && indexes.nonEmpty) {
+          val pinnedReadOptions = IndexUtils.pinVersion(readOptions, dataset)
+          val (namespaceImpl, namespaceProperties, _, initialStorageOptions) =
+            IndexUtils.extractNamespaceInfo(catalog, lanceDataset, readOptions)
+          val segments = indexes.flatMap { case (name, indexSegments) =>
+            indexSegments.map(segment => (name, segment.uuid()))
+          }
+          val partitions = math.min(segments.size, session.sparkContext.defaultParallelism)
+          session.sparkContext.parallelize(segments, partitions)
+            .mapPartitions { work =>
+              ShowIndexesExec.collectSegmentStatistics(
+                work,
+                pinnedReadOptions,
+                namespaceImpl,
+                namespaceProperties,
+                initialStorageOptions)
+            }
+            .collect()
+            .groupBy(_._1)
+            .map { case (name, results) => name -> results.map(_._2).toSeq }
+        } else {
+          Map.empty
+        }
 
       indexes.map { case (_, indexSegments) =>
         val idx = indexSegments.head
@@ -69,7 +95,12 @@ case class ShowIndexesExec(
           }
 
         val name = idx.name()
-        val stats = dataset.getIndexStatistics(name)
+        val stats =
+          if (distributed) {
+            dataset.getIndexStatisticsFromSegments(name, statisticsByName(name).asJava)
+          } else {
+            dataset.getIndexStatistics(name)
+          }
         val indexTypeValue = stats.get("index_type")
         val indexTypeUtf8 =
           if (indexTypeValue == null) {
@@ -132,6 +163,41 @@ case class ShowIndexesExec(
       }
     } finally {
       dataset.close()
+    }
+  }
+}
+
+object ShowIndexesExec {
+  val DISTRIBUTED_STATISTICS_ENABLED = "spark.lance.indexStatistics.distributed.enabled"
+
+  private def collectSegmentStatistics(
+      segments: Iterator[(String, UUID)],
+      readOptions: LanceSparkReadOptions,
+      namespaceImpl: Option[String],
+      namespaceProperties: Option[Map[String, String]],
+      initialStorageOptions: Option[Map[String, String]])
+      : Iterator[(String, IndexSegmentStatistics)] = {
+    if (!segments.hasNext) {
+      return Iterator.empty
+    }
+    val namespace = ExecutorNamespace.acquire(
+      readOptions,
+      namespaceImpl.orNull,
+      namespaceProperties.map(_.asJava).orNull)
+    try {
+      val dataset = Utils.openDatasetBuilder(readOptions)
+        .initialStorageOptions(initialStorageOptions.map(_.asJava).orNull)
+        .build()
+      try {
+        segments.toVector.groupBy(_._1).iterator.flatMap { case (name, work) =>
+          dataset.getIndexSegmentStatistics(name, work.map(_._2).asJava).asScala
+            .map(statistics => name -> statistics)
+        }.toVector.iterator
+      } finally {
+        dataset.close()
+      }
+    } finally {
+      namespace.close()
     }
   }
 }

@@ -59,6 +59,14 @@ The following features require the Lance Spark SQL extension to be enabled:
 - [OPTIMIZE INDEX](operations/ddl/optimize-index.md) - Incrementally maintain a named index
 - [VACUUM](operations/ddl/vacuum.md) - Remove old versions and reclaim storage space
 
+## Distributed index statistics
+
+`spark.lance.indexStatistics.distributed.enabled` controls whether
+[SHOW INDEXES](operations/ddl/show-indexes.md#distributed-statistics) collects physical
+segment statistics on executors. It defaults to `false`. When enabled, work is distributed
+both across logical indexes and within multi-segment indexes, using at most
+`SparkContext.defaultParallelism` tasks. Result columns are unchanged.
+
 ## Basic Setup
 
 Configure Spark with the `LanceNamespaceSparkCatalog` by setting the appropriate Spark catalog implementation
