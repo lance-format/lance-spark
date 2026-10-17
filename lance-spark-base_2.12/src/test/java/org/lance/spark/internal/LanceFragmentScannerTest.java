@@ -25,6 +25,7 @@ import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Optional;
 
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.spark.sql.catalyst.expressions.MetadataAttribute;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
@@ -154,16 +155,26 @@ public class LanceFragmentScannerTest {
 
   @Test
   public void testGetColumnNamesExcludesScore() throws Exception {
-    // _score is auto-projected by Lance when a full-text query is set, so it must not be requested
-    // in the native column projection.
     StructType schema =
         new StructType(
             new StructField[] {
               DataTypes.createStructField("id", DataTypes.LongType, true),
-              DataTypes.createStructField(LanceConstant.SCORE, DataTypes.FloatType, true)
+              DataTypes.createStructField(
+                  LanceConstant.SCORE,
+                  DataTypes.FloatType,
+                  true,
+                  MetadataAttribute.apply(LanceConstant.SCORE, DataTypes.FloatType, true)
+                      .metadata())
             });
 
     assertEquals(Arrays.asList("id"), callGetColumnNames(schema));
+  }
+
+  @Test
+  public void testGetColumnNamesIncludesStoredScore() throws Exception {
+    StructType schema =
+        new StructType().add("id", DataTypes.LongType).add("_score", DataTypes.FloatType);
+    assertEquals(Arrays.asList("id", "_score"), callGetColumnNames(schema));
   }
 
   @Test

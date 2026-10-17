@@ -19,11 +19,15 @@ import org.lance.Ref;
 import org.lance.Tag;
 import org.lance.Version;
 import org.lance.namespace.LanceNamespace;
+import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkCatalogConfig;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.LanceSparkWriteOptions;
+
+import org.apache.spark.sql.catalyst.expressions.MetadataAttribute;
+import org.apache.spark.sql.types.StructField;
 
 import java.time.Instant;
 import java.util.Collections;
@@ -31,6 +35,18 @@ import java.util.List;
 import java.util.Map;
 
 public class Utils {
+
+  public static boolean isScoreMetadataColumn(StructField field) {
+    return field.name().equals(LanceConstant.SCORE)
+        && MetadataAttribute.unapply(
+                MetadataAttribute.apply(field.name(), field.dataType(), field.nullable())
+                    .withMetadata(field.metadata()))
+            .isDefined();
+  }
+
+  public static boolean isStoredScoreColumn(StructField field) {
+    return field.name().equals(LanceConstant.SCORE) && !isScoreMetadataColumn(field);
+  }
 
   public static long parseVersion(String version) {
     return Long.parseUnsignedLong(version);

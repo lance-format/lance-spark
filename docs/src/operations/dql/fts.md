@@ -111,16 +111,47 @@ SELECT * FROM lance.db.documents
 WHERE lance_multi_match('machine learning', 'operator=AND', title, body);
 ```
 
+## Relevance Score (`_score`)
+
+The `_score` metadata column exposes the BM25 relevance score computed by the FTS index. It is available only when a full-text search predicate is active.
+
+```sql
+-- Project _score alongside data columns
+SELECT id, body, _score FROM lance.db.documents
+WHERE lance_match(body, 'machine learning');
+
+-- Sort by relevance
+SELECT id, _score FROM lance.db.documents
+WHERE lance_match(body, 'vector database')
+ORDER BY _score DESC;
+
+-- Combine with scalar filters
+SELECT id, _score FROM lance.db.documents
+WHERE lance_match(body, 'deep learning') AND year >= 2024
+ORDER BY _score DESC;
+```
+
+`_score` is a hidden metadata column — it does not appear in `SELECT *` output. Selecting `_score` without an FTS predicate raises an error at planning time.
+
+If the table has a stored column named `_score`, Spark resolves `_score` to that data column instead. It remains visible in `SELECT *` and is readable without FTS. Stored `FLOAT` values, including nulls, are preserved during FTS using local scans with batched row-ID lookups. The current Lance engine cannot run FTS on a table whose stored `_score` has another type; rename that column to use FTS and access the BM25 metadata column.
+
+!!! note "Ranked retrieval depends on the scan path"
+    On a query-capable namespace, such as the directory namespace, a single `ORDER BY _score DESC LIMIT k` can push the generated relevance-score top-k into `queryTable`. Spark retains a final sort and limit. Ascending or multi-key ordering, residual filters, and stored `_score` columns do not use this optimization.
+
+    Pushed scalar filters are evaluated before namespace top-k selection. Filters on `_score` remain in Spark, so they prevent top-k pushdown.
+
+    Local per-fragment scans return all matching rows; Spark sorts and limits them. Pushed ranked retrieval for this path remains a future extension.
+
 ## Known Limitations
 
-- **No global relevance ordering.** FTS predicates act as WHERE filters and return all matching rows. There is no `lance_score()` function or relevance-based `ORDER BY` — rows are returned in storage order. In particular, `SELECT * FROM t WHERE lance_match(...) LIMIT N` returns N matching rows determined by Spark task scheduling, not by BM25 rank — it is not a "top-N by relevance" query.
+- **No local pushed ranked retrieval.** Local per-fragment scans score all matching rows before Spark applies `ORDER BY _score DESC LIMIT k`.
 - **Column names must match the schema exactly.** Column references are resolved at planning time; aliases or expressions are not supported.
 - **`lance_match_phrase` requires positional index.** The FTS index must be built with `with_position = true`. Without it, phrase queries will fail.
-- **WHERE-filter uses full BM25 scoring (no WAND early stopping).** Every row matching the query is evaluated — `wand_factor` is not exposed because SQL WHERE semantics require returning all matching rows.
+- **Unbounded WHERE-filter queries return every match.** Without a supported namespace top-k push, every matching row is evaluated. `wand_factor` is not exposed.
 - **One FTS predicate per query.** Only a single FTS function call is allowed per `WHERE` clause. For multi-column search, use `lance_multi_match` instead of combining multiple `lance_match` calls with OR.
 - **FTS predicates cannot appear inside OR.** `WHERE lance_match(a, 'x') OR other_condition` is not supported — OR semantics cannot be preserved when pushing a single FTS query to the scanner.
-- **On namespaces that serve queries server-side, row queries currently ignore the FTS predicate.** For a namespace whose `queryTable` is used (`dir`, and REST implementations that do not parse a structured full-text query), the connector sends the predicate as a structured query, which such implementations skip — so `SELECT * FROM t WHERE lance_match(...)` returns every row. A `COUNT(*)` that pushes down (the FTS predicate is the only filter, or all other filters push down too) is not routed server-side and does apply the predicate, so on those namespaces such a count and a row query over the same predicate can disagree. A `COUNT(*)` whose other filters cannot push down is routed server-side like a row query, and is unfiltered there as well. Catalog-only namespaces (Glue, Hive, Iceberg) are unaffected: they fall back to the local per-fragment scan, which applies the predicate on every path.
+- **Query-serving namespaces must implement structured FTS queries.** The directory namespace supports this request format. Custom REST implementations must evaluate the structured full-text query rather than ignore it. Catalog-only namespaces (Glue, Hive, Iceberg) fall back to local per-fragment scans.
 
 ## Cost Model
 
-Each Spark task scans one fragment and independently opens all committed FTS index segments to build a global BM25 scorer. Total segment-open cost per query is proportional to `N_fragments × M_index_segments`. For example, a 500-fragment dataset with 20 index segments causes 10,000 segment opens per query. Running `OPTIMIZE` periodically compacts data fragments, reducing the fragment count and therefore the total number of segment opens — this is the primary user-facing mitigation for latency-sensitive workloads.
+On the local per-fragment scan path, each Spark task independently opens all committed FTS index segments to build a global BM25 scorer. Total segment-open cost per query is proportional to `N_fragments × M_index_segments`. For example, a 500-fragment dataset with 20 index segments causes 10,000 segment opens per query. Running `OPTIMIZE` periodically compacts data fragments, reducing the fragment count and therefore the total number of segment opens — this is the primary user-facing mitigation for latency-sensitive workloads.
