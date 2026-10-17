@@ -14,14 +14,19 @@
 package org.lance.spark.utils;
 
 import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.types.ArrayType;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.MapType;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
 import org.apache.spark.unsafe.types.UTF8String;
 
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -38,8 +43,9 @@ public class BlobUtils {
   public static final String MIN_BLOB_V2_FILE_FORMAT_VERSION = "2.2";
 
   /**
-   * Highest version that still accepts the legacy (v1) blob encoding; Lance rejects {@link
-   * #LANCE_ENCODING_BLOB_KEY} from {@link #MIN_BLOB_V2_FILE_FORMAT_VERSION} on.
+   * Highest version that stores the legacy (v1) blob encoding. From {@link
+   * #MIN_BLOB_V2_FILE_FORMAT_VERSION} on, Lance turns a column marked {@link
+   * #LANCE_ENCODING_BLOB_KEY} into blob v2.
    */
   public static final String MAX_BLOB_V1_FILE_FORMAT_VERSION = "2.1";
 
@@ -51,11 +57,11 @@ public class BlobUtils {
       new HashSet<>(Arrays.asList("stable", "next"));
 
   /**
-   * Versions Lance recognizes and rejects the legacy (v1) blob encoding on. Lance parses versions
-   * against a closed set, so an unrecognized string such as {@code 2.4} is not a newer format but a
-   * parse failure, and is left for Lance to report rather than rejected here. Only this side needs
-   * listing: it grows with each Lance release, while the v1-capable side is closed at {@link
-   * #MAX_BLOB_V1_FILE_FORMAT_VERSION}.
+   * Versions Lance recognizes that cannot store the legacy (v1) blob encoding. Lance parses
+   * versions against a closed set, so an unrecognized string such as {@code 2.4} is not a newer
+   * format but a parse failure, and is left for Lance to report rather than rejected here. Only
+   * this side needs listing: it grows with each Lance release, while the v1-capable side is closed
+   * at {@link #MAX_BLOB_V1_FILE_FORMAT_VERSION}.
    */
   private static final Set<String> KNOWN_BLOB_V2_VERSIONS =
       new HashSet<>(Arrays.asList("2.2", "2.3", "stable", "next"));
@@ -190,17 +196,51 @@ public class BlobUtils {
   }
 
   /**
-   * Names of the legacy (v1) blob columns in {@code schema}, identified by {@link
-   * #LANCE_ENCODING_BLOB_KEY}.
+   * Paths of the legacy (v1) blob fields in {@code schema}, identified by {@link
+   * #LANCE_ENCODING_BLOB_KEY}. Fields nested in structs, arrays and maps count too: Lance converts
+   * them to blob v2 like top-level columns.
    */
   public static Set<String> blobV1ColumnNames(StructType schema) {
-    Set<String> names = new HashSet<>();
-    for (StructField field : schema.fields()) {
-      if (isBlobSparkField(field)) {
-        names.add(field.name());
-      }
+    Set<String> paths = new LinkedHashSet<>();
+    collectBlobV1Paths("", schema, Metadata.empty(), paths);
+    return paths;
+  }
+
+  private static void collectBlobV1Paths(
+      String path, DataType type, Metadata metadata, Set<String> paths) {
+    if (isBlobSparkMetadata(metadata)) {
+      paths.add(path);
     }
-    return names;
+    if (type instanceof StructType) {
+      for (StructField field : ((StructType) type).fields()) {
+        String fieldPath = path.isEmpty() ? field.name() : path + "." + field.name();
+        collectBlobV1Paths(fieldPath, field.dataType(), field.metadata(), paths);
+      }
+    } else if (type instanceof ArrayType) {
+      // Spark has no metadata slot for array elements or map entries, so the connector keeps
+      // theirs on the parent field (see LanceArrowUtils).
+      collectBlobV1Paths(
+          path,
+          ((ArrayType) type).elementType(),
+          embeddedMetadata(metadata, LanceArrowUtils.LANCE_ELEMENT_METADATA_KEY()),
+          paths);
+    } else if (type instanceof MapType) {
+      MapType map = (MapType) type;
+      collectBlobV1Paths(
+          path + ".key",
+          map.keyType(),
+          embeddedMetadata(metadata, LanceArrowUtils.LANCE_MAP_KEY_METADATA_KEY()),
+          paths);
+      collectBlobV1Paths(
+          path + ".value",
+          map.valueType(),
+          embeddedMetadata(metadata, LanceArrowUtils.LANCE_MAP_VALUE_METADATA_KEY()),
+          paths);
+    }
+  }
+
+  private static Metadata embeddedMetadata(Metadata parent, String key) {
+    return parent.contains(key) ? Metadata.fromJson(parent.getString(key)) : Metadata.empty();
   }
 
   /** Returns true if any field in {@code schema} carries legacy (v1) blob metadata. */
@@ -236,9 +276,10 @@ public class BlobUtils {
   }
 
   /**
-   * True when Lance is known to reject legacy (v1) blob columns at {@code fileFormatVersion}.
-   * Deliberately narrower than {@link #fileFormatSupportsBlobV2(String)}, which picks the metadata
-   * to write and so errs towards v2; this one gates an up-front failure.
+   * True when {@code fileFormatVersion} is known not to store legacy (v1) blob columns, so the
+   * connector refuses to create or write them at it. Deliberately narrower than {@link
+   * #fileFormatSupportsBlobV2(String)}, which picks the metadata to write and so errs towards v2;
+   * this one gates an up-front failure.
    */
   public static boolean knownToRejectBlobV1(String fileFormatVersion) {
     if (fileFormatVersion == null) {

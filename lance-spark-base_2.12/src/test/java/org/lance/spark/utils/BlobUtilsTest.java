@@ -19,10 +19,13 @@ import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
 import org.apache.spark.unsafe.types.UTF8String;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -69,6 +72,33 @@ public class BlobUtilsTest {
               blobV2Field(),
             });
     assertEquals(Collections.singleton("payload"), BlobUtils.blobV2ColumnNames(schema));
+  }
+
+  @Test
+  public void testBlobV1ColumnNamesIncludesNestedFields() {
+    Metadata v1 =
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build();
+    StructType inner = new StructType().add("data", DataTypes.BinaryType, true, v1);
+    // An array element's metadata sits on the array field, as the connector reads it back.
+    Metadata blobElements =
+        new MetadataBuilder()
+            .putString(LanceArrowUtils.LANCE_ELEMENT_METADATA_KEY(), v1.json())
+            .build();
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType)
+            .add("payload", inner)
+            .add("items", DataTypes.createArrayType(inner))
+            .add("byName", DataTypes.createMapType(DataTypes.StringType, inner))
+            .add("chunks", DataTypes.createArrayType(DataTypes.BinaryType), true, blobElements);
+    assertEquals(
+        new HashSet<>(Arrays.asList("payload.data", "items.data", "byName.value.data", "chunks")),
+        BlobUtils.blobV1ColumnNames(schema));
+    assertFalse(
+        BlobUtils.hasBlobV1Fields(
+            new StructType().add("payload", new StructType().add("data", DataTypes.BinaryType))));
   }
 
   @Test

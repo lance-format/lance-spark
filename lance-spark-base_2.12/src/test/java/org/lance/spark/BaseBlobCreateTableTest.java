@@ -23,6 +23,8 @@ import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.expressions.Transform;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterEach;
@@ -785,6 +787,98 @@ public abstract class BaseBlobCreateTableTest {
     assertBlobMetadata(spark.table(catalogName + ".default." + tableName).schema(), "data");
 
     spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
+  }
+
+  @Test
+  public void testWriteAtBlobV2VersionToBlobV1TableIsRejected() {
+    String tableName = catalogName + ".default.blob_v1_write_22_" + System.currentTimeMillis();
+    spark.sql(
+        "CREATE TABLE "
+            + tableName
+            + " (id INT NOT NULL, data BINARY) USING lance "
+            + "TBLPROPERTIES ('data.lance.encoding' = 'blob', 'file_format_version' = '2.1')");
+    spark.sql("INSERT INTO " + tableName + " VALUES (1, X'6F6C64')");
+
+    Dataset<Row> more =
+        spark.createDataFrame(
+            Collections.singletonList(RowFactory.create(2, "new".getBytes(StandardCharsets.UTF_8))),
+            spark.table(tableName).schema());
+    // Lance 13 would convert the column to blob v2 and then fail to read the new file.
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> more.writeTo(tableName).option("file_format_version", "2.2").append());
+    assertTrue(e.getMessage().contains("[data]"), e.getMessage());
+
+    StructType schema = spark.table(tableName).schema();
+    assertBlobMetadata(schema, "data");
+    assertEquals(DataTypes.BinaryType, schema.apply("data").dataType());
+    assertEquals(1L, spark.table(tableName).count());
+
+    spark.sql("DROP TABLE IF EXISTS " + tableName);
+  }
+
+  @Test
+  public void testStagedCreateWrittenAtBlobV2VersionIsRejected() {
+    String tableName = "blob_v1_staged_22_" + System.currentTimeMillis();
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("data", DataTypes.BinaryType, true);
+    Dataset<Row> rows =
+        spark.createDataFrame(
+            Collections.singletonList(RowFactory.create(1, "x".getBytes(StandardCharsets.UTF_8))),
+            schema);
+    // Staged at 2.1, so the column is blob v1; the write-time version must not override that.
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                rows.writeTo(catalogName + ".default." + tableName)
+                    .using("lance")
+                    .tableProperty("data.lance.encoding", "blob")
+                    .tableProperty("file_format_version", "2.1")
+                    .option("file_format_version", "stable")
+                    .create());
+    assertTrue(e.getMessage().contains("[data]"), e.getMessage());
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    assertFalse(catalog.tableExists(Identifier.of(new String[] {"default"}, tableName)));
+  }
+
+  @Test
+  public void testNestedBlobV1FieldsStayOnBlobV1Versions() throws Exception {
+    String tableName = "blob_v1_nested_" + System.currentTimeMillis();
+    String fullName = catalogName + ".default." + tableName;
+    Metadata blob =
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build();
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("payload", new StructType().add("data", DataTypes.BinaryType, true, blob));
+    Dataset<Row> rows =
+        spark.createDataFrame(
+            Collections.singletonList(RowFactory.create(1, RowFactory.create(new byte[] {65}))),
+            schema);
+
+    // Lance promotes nested blob v1 fields too, so they keep an unpinned create at 2.1.
+    rows.writeTo(fullName).using("lance").create();
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    LanceDataset table =
+        (LanceDataset) catalog.loadTable(Identifier.of(new String[] {"default"}, tableName));
+    assertEquals(BlobUtils.MAX_BLOB_V1_FILE_FORMAT_VERSION, table.getFileFormatVersion());
+
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> rows.writeTo(fullName).option("file_format_version", "2.2").append());
+    assertTrue(e.getMessage().contains("[payload.data]"), e.getMessage());
+    assertEquals(1, spark.table(fullName).collectAsList().size());
+
+    spark.sql("DROP TABLE IF EXISTS " + fullName);
   }
 
   @Test

@@ -465,6 +465,27 @@ public class LanceDataset
     }
     LanceSparkWriteOptions writeOptions = writeOptionsBuilder.build();
 
+    // Keep blob v1 columns on 2.1 or older, as CREATE TABLE does. Since lance#9459 a commit that
+    // adds a 2.2+ file turns them into blob v2, while Lance's fragment writer still stores the v1
+    // layout in that file, so the new version cannot be read. Revisit once Lance's
+    // FragmentCreateBuilder converts legacy blob input and lance#9458 settles how v1 fields move to
+    // v2: lifting the check would then silently turn such columns into blob v2 descriptors.
+    String writeVersion = writeOptions.getFileFormatVersion();
+    if (BlobUtils.knownToRejectBlobV1(writeVersion) && BlobUtils.hasBlobV1Fields(sparkSchema)) {
+      throw new IllegalArgumentException(
+          "Legacy (v1) blob columns "
+              + BlobUtils.blobV1ColumnNames(sparkSchema)
+              + " cannot be written with file_format_version '"
+              + writeVersion
+              + "'. Write with "
+              + BlobUtils.MAX_BLOB_V1_FILE_FORMAT_VERSION
+              + " or older, or rebuild the columns as blob v2. If the table was already written at "
+              + BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION
+              + " or newer, first overwrite it with its own rows at "
+              + BlobUtils.MAX_BLOB_V1_FILE_FORMAT_VERSION
+              + "; any other commit leaves it unreadable.");
+    }
+
     List<String> backfillColumns =
         Arrays.stream(
                 sparkWriteOptions.getOrDefault(LanceConstant.BACKFILL_COLUMNS_KEY, "").split(","))

@@ -37,6 +37,7 @@ object VacuumOutputType {
   val SCHEMA = StructType(
     Array(
       StructField("bytes_removed", DataTypes.LongType, nullable = true),
-      StructField("old_versions", DataTypes.LongType, nullable = true)))
+      StructField("old_versions", DataTypes.LongType, nullable = true),
+      StructField("failed_deletes", DataTypes.LongType, nullable = true)))
     .map(field => AttributeReference(field.name, field.dataType, field.nullable, field.metadata)())
 }

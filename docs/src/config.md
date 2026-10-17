@@ -686,11 +686,35 @@ Lance's default version, which is `2.2`, so its blob columns are blob v2. A cata
 still produces v1 blob columns.
 
 Creating a table from a schema read back from an existing v1 blob table is the exception:
-that schema already carries `lance-encoding:blob = true`, which Lance rejects from `2.2`
-on, so the new table is created at `2.1` and its blob columns stay v1. Pinning a version
+that schema already carries `lance-encoding:blob = true`, which only `2.1` and older store
+as v1, so the new table is created at `2.1` and its blob columns stay v1. Pinning a version
 of `2.2` or newer for such a schema is rejected — rebuild the column as blob v2 instead.
 A schema that mixes v1 and v2 blob columns is rejected as well, because no single file
-format version can store both.
+format version can store both. The same holds for writes: writing a table that has v1 blob
+fields, top-level or nested, at `2.2` or newer, `stable` or `next`, whether set by the
+`file_format_version` write option or by the table's own version, is rejected.
+
+Earlier connector releases, on Lance 12, accepted such writes and kept the columns v1, but
+stored the new data files at the requested version. With Lance 13, any commit to a table that
+holds such a file turns its v1 blob columns into blob v2 and leaves the new version unreadable.
+If a table with v1 blob columns was ever written or created at `2.2` or newer, `stable` or
+`next`, overwrite it with its own rows at `2.1` before any other commit to it:
+
+```python
+from pyspark.sql.functions import lit
+
+spark.table("lance.ns.docs").writeTo("lance.ns.docs") \
+    .option("file_format_version", "2.1") \
+    .overwrite(lit(True))
+```
+
+The overwrite rewrites every row, including the blob bytes, drops the table's indexes, which
+have to be rebuilt afterwards, and assigns new row ids on tables with stable row ids.
+
+A table a commit already broke still reads at its earlier versions. Restore the last readable
+one with Lance, for example `lance.dataset(uri, version=n).restore()`, then overwrite it as
+above; writes made after version `n` have to be redone. Do not `VACUUM` the table before that,
+since it can remove the versions that still read.
 
 With an older version, such as `2.0`, `2.1` or `legacy`, blob columns use the legacy v1
 encoding with `lance-encoding:blob = true` metadata. Pin one of those versions to keep a

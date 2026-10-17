@@ -1343,9 +1343,10 @@ class TestDDLVacuum:
         # Verify output schema
         assert len(result) == 1
         row = result[0]
-        # VACUUM returns: bytes_removed, old_versions
+        # VACUUM returns: bytes_removed, old_versions, failed_deletes
         assert row.bytes_removed >= 0
         assert row.old_versions >= 0
+        assert row.failed_deletes == 0
 
     def test_vacuum_with_before_version(self, spark):
         """Test VACUUM with before_version option."""
@@ -1448,6 +1449,7 @@ class TestDDLVacuum:
         # After optimize, vacuum should clean up the old fragments
         assert row.bytes_removed >= 0
         assert row.old_versions >= 0
+        assert row.failed_deletes == 0
 
         # Verify data integrity
         count = spark.table("default.test_table").count()

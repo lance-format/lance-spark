@@ -13,17 +13,28 @@
  */
 package org.lance.spark.update;
 
+import org.lance.spark.LanceDataset;
+
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.net.URI;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -161,5 +172,51 @@ public abstract class BaseVacuumTest {
     Row row = vacuumResult.collectAsList().get(0);
     Assertions.assertTrue(row.getLong(0) > 0);
     Assertions.assertTrue(row.getLong(1) >= 0);
+  }
+
+  @Test
+  public void testVacuumCountsFilesItCannotDelete() throws Exception {
+    prepareDataset();
+    appendRows(10, 100);
+    // Compaction leaves the pre-compaction data files for the vacuum below to delete.
+    spark.sql(String.format("optimize %s with (target_rows_per_fragment=20000)", fullTable));
+
+    Path dataDir = datasetPath().resolve("data");
+    Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(dataDir);
+    Files.setPosixFilePermissions(dataDir, PosixFilePermissions.fromString("r-xr-xr-x"));
+    try {
+      // Directory permissions do not bind root, which can delete the files anyway.
+      Assumptions.assumeFalse(Files.isWritable(dataDir), "needs a user bound by permissions");
+      Row row =
+          spark
+              .sql(String.format("vacuum %s with (before_version=1000000)", fullTable))
+              .collectAsList()
+              .get(0);
+      Assertions.assertTrue(row.getLong(2) > 0, "undeletable data files must be counted");
+    } finally {
+      Files.setPosixFilePermissions(dataDir, permissions);
+    }
+
+    // The first vacuum removed the versions that referenced the leftover files, so only
+    // delete_unverified removes them before they are 7 days old.
+    Row retry =
+        spark
+            .sql(
+                String.format(
+                    "vacuum %s with (before_version=1000000, delete_unverified=true)", fullTable))
+            .collectAsList()
+            .get(0);
+    Assertions.assertEquals(0L, retry.getLong(2));
+    Assertions.assertTrue(retry.getLong(0) > 0, "a later vacuum removes the leftover files");
+  }
+
+  private Path datasetPath() throws Exception {
+    String uri =
+        ((LanceDataset)
+                ((TableCatalog) spark.sessionState().catalogManager().catalog(catalogName))
+                    .loadTable(Identifier.of(new String[] {"default"}, tableName)))
+            .readOptions()
+            .getDatasetUri();
+    return uri.startsWith("file:") ? Paths.get(URI.create(uri)) : Paths.get(uri);
   }
 }
