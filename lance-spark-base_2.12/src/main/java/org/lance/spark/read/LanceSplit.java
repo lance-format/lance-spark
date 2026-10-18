@@ -102,12 +102,4 @@ public class LanceSplit implements Serializable {
     LanceRef ref = Utils.pinOpenedRef(dataset, readOptions.getRef());
     return new ScanPlanResult(splits, ref, fragmentRowCounts);
   }
-
-  /**
-   * @deprecated Use {@link #planScan(LanceSparkReadOptions)} instead to get resolved version.
-   */
-  @Deprecated
-  public static List<LanceSplit> generateLanceSplits(LanceSparkReadOptions readOptions) {
-    return planScan(readOptions).getSplits();
-  }
 }

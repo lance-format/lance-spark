@@ -42,7 +42,7 @@ ENV SPARK_VERSION=${SPARK_DOWNLOAD_VERSION}
 ENV SPARK_MAJOR_VERSION=${SPARK_MAJOR_VERSION}
 ENV SCALA_VERSION=${SCALA_VERSION}
 ENV LANCE_SPARK_VERSION=0.6.1
-ENV LANCE_NS_IMPL_VERSION=0.4.0
+ENV LANCE_NS_IMPL_VERSION=0.4.2
 
 # Download spark (dlcdn only keeps the latest patch of each line, so fall back
 # to the archive mirror for pinned/older versions)

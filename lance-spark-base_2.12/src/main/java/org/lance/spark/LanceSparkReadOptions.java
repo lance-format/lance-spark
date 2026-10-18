@@ -106,7 +106,6 @@ public class LanceSparkReadOptions implements Serializable {
   private static final boolean DEFAULT_EXECUTOR_CREDENTIAL_REFRESH = true;
 
   private final String datasetUri;
-  private final String dbPath;
   private final String datasetName;
   private final boolean pushDownFilters;
   private final Integer blockSize;
@@ -141,9 +140,7 @@ public class LanceSparkReadOptions implements Serializable {
 
   private LanceSparkReadOptions(Builder builder) {
     this.datasetUri = builder.datasetUri;
-    String[] paths = extractDbPathAndDatasetName(datasetUri);
-    this.dbPath = paths[0];
-    this.datasetName = paths[1];
+    this.datasetName = extractDatasetName(datasetUri);
     this.pushDownFilters = builder.pushDownFilters;
     this.blockSize = builder.blockSize;
     this.ref = builder.ref;
@@ -204,7 +201,7 @@ public class LanceSparkReadOptions implements Serializable {
 
   // ========== Helper methods ==========
 
-  private static String[] extractDbPathAndDatasetName(String datasetUri) {
+  private static String extractDatasetName(String datasetUri) {
     if (datasetUri == null) {
       throw new IllegalArgumentException("The dataset uri should not be null");
     }
@@ -214,28 +211,18 @@ public class LanceSparkReadOptions implements Serializable {
       throw new IllegalArgumentException("Invalid dataset uri: " + datasetUri);
     }
 
-    String dbPath = datasetUri.substring(0, lastSlashIndex + 1);
     String datasetNameWithSuffix = datasetUri.substring(lastSlashIndex + 1);
-    String datasetName;
     if (datasetUri.endsWith(LANCE_FILE_SUFFIX)) {
-      datasetName =
-          datasetNameWithSuffix.substring(
-              0, datasetNameWithSuffix.length() - LANCE_FILE_SUFFIX.length());
-    } else {
-      datasetName = datasetNameWithSuffix;
+      return datasetNameWithSuffix.substring(
+          0, datasetNameWithSuffix.length() - LANCE_FILE_SUFFIX.length());
     }
-
-    return new String[] {dbPath, datasetName};
+    return datasetNameWithSuffix;
   }
 
   // ========== Getters ==========
 
   public String getDatasetUri() {
     return datasetUri;
-  }
-
-  public String getDbPath() {
-    return dbPath;
   }
 
   public String getDatasetName() {

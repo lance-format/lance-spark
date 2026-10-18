@@ -133,31 +133,6 @@ public final class SparkLanceShardingUtils {
   }
 
   /**
-   * Detects partition keys only for fragments represented by the supplied zone stats.
-   *
-   * @deprecated This overload cannot verify that the stats cover every live fragment. Use {@link
-   *     #detectFragmentKeys(ShardingField, LanceSchema, List, Set)} when deciding whether a scan
-   *     can advertise key-grouped partitioning.
-   */
-  @Deprecated
-  public static Optional<Map<Integer, Object>> detectFragmentKeys(
-      ShardingField field, LanceSchema schema, List<ZoneStats> zones) {
-    columnName(field, schema);
-    Map<Integer, Object> result = new HashMap<>();
-    for (ZoneStats zone : zones) {
-      result.putIfAbsent(zone.getFragmentId(), null);
-    }
-    for (int fragmentId : new ArrayList<>(result.keySet())) {
-      Optional<Object> key = fragmentKeyFromZones(field, schema, zones, fragmentId);
-      if (!key.isPresent()) {
-        return Optional.empty();
-      }
-      result.put(fragmentId, key.get());
-    }
-    return Optional.of(result);
-  }
-
-  /**
    * Detects a partition key for every live fragment.
    *
    * <p>Only stats for live fragments participate. Every live fragment must be covered and all of
@@ -201,10 +176,6 @@ public final class SparkLanceShardingUtils {
   public static InternalRow partitionKeyRow(Object value) {
     Object sparkValue = value instanceof String ? UTF8String.fromString((String) value) : value;
     return new GenericInternalRow(new Object[] {sparkValue});
-  }
-
-  public static int partitionCount(Map<Integer, Object> fragmentKeys) {
-    return fragmentKeys.size();
   }
 
   public static String columnName(ShardingField field, LanceSchema schema) {

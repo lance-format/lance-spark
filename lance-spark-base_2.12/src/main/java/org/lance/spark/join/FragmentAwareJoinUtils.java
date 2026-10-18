@@ -13,21 +13,12 @@
  */
 package org.lance.spark.join;
 
-import org.lance.Dataset;
-import org.lance.Fragment;
-import org.lance.spark.LanceSparkReadOptions;
-import org.lance.spark.utils.Utils;
-
 import org.apache.spark.sql.catalyst.expressions.Expression;
 import org.apache.spark.sql.catalyst.expressions.Literal;
 import org.apache.spark.sql.catalyst.expressions.ShiftRight;
 import org.apache.spark.sql.types.DataTypes;
 
 import java.io.Serializable;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.stream.Collectors;
 
 /**
  * Utilities for fragment-aware join optimization.
@@ -35,8 +26,8 @@ import java.util.stream.Collectors;
  * <p>Lance stores data in fragments, and row addresses encode the fragment ID in the upper 32 bits:
  * {@code row_address = (fragment_id << 32) | row_index}
  *
- * <p>This class provides utilities to extract fragment IDs from row addresses and build mappings
- * for efficient fragment-based joins.
+ * <p>This class provides utilities to extract fragment IDs from row addresses for fragment-based
+ * joins.
  */
 public class FragmentAwareJoinUtils implements Serializable {
   private static final long serialVersionUID = 1L;
@@ -77,96 +68,13 @@ public class FragmentAwareJoinUtils implements Serializable {
   }
 
   /**
-   * Build a mapping of fragment IDs to their sizes for a Lance dataset.
-   *
-   * <p>This can be used to determine the distribution of data across fragments and optimize
-   * partition planning.
-   *
-   * @param options the Lance read options
-   * @return a map from fragment ID to the number of rows in that fragment
-   */
-  public static Map<Integer, Long> buildFragmentSizeMap(LanceSparkReadOptions options) {
-    Map<Integer, Long> fragmentSizes = new HashMap<>();
-    List<Integer> fragmentIds = getFragmentIds(options);
-
-    // In a full implementation, we would query the fragment metadata
-    // For now, we return an empty map as a placeholder
-    for (Integer fragId : fragmentIds) {
-      // TODO: Get actual fragment size from Lance metadata
-      fragmentSizes.put(fragId, 0L);
-    }
-
-    return fragmentSizes;
-  }
-
-  /**
-   * Represents a range of stable row IDs.
-   *
-   * <p>Used for mapping stable row IDs to fragment IDs when joining on _rowid instead of _rowaddr.
-   */
-  public static class LongRange implements Serializable {
-    private static final long serialVersionUID = 1L;
-
-    private final long start;
-    private final long end;
-
-    public LongRange(long start, long end) {
-      this.start = start;
-      this.end = end;
-    }
-
-    public long getStart() {
-      return start;
-    }
-
-    public long getEnd() {
-      return end;
-    }
-
-    public boolean contains(long value) {
-      return value >= start && value <= end;
-    }
-
-    @Override
-    public String toString() {
-      return String.format("[%d, %d]", start, end);
-    }
-  }
-
-  /**
-   * Build a mapping from stable row ID ranges to fragment IDs.
-   *
-   * <p>This is used for fragment-aware joins when the join condition uses stable _rowid instead of
-   * physical _rowaddr.
-   *
-   * <p>Note: This requires scanning the Lance manifest to build the row ID distribution. For large
-   * tables, this mapping should be cached/broadcast.
-   *
-   * @param options the Lance read options
-   * @return a map from row ID ranges to fragment IDs
-   */
-  public static Map<LongRange, Integer> buildRowIdFragmentMap(LanceSparkReadOptions options) {
-    Map<LongRange, Integer> rowIdMap = new HashMap<>();
-    List<Integer> fragmentIds = getFragmentIds(options);
-
-    // TODO: Query Lance manifest to get row ID ranges for each fragment
-    // For now, return an empty map as a placeholder
-    // Full implementation would need to:
-    // 1. Get fragment metadata from Lance
-    // 2. Build ranges based on stable row ID distribution
-    // 3. Handle tombstones/deletions
-
-    return rowIdMap;
-  }
-
-  /**
    * Check if a column name represents a row address or row ID metadata column.
    *
    * @param columnName the column name to check
    * @return true if the column is a row address or row ID column
    */
   public static boolean isRowAddressOrIdColumn(String columnName) {
-    return "_rowaddr".equalsIgnoreCase(columnName) || "_rowid".equalsIgnoreCase(columnName);
+    return isRowAddressColumn(columnName) || isRowIdColumn(columnName);
   }
 
   /**
@@ -187,12 +95,5 @@ public class FragmentAwareJoinUtils implements Serializable {
    */
   public static boolean isRowIdColumn(String columnName) {
     return "_rowid".equalsIgnoreCase(columnName);
-  }
-
-  /** Opens the dataset and returns its fragment IDs. */
-  private static List<Integer> getFragmentIds(LanceSparkReadOptions options) {
-    try (Dataset dataset = Utils.openDatasetBuilder(options).build()) {
-      return dataset.getFragments().stream().map(Fragment::getId).collect(Collectors.toList());
-    }
   }
 }

@@ -13,12 +13,6 @@
  */
 package org.lance.spark.utils;
 
-import org.apache.arrow.vector.types.pojo.Field;
-import org.apache.spark.sql.types.BinaryType;
-import org.apache.spark.sql.types.StructField;
-
-import java.util.Map;
-
 /**
  * Utility class for LargeBinary Arrow type metadata handling.
  *
@@ -33,48 +27,6 @@ public class LargeVarBinaryUtils {
 
   public static final String ARROW_LARGE_VAR_BINARY_KEY = "arrow:large-var-binary";
   public static final String ARROW_LARGE_VAR_BINARY_VALUE = "true";
-
-  /**
-   * Check if a Spark field is a large binary field based on its metadata.
-   *
-   * @param field the Spark struct field to check
-   * @return true if the field is a large binary field, false otherwise
-   */
-  public static boolean isLargeVarBinarySparkField(StructField field) {
-    if (field == null || field.metadata() == null) {
-      return false;
-    }
-
-    if (!(field.dataType() instanceof BinaryType)) {
-      return false;
-    }
-
-    if (!field.metadata().contains(ARROW_LARGE_VAR_BINARY_KEY)) {
-      return false;
-    }
-
-    return ARROW_LARGE_VAR_BINARY_VALUE.equalsIgnoreCase(
-        field.metadata().getString(ARROW_LARGE_VAR_BINARY_KEY));
-  }
-
-  /**
-   * Check if an Arrow field is a large binary field based on its metadata.
-   *
-   * @param field the Arrow field to check
-   * @return true if the field is a large binary field, false otherwise
-   */
-  public static boolean isLargeVarBinaryArrowField(Field field) {
-    if (field == null) {
-      return false;
-    }
-
-    Map<String, String> metadata = field.getMetadata();
-    if (metadata == null || !metadata.containsKey(ARROW_LARGE_VAR_BINARY_KEY)) {
-      return false;
-    }
-
-    return ARROW_LARGE_VAR_BINARY_VALUE.equalsIgnoreCase(metadata.get(ARROW_LARGE_VAR_BINARY_KEY));
-  }
 
   /**
    * Create the property key for configuring large binary on a column.
