@@ -25,7 +25,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.lance.ipc.FullTextQuery
 import org.lance.spark.{LanceDataset, LanceSparkReadOptions}
 import org.lance.spark.search.LanceSearchQuery.SearchType
-import org.lance.spark.utils.FullTextQueryUtils
+import org.lance.spark.utils.{FullTextQueryUtils, Utils}
 
 import java.util.Locale
 
@@ -197,6 +197,7 @@ object LanceSearchTableFunctions {
     val version = optionalLong(parsed, "version")
 
     val resolved = resolveLanceTable(tableName, version)
+    Utils.validateFullTextSearchSchema(resolved.table.schema())
     val vectorSchemaColumns =
       hybridSideOutputColumns(resolved.table.schema(), outputColumns, DistanceMetricColumn)
     val ftsSchemaColumns =
@@ -251,6 +252,7 @@ object LanceSearchTableFunctions {
       .searchColumns(optionalStringArray(parsed, SearchColumnsArg).getOrElse(Seq.empty).asJava)
       .topK(candidateK)
       .filter(filter)
+      .prefilter(optionalBoolean(parsed, "prefilter").orNull)
       .version(version.orNull)
       .withRowId(java.lang.Boolean.TRUE)
       .build()

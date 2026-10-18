@@ -15,6 +15,8 @@ Run vector search and full-text search together from Spark SQL, then rerank the 
 
 `HYBRID_SEARCH` returns the selected table columns plus `_distance`, `_score`, and `_relevance_score`. Rows that only match one side have null for the other side's metric.
 
+Tables with a stored `_score` column must rename it before using full-text search. See [relevance scores](fts.md#relevance-score-_score).
+
 === "SQL"
     ```sql
     SELECT id, body, _distance, _score, _relevance_score
@@ -56,12 +58,13 @@ Use positional arguments for simple calls and Spark 3.4 compatibility.
 | `rrf_k` | Float | No | Reciprocal rank fusion constant. Defaults to `60.0`. |
 | `columns` | Array string literal | No | Output table columns. `_distance`, `_score`, and `_relevance_score` are always included. Use `array('*')` or omit this argument for all table columns. |
 | `filter` | String | No | SQL filter expression evaluated by Lance on both side queries. |
+| `prefilter` | Boolean | No | Apply `filter` before candidate selection on both the vector and full-text sides when `true`, or after selection when `false`. If omitted, Lance uses its default. |
 | `offset` | Integer | No | Number of reranked results to skip after fusion. Defaults to `0`. |
 | `version` | Long | No | Lance table version to search. |
 | `distance_type` | String | No | Distance metric such as `l2`, `cosine`, or `dot`. |
 | `nprobes`, `ef`, `refine_factor` | Integer | No | Vector index search tuning parameters. |
 | `lower_bound`, `upper_bound` | Float | No | Distance bounds. |
-| `bypass_vector_index`, `fast_search`, `prefilter`, `with_row_id` | Boolean | No | Lance query options. `with_row_id` adds `_rowid` to the output. |
+| `bypass_vector_index`, `fast_search`, `with_row_id` | Boolean | No | Lance query options. `with_row_id` adds `_rowid` to the output. |
 
 ## Reranking
 

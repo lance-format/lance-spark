@@ -14,39 +14,11 @@
 package org.lance.spark.read;
 
 import org.lance.namespace.DirectoryNamespace;
-import org.lance.namespace.LanceNamespace;
-import org.lance.namespace.model.CreateNamespaceRequest;
-import org.lance.namespace.model.CreateNamespaceResponse;
-import org.lance.namespace.model.DeclareTableRequest;
-import org.lance.namespace.model.DeclareTableResponse;
-import org.lance.namespace.model.DeregisterTableRequest;
-import org.lance.namespace.model.DeregisterTableResponse;
-import org.lance.namespace.model.DescribeNamespaceRequest;
-import org.lance.namespace.model.DescribeNamespaceResponse;
-import org.lance.namespace.model.DescribeTableRequest;
-import org.lance.namespace.model.DescribeTableResponse;
-import org.lance.namespace.model.DropNamespaceRequest;
-import org.lance.namespace.model.DropNamespaceResponse;
-import org.lance.namespace.model.DropTableRequest;
-import org.lance.namespace.model.DropTableResponse;
-import org.lance.namespace.model.ListNamespacesRequest;
-import org.lance.namespace.model.ListNamespacesResponse;
-import org.lance.namespace.model.ListTablesRequest;
-import org.lance.namespace.model.ListTablesResponse;
-import org.lance.namespace.model.NamespaceExistsRequest;
-import org.lance.namespace.model.NamespaceExistsResponse;
 import org.lance.namespace.model.QueryTableRequest;
 import org.lance.namespace.model.QueryTableResponse;
-import org.lance.namespace.model.RegisterTableRequest;
-import org.lance.namespace.model.RegisterTableResponse;
-import org.lance.namespace.model.RenameTableRequest;
-import org.lance.namespace.model.RenameTableResponse;
-import org.lance.namespace.model.TableExistsRequest;
-import org.lance.namespace.model.TableExistsResponse;
-import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.read.BaseFtsCatalogOnlyNamespaceTest.CatalogOnlyNamespace;
 
-import org.apache.arrow.memory.BufferAllocator;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
@@ -65,7 +37,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -80,7 +51,6 @@ public abstract class BaseFtsScoreColumnTest {
 
   protected SparkSession spark;
   protected String catalogName = "lance_fts_score_test";
-  protected String fullTable;
 
   @TempDir Path tempDir;
 
@@ -103,11 +73,7 @@ public abstract class BaseFtsScoreColumnTest {
             .config("spark.sql.catalog." + catalogName + ".root", rootPath.toString())
             .config("spark.sql.catalog." + catalogName + ".single_level_ns", "true")
             .config("spark.sql.defaultCatalog", catalogName)
-            .config("spark.sql.adaptive.enabled", "false")
             .getOrCreate();
-
-    fullTable = catalogName + ".default.fts_score_" + UUID.randomUUID().toString().replace("-", "");
-    createAndIndexTable();
   }
 
   @AfterEach
@@ -136,95 +102,64 @@ public abstract class BaseFtsScoreColumnTest {
         spark
             .sql("SELECT id, _score FROM " + table + " ORDER BY _score DESC LIMIT 1")
             .collectAsList());
+    assertEquals(
+        Collections.singletonList(RowFactory.create(3)),
+        spark.sql("SELECT id FROM " + table + " WHERE _score IS NULL").collectAsList());
+    String predicate = scoreType.equals("FLOAT") ? "_score > 0" : "_score = 'stored-one'";
+    List<Integer> expectedIds =
+        scoreType.equals("FLOAT") ? Arrays.asList(1, 2, 5) : Collections.singletonList(1);
+    assertEquals(
+        expectedIds,
+        spark
+            .sql("SELECT id FROM " + table + " WHERE " + predicate + " ORDER BY id")
+            .collectAsList()
+            .stream()
+            .map(row -> row.getInt(0))
+            .collect(Collectors.toList()));
+    assertEquals(
+        (long) expectedIds.size(),
+        spark.sql("SELECT COUNT(*) FROM " + table + " WHERE " + predicate).head().getLong(0));
   }
 
   @ParameterizedTest
-  @ValueSource(strings = {"local", "namespace"})
-  public void testStoredScoreWithFts(String backend) throws Exception {
-    String table = createScoreTable(backend, "FLOAT");
-    long allocatedBefore = LanceRuntime.allocator().getAllocatedMemory();
-    List<Row> rows =
-        spark
-            .sql("SELECT * FROM " + table + " WHERE lance_match(body, 'hello') ORDER BY id")
-            .collectAsList();
-    assertEquals(
-        Arrays.asList(
-            RowFactory.create(1, "hello hello padding", 1000.0f),
-            RowFactory.create(3, "hello padding", null),
-            RowFactory.create(4, "hello hello hello padding", -50.0f),
-            RowFactory.create(5, "hello world extra padding", 3000.0f)),
-        rows);
-    assertTrue(RecordingDirectoryNamespace.requests.isEmpty());
-    assertEquals(allocatedBefore, LanceRuntime.allocator().getAllocatedMemory());
-    assertEquals(
-        Arrays.asList(
-            RowFactory.create(-50.0f),
-            RowFactory.create(1000.0f),
-            RowFactory.create(3000.0f),
-            RowFactory.create((Object) null)),
-        spark
-            .sql(
-                "SELECT _score FROM "
-                    + table
-                    + " WHERE lance_match(body, 'hello') ORDER BY _score ASC NULLS LAST")
-            .collectAsList());
-    assertEquals(allocatedBefore, LanceRuntime.allocator().getAllocatedMemory());
-  }
-
-  @ParameterizedTest
-  @ValueSource(strings = {"local", "namespace"})
-  public void testStoredScoreFtsFiltersAndOrdering(String backend) throws Exception {
-    String table = createScoreTable(backend, "FLOAT");
-    assertEquals(
-        Collections.singletonList(RowFactory.create(1, 1000.0f)),
-        spark
-            .sql(
-                "SELECT id, _score FROM "
-                    + table
-                    + " WHERE lance_match(body, 'hello') ORDER BY id ASC LIMIT 1")
-            .collectAsList());
-    assertEquals(
-        Arrays.asList(RowFactory.create(4, -50.0f), RowFactory.create(1, 1000.0f)),
-        spark
-            .sql(
-                "SELECT id, _score FROM "
-                    + table
-                    + " WHERE lance_match(body, 'hello') ORDER BY _score ASC NULLS LAST LIMIT 2")
-            .collectAsList());
-    assertEquals(
-        Collections.singletonList(RowFactory.create(5, 3000.0f)),
-        spark
-            .sql(
-                "SELECT id, _score AS stored_score FROM "
-                    + table
-                    + " WHERE lance_match(body, 'hello') AND _score > 900"
-                    + " ORDER BY stored_score DESC LIMIT 1")
-            .collectAsList());
-    assertEquals(
-        2L,
-        spark
-            .sql(
-                "SELECT COUNT(*) FROM "
-                    + table
-                    + " WHERE lance_match(body, 'hello') AND _score > 900")
-            .head()
-            .getLong(0));
+  @CsvSource({"local,FLOAT", "namespace,FLOAT", "local,STRING", "namespace,STRING"})
+  public void testStoredScoreRejectsFts(String backend, String scoreType) throws Exception {
+    String table = createScoreTable(backend, scoreType);
+    for (String projection : Arrays.asList("*", "id", "_score", "COUNT(*)")) {
+      UnsupportedOperationException failure =
+          assertThrows(
+              UnsupportedOperationException.class,
+              () ->
+                  spark
+                      .sql(
+                          "SELECT "
+                              + projection
+                              + " FROM "
+                              + table
+                              + " WHERE lance_match(body, 'hello')")
+                      .collectAsList());
+      assertTrue(failure.getMessage().contains("stored '_score' column"));
+      assertTrue(failure.getMessage().contains("Rename the stored column"));
+    }
     assertTrue(RecordingDirectoryNamespace.requests.isEmpty());
   }
 
   @ParameterizedTest
   @ValueSource(strings = {"local", "namespace"})
-  public void testStoredStringScoreRejectsFtsClearly(String backend) throws Exception {
-    String table = createScoreTable(backend, "STRING");
-    Exception failure =
-        assertThrows(
-            Exception.class,
-            () ->
-                spark
-                    .sql("SELECT id FROM " + table + " WHERE lance_match(body, 'hello')")
-                    .collectAsList());
-    assertTrue(failure.getMessage().contains("FLOAT stored '_score'"));
-    assertTrue(failure.getMessage().contains("Rename the stored column"));
+  public void testScoreFilterWithoutFtsRejected(String backend) throws Exception {
+    String table = createScoreTable(backend, null);
+    for (String projection : Arrays.asList("id", "COUNT(*)")) {
+      for (String predicate : Arrays.asList("_score > 0", "_score IS NULL")) {
+        IllegalArgumentException failure =
+            assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                    spark
+                        .sql("SELECT " + projection + " FROM " + table + " WHERE " + predicate)
+                        .collectAsList());
+        assertTrue(failure.getMessage().contains("full-text search predicate"));
+      }
+    }
     assertTrue(RecordingDirectoryNamespace.requests.isEmpty());
   }
 
@@ -368,7 +303,9 @@ public abstract class BaseFtsScoreColumnTest {
     }
   }
 
-  private void createAndIndexTable() {
+  private String createAndIndexTable() {
+    String fullTable =
+        catalogName + ".default.fts_score_" + UUID.randomUUID().toString().replace("-", "");
     spark.sql(String.format("CREATE TABLE %s (id INT, body STRING) USING lance", fullTable));
     String frag1 =
         IntStream.range(0, 10)
@@ -385,6 +322,7 @@ public abstract class BaseFtsScoreColumnTest {
             .collect(Collectors.joining(", "));
     spark.sql(String.format("INSERT INTO %s VALUES %s, %s", fullTable, frag2a, frag2b));
     createFtsIndex(fullTable);
+    return fullTable;
   }
 
   private void createFtsIndex(String table) {
@@ -399,6 +337,7 @@ public abstract class BaseFtsScoreColumnTest {
 
   @Test
   public void testScoreReturnedWithLanceMatch() {
+    String fullTable = createAndIndexTable();
     List<Row> rows =
         spark
             .sql(
@@ -414,6 +353,7 @@ public abstract class BaseFtsScoreColumnTest {
 
   @Test
   public void testScoreReturnedWithLanceMatchPhrase() {
+    String fullTable = createAndIndexTable();
     List<Row> rows =
         spark
             .sql(
@@ -430,6 +370,7 @@ public abstract class BaseFtsScoreColumnTest {
 
   @Test
   public void testScoreWithLimitReturnsSubset() {
+    String fullTable = createAndIndexTable();
     List<Row> rows =
         spark
             .sql(
@@ -446,6 +387,7 @@ public abstract class BaseFtsScoreColumnTest {
 
   @Test
   public void testScoreExcludedFromSelectStar() {
+    String fullTable = createAndIndexTable();
     Dataset<Row> df =
         spark.sql(String.format("SELECT * FROM %s WHERE lance_match(body, 'hello')", fullTable));
     List<String> columns = Arrays.asList(df.columns());
@@ -456,6 +398,7 @@ public abstract class BaseFtsScoreColumnTest {
 
   @Test
   public void testScoreWithoutFtsRejected() {
+    String fullTable = createAndIndexTable();
     IllegalArgumentException ex =
         assertThrows(
             IllegalArgumentException.class,
@@ -467,6 +410,7 @@ public abstract class BaseFtsScoreColumnTest {
 
   @Test
   public void testScoreWithScalarFilterOnlyRejected() {
+    String fullTable = createAndIndexTable();
     IllegalArgumentException ex =
         assertThrows(
             IllegalArgumentException.class,
@@ -481,6 +425,7 @@ public abstract class BaseFtsScoreColumnTest {
 
   @Test
   public void testScoreWithCombinedFilter() {
+    String fullTable = createAndIndexTable();
     List<Row> rows =
         spark
             .sql(
@@ -497,6 +442,7 @@ public abstract class BaseFtsScoreColumnTest {
 
   @Test
   public void testScoreOrderDescending() {
+    String fullTable = createAndIndexTable();
     List<Row> rows =
         spark
             .sql(
@@ -515,6 +461,7 @@ public abstract class BaseFtsScoreColumnTest {
 
   @Test
   public void testScoreOrderDescendingWithLimit() {
+    String fullTable = createAndIndexTable();
     List<Row> rows =
         spark
             .sql(
@@ -533,95 +480,11 @@ public abstract class BaseFtsScoreColumnTest {
 
   @Test
   public void testScoreIsNullableInSchema() {
+    String fullTable = createAndIndexTable();
     Dataset<Row> df =
         spark.sql(
             String.format("SELECT _score FROM %s WHERE lance_match(body, 'hello')", fullTable));
     assertTrue(
         df.schema().apply("_score").nullable(), "_score metadata column must be declared nullable");
-  }
-
-  /**
-   * Catalog-only namespace: delegates to {@link DirectoryNamespace} but leaves {@code queryTable}
-   * unimplemented, forcing the local per-fragment scan path.
-   */
-  public static class CatalogOnlyNamespace implements LanceNamespace {
-    private final DirectoryNamespace delegate = new DirectoryNamespace();
-
-    public CatalogOnlyNamespace() {}
-
-    @Override
-    public void initialize(Map<String, String> configProperties, BufferAllocator allocator) {
-      delegate.initialize(configProperties, allocator);
-    }
-
-    @Override
-    public String namespaceId() {
-      return delegate.namespaceId();
-    }
-
-    @Override
-    public CreateNamespaceResponse createNamespace(CreateNamespaceRequest request) {
-      return delegate.createNamespace(request);
-    }
-
-    @Override
-    public DropNamespaceResponse dropNamespace(DropNamespaceRequest request) {
-      return delegate.dropNamespace(request);
-    }
-
-    @Override
-    public ListNamespacesResponse listNamespaces(ListNamespacesRequest request) {
-      return delegate.listNamespaces(request);
-    }
-
-    @Override
-    public DescribeNamespaceResponse describeNamespace(DescribeNamespaceRequest request) {
-      return delegate.describeNamespace(request);
-    }
-
-    @Override
-    public NamespaceExistsResponse namespaceExists(NamespaceExistsRequest request) {
-      return delegate.namespaceExists(request);
-    }
-
-    @Override
-    public DeclareTableResponse declareTable(DeclareTableRequest request) {
-      return delegate.declareTable(request);
-    }
-
-    @Override
-    public DescribeTableResponse describeTable(DescribeTableRequest request) {
-      return delegate.describeTable(request);
-    }
-
-    @Override
-    public DropTableResponse dropTable(DropTableRequest request) {
-      return delegate.dropTable(request);
-    }
-
-    @Override
-    public ListTablesResponse listTables(ListTablesRequest request) {
-      return delegate.listTables(request);
-    }
-
-    @Override
-    public TableExistsResponse tableExists(TableExistsRequest request) {
-      return delegate.tableExists(request);
-    }
-
-    @Override
-    public RegisterTableResponse registerTable(RegisterTableRequest request) {
-      return delegate.registerTable(request);
-    }
-
-    @Override
-    public DeregisterTableResponse deregisterTable(DeregisterTableRequest request) {
-      return delegate.deregisterTable(request);
-    }
-
-    @Override
-    public RenameTableResponse renameTable(RenameTableRequest request) {
-      return delegate.renameTable(request);
-    }
   }
 }

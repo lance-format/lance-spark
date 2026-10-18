@@ -36,7 +36,6 @@ import org.apache.spark.sql.vectorized.ColumnarMap;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -47,7 +46,6 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
   private final LanceFragmentScanner fragmentScanner;
   private final ArrowReader arrowReader;
   private ColumnarBatch currentColumnarBatch;
-  private FieldVector storedScoreVector;
   private long lastBatchLoadTimeNs;
 
   public LanceFragmentColumnarBatchScanner(
@@ -65,28 +63,15 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
   public boolean loadNextBatch() throws IOException {
     long start = System.nanoTime();
     try {
-      closeStoredScoreVector();
-      while (arrowReader.loadNextBatch()) {
-        VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
-        if (root.getRowCount() == 0) {
-          continue;
-        }
-        LanceInputPartition inputPartition = fragmentScanner.getInputPartition();
-        if (inputPartition.getReadOptions().getFullTextQuery() != null
-            && Arrays.stream(inputPartition.getSchema().fields())
-                .anyMatch(Utils::isStoredScoreColumn)) {
-          FieldVector rowIds = root.getVector(LanceConstant.ROW_ID);
-          if (!(rowIds instanceof UInt8Vector) || rowIds.getValueCount() != root.getRowCount()) {
-            throw new IllegalStateException("FTS stored '_score' lookup requires aligned row IDs");
-          }
-          storedScoreVector = fragmentScanner.takeStoredScoreRows((UInt8Vector) rowIds);
-        }
-        List<ColumnVector> fieldVectors = buildSparkOrderedVectors(root, inputPartition);
-        currentColumnarBatch =
-            new ColumnarBatch(fieldVectors.toArray(new ColumnVector[] {}), root.getRowCount());
-        return true;
+      if (!arrowReader.loadNextBatch()) {
+        return false;
       }
-      return false;
+      VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
+      List<ColumnVector> fieldVectors =
+          buildSparkOrderedVectors(root, fragmentScanner.getInputPartition());
+      currentColumnarBatch =
+          new ColumnarBatch(fieldVectors.toArray(new ColumnVector[] {}), root.getRowCount());
+      return true;
     } finally {
       lastBatchLoadTimeNs = System.nanoTime() - start;
     }
@@ -123,21 +108,10 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
       }
     } finally {
       try {
-        closeStoredScoreVector();
+        arrowReader.close();
       } finally {
-        try {
-          arrowReader.close();
-        } finally {
-          fragmentScanner.close();
-        }
+        fragmentScanner.close();
       }
-    }
-  }
-
-  private void closeStoredScoreVector() {
-    if (storedScoreVector != null) {
-      storedScoreVector.close();
-      storedScoreVector = null;
     }
   }
 
@@ -150,10 +124,6 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
     for (int i = 0; i < rootVectors.size(); i++) {
       actualFields.put(rootVectors.get(i).getField().getName(), rootVectors.get(i));
     }
-    if (storedScoreVector != null) {
-      actualFields.put(LanceConstant.SCORE, storedScoreVector);
-    }
-
     // Extract row addresses for blob reference support
     Set<String> blobColumnNames = fragmentScanner.getBlobColumnNames();
     long[] rowAddresses = extractRowAddresses(rootVectors, blobColumnNames, root.getRowCount());

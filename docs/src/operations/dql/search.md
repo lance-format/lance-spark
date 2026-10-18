@@ -15,6 +15,8 @@ Run Lance full-text search from Spark SQL using Lance namespace execution.
 
 `SEARCH` returns the selected table columns plus `_score`. Create an FTS index before querying text columns.
 
+Tables with a stored `_score` column must rename it before using full-text search. See [relevance scores](fts.md#relevance-score-_score).
+
 === "SQL"
     ```sql
     ALTER TABLE lance.default.documents

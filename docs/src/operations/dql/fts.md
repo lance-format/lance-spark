@@ -131,16 +131,19 @@ WHERE lance_match(body, 'deep learning') AND year >= 2024
 ORDER BY _score DESC;
 ```
 
-`_score` is a hidden metadata column — it does not appear in `SELECT *` output. Selecting `_score` without an FTS predicate raises an error at planning time.
+`_score` is a hidden metadata column — it does not appear in `SELECT *` output. Selecting or filtering on this metadata column without an FTS predicate raises an error at planning time.
 
-If the table has a stored column named `_score`, Spark resolves `_score` to that data column instead. It remains visible in `SELECT *` and is readable without FTS. Stored `FLOAT` values, including nulls, are preserved during FTS using local scans with batched row-ID lookups. The current Lance engine cannot run FTS on a table whose stored `_score` has another type; rename that column to use FTS and access the BM25 metadata column.
+If the table has a stored column named `_score`, Spark resolves `_score` to that data column instead. It remains visible in `SELECT *` and supports ordinary reads, filters, and ordering without FTS. Full-text search, including `SEARCH` and `HYBRID_SEARCH`, rejects tables with a stored `_score` column of any type, even when the column is not projected. Rename the stored column to use FTS and access relevance scores.
 
 !!! note "Ranked retrieval depends on the scan path"
-    On a query-capable namespace, such as the directory namespace, a single `ORDER BY _score DESC LIMIT k` can push the generated relevance-score top-k into `queryTable`. Spark retains a final sort and limit. Ascending or multi-key ordering, residual filters, and stored `_score` columns do not use this optimization.
+    On a query-capable namespace, such as the directory namespace, a single `ORDER BY _score DESC LIMIT k` can push the generated relevance-score top-k into `queryTable`. Spark retains a final sort and limit. Ascending or multi-key ordering and residual filters do not use this optimization.
 
     Pushed scalar filters are evaluated before namespace top-k selection. Filters on `_score` remain in Spark, so they prevent top-k pushdown.
 
     Local per-fragment scans return all matching rows; Spark sorts and limits them. Pushed ranked retrieval for this path remains a future extension.
+
+!!! note "Index coverage affects relevance scores"
+    In Lance 12.0.0, partially indexed data can produce different scores or rankings before and after index optimization, even when the data and query are unchanged ([Lance issue #9058](https://github.com/lance-format/lance/issues/9058)). Run `ALTER TABLE lance.db.documents OPTIMIZE INDEX fts_body` after appends and use a fully indexed snapshot when relying on score thresholds or corpus-relative ranking.
 
 ## Known Limitations
 

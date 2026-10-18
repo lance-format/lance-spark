@@ -19,23 +19,18 @@ import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
 import org.lance.ipc.ScanStats;
 import org.lance.spark.LanceConstant;
-import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Utils;
 
-import org.apache.arrow.vector.FieldVector;
-import org.apache.arrow.vector.UInt8Vector;
 import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
@@ -106,13 +101,9 @@ public class LanceFragmentScanner implements AutoCloseable {
       boolean hasBlobColumns = !blobColumnNames.isEmpty();
 
       List<String> projectedColumns = getColumnNames(scanSchema);
-      if (readOptions.getFullTextQuery() != null) {
-        if (Arrays.stream(scanSchema.fields()).anyMatch(Utils::isStoredScoreColumn)) {
-          projectedColumns.remove(LanceConstant.SCORE);
-          scanOptions.withRowId(true);
-        } else if (Arrays.stream(scanSchema.fields()).anyMatch(Utils::isScoreMetadataColumn)) {
-          projectedColumns.add(LanceConstant.SCORE);
-        }
+      if (readOptions.getFullTextQuery() != null
+          && Arrays.stream(scanSchema.fields()).anyMatch(Utils::isScoreMetadataColumn)) {
+        projectedColumns.add(LanceConstant.SCORE);
       }
       if (projectedColumns.isEmpty() && scanSchema.isEmpty()) {
         scanOptions.withRowId(true);
@@ -205,56 +196,9 @@ public class LanceFragmentScanner implements AutoCloseable {
     scanner.exportArrowStream(streamAddress);
   }
 
-  public FieldVector takeStoredScoreRows(UInt8Vector rowIds) throws IOException {
-    FieldVector storedScore = null;
-    boolean complete = false;
-    try {
-      List<Long> requestedRowIds = new ArrayList<>(rowIds.getValueCount());
-      for (int rowIndex = 0; rowIndex < rowIds.getValueCount(); rowIndex++) {
-        requestedRowIds.add(rowIds.get(rowIndex));
-      }
-      int copiedRows = 0;
-      try (ArrowReader reader =
-          dataset.takeRows(requestedRowIds, Collections.singletonList(LanceConstant.SCORE))) {
-        FieldVector source = reader.getVectorSchemaRoot().getVector(LanceConstant.SCORE);
-        if (source == null) {
-          throw new IllegalStateException("Row lookup did not return the stored '_score' column");
-        }
-        storedScore = source.getField().createVector(LanceRuntime.allocator());
-        storedScore.allocateNew();
-        while (reader.loadNextBatch()) {
-          source = reader.getVectorSchemaRoot().getVector(LanceConstant.SCORE);
-          for (int rowIndex = 0;
-              rowIndex < reader.getVectorSchemaRoot().getRowCount();
-              rowIndex++) {
-            if (copiedRows >= requestedRowIds.size()) {
-              throw new IllegalStateException("Stored '_score' lookup returned too many rows");
-            }
-            storedScore.copyFromSafe(rowIndex, copiedRows++, source);
-          }
-        }
-      }
-      if (copiedRows != requestedRowIds.size()) {
-        throw new IllegalStateException(
-            "Stored '_score' lookup returned "
-                + copiedRows
-                + " rows for "
-                + requestedRowIds.size()
-                + " row IDs");
-      }
-      storedScore.setValueCount(copiedRows);
-      complete = true;
-      return storedScore;
-    } finally {
-      if (!complete && storedScore != null) {
-        storedScore.close();
-      }
-    }
-  }
-
   /**
    * @return the Arrow schema the native scan produces, including row IDs or addresses requested
-   *     internally for stored-column lookups and blob references
+   *     internally for empty projections and blob references
    */
   public Schema schema() {
     return scanner.schema();

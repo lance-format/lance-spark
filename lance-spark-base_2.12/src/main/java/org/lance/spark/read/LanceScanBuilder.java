@@ -139,14 +139,9 @@ public class LanceScanBuilder
     this.fullSchema = BlobUtils.applyBlobV2DescriptorSchema(schema);
     this.residualFilterColumns = new HashSet<>(BlobUtils.blobV2ColumnNames(this.fullSchema));
     if (readOptions.getFullTextQuery() != null) {
-      for (StructField field : this.fullSchema.fields()) {
-        if (Utils.isStoredScoreColumn(field) && !field.dataType().equals(DataTypes.FloatType)) {
-          throw new UnsupportedOperationException(
-              "Full-text search requires a FLOAT stored '_score' column, but found "
-                  + field.dataType().simpleString()
-                  + ". Rename the stored column to use FTS with the current Lance engine.");
-        }
-      }
+      Utils.validateFullTextSearchSchema(this.fullSchema);
+    }
+    if (Arrays.stream(this.fullSchema.fields()).noneMatch(Utils::isStoredScoreColumn)) {
       this.residualFilterColumns.add(LanceConstant.SCORE);
     }
     this.schema = this.fullSchema;
@@ -194,7 +189,8 @@ public class LanceScanBuilder
       // unconditionally (analyzer resolves it before the FTS rule runs), so validation
       // must happen here at build time, after the optimizer fixed-point has finalized
       // the relation options.
-      if (hasScoreMetadataColumn(schema) && readOptions.getFullTextQuery() == null) {
+      if (Arrays.stream(schema.fields()).anyMatch(Utils::isScoreMetadataColumn)
+          && readOptions.getFullTextQuery() == null) {
         throw new IllegalArgumentException(
             "Column '_score' requires a full-text search predicate (lance_match, "
                 + "lance_match_phrase, or lance_multi_match) in the WHERE clause. "
@@ -537,8 +533,7 @@ public class LanceScanBuilder
 
     return readOptions.getFullTextQuery() != null
         && LanceRuntime.supportsQueryTable(namespaceImpl)
-        && !pushedAggregation.isPresent()
-        && Arrays.stream(schema.fields()).noneMatch(Utils::isStoredScoreColumn);
+        && !pushedAggregation.isPresent();
   }
 
   /**
@@ -765,15 +760,6 @@ public class LanceScanBuilder
       return true;
     }
 
-    return false;
-  }
-
-  private static boolean hasScoreMetadataColumn(StructType schema) {
-    for (StructField field : schema.fields()) {
-      if (Utils.isScoreMetadataColumn(field)) {
-        return true;
-      }
-    }
     return false;
   }
 

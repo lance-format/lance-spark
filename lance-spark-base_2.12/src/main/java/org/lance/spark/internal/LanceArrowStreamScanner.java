@@ -43,9 +43,9 @@ import java.util.List;
  * reader does on the JVM after import. So {@link #export} verifies that the schema the native scan
  * actually produces equals the declared partition schema (field names, in order) and rejects the
  * partition otherwise. This covers columns the columnar reader reconciles after import — the
- * synthesized {@code _fragid}, stored {@code _score} values fetched by row ID during FTS, the
- * {@code _rowaddr} added for blob columns, the {@code _rowid} an empty projection surfaces, and
- * reordered row-version columns — none of which the raw stream can reproduce.
+ * synthesized {@code _fragid}, the {@code _rowaddr} added for blob columns, the {@code _rowid} an
+ * empty projection surfaces, and reordered row-version columns — none of which the raw stream can
+ * reproduce.
  *
  * <p>The Lance native core writes batches into the caller-owned stream on demand as the consumer
  * pulls them, so no Arrow data is materialized on the JVM heap on this path.
@@ -118,11 +118,8 @@ public final class LanceArrowStreamScanner {
 
   /**
    * Rejects a partition whose declared Spark schema differs from the schema the native scan
-   * actually produces. The columnar reader reconciles such differences on the JVM after import —
-   * synthesizing {@code _fragid}, fetching stored {@code _score} values by row ID during FTS,
-   * stripping the {@code _rowaddr} added for blobs, surfacing {@code _rowid} for an empty
-   * projection, reordering row-version columns — but this zero-copy export cannot, so any mismatch
-   * must fall back to the columnar reader.
+   * actually produces. See the class documentation for differences reconciled by the columnar
+   * reader.
    *
    * <p>The comparison covers field names, order, Arrow types, and nullability. The declared Spark
    * schema is converted to Arrow through {@link LanceArrowUtils} — the same adapter the read path
