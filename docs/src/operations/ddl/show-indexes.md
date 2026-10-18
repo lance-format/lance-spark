@@ -66,6 +66,14 @@ An empty index listing starts no segment job. Task failures fail the command; th
 silent fallback to driver execution. Distributed aggregation does not perform Lance's
 legacy fragment-metadata migration: migrate an affected table before enabling this option.
 
+To migrate an affected table, collect statistics once on the driver before retrying:
+
+```sql
+SET spark.lance.indexStatistics.distributed.enabled=false;
+SHOW INDEXES FROM lance.db.users;
+SET spark.lance.indexStatistics.distributed.enabled=true;
+```
+
 Use this mode when collecting statistics across many segments is expensive enough to
 justify Spark scheduling and dataset-open overhead. It does not distribute the internal
 work of a single physical segment or the final coverage calculation.

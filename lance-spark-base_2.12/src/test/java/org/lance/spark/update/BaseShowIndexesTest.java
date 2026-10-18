@@ -21,6 +21,7 @@ import org.lance.index.scalar.ScalarIndexParams;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Utils;
 
+import org.apache.spark.SparkException;
 import org.apache.spark.scheduler.SparkListener;
 import org.apache.spark.scheduler.SparkListenerJobStart;
 import org.apache.spark.sql.Dataset;
@@ -42,6 +43,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 public abstract class BaseShowIndexesTest {
   private static final String DISTRIBUTED_STATISTICS_ENABLED =
@@ -203,6 +205,90 @@ public abstract class BaseShowIndexesTest {
   public void testDistributedStatisticsForEmptyIndex() {
     spark.sql(String.format("create table %s (id int, text string) using lance", fullTable));
     spark.sql(String.format("alter table %s create index test_index using btree (id)", fullTable));
+    List<Row> expected =
+        spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+    spark.conf().set(DISTRIBUTED_STATISTICS_ENABLED, "true");
+    try {
+      Assertions.assertEquals(
+          expected, spark.sql(String.format("show indexes from %s", fullTable)).collectAsList());
+    } finally {
+      spark.conf().unset(DISTRIBUTED_STATISTICS_ENABLED);
+    }
+  }
+
+  @Test
+  public void testDistributedStatisticsPropagatesSegmentReadFailure() throws IOException {
+    prepareDataset();
+    spark.sql(
+        String.format(
+            "alter table %s create index test_index using btree (id) with (num_segments = 2)",
+            fullTable));
+    UUID segmentUuid;
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build()) {
+      segmentUuid = dataset.getIndexes().get(0).uuid();
+    }
+    Files.move(
+        Path.of(tableDir, "_indices", segmentUuid.toString()), tempDir.resolve("missing-segment"));
+    spark.conf().set(DISTRIBUTED_STATISTICS_ENABLED, "true");
+    try {
+      SparkException error =
+          Assertions.assertThrows(
+              SparkException.class,
+              () -> spark.sql(String.format("show indexes from %s", fullTable)).collectAsList());
+      Assertions.assertTrue(error.getMessage().contains("Job aborted due to stage failure"));
+      Assertions.assertTrue(error.getMessage().contains(segmentUuid.toString()));
+    } finally {
+      spark.conf().unset(DISTRIBUTED_STATISTICS_ENABLED);
+    }
+  }
+
+  @Test
+  public void testDistributedStatisticsRejectsLegacyMetadataWithoutWrites() throws Exception {
+    Path fixture =
+        Path.of(
+            getClass()
+                .getResource("/legacy_index_fragment_bitmap/bad_index_fragment_bitmap")
+                .toURI());
+    Path destination = Path.of(tableDir);
+    try (Stream<Path> paths = Files.walk(fixture)) {
+      for (Path source : paths.collect(Collectors.toList())) {
+        Path target = destination.resolve(fixture.relativize(source));
+        if (Files.isDirectory(source)) {
+          Files.createDirectories(target);
+        } else {
+          Files.copy(source, target);
+        }
+      }
+    }
+    long originalVersion;
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build()) {
+      originalVersion = dataset.version();
+    }
+    spark.conf().set(DISTRIBUTED_STATISTICS_ENABLED, "true");
+    try {
+      RuntimeException error =
+          Assertions.assertThrows(
+              RuntimeException.class,
+              () -> spark.sql(String.format("show indexes from %s", fullTable)).collectAsList());
+      Assertions.assertTrue(error.getMessage().contains("Outdated fragment metadata"));
+      try (org.lance.Dataset dataset =
+          Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build()) {
+        Assertions.assertEquals(originalVersion, dataset.version());
+      }
+    } finally {
+      spark.conf().unset(DISTRIBUTED_STATISTICS_ENABLED);
+    }
+
+    List<Row> migrated =
+        spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+    Assertions.assertEquals(1, migrated.size());
+    Assertions.assertEquals("vector_idx", migrated.get(0).getString(0));
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build()) {
+      Assertions.assertTrue(dataset.version() > originalVersion);
+    }
     List<Row> expected =
         spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
     spark.conf().set(DISTRIBUTED_STATISTICS_ENABLED, "true");
