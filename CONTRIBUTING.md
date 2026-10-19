@@ -103,6 +103,31 @@ make integration-test SPARK_VERSION=3.5 SCALA_VERSION=2.13 \
 
 The Spark Search workflow runs that suite on pull requests. Workflow dispatch with `rest-uri` is for an external REST server.
 
+### Real Azure Blob Storage
+
+Use an existing container in a dedicated test storage account. Export
+`AZURE_STORAGE_ACCOUNT`, `AZURE_STORAGE_KEY`, and `AZURE_STORAGE_CONTAINER`, then run:
+
+```shell
+make integration-test SPARK_VERSION=4.1 SCALA_VERSION=2.13 TEST_BACKENDS=azure
+```
+
+This runs the same PySpark suite against Azure over HTTPS, without Azurite. Missing
+credentials fail immediately rather than skipping the tests. Each run uses a unique
+`lance_spark_test_*` prefix, printed in the pytest header. Set `AZURE_TEST_PREFIX` to
+choose a prefix; remove that prefix after local runs:
+
+```shell
+az storage blob delete-batch --source "$AZURE_STORAGE_CONTAINER" \
+  --pattern '<prefix-from-pytest-header>/*'
+```
+
+The **Spark Azure Integration** workflow uses repository secrets with the same three
+names. It runs on pushes to `main`, same-repository pull requests, and manual dispatch;
+fork pull requests never receive these credentials. The workflow removes only its
+run-specific prefix on completion, including failures. Force-cancelled jobs may leave
+data behind; use a storage lifecycle rule for the `lance_spark_test_` prefix as a backstop.
+
 ## Notebooks
 
 After `make bundle`, start the notebook image in `docker/`:

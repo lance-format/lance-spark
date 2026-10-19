@@ -4,7 +4,7 @@ Shared fixtures for Lance-Spark integration tests.
 Fixtures defined here are available to all test modules under integration-tests/.
 
 The ``spark`` fixture is parameterized over storage backends (local filesystem,
-Azurite, MinIO, and optionally LanceDB Cloud) so that every test is
+Azurite, MinIO, and optionally Azure Blob Storage or LanceDB Cloud) so that every test is
 automatically exercised against all available backends.
 """
 
@@ -214,6 +214,12 @@ AWS_GLUE_ROOT = os.environ.get("AWS_GLUE_ROOT") or (
     if AWS_S3_BUCKET_NAME
     else None
 )
+AZURE_STORAGE_ACCOUNT = os.environ.get("AZURE_STORAGE_ACCOUNT")
+AZURE_STORAGE_KEY = os.environ.get("AZURE_STORAGE_KEY")
+AZURE_STORAGE_CONTAINER = os.environ.get("AZURE_STORAGE_CONTAINER")
+AZURE_TEST_PREFIX = os.environ.get("AZURE_TEST_PREFIX") or (
+    f"lance_spark_test_{uuid.uuid4().hex}"
+)
 
 _all_backends = ["local", "azurite", "minio"]
 if LANCEDB_DB and LANCEDB_API_KEY:
@@ -222,7 +228,19 @@ if LANCE_SPARK_REST_URI or LANCE_SPARK_START_REST_DIR:
     _all_backends.append("rest-dir")
 if AWS_S3_BUCKET_NAME:
     _all_backends.append("glue")
+if AZURE_STORAGE_CONTAINER:
+    _all_backends.append("azure")
 _backends = os.environ.get("TEST_BACKENDS", ",".join(_all_backends)).split(",")
+
+if "azure" in _backends:
+    missing = [
+        name for name in (
+            "AZURE_STORAGE_ACCOUNT", "AZURE_STORAGE_KEY", "AZURE_STORAGE_CONTAINER",
+        )
+        if not os.environ.get(name)
+    ]
+    if missing:
+        raise pytest.UsageError(f"Azure backend requires: {', '.join(missing)}")
 
 
 def pytest_report_header(config):
@@ -230,6 +248,8 @@ def pytest_report_header(config):
     if "glue" in _backends:
         lines.append(f"aws glue root: {AWS_GLUE_ROOT}")
         lines.append(f"aws region: {AWS_REGION}")
+    if "azure" in _backends:
+        lines.append(f"azure root: az://{AZURE_STORAGE_CONTAINER}/{AZURE_TEST_PREFIX}")
     return lines
 
 
@@ -242,6 +262,8 @@ def spark(request):
 
     - **local** – local filesystem at ``LANCE_SPARK_DATA_ROOT`` (default ``integration-tests/.data``)
     - **azurite** – Azure Blob Storage via the Azurite emulator
+    - **azure** – real Azure Blob Storage (requires ``AZURE_STORAGE_ACCOUNT``,
+      ``AZURE_STORAGE_KEY``, and an existing ``AZURE_STORAGE_CONTAINER``)
     - **minio** – S3-compatible storage via the MinIO emulator
     - **lancedb** – LanceDB Cloud via REST API (requires ``LANCEDB_DB`` and
       ``LANCEDB_API_KEY`` env vars; skipped otherwise)
@@ -365,6 +387,16 @@ def spark(request):
                     f"spark.sql.catalog.{CATALOG}.storage.azure_storage_endpoint", az["endpoint"],
                 )
                 .config(f"spark.sql.catalog.{CATALOG}.storage.allow_http", "true")
+            )
+        elif backend == "azure":
+            builder = (
+                builder
+                .config(
+                    f"spark.sql.catalog.{CATALOG}.root",
+                    f"az://{AZURE_STORAGE_CONTAINER}/{AZURE_TEST_PREFIX}",
+                )
+                .config(f"spark.sql.catalog.{CATALOG}.storage.account_name", AZURE_STORAGE_ACCOUNT)
+                .config(f"spark.sql.catalog.{CATALOG}.storage.account_key", AZURE_STORAGE_KEY)
             )
         elif backend == "minio":
             s3 = request.getfixturevalue("minio")
