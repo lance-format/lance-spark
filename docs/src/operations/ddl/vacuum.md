@@ -61,6 +61,13 @@ The `VACUUM` command returns statistics about the cleanup operation:
 |--------|------|-------------|
 | `bytes_removed` | Long | Total bytes removed from storage |
 | `old_versions` | Long | Number of old versions removed |
+| `data_files_removed` | Long | Number of data files removed |
+| `transaction_files_removed` | Long | Number of transaction files removed |
+| `index_files_removed` | Long | Number of index files removed |
+| `deletion_files_removed` | Long | Number of deletion files removed |
+
+File counts describe files removed by this operation, not the number of rows deleted.
+Counts are zero for file types with nothing to remove.
 
 ## When to Vacuum
 

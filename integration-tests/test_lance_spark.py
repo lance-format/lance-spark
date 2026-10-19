@@ -1343,9 +1343,13 @@ class TestDDLVacuum:
         # Verify output schema
         assert len(result) == 1
         row = result[0]
-        # VACUUM returns: bytes_removed, old_versions
+        # The current version still references all data files.
         assert row.bytes_removed >= 0
         assert row.old_versions >= 0
+        assert row.data_files_removed == 0
+        assert row.transaction_files_removed >= 0
+        assert row.index_files_removed == 0
+        assert row.deletion_files_removed == 0
 
     def test_vacuum_with_before_version(self, spark):
         """Test VACUUM with before_version option."""
@@ -1434,9 +1438,10 @@ class TestDDLVacuum:
             df.writeTo("default.test_table").append()
 
         # Optimize to compact fragments
-        spark.sql("""
+        optimized = spark.sql("""
             OPTIMIZE default.test_table WITH (target_rows_per_fragment = 100)
-        """)
+        """).collect()[0]
+        assert optimized.files_removed > 0
 
         # Vacuum to remove old fragment files
         result = spark.sql("""
@@ -1446,8 +1451,12 @@ class TestDDLVacuum:
         assert len(result) == 1
         row = result[0]
         # After optimize, vacuum should clean up the old fragments
-        assert row.bytes_removed >= 0
-        assert row.old_versions >= 0
+        assert row.bytes_removed > 0
+        assert row.old_versions > 0
+        assert row.data_files_removed == optimized.files_removed
+        assert row.transaction_files_removed > 0
+        assert row.index_files_removed == 0
+        assert row.deletion_files_removed == 0
 
         # Verify data integrity
         count = spark.table("default.test_table").count()

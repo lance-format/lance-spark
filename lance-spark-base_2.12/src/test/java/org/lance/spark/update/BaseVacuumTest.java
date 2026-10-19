@@ -16,6 +16,8 @@ package org.lance.spark.update;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructField;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
@@ -91,9 +93,29 @@ public abstract class BaseVacuumTest {
 
     Dataset<Row> result = spark.sql(String.format("vacuum %s", fullTable));
 
+    Assertions.assertArrayEquals(
+        new String[] {
+          "bytes_removed",
+          "old_versions",
+          "data_files_removed",
+          "transaction_files_removed",
+          "index_files_removed",
+          "deletion_files_removed"
+        },
+        result.columns());
+    for (StructField field : result.schema().fields()) {
+      Assertions.assertEquals(DataTypes.LongType, field.dataType(), field.name());
+    }
     Row row = result.collectAsList().get(0);
-    Assertions.assertTrue(row.getLong(0) >= 0);
-    Assertions.assertTrue(row.getLong(1) >= 0);
+    for (int i = 0; i < row.size(); i++) {
+      Assertions.assertTrue(row.getLong(i) >= 0, result.columns()[i]);
+    }
+
+    // Repeating cleanup without new writes has nothing left to remove.
+    Row repeated = spark.sql(String.format("vacuum %s", fullTable)).collectAsList().get(0);
+    for (int i = 0; i < repeated.size(); i++) {
+      Assertions.assertEquals(0L, repeated.getLong(i), result.columns()[i]);
+    }
   }
 
   @Test
@@ -154,6 +176,8 @@ public abstract class BaseVacuumTest {
 
     Dataset<Row> optimizeResult =
         spark.sql(String.format("optimize %s with (target_rows_per_fragment=20000)", fullTable));
+    long filesRemoved = optimizeResult.collectAsList().get(0).getAs("files_removed");
+    Assertions.assertTrue(filesRemoved > 0);
 
     Dataset<Row> vacuumResult =
         spark.sql(String.format("vacuum %s with (before_version=1000000)", fullTable));
@@ -161,5 +185,9 @@ public abstract class BaseVacuumTest {
     Row row = vacuumResult.collectAsList().get(0);
     Assertions.assertTrue(row.getLong(0) > 0);
     Assertions.assertTrue(row.getLong(1) >= 0);
+    Assertions.assertEquals(filesRemoved, (long) row.getAs("data_files_removed"));
+    Assertions.assertTrue((long) row.getAs("transaction_files_removed") > 0);
+    Assertions.assertEquals(0L, (long) row.getAs("index_files_removed"));
+    Assertions.assertEquals(0L, (long) row.getAs("deletion_files_removed"));
   }
 }
