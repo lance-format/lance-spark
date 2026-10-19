@@ -54,6 +54,7 @@ public class LanceSparkReadOptions implements Serializable {
   public static final String CONFIG_BLOCK_SIZE = "block_size";
   public static final String CONFIG_VERSION = "version";
   public static final String CONFIG_BRANCH = "branch";
+  public static final String CONFIG_TAG = "tag";
   public static final String CONFIG_INDEX_CACHE_SIZE = "index_cache_size";
   public static final String CONFIG_METADATA_CACHE_SIZE = "metadata_cache_size";
   public static final String CONFIG_BATCH_SIZE = "batch_size";
@@ -572,8 +573,11 @@ public class LanceSparkReadOptions implements Serializable {
           !opts.containsKey(CONFIG_NEAREST),
           "The nearest read option is no longer supported; use VECTOR_SEARCH table function");
       Preconditions.checkArgument(
-          !(opts.containsKey(CONFIG_VERSION) && opts.containsKey(CONFIG_BRANCH)),
-          "Specify only one of branch or version");
+          (opts.containsKey(CONFIG_VERSION) ? 1 : 0)
+                  + (opts.containsKey(CONFIG_BRANCH) ? 1 : 0)
+                  + (opts.containsKey(CONFIG_TAG) ? 1 : 0)
+              <= 1,
+          "Specify only one of branch, tag, or version");
       if (opts.containsKey(CONFIG_PUSH_DOWN_FILTERS)) {
         this.pushDownFilters = Boolean.parseBoolean(opts.get(CONFIG_PUSH_DOWN_FILTERS));
       }
@@ -584,6 +588,8 @@ public class LanceSparkReadOptions implements Serializable {
         this.ref = LanceRef.ofMain(Long.parseLong(opts.get(CONFIG_VERSION)));
       } else if (opts.containsKey(CONFIG_BRANCH)) {
         this.ref = LanceRef.ofBranch(opts.get(CONFIG_BRANCH));
+      } else if (opts.containsKey(CONFIG_TAG)) {
+        this.ref = LanceRef.ofTag(opts.get(CONFIG_TAG));
       }
       if (opts.containsKey(CONFIG_INDEX_CACHE_SIZE)) {
         this.indexCacheSize = Integer.parseInt(opts.get(CONFIG_INDEX_CACHE_SIZE));

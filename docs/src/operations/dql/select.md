@@ -214,20 +214,24 @@ Use `VERSION AS OF` with a quoted tag name to query the snapshot referenced by a
 
 === "Python"
     ```python
-    # Query a tag using SQL
-    spark.sql("SELECT * FROM users VERSION AS OF 'release_candidate'").show()
+    tagged = spark.read.option("tag", "release_candidate").table("users")
+
+    tagged_path = spark.read \
+        .format("lance") \
+        .option("tag", "release_candidate") \
+        .load("/path/to/dataset.lance")
     ```
 
 === "Scala"
     ```scala
-    // Query a tag using SQL
-    spark.sql("SELECT * FROM users VERSION AS OF 'release_candidate'").show()
+    val tagged = spark.read.option("tag", "release_candidate").table("users")
     ```
 
 === "Java"
     ```java
-    // Query a tag using SQL
-    spark.sql("SELECT * FROM users VERSION AS OF 'release_candidate'").show();
+    Dataset<Row> tagged = spark.read()
+        .option("tag", "release_candidate")
+        .table("users");
     ```
 
 !!! note
@@ -236,13 +240,17 @@ Use `VERSION AS OF` with a quoted tag name to query the snapshot referenced by a
     `VERSION AS OF '123'` query table version 123 rather than a tag named `123`. Use a tag name that
     contains at least one non-digit character.
 
+The explicit `tag` read option also accepts numeric tag names. Do not combine it
+with `branch` or `version`. Read options apply at scan time; use SQL `VERSION AS OF`
+when the tag has a different schema from the current table.
+
 Tag queries are read-only; mutating commands are rejected. Besides DML and schema changes, this
 covers `CREATE INDEX`, `DROP INDEX`, `OPTIMIZE`, `VACUUM`, `SET UNENFORCED PRIMARY KEY`, and
 branch and tag DDL. Branch identifiers behave the same way.
 
 ### Query by Branch
 
-Read the current head of a named branch. Do not set `branch` and `version` on the same read.
+Read the current head of a named branch. Do not combine `branch` with `tag` or `version`.
 
 === "SQL"
     ```sql
@@ -328,7 +336,8 @@ These options control how data is read from Lance datasets. They can be set usin
 | `batch_size`          | Integer | `8192`  | Number of rows to read per batch during scanning. Larger values may improve throughput but increase memory usage. |
 | `use_scalar_index`    | Boolean | `true`  | Whether to use scalar indices (e.g. btree) for filter acceleration during scanning.                               |
 | `version`             | Integer | Latest  | Specific dataset version to read. If not specified, reads the latest version.                                     |
-| `branch`              | String  | Main    | Named branch to read. Reads the current head. Do not set with `version`.                                          |
+| `branch`              | String  | Main    | Named branch to read. Reads the current head. Do not set with `tag` or `version`.                                 |
+| `tag`                 | String  | -       | Tagged snapshot to read. Read-only; do not set with `branch` or `version`.                                        |
 | `block_size`          | Integer | -       | Block size in bytes for reading data.                                                                             |
 | `index_cache_size`    | Integer | -       | Size of the index cache in number of entries.                                                                     |
 | `metadata_cache_size` | Integer | -       | Size of the metadata cache in number of entries.                                                                  |

@@ -66,6 +66,20 @@ public class LanceSparkWriteOptionsTest {
   }
 
   @Test
+  public void testWriteOptionsRejectTag() {
+    Map<String, String> options = new HashMap<>();
+    options.put(LanceSparkReadOptions.CONFIG_TAG, "stable");
+
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(options).build());
+
+    assertTrue(exception.getMessage().contains("read-only"));
+  }
+
+  @Test
   public void fileFormatVersionUsesValueEquality() {
     LanceSparkWriteOptions left =
         LanceSparkWriteOptions.builder()

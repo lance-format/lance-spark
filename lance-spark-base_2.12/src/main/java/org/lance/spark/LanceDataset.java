@@ -318,7 +318,8 @@ public class LanceDataset
     LanceSparkReadOptions scanOptions = mergeScanOptions(scanMap);
     StructType scanSchema = sparkSchema;
     LanceRef scanRef = scanOptions.getRef();
-    if (scanRef != null && scanRef.isBranch() && scanRef.getVersionNumber().isEmpty()) {
+    if (scanRef != null
+        && (scanRef.isTag() || (scanRef.isBranch() && scanRef.getVersionNumber().isEmpty()))) {
       try (Dataset dataset =
           Utils.openDatasetBuilder(scanOptions)
               .initialStorageOptions(initialStorageOptions)
@@ -342,14 +343,16 @@ public class LanceDataset
       return readOptions;
     }
     LanceRef tableRef = readOptions.getRef();
-    boolean scanSetsBranchOrVersion =
+    boolean scanSetsRef =
         scanMap.containsKey(LanceSparkReadOptions.CONFIG_VERSION)
-            || scanMap.containsKey(LanceSparkReadOptions.CONFIG_BRANCH);
+            || scanMap.containsKey(LanceSparkReadOptions.CONFIG_BRANCH)
+            || scanMap.containsKey(LanceSparkReadOptions.CONFIG_TAG);
     Map<String, String> merged = new HashMap<>(readOptions.getStorageOptions());
-    // Stored options can still hold version/branch keys. Strip them so fromOptions cannot
+    // Stored options can still hold reference keys. Strip them so fromOptions cannot
     // overwrite the table ref with a leftover key.
     merged.remove(LanceSparkReadOptions.CONFIG_VERSION);
     merged.remove(LanceSparkReadOptions.CONFIG_BRANCH);
+    merged.remove(LanceSparkReadOptions.CONFIG_TAG);
     merged.putAll(scanMap.asCaseSensitiveMap());
     LanceSparkReadOptions scanOptions =
         LanceSparkReadOptions.builder()
@@ -362,7 +365,7 @@ public class LanceDataset
             .ref(tableRef)
             .fromOptions(merged)
             .build();
-    if (tableRef != null && scanSetsBranchOrVersion) {
+    if (tableRef != null && scanSetsRef) {
       LanceRef scanRef = scanOptions.getRef();
       if (sameNamedBranch(tableRef, scanRef)) {
         return scanOptions.withRef(tableRef);

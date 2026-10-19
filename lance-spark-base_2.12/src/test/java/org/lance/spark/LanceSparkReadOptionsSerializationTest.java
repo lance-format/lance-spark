@@ -86,6 +86,35 @@ public class LanceSparkReadOptionsSerializationTest {
   }
 
   @Test
+  public void testFromOptionsParsesTag() {
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.from(
+            Collections.singletonMap(LanceSparkReadOptions.CONFIG_TAG, "stable"),
+            "s3://bucket/path");
+
+    Assertions.assertEquals(LanceRef.ofTag("stable"), options.getRef());
+  }
+
+  @Test
+  public void testFromOptionsRejectsEmptyOrConflictingTag() {
+    Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            LanceSparkReadOptions.from(
+                Collections.singletonMap(LanceSparkReadOptions.CONFIG_TAG, ""),
+                "s3://bucket/path"));
+    for (String other :
+        Arrays.asList(LanceSparkReadOptions.CONFIG_BRANCH, LanceSparkReadOptions.CONFIG_VERSION)) {
+      Map<String, String> options = new HashMap<>();
+      options.put(LanceSparkReadOptions.CONFIG_TAG, "stable");
+      options.put(other, "2");
+      Assertions.assertThrows(
+          IllegalArgumentException.class,
+          () -> LanceSparkReadOptions.from(options, "s3://bucket/path"));
+    }
+  }
+
+  @Test
   public void testFromOptionsRejectsBranchAndVersion() {
     Map<String, String> options = new HashMap<>();
     options.put(LanceSparkReadOptions.CONFIG_BRANCH, "audit");
