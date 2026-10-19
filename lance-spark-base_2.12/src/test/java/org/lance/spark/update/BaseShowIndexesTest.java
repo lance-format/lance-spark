@@ -304,7 +304,6 @@ public abstract class BaseShowIndexesTest {
   public void testShowIndexes() {
     prepareDataset();
 
-    // Create a B-tree index on id
     spark.sql(String.format("alter table %s create index test_index using btree (id)", fullTable));
 
     Dataset<Row> result = spark.sql(String.format("show indexes from %s", fullTable));
@@ -318,22 +317,17 @@ public abstract class BaseShowIndexesTest {
 
     Row row = rows.get(0);
 
-    // name should match created index
     Assertions.assertEquals("test_index", row.getString(0));
 
-    // fields should contain column name "id"
     @SuppressWarnings("unchecked")
     List<String> fieldNames = row.getList(1);
     Assertions.assertTrue(fieldNames.contains("id"), "fields should contain column name 'id'");
 
-    // index_type should be btree
     Assertions.assertEquals("btree", row.getString(2));
 
-    // num_indexed_fragments should be at least 1
     long numIndexedFragments = row.getLong(3);
     Assertions.assertTrue(numIndexedFragments >= 1L, "num_indexed_fragments should be at least 1");
 
-    // num_indexed_rows should be at least 1
     long numIndexedRows = row.getLong(4);
     Assertions.assertTrue(numIndexedRows >= 1L, "num_indexed_rows should be at least 1");
 
@@ -427,8 +421,7 @@ public abstract class BaseShowIndexesTest {
   public void testShowIndexesFiltersFragmentReuseIndex() {
     prepareDataset();
 
-    // Use one index segment over all fragments so compaction rewrites indexed data. Distributed
-    // CREATE INDEX produces per-task segments that the compaction planner keeps in separate bins.
+    // One segment keeps the indexed fragments in the same compaction bin.
     IndexParams indexParams =
         IndexParams.builder().setScalarIndexParams(ScalarIndexParams.create("BTREE")).build();
     try (var dataset =

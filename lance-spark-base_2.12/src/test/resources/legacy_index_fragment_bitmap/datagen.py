@@ -7,7 +7,6 @@ import lance
 import pyarrow as pa
 import pyarrow.compute as pc
 
-# To generate the test file, we should be running this version of lance
 assert lance.__version__ == "0.21.0"
 
 data = pa.table(
