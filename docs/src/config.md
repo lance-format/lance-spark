@@ -604,9 +604,11 @@ The parent configuration effectively "anchors" your Spark catalog at a specific 
 hierarchy, making the extra levels transparent to Spark users while maintaining compatibility with the underlying
 namespace implementation.
 
-## Branch Read Option
+## Branch and Tag Read Options
 
-Set `branch` to read the current head of a named branch. Do not set `version` on the same read.
+Set `branch` to read the current head of a named branch, or `tag` to read a tagged
+snapshot. Specify only one of `branch`, `tag`, or `version`. Branch and tag options
+are read-only.
 
 ```python
 df = spark.read \
@@ -614,6 +616,18 @@ df = spark.read \
     .option("branch", "audit") \
     .load("/path/to/dataset.lance")
 ```
+
+```python
+df = spark.read \
+    .format("lance") \
+    .option("tag", "release_candidate") \
+    .load("/path/to/dataset.lance")
+
+tagged = spark.read.option("tag", "release_candidate").table("lance.db.users")
+```
+
+Use SQL `VERSION AS OF 'release_candidate'` when the tag's schema differs from the
+current table schema, so Spark analyzes the query against the historical schema.
 
 ## Memory Configuration
 
