@@ -19,6 +19,7 @@ import org.lance.namespace.LanceNamespace;
 import org.lance.spark.utils.FullTextQueryUtils;
 
 import com.google.common.base.Preconditions;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
@@ -569,13 +570,14 @@ public class LanceSparkReadOptions implements Serializable {
      * both call sites stay in sync and catalog-level configs reach the typed fields.
      */
     private void parseTypedFlags(Map<String, String> opts) {
+      CaseInsensitiveStringMap references = new CaseInsensitiveStringMap(opts);
       Preconditions.checkArgument(
           !opts.containsKey(CONFIG_NEAREST),
           "The nearest read option is no longer supported; use VECTOR_SEARCH table function");
       Preconditions.checkArgument(
-          (opts.containsKey(CONFIG_VERSION) ? 1 : 0)
-                  + (opts.containsKey(CONFIG_BRANCH) ? 1 : 0)
-                  + (opts.containsKey(CONFIG_TAG) ? 1 : 0)
+          (references.containsKey(CONFIG_VERSION) ? 1 : 0)
+                  + (references.containsKey(CONFIG_BRANCH) ? 1 : 0)
+                  + (references.containsKey(CONFIG_TAG) ? 1 : 0)
               <= 1,
           "Specify only one of branch, tag, or version");
       if (opts.containsKey(CONFIG_PUSH_DOWN_FILTERS)) {
@@ -584,12 +586,12 @@ public class LanceSparkReadOptions implements Serializable {
       if (opts.containsKey(CONFIG_BLOCK_SIZE)) {
         this.blockSize = Integer.parseInt(opts.get(CONFIG_BLOCK_SIZE));
       }
-      if (opts.containsKey(CONFIG_VERSION)) {
-        this.ref = LanceRef.ofMain(Long.parseLong(opts.get(CONFIG_VERSION)));
-      } else if (opts.containsKey(CONFIG_BRANCH)) {
-        this.ref = LanceRef.ofBranch(opts.get(CONFIG_BRANCH));
-      } else if (opts.containsKey(CONFIG_TAG)) {
-        this.ref = LanceRef.ofTag(opts.get(CONFIG_TAG));
+      if (references.containsKey(CONFIG_VERSION)) {
+        this.ref = LanceRef.ofMain(Long.parseLong(references.get(CONFIG_VERSION)));
+      } else if (references.containsKey(CONFIG_BRANCH)) {
+        this.ref = LanceRef.ofBranch(references.get(CONFIG_BRANCH));
+      } else if (references.containsKey(CONFIG_TAG)) {
+        this.ref = LanceRef.ofTag(references.get(CONFIG_TAG));
       }
       if (opts.containsKey(CONFIG_INDEX_CACHE_SIZE)) {
         this.indexCacheSize = Integer.parseInt(opts.get(CONFIG_INDEX_CACHE_SIZE));

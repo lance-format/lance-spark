@@ -3034,16 +3034,17 @@ class TestDQLTimeTravel:
         ]
 
     @pytest.mark.parametrize("tag", ["stable", "123"])
-    def test_tag_read_option_matches_sql_and_path(self, spark, tag):
+    @pytest.mark.parametrize("tag_option", ["tag", "TaG", "TAG"])
+    def test_tag_read_option_matches_sql_and_path(self, spark, tag, tag_option):
         spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
         spark.sql("INSERT INTO default.test_table VALUES (1, 'tagged')")
         spark.sql(f"ALTER TABLE default.test_table CREATE TAG `{tag}`")
         spark.sql("INSERT INTO default.test_table VALUES (2, 'main')")
 
         expected = [(1, "tagged")]
-        table = spark.read.option("tag", tag).table("default.test_table")
+        table = spark.read.option(tag_option, tag).table("default.test_table")
         path = (
-            spark.read.format("lance").option("tag", tag)
+            spark.read.format("lance").option(tag_option, tag)
             .load(_table_location(spark, "default.test_table"))
         )
         for tagged in (table, path):
@@ -3051,30 +3052,53 @@ class TestDQLTimeTravel:
             assert tagged.count() == 1
         assert spark.table("default.test_table").count() == 2
 
-    def test_tag_read_option_rejects_conflicts_and_writes(self, spark):
+    @pytest.mark.parametrize("tag_option", ["tag", "TaG"])
+    def test_tag_read_option_rejects_conflicts(self, spark, tag_option):
         spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
         spark.sql("INSERT INTO default.test_table VALUES (1, 'tagged')")
         spark.sql("ALTER TABLE default.test_table CREATE TAG stable")
         spark.sql("ALTER TABLE default.test_table CREATE BRANCH audit")
         location = _table_location(spark, "default.test_table")
 
-        for option, value in (("version", "2"), ("branch", "audit")):
+        for option, value in (
+            ("version", "2"), ("VERSION", "2"), ("branch", "audit"), ("BrAnCh", "audit"),
+        ):
             with pytest.raises(Exception, match="Specify only one"):
-                spark.read.option("tag", "stable").option(option, value).table(
+                spark.read.option(tag_option, "stable").option(option, value).table(
                     "default.test_table"
                 ).collect()
+            with pytest.raises(Exception, match="Specify only one"):
+                spark.read.format("lance").option(tag_option, "stable").option(
+                    option, value
+                ).load(location).collect()
         with pytest.raises(Exception, match="missing_tag"):
-            spark.read.option("tag", "missing_tag").table(
+            spark.read.option(tag_option, "missing_tag").table(
                 "default.test_table"
             ).collect()
         with pytest.raises(Exception, match="Cannot combine"):
-            spark.read.option("tag", "stable").table(
+            spark.read.option(tag_option, "stable").table(
                 "default.test_table.branch_audit"
             ).collect()
+
+    @pytest.mark.parametrize("tag_option", ["tag", "TaG"])
+    @pytest.mark.parametrize("mode", ["append", "overwrite"])
+    @pytest.mark.parametrize("target", ["path", "table"])
+    def test_tag_read_option_rejects_writes(self, spark, tag_option, mode, target):
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'tagged')")
+        spark.sql("ALTER TABLE default.test_table CREATE TAG stable")
+        location = _table_location(spark, "default.test_table")
+
+        writer = spark.createDataFrame([(9, "new")], "id INT, name STRING").write \
+            .format("lance").option(tag_option, "stable").mode(mode)
         with pytest.raises(Exception, match="read-only|Writes are not supported"):
-            spark.createDataFrame([(2, "new")], "id INT, name STRING").write \
-                .format("lance").option("tag", "stable").mode("append").save(location)
-        assert spark.table("default.test_table").count() == 1
+            if target == "path":
+                writer.save(location)
+            else:
+                writer.saveAsTable("default.test_table")
+        assert [(row.id, row.name) for row in spark.table("default.test_table").collect()] == [
+            (1, "tagged"),
+        ]
 
     @requires_update_or_merge
     def test_version_as_of_after_update(self, spark):

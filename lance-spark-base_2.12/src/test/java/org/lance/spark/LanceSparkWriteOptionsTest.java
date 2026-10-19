@@ -22,6 +22,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -53,30 +54,40 @@ public class LanceSparkWriteOptionsTest {
 
   @Test
   public void testWriteOptionsRejectBranch() {
-    Map<String, String> options = new HashMap<>();
-    options.put(LanceSparkReadOptions.CONFIG_BRANCH, "audit");
+    for (String key : Arrays.asList("branch", "BrAnCh")) {
+      Map<String, String> options = new HashMap<>();
+      options.put(key, "audit");
 
-    IllegalArgumentException exception =
-        assertThrows(
-            IllegalArgumentException.class,
-            () ->
-                LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(options).build());
+      IllegalArgumentException exception =
+          assertThrows(
+              IllegalArgumentException.class,
+              () ->
+                  LanceSparkWriteOptions.builder()
+                      .datasetUri(TEMP_URL)
+                      .fromOptions(options)
+                      .build());
 
-    assertTrue(exception.getMessage().contains("read-only"));
+      assertTrue(exception.getMessage().contains("read-only"));
+    }
   }
 
   @Test
   public void testWriteOptionsRejectTag() {
-    Map<String, String> options = new HashMap<>();
-    options.put(LanceSparkReadOptions.CONFIG_TAG, "stable");
+    for (String key : Arrays.asList("tag", "TaG", "TAG")) {
+      Map<String, String> options = new HashMap<>();
+      options.put(key, "stable");
 
-    IllegalArgumentException exception =
-        assertThrows(
-            IllegalArgumentException.class,
-            () ->
-                LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(options).build());
+      IllegalArgumentException exception =
+          assertThrows(
+              IllegalArgumentException.class,
+              () ->
+                  LanceSparkWriteOptions.builder()
+                      .datasetUri(TEMP_URL)
+                      .fromOptions(options)
+                      .build());
 
-    assertTrue(exception.getMessage().contains("read-only"));
+      assertTrue(exception.getMessage().contains("read-only"));
+    }
   }
 
   @Test

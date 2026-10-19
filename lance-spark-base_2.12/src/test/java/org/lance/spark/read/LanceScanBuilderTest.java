@@ -15,6 +15,7 @@ package org.lance.spark.read;
 
 import org.lance.ipc.FullTextQuery;
 import org.lance.spark.LanceConstant;
+import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceRef;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
@@ -41,8 +42,10 @@ import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -61,6 +64,34 @@ public class LanceScanBuilderTest {
   }
 
   // --- pruneColumns ---
+
+  @Test
+  public void testScanOptionsDoNotRestoreStaleMixedCaseReference() {
+    for (String key : Arrays.asList("TaG", "BrAnCh", "VeRsIoN")) {
+      LanceSparkReadOptions options =
+          LanceSparkReadOptions.from(
+                  Collections.singletonMap(key, "999"), TestUtils.TestTable1Config.datasetUri)
+              .withRef(LanceRef.ofMain(1));
+      LanceDataset table =
+          new LanceDataset(
+              options,
+              TEST_SCHEMA,
+              Collections.emptyMap(),
+              null,
+              Collections.emptyMap(),
+              false,
+              null);
+      LanceScan scan =
+          (LanceScan)
+              table
+                  .newScanBuilder(
+                      new CaseInsensitiveStringMap(Collections.singletonMap("batch_size", "128")))
+                  .build();
+      LanceInputPartition partition = (LanceInputPartition) scan.planInputPartitions()[0];
+      assertEquals(LanceRef.ofMain(1), partition.getReadOptions().getRef());
+      assertEquals(128, partition.getReadOptions().getBatchSize());
+    }
+  }
 
   @Test
   public void testPruneColumnsUpdatesSchema() {

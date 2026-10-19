@@ -18,6 +18,7 @@ import org.lance.WriteParams.WriteMode;
 import org.lance.namespace.LanceNamespace;
 
 import com.google.common.base.Preconditions;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
 import java.io.Serializable;
 import java.util.HashMap;
@@ -521,11 +522,12 @@ public class LanceSparkWriteOptions implements Serializable {
      * @return this builder
      */
     public Builder fromOptions(Map<String, String> options) {
+      CaseInsensitiveStringMap references = new CaseInsensitiveStringMap(options);
       Preconditions.checkArgument(
-          !options.containsKey(LanceSparkReadOptions.CONFIG_BRANCH),
+          !references.containsKey(LanceSparkReadOptions.CONFIG_BRANCH),
           "The branch option is read-only");
       Preconditions.checkArgument(
-          !options.containsKey(LanceSparkReadOptions.CONFIG_TAG), "The tag option is read-only");
+          !references.containsKey(LanceSparkReadOptions.CONFIG_TAG), "The tag option is read-only");
       this.storageOptions = new HashMap<>(options);
       if (options.containsKey(CONFIG_WRITE_MODE)) {
         this.writeMode = WriteMode.valueOf(options.get(CONFIG_WRITE_MODE).toUpperCase(Locale.ROOT));

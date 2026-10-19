@@ -350,9 +350,13 @@ public class LanceDataset
     Map<String, String> merged = new HashMap<>(readOptions.getStorageOptions());
     // Stored options can still hold reference keys. Strip them so fromOptions cannot
     // overwrite the table ref with a leftover key.
-    merged.remove(LanceSparkReadOptions.CONFIG_VERSION);
-    merged.remove(LanceSparkReadOptions.CONFIG_BRANCH);
-    merged.remove(LanceSparkReadOptions.CONFIG_TAG);
+    merged
+        .keySet()
+        .removeIf(
+            key ->
+                key.equalsIgnoreCase(LanceSparkReadOptions.CONFIG_VERSION)
+                    || key.equalsIgnoreCase(LanceSparkReadOptions.CONFIG_BRANCH)
+                    || key.equalsIgnoreCase(LanceSparkReadOptions.CONFIG_TAG));
     merged.putAll(scanMap.asCaseSensitiveMap());
     LanceSparkReadOptions scanOptions =
         LanceSparkReadOptions.builder()
@@ -371,7 +375,7 @@ public class LanceDataset
         return scanOptions.withRef(tableRef);
       }
       Preconditions.checkArgument(
-          tableRef.equals(scanRef), "Cannot combine %s with %s", tableRef, scanRef);
+          tableRef.equals(scanRef), "Cannot combine " + tableRef + " with " + scanRef);
     }
     return scanOptions;
   }
