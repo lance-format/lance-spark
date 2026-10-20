@@ -587,6 +587,10 @@ public class LanceScanBuilder
 
   @Override
   public void pruneColumns(StructType requiredSchema) {
+    LanceRef ref = readOptions.getRef();
+    if (ref != null && (ref.isBranchOrTag() || ref.getVersionNumber().isPresent())) {
+      ReadSchemaNestedStructWidening.validateRequiredSchema(requiredSchema, fullSchema);
+    }
     this.schema = ReadSchemaNestedStructWidening.widenRequiredSchema(requiredSchema, fullSchema);
   }
 

@@ -626,8 +626,10 @@ df = spark.read \
 tagged = spark.read.option("tag", "release_candidate").table("lance.db.users")
 ```
 
-Use SQL `VERSION AS OF 'release_candidate'` when the tag's schema differs from the
-current table schema, so Spark analyzes the query against the historical schema.
+Spark analyzes the current table schema before applying the `tag` read option.
+Select columns compatible with the snapshot; missing columns or incompatible types,
+including nested fields, fail during planning. Use SQL `VERSION AS OF 'release_candidate'`
+to analyze the query against the historical schema instead.
 
 ## Memory Configuration
 

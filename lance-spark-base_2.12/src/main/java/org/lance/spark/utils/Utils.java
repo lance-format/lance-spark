@@ -39,11 +39,14 @@ import java.util.Map;
 public class Utils {
 
   public static boolean isScoreMetadataColumn(StructField field) {
-    return field.name().equals(LanceConstant.SCORE)
-        && MetadataAttribute.unapply(
-                MetadataAttribute.apply(field.name(), field.dataType(), field.nullable())
-                    .withMetadata(field.metadata()))
-            .isDefined();
+    return field.name().equals(LanceConstant.SCORE) && isMetadataColumn(field);
+  }
+
+  public static boolean isMetadataColumn(StructField field) {
+    return MetadataAttribute.unapply(
+            MetadataAttribute.apply(field.name(), field.dataType(), field.nullable())
+                .withMetadata(field.metadata()))
+        .isDefined();
   }
 
   public static boolean isStoredScoreColumn(StructField field) {

@@ -37,6 +37,7 @@ import org.apache.spark.sql.connector.expressions.aggregate.Sum;
 import org.apache.spark.sql.connector.expressions.filter.Predicate;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.types.ArrayType;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.MetadataBuilder;
@@ -113,6 +114,104 @@ public class LanceScanBuilderTest {
     builder.pruneColumns(emptySchema);
     Scan scan = builder.build();
     assertEquals(emptySchema, scan.readSchema());
+  }
+
+  private LanceScanBuilder createSnapshotBuilder(StructType schema) {
+    return new LanceScanBuilder(
+        schema,
+        TestUtils.TestTable1Config.readOptions.withRef(LanceRef.ofMain(1)),
+        Collections.emptyMap(),
+        null,
+        Collections.emptyMap());
+  }
+
+  @Test
+  public void testPruneSnapshotColumnsRejectsMissingFields() {
+    LanceScanBuilder builder =
+        createSnapshotBuilder(
+            new StructType().add("payload", new StructType().add("value", DataTypes.IntegerType)));
+    for (StructType required :
+        Arrays.asList(
+            new StructType().add("extra", DataTypes.IntegerType),
+            new StructType()
+                .add("payload", new StructType().add("extra", DataTypes.IntegerType)))) {
+      IllegalArgumentException error =
+          assertThrows(IllegalArgumentException.class, () -> builder.pruneColumns(required));
+      assertTrue(error.getMessage().contains("extra"));
+      assertTrue(error.getMessage().contains("snapshot"));
+    }
+  }
+
+  @Test
+  public void testPruneSnapshotColumnsRejectsChangedTypes() {
+    StructType oldStruct = new StructType().add("value", DataTypes.IntegerType);
+    StructType newStruct = new StructType().add("value", DataTypes.LongType);
+    DataType[] oldTypes = {
+      DataTypes.IntegerType,
+      oldStruct,
+      DataTypes.createArrayType(oldStruct),
+      DataTypes.createMapType(DataTypes.StringType, oldStruct),
+      DataTypes.createMapType(DataTypes.StringType, DataTypes.IntegerType)
+    };
+    DataType[] newTypes = {
+      DataTypes.LongType,
+      newStruct,
+      DataTypes.createArrayType(newStruct),
+      DataTypes.createMapType(DataTypes.StringType, newStruct),
+      DataTypes.createMapType(DataTypes.IntegerType, DataTypes.IntegerType)
+    };
+    for (int i = 0; i < oldTypes.length; i++) {
+      LanceScanBuilder builder =
+          createSnapshotBuilder(new StructType().add("payload", oldTypes[i]));
+      StructType required = new StructType().add("payload", newTypes[i]);
+      IllegalArgumentException error =
+          assertThrows(IllegalArgumentException.class, () -> builder.pruneColumns(required));
+      assertTrue(error.getMessage().contains("payload"));
+      assertTrue(error.getMessage().contains("snapshot"));
+    }
+  }
+
+  @Test
+  public void testPruneSnapshotColumnsAllowsCompatibleProjections() {
+    StructType oldStruct =
+        new StructType().add("value", DataTypes.IntegerType).add("label", DataTypes.StringType);
+    StructType projected = new StructType().add("label", DataTypes.StringType, false);
+    DataType[] oldTypes = {
+      oldStruct,
+      DataTypes.createArrayType(oldStruct),
+      DataTypes.createMapType(DataTypes.StringType, oldStruct)
+    };
+    DataType[] projectedTypes = {
+      projected,
+      DataTypes.createArrayType(projected, false),
+      DataTypes.createMapType(DataTypes.StringType, projected, false)
+    };
+    for (int i = 0; i < oldTypes.length; i++) {
+      LanceScanBuilder builder =
+          createSnapshotBuilder(
+              new StructType().add("id", DataTypes.IntegerType).add("payload", oldTypes[i]));
+      StructType required = new StructType().add("payload", projectedTypes[i], false);
+      assertDoesNotThrow(() -> builder.pruneColumns(required));
+      assertDoesNotThrow(() -> builder.pruneColumns(new StructType()));
+    }
+  }
+
+  @Test
+  public void testPruneSnapshotColumnsAllowsVirtualMetadata() {
+    StructField[] fields =
+        Arrays.stream(LanceDataset.METADATA_COLUMNS)
+            .map(
+                column ->
+                    DataTypes.createStructField(
+                        column.name(),
+                        column.dataType(),
+                        column.isNullable(),
+                        MetadataAttribute.apply(
+                                column.name(), column.dataType(), column.isNullable())
+                            .metadata()))
+            .toArray(StructField[]::new);
+    LanceScanBuilder builder = createSnapshotBuilder(TEST_SCHEMA);
+    assertDoesNotThrow(() -> builder.pruneColumns(new StructType(fields)));
   }
 
   // --- pushPredicates ---

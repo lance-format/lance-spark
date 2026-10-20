@@ -14,6 +14,7 @@
 package org.lance.spark.read;
 
 import org.lance.spark.utils.BlobUtils;
+import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataType;
@@ -38,6 +39,48 @@ import java.util.Map;
 final class ReadSchemaNestedStructWidening {
 
   private ReadSchemaNestedStructWidening() {}
+
+  static void validateRequiredSchema(StructType required, StructType tableFull) {
+    validateRequiredType(required, tableFull, "");
+  }
+
+  private static void validateRequiredType(DataType required, DataType tableFull, String path) {
+    if (required instanceof StructType && tableFull instanceof StructType) {
+      Map<String, StructField> tableFields = indexByName((StructType) tableFull);
+      for (StructField field : ((StructType) required).fields()) {
+        StructField tableField = tableFields.get(field.name());
+        String fieldPath = path.isEmpty() ? field.name() : path + "." + field.name();
+        if (tableField == null) {
+          if (path.isEmpty() && Utils.isMetadataColumn(field)) {
+            continue;
+          }
+          throw new IllegalArgumentException(
+              "Column '"
+                  + fieldPath
+                  + "' does not exist in the selected snapshot. "
+                  + "Select compatible columns or use SQL VERSION AS OF to read its schema.");
+        }
+        validateRequiredType(field.dataType(), tableField.dataType(), fieldPath);
+      }
+    } else if (required instanceof ArrayType && tableFull instanceof ArrayType) {
+      validateRequiredType(
+          ((ArrayType) required).elementType(), ((ArrayType) tableFull).elementType(), path + "[]");
+    } else if (required instanceof MapType && tableFull instanceof MapType) {
+      validateRequiredType(
+          ((MapType) required).keyType(), ((MapType) tableFull).keyType(), path + ".key");
+      validateRequiredType(
+          ((MapType) required).valueType(), ((MapType) tableFull).valueType(), path + ".value");
+    } else if (!DataType.equalsIgnoreNullability(required, tableFull)) {
+      throw new IllegalArgumentException(
+          "Column '"
+              + path
+              + "' requires "
+              + required.simpleString()
+              + " but the selected snapshot has "
+              + tableFull.simpleString()
+              + ". Select compatible columns or use SQL VERSION AS OF to read its schema.");
+    }
+  }
 
   static StructType widenRequiredSchema(StructType required, StructType tableFull) {
     if (required == null || tableFull == null) {

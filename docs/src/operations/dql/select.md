@@ -235,14 +235,16 @@ Use `VERSION AS OF` with a quoted tag name to query the snapshot referenced by a
     ```
 
 !!! note
-    Tags whose names consist entirely of integer digits cannot be queried. Numeric values are
-    interpreted as table versions, even when quoted. For example, both `VERSION AS OF 123` and
-    `VERSION AS OF '123'` query table version 123 rather than a tag named `123`. Use a tag name that
-    contains at least one non-digit character.
+    SQL `VERSION AS OF` cannot query tags whose names consist entirely of integer digits.
+    Numeric values are interpreted as table versions, even when quoted. For example, both
+    `VERSION AS OF 123` and `VERSION AS OF '123'` query table version 123 rather than a tag named
+    `123`. Use a tag name containing a non-digit character, or the explicit `tag` read option.
 
 The explicit `tag` read option also accepts numeric tag names. Do not combine it
-with `branch` or `version`. Read options apply at scan time; use SQL `VERSION AS OF`
-when the tag has a different schema from the current table.
+with `branch` or `version`. Read options apply at scan time, after Spark analyzes the
+current table schema. You can select columns compatible with the tagged snapshot;
+missing columns or incompatible types (including nested fields) fail during planning.
+Use SQL `VERSION AS OF` to analyze the historical schema instead.
 
 Tag queries are read-only; mutating commands are rejected. Besides DML and schema changes, this
 covers `CREATE INDEX`, `DROP INDEX`, `OPTIMIZE`, `VACUUM`, `SET UNENFORCED PRIMARY KEY`, and
