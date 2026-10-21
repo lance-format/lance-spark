@@ -3052,7 +3052,10 @@ class TestDQLTimeTravel:
             assert tagged.count() == 1
         assert spark.table("default.test_table").count() == 2
 
-    def test_tag_read_option_validates_projection_after_add_columns(self, spark):
+    @pytest.mark.parametrize("reference,value", [("tag", "stable"), ("version", "2")])
+    def test_snapshot_read_option_validates_projection_after_add_columns(
+        self, spark, reference, value
+    ):
         spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
         spark.sql("INSERT INTO default.test_table VALUES (1, 'tagged')")
         spark.sql("ALTER TABLE default.test_table CREATE TAG stable")
@@ -3065,7 +3068,7 @@ class TestDQLTimeTravel:
         finally:
             spark.catalog.dropTempView("tag_extra")
 
-        tagged = spark.read.option("tag", "stable").table("default.test_table")
+        tagged = spark.read.option(reference, value).table("default.test_table")
         assert [(row.id, row.name) for row in tagged.select("id", "name").collect()] == [
             (1, "tagged"),
         ]
@@ -3078,7 +3081,10 @@ class TestDQLTimeTravel:
         ).columns == ["id", "name"]
 
     @pytest.mark.parametrize("column", ["id", "payload.value"])
-    def test_tag_read_option_rejects_changed_types_during_planning(self, spark, column):
+    @pytest.mark.parametrize("reference,value", [("tag", "stable"), ("version", "2")])
+    def test_snapshot_read_option_rejects_changed_types_during_planning(
+        self, spark, column, reference, value
+    ):
         if getattr(spark, "_lance_backend", None) == "lancedb":
             pytest.skip("Direct schema evolution requires a filesystem-backed table")
         spark.sql("""
@@ -3106,8 +3112,8 @@ class TestDQLTimeTravel:
             dataset.close()
         spark.catalog.refreshTable("default.test_table")
 
-        table = spark.read.option("tag", "stable").table("default.test_table")
-        path = spark.read.format("lance").option("tag", "stable").load(
+        table = spark.read.option(reference, value).table("default.test_table")
+        path = spark.read.format("lance").option(reference, value).load(
             _table_location(spark, "default.test_table")
         )
         for tagged in (table, path):

@@ -199,6 +199,10 @@ Use `VERSION AS OF` to query a specific version of the table:
     df.show();
     ```
 
+The `version` read option applies after Spark analyzes the current table schema.
+Select compatible columns, or use SQL `VERSION AS OF` to analyze the historical schema.
+Missing columns or incompatible types fail during planning.
+
 ### Query by Tag
 
 Use `VERSION AS OF` with a quoted tag name to query the snapshot referenced by a tag:

@@ -318,8 +318,7 @@ public class LanceDataset
     LanceSparkReadOptions scanOptions = mergeScanOptions(scanMap);
     StructType scanSchema = sparkSchema;
     LanceRef scanRef = scanOptions.getRef();
-    if (scanRef != null
-        && (scanRef.isTag() || (scanRef.isBranch() && scanRef.getVersionNumber().isEmpty()))) {
+    if (scanRef != null && (scanRef.isBranchOrTag() || scanRef.getVersionNumber().isPresent())) {
       try (Dataset dataset =
           Utils.openDatasetBuilder(scanOptions)
               .initialStorageOptions(initialStorageOptions)
