@@ -70,7 +70,7 @@ final class ReadSchemaNestedStructWidening {
           ((MapType) required).keyType(), ((MapType) tableFull).keyType(), path + ".key");
       validateRequiredType(
           ((MapType) required).valueType(), ((MapType) tableFull).valueType(), path + ".value");
-    } else if (!DataType.equalsIgnoreNullability(required, tableFull)) {
+    } else if (!required.equals(tableFull)) {
       throw new IllegalArgumentException(
           "Column '"
               + path
