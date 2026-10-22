@@ -23,6 +23,12 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.Serializable;
 import java.net.URL;
 import java.util.Arrays;
 import java.util.List;
@@ -95,6 +101,20 @@ public class TestUtils {
               null /* namespaceImpl */,
               null /* namespaceProperties */,
               null /* partitionKeyRow */);
+    }
+  }
+
+  /** Serializes and deserializes {@code value}, as Spark does when it ships it between JVMs. */
+  @SuppressWarnings("unchecked")
+  public static <T extends Serializable> T roundTrip(T value)
+      throws IOException, ClassNotFoundException {
+    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    try (ObjectOutputStream output = new ObjectOutputStream(bytes)) {
+      output.writeObject(value);
+    }
+    try (ObjectInputStream input =
+        new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
+      return (T) input.readObject();
     }
   }
 

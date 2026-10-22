@@ -52,7 +52,8 @@ import java.util.stream.Collectors;
 
 public class LanceBatchWrite implements BatchWrite {
   private static final Logger logger = LoggerFactory.getLogger(LanceBatchWrite.class);
-  private static final Pattern CONCRETE_FILE_FORMAT_VERSION = Pattern.compile("(\\d+)\\.(\\d+)");
+  private static final Pattern CONCRETE_FILE_FORMAT_VERSION =
+      Pattern.compile("(\\d{1,9})\\.(\\d{1,9})");
 
   private final StructType schema;
   private LanceSparkWriteOptions writeOptions;
@@ -164,12 +165,7 @@ public class LanceBatchWrite implements BatchWrite {
   public void commit(WriterCommitMessage[] messages) {
     List<TaskCommit> taskCommits =
         Arrays.stream(messages).map(m -> (TaskCommit) m).collect(Collectors.toList());
-    // Fragments from taskCommit(...) were written outside lance-spark, so check them first.
-    checkFileFormatVersion(
-        taskCommits.stream()
-            .filter(TaskCommit::isExternal)
-            .flatMap(c -> c.getFragments().stream())
-            .collect(Collectors.toList()));
+    checkFileFormatVersion(taskCommits);
     List<FragmentMetadata> fragments =
         taskCommits.stream()
             .map(TaskCommit::getFragments)
@@ -281,9 +277,10 @@ public class LanceBatchWrite implements BatchWrite {
   }
 
   /**
-   * Returns what an external writer needs to write fragments for this write: the write mode picked
-   * from {@link #isOverwrite()}, resolved options such as {@code file_format_version}, and the
-   * storage options, including credentials vended by a namespace.
+   * Returns the Lance write parameters {@link #commit(WriterCommitMessage[])} expects for fragments
+   * an external writer produces: the write mode {@link #isOverwrite()} requires, the resolved
+   * {@code file_format_version}, the file size limits, and the storage options, including
+   * credentials vended by a namespace.
    */
   @Evolving
   public FragmentWriteSpec getFragmentWriteSpec() {
@@ -298,8 +295,9 @@ public class LanceBatchWrite implements BatchWrite {
   }
 
   /**
-   * The file format version this write commits: the write option, or for a staged commit the
-   * version resolved when it was staged. Null means Lance's default.
+   * The file format version this write resolves: the write option, or for a staged commit the
+   * version resolved when it was staged. Null means none was resolved: fragments get Lance's
+   * default, and {@code commit} does not check them.
    */
   private String effectiveFileFormatVersion() {
     String version = writeOptions.getFileFormatVersion();
@@ -310,28 +308,41 @@ public class LanceBatchWrite implements BatchWrite {
   }
 
   /**
-   * Rejects fragments whose data files use another file format version than the one this write
-   * commits. Only concrete versions of format 2 and later are checked: a release name such as
-   * "stable" resolves inside Lance, and a legacy "0.1" table writes its data files as "0.2".
+   * Rejects fragments from {@link #taskCommit} whose data files use another file format version
+   * than the one this write resolves. lance-spark's own row writer writes that version itself, so
+   * its messages are not checked. Only concrete versions of format 2 and later are compared: a
+   * release name such as "stable" resolves inside Lance, and a legacy "0.1" table writes its data
+   * files as "0.2".
    */
-  private void checkFileFormatVersion(List<FragmentMetadata> fragments) {
+  private void checkFileFormatVersion(List<TaskCommit> taskCommits) {
     String version = effectiveFileFormatVersion();
-    if (fragments.isEmpty() || version == null) {
+    Matcher matcher = version == null ? null : CONCRETE_FILE_FORMAT_VERSION.matcher(version);
+    if (matcher == null || !matcher.matches()) {
       return;
     }
-    Matcher matcher = CONCRETE_FILE_FORMAT_VERSION.matcher(version);
-    if (!matcher.matches() || Integer.parseInt(matcher.group(1)) < 2) {
+    int major = Integer.parseInt(matcher.group(1));
+    int minor = Integer.parseInt(matcher.group(2));
+    if (major < 2) {
       return;
     }
-    for (FragmentMetadata fragment : fragments) {
-      for (DataFile file : fragment.getFiles()) {
-        String fileVersion = file.getFileMajorVersion() + "." + file.getFileMinorVersion();
-        if (!fileVersion.equals(version)) {
-          throw new IllegalArgumentException(
-              String.format(
-                  "Fragment %d has a data file in Lance file format %s, but this write uses %s. "
-                      + "Write it with the parameters of LanceBatchWrite.getFragmentWriteSpec().",
-                  fragment.getId(), fileVersion, version));
+    for (TaskCommit taskCommit : taskCommits) {
+      if (!taskCommit.isExternal()) {
+        continue;
+      }
+      for (FragmentMetadata fragment : taskCommit.getFragments()) {
+        for (DataFile file : fragment.getFiles()) {
+          if (file.getFileMajorVersion() != major || file.getFileMinorVersion() != minor) {
+            throw new IllegalArgumentException(
+                String.format(
+                    "Data file %s of fragment %d uses Lance file format %d.%d, but this write "
+                        + "uses %s. Write it with the parameters of "
+                        + "LanceBatchWrite.getFragmentWriteSpec().",
+                    file.getPath(),
+                    fragment.getId(),
+                    file.getFileMajorVersion(),
+                    file.getFileMinorVersion(),
+                    version));
+          }
         }
       }
     }
@@ -343,17 +354,15 @@ public class LanceBatchWrite implements BatchWrite {
    * <p>The returned message must be passed to {@link #commit(WriterCommitMessage[])} on a {@code
    * LanceBatchWrite} for the same target dataset.
    *
-   * <p>Write the fragments the same way {@link LanceDataWriter} does, with the parameters of {@link
-   * #getFragmentWriteSpec()}. They use the write mode {@link #isOverwrite()} requires and carry
-   * resolved options such as {@code file_format_version} and the storage options. On an overwrite,
+   * <p>Write the fragments with the parameters of {@link #getFragmentWriteSpec()}. On an overwrite,
    * do not pass the table's schema to {@code WriteFragmentBuilder.schema(...)}, and give the stream
    * the column types of {@link #getCommitSchema()}. Timestamps must use the same unit, and strings
    * and binaries the same offset width. The stream may leave out a timestamp's time zone.
    *
-   * <p>{@code commit} rejects these fragments with an {@link IllegalArgumentException}, without
-   * committing anything, if their data files use another file format version than the one this
-   * write resolves. It does not check field ids or column types, so fragments written another way
-   * can commit and read back as nulls or wrong values.
+   * <p>When the write resolves a concrete file format version of format 2 or later, {@code commit}
+   * rejects these fragments with an {@link IllegalArgumentException}, without committing anything,
+   * if their data files use another version. It does not check field ids or column types, so
+   * fragments written another way can commit and read back as nulls or wrong values.
    *
    * @param fragments uncommitted fragments produced by a task
    * @return a message accepted by {@link #commit(WriterCommitMessage[])}

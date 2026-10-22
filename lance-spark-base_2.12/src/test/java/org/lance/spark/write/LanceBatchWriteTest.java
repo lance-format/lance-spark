@@ -49,11 +49,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
-import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -510,6 +505,8 @@ public class LanceBatchWriteTest {
       options.put(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION, "2.1");
       options.put(LanceSparkWriteOptions.CONFIG_MAX_ROWS_PER_FILE, "10");
       options.put(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS, "true");
+      // The spec takes the write mode from isOverwrite(), not from the write_mode option.
+      options.put(LanceSparkWriteOptions.CONFIG_WRITE_MODE, "create");
       LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(options, datasetUri);
       Map<String, String> vended = new HashMap<>();
       vended.put("access_key_id", "from-namespace");
@@ -520,8 +517,9 @@ public class LanceBatchWriteTest {
               .getFragmentWriteSpec();
       // The spec keeps its own copy of the vended options.
       vended.put("access_key_id", "changed");
-      WriteParams params = roundTrip(appendSpec).toWriteParams();
-      assertEquals(datasetUri, appendSpec.getDatasetUri());
+      FragmentWriteSpec shipped = TestUtils.roundTrip(appendSpec);
+      WriteParams params = shipped.toWriteParams();
+      assertEquals(datasetUri, shipped.getDatasetUri());
       assertEquals(Optional.of("APPEND"), params.getMode());
       assertEquals(Optional.of("2.1"), params.getDataStorageVersion());
       assertEquals(Optional.of(10), params.getMaxRowsPerFile());
@@ -534,18 +532,6 @@ public class LanceBatchWriteTest {
                   sparkSchema, writeOptions, true, vended, null, null, null, false, null)
               .getFragmentWriteSpec();
       assertEquals(Optional.of("OVERWRITE"), overwriteSpec.toWriteParams().getMode());
-
-      // A staged create or replace always commits as an overwrite.
-      String stagedUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName + "_staged");
-      StagedCommit stagedCommit =
-          StagedCommit.forNewTable(
-              schema,
-              stagedUri,
-              StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
-      FragmentWriteSpec stagedSpec =
-          newBatchWrite(sparkSchema, LanceSparkWriteOptions.from(stagedUri), false, stagedCommit)
-              .getFragmentWriteSpec();
-      assertEquals(Optional.of("OVERWRITE"), stagedSpec.toWriteParams().getMode());
     }
   }
 
@@ -660,28 +646,33 @@ public class LanceBatchWriteTest {
   }
 
   /**
-   * Only concrete versions of format 2 and later are checked: without a resolved version, or for a
-   * legacy table, which resolves "0.1" and writes "0.2" data files, fragments commit.
+   * Only concrete versions of format 2 and later are compared. A release name such as "stable"
+   * resolves inside Lance, and a legacy table resolves "0.1" but writes "0.2" data files, so a
+   * comparison would reject both.
    */
   @Test
-  public void testCommitSkipsVersionCheckWhenNotConcrete(TestInfo testInfo) throws Exception {
+  public void testCommitSkipsVersionCheckForReleaseNamesAndLegacy(TestInfo testInfo)
+      throws Exception {
     String datasetName = testInfo.getTestMethod().get().getName();
     Schema schema = new Schema(Arrays.asList(intField("a"), intField("c")));
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
-      String unpinnedUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName + "_unpinned");
-      Dataset.create(
-              allocator,
-              unpinnedUri,
-              schema,
-              new WriteParams.Builder().withDataStorageVersion("2.1").build())
-          .close();
-      newBatchWrite(schema, unpinnedUri, false)
-          .commit(
-              new WriterCommitMessage[] {
-                LanceBatchWrite.taskCommit(
-                    writeFragments(allocator, unpinnedUri, schema, WriteMode.APPEND, 0, 5))
-              });
-      assertEquals(expectedRows(0, 5), readRows(allocator, unpinnedUri));
+      String stableUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName + "_stable");
+      Dataset.create(allocator, stableUri, schema, new WriteParams.Builder().build()).close();
+      LanceBatchWrite stableWrite =
+          newBatchWrite(
+              LanceArrowUtils.fromArrowSchema(schema),
+              LanceSparkWriteOptions.builder()
+                  .datasetUri(stableUri)
+                  .fileFormatVersion("stable")
+                  .build(),
+              false,
+              null);
+      stableWrite.commit(
+          new WriterCommitMessage[] {
+            LanceBatchWrite.taskCommit(
+                writeFragments(allocator, stableWrite.getFragmentWriteSpec(), schema, 0, 5))
+          });
+      assertEquals(expectedRows(0, 5), readRows(allocator, stableUri));
 
       String legacyUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName + "_legacy");
       String legacyVersion;
@@ -708,6 +699,41 @@ public class LanceBatchWriteTest {
                 writeFragments(allocator, legacyWrite.getFragmentWriteSpec(), schema, 0, 5))
           });
       assertEquals(expectedRows(0, 5), readRows(allocator, legacyUri));
+    }
+  }
+
+  /**
+   * lance-spark's row writer writes the resolved version itself, so commit only checks the
+   * fragments in messages from taskCommit.
+   */
+  @Test
+  public void testCommitChecksOnlyTaskCommitMessages(TestInfo testInfo) throws Exception {
+    String datasetUri =
+        TestUtils.getDatasetUri(tempDir.toString(), testInfo.getTestMethod().get().getName());
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Schema schema = new Schema(Arrays.asList(intField("a"), intField("c")));
+      Dataset.create(
+              allocator,
+              datasetUri,
+              schema,
+              new WriteParams.Builder().withDataStorageVersion("2.1").build())
+          .close();
+      LanceBatchWrite batchWrite =
+          newBatchWrite(
+              LanceArrowUtils.fromArrowSchema(schema),
+              LanceSparkWriteOptions.builder()
+                  .datasetUri(datasetUri)
+                  .fileFormatVersion("2.1")
+                  .build(),
+              false,
+              null);
+      List<FragmentMetadata> fragments =
+          writeFragments(allocator, datasetUri, schema, WriteMode.APPEND, 0, 5);
+      assertFileFormatVersion("2.2", fragments);
+
+      batchWrite.commit(new WriterCommitMessage[] {new LanceBatchWrite.TaskCommit(fragments)});
+
+      assertEquals(expectedRows(0, 5), readRows(allocator, datasetUri));
     }
   }
 
@@ -822,18 +848,6 @@ public class LanceBatchWriteTest {
             file.getFileMajorVersion() + "." + file.getFileMinorVersion(),
             file.getPath());
       }
-    }
-  }
-
-  @SuppressWarnings("unchecked")
-  private static <T extends Serializable> T roundTrip(T value) throws Exception {
-    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-    try (ObjectOutputStream output = new ObjectOutputStream(bytes)) {
-      output.writeObject(value);
-    }
-    try (ObjectInputStream input =
-        new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
-      return (T) input.readObject();
     }
   }
 

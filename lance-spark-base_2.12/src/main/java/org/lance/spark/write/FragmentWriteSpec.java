@@ -23,12 +23,14 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * What an external writer needs to write uncommitted fragments for a {@link LanceBatchWrite} the
- * same way {@link LanceDataWriter} does. Get it from {@link
- * LanceBatchWrite#getFragmentWriteSpec()}.
+ * The Lance write parameters {@link LanceBatchWrite#commit} expects for fragments an external
+ * writer produces, from {@link LanceBatchWrite#getFragmentWriteSpec()}. It does not cover what
+ * lance-spark's row writer does beyond those parameters, such as rolling fragments at sharding-key
+ * boundaries or resolving blob references.
  *
- * <p>It is serializable, so a driver can send it to executors. Lance's {@link WriteParams} is not,
- * so build those on the executor with {@link #toWriteParams()}.
+ * <p>It is serializable, so a driver can send it to executors; Lance's {@link WriteParams} is not,
+ * so build those on the executor with {@link #toWriteParams()}. It carries the storage options,
+ * which can include credentials, so do not log or persist it.
  */
 @Evolving
 public final class FragmentWriteSpec implements Serializable {
@@ -51,8 +53,8 @@ public final class FragmentWriteSpec implements Serializable {
 
   /**
    * Returns the parameters to pass to {@code Fragment.write()}: the write mode {@code commit}
-   * expects, resolved options such as {@code file_format_version} and the file size limits, and the
-   * storage options, including credentials vended by a namespace.
+   * expects, the resolved {@code file_format_version}, the file size limits, and the storage
+   * options, including credentials vended by a namespace.
    */
   public WriteParams toWriteParams() {
     return writeOptions.toWriteParams(initialStorageOptions);

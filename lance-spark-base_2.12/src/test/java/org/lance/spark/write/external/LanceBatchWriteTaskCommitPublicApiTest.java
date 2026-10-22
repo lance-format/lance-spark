@@ -17,6 +17,7 @@ import org.lance.Dataset;
 import org.lance.FragmentMetadata;
 import org.lance.WriteParams;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.TestUtils;
 import org.lance.spark.write.FragmentWriteSpec;
 import org.lance.spark.write.LanceBatchWrite;
 
@@ -31,10 +32,6 @@ import org.apache.spark.sql.util.LanceArrowUtils;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.Optional;
@@ -67,7 +64,7 @@ public class LanceBatchWriteTaskCommitPublicApiTest {
             false,
             null);
 
-    FragmentWriteSpec spec = roundTrip(batchWrite.getFragmentWriteSpec());
+    FragmentWriteSpec spec = TestUtils.roundTrip(batchWrite.getFragmentWriteSpec());
 
     assertEquals(datasetUri, spec.getDatasetUri());
     assertEquals(Optional.of("APPEND"), spec.toWriteParams().getMode());
@@ -78,21 +75,9 @@ public class LanceBatchWriteTaskCommitPublicApiTest {
     FragmentMetadata fragment = new FragmentMetadata(7, Collections.emptyList(), 0L, null, null);
 
     WriterCommitMessage message = LanceBatchWrite.taskCommit(Collections.singletonList(fragment));
-    WriterCommitMessage deserialized = roundTrip(message);
+    WriterCommitMessage deserialized = TestUtils.roundTrip(message);
 
     assertNotNull(deserialized);
     assertEquals(message.getClass(), deserialized.getClass());
-  }
-
-  @SuppressWarnings("unchecked")
-  private static <T> T roundTrip(T message) throws Exception {
-    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-    try (ObjectOutputStream output = new ObjectOutputStream(bytes)) {
-      output.writeObject(message);
-    }
-    try (ObjectInputStream input =
-        new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
-      return (T) input.readObject();
-    }
   }
 }
