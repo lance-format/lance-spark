@@ -415,18 +415,52 @@ public class LanceDataset
   }
 
   public static LanceDataset requireWritable(Table table, String command) {
+    LanceDataset dataset = requireWritableRef(table, command);
+    dataset.checkBlobV1DataFiles();
+    return dataset;
+  }
+
+  /**
+   * Like {@link #requireWritable}, for a {@code command} that only manages the table's tags,
+   * branches or old versions. None of them builds a manifest from the table's data files (a branch
+   * is a shallow clone), so they cannot leave the table unreadable.
+   */
+  public static LanceDataset requireWritableRef(Table table, String command) {
     if (!(table instanceof LanceDataset)) {
       throw new UnsupportedOperationException(command + " only supports LanceDataset");
     }
     LanceDataset dataset = (LanceDataset) table;
-    dataset.ensureWritable();
+    dataset.ensureNotBranchOrTag();
     return dataset;
   }
 
+  /** Rejects commits to a tag or branch, and to a table that a commit would leave unreadable. */
   protected void ensureWritable() {
+    ensureNotBranchOrTag();
+    checkBlobV1DataFiles();
+  }
+
+  private void ensureNotBranchOrTag() {
     if (isBranchOrTag()) {
       throw new UnsupportedOperationException(
           "Writes are not supported for " + readOptions.getRef());
+    }
+  }
+
+  /**
+   * See {@link BlobUtils#checkBlobV1DataFiles}. Plain writes check this in {@code LanceBatchWrite}
+   * instead, which lets an overwrite at 2.1 through to repair the table.
+   */
+  private void checkBlobV1DataFiles() {
+    // sparkSchema is the table's schema, so a table without v1 blob fields is not opened.
+    if (!BlobUtils.hasBlobV1Fields(sparkSchema)) {
+      return;
+    }
+    try (Dataset dataset =
+        Utils.openDatasetBuilder(readOptions)
+            .initialStorageOptions(initialStorageOptions)
+            .build()) {
+      BlobUtils.checkBlobV1DataFiles(dataset);
     }
   }
 
@@ -436,7 +470,7 @@ public class LanceDataset
 
   @Override
   public WriteBuilder newWriteBuilder(LogicalWriteInfo logicalWriteInfo) {
-    ensureWritable();
+    ensureNotBranchOrTag();
     if (capabilities().contains(TableCapability.ACCEPT_ANY_SCHEMA)) {
       LanceWriteSchemaValidator.validate(sparkSchema, logicalWriteInfo.schema());
     }
@@ -470,6 +504,7 @@ public class LanceDataset
               tableProperties.get(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS)));
     }
     LanceSparkWriteOptions writeOptions = writeOptionsBuilder.build();
+    BlobUtils.checkBlobV1WriteVersion(sparkSchema, writeOptions.getFileFormatVersion());
 
     List<String> backfillColumns =
         Arrays.stream(

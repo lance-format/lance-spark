@@ -13,6 +13,7 @@
  */
 package org.lance.spark;
 
+import org.lance.BlobFile;
 import org.lance.spark.utils.BlobUtils;
 
 import org.apache.spark.sql.Dataset;
@@ -22,7 +23,10 @@ import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.expressions.Transform;
+import org.apache.spark.sql.functions;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterEach;
@@ -31,13 +35,16 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.lance.spark.LanceConstant.BLOB_POSITION_SUFFIX;
@@ -55,6 +62,8 @@ public abstract class BaseBlobCreateTableTest {
         SparkSession.builder()
             .appName("blob-create-table-test")
             .master("local[*]")
+            .config(
+                "spark.sql.extensions", "org.lance.spark.extensions.LanceSparkSessionExtensions")
             .config(
                 "spark.sql.catalog." + catalogName, "org.lance.spark.LanceNamespaceSparkCatalog")
             .config("spark.sql.catalog." + catalogName + ".impl", "dir")
@@ -788,6 +797,152 @@ public abstract class BaseBlobCreateTableTest {
   }
 
   @Test
+  public void testWriteAtBlobV2VersionToBlobV1TableIsRejected() {
+    String fullName = catalogName + ".default.blob_v1_write_22_" + System.currentTimeMillis();
+    spark.sql(
+        "CREATE TABLE "
+            + fullName
+            + " (id INT NOT NULL, data BINARY) USING lance "
+            + "TBLPROPERTIES ('data.lance.encoding' = 'blob', 'file_format_version' = '2.1')");
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, X'6F6C64')");
+
+    Dataset<Row> more =
+        spark.createDataFrame(
+            Collections.singletonList(RowFactory.create(2, "new".getBytes(StandardCharsets.UTF_8))),
+            spark.table(fullName).schema());
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> more.writeTo(fullName).option("file_format_version", "2.2").append());
+    assertTrue(e.getMessage().contains("[data]"), e.getMessage());
+
+    StructType schema = spark.table(fullName).schema();
+    assertBlobMetadata(schema, "data");
+    assertEquals(DataTypes.BinaryType, schema.apply("data").dataType());
+    assertEquals(1, spark.table(fullName).collectAsList().size());
+
+    spark.sql("DROP TABLE IF EXISTS " + fullName);
+  }
+
+  @Test
+  public void testStagedCreateWrittenAtBlobV2VersionIsRejected() {
+    String tableName = "blob_v1_staged_22_" + System.currentTimeMillis();
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("data", DataTypes.BinaryType, true);
+    Dataset<Row> rows =
+        spark.createDataFrame(
+            Collections.singletonList(RowFactory.create(1, "x".getBytes(StandardCharsets.UTF_8))),
+            schema);
+    // Staged at 2.1, so the column is blob v1; the write-time version must not override that.
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                rows.writeTo(catalogName + ".default." + tableName)
+                    .using("lance")
+                    .tableProperty("data.lance.encoding", "blob")
+                    .tableProperty("file_format_version", "2.1")
+                    .option("file_format_version", "stable")
+                    .create());
+    assertTrue(e.getMessage().contains("[data]"), e.getMessage());
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    assertFalse(catalog.tableExists(Identifier.of(new String[] {"default"}, tableName)));
+  }
+
+  @Test
+  public void testNestedBlobV1FieldsStayOnBlobV1Versions() throws Exception {
+    String tableName = "blob_v1_nested_" + System.currentTimeMillis();
+    String fullName = catalogName + ".default." + tableName;
+    Metadata blob =
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build();
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("payload", new StructType().add("data", DataTypes.BinaryType, true, blob));
+    Dataset<Row> rows =
+        spark.createDataFrame(
+            Collections.singletonList(RowFactory.create(1, RowFactory.create(new byte[] {65}))),
+            schema);
+
+    rows.writeTo(fullName).using("lance").create();
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    LanceDataset table =
+        (LanceDataset) catalog.loadTable(Identifier.of(new String[] {"default"}, tableName));
+    assertEquals(BlobUtils.MAX_BLOB_V1_FILE_FORMAT_VERSION, table.getFileFormatVersion());
+
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> rows.writeTo(fullName).option("file_format_version", "2.2").append());
+    assertTrue(e.getMessage().contains("[payload.data]"), e.getMessage());
+    assertEquals(1, spark.table(fullName).collectAsList().size());
+
+    spark.sql("DROP TABLE IF EXISTS " + fullName);
+  }
+
+  /**
+   * Lance 12 also wrote this table's v1 blob column into a 2.2 file, so a Lance 13 commit would
+   * leave the table unreadable. Every command but an overwrite at 2.1 fails before committing, and
+   * that overwrite repairs the table, blob bytes included.
+   */
+  @Test
+  public void testLance12BlobV1TableOnlyAcceptsAnOverwriteAt21() throws Exception {
+    String uri = copyLance12Table("top_level");
+    String table = catalogName + ".`" + uri + "`";
+    assertRejectedBeforeCommit(
+        uri,
+        table,
+        "[data]",
+        "INSERT INTO %s VALUES (4, X'666F7572')",
+        "DELETE FROM %s WHERE id = 1",
+        "ALTER TABLE %s CREATE INDEX data_idx USING btree (id)",
+        "ALTER TABLE %s DROP INDEX id_idx",
+        "OPTIMIZE %s",
+        "ALTER TABLE %s SET TBLPROPERTIES ('note' = 'x')");
+    spark.sql("ALTER TABLE " + table + " CREATE TAG before_repair");
+
+    spark
+        .table(table)
+        .writeTo(table)
+        .option("file_format_version", BlobUtils.MAX_BLOB_V1_FILE_FORMAT_VERSION)
+        .overwrite(functions.lit(true));
+    spark.sql("INSERT INTO " + table + " VALUES (4, X'666F7572')");
+    assertBlobBytes(uri, table, "one", "two", "three", "four");
+  }
+
+  @Test
+  public void testLance12NestedBlobV1TableRejectsCommits() throws Exception {
+    String uri = copyLance12Table("nested");
+    assertRejectedBeforeCommit(
+        uri,
+        catalogName + ".`" + uri + "`",
+        "[payload.data]",
+        "INSERT INTO %s VALUES (3, named_struct('data', X'7468726565'))",
+        "ALTER TABLE %s CREATE INDEX id_idx USING btree (id)");
+  }
+
+  @Test
+  public void testBlobV1TableWithoutTwoTwoFilesAcceptsCommits() {
+    String fullName = catalogName + ".default.blob_v1_commits_" + System.currentTimeMillis();
+    spark.sql(
+        "CREATE TABLE "
+            + fullName
+            + " (id INT NOT NULL, data BINARY) USING lance "
+            + "TBLPROPERTIES ('data.lance.encoding' = 'blob', 'file_format_version' = '2.1')");
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, X'6F6E65'), (2, X'74776F')");
+    spark.sql("DELETE FROM " + fullName + " WHERE id = 1");
+    spark.sql("ALTER TABLE " + fullName + " CREATE INDEX id_idx USING btree (id)");
+    assertEquals(1, spark.table(fullName).collectAsList().size());
+    spark.sql("DROP TABLE IF EXISTS " + fullName);
+  }
+
+  @Test
   public void testBlobColumnsUseBlobV2WithoutFileFormatVersion() {
     String tableName = "blob_v2_ffv_unset_" + System.currentTimeMillis();
 
@@ -1100,6 +1255,71 @@ public abstract class BaseBlobCreateTableTest {
         ex.getMessage() != null && ex.getMessage().toLowerCase().contains("version"),
         "creating with a malformed file_format_version must fail mentioning the version, but got "
             + ex.getMessage());
+  }
+
+  /** Copies a table that {@code lance12_blob_v1/datagen.py} wrote and returns its new path. */
+  private String copyLance12Table(String name) throws Exception {
+    Path source =
+        Paths.get(
+            BaseBlobCreateTableTest.class
+                .getResource("/lance12_blob_v1/" + name + ".lance")
+                .toURI());
+    Path target = tempDir.resolve("lance12").resolve(name + ".lance");
+    Files.createDirectories(target.getParent());
+    try (Stream<Path> files = Files.walk(source)) {
+      for (Path file : (Iterable<Path>) files::iterator) {
+        Files.copy(file, target.resolve(source.relativize(file).toString()));
+      }
+    }
+    return target.toString();
+  }
+
+  /** Runs each statement on {@code table} and checks that it fails before committing. */
+  private void assertRejectedBeforeCommit(
+      String uri, String table, String fields, String... statements) {
+    long version = latestVersion(uri);
+    for (String statement : statements) {
+      String sql = String.format(statement, table);
+      Exception e = assertThrows(Exception.class, () -> spark.sql(sql));
+      assertTrue(causedByMessage(e, fields), sql + " failed for another reason: " + e);
+    }
+    assertEquals(version, latestVersion(uri));
+    assertDoesNotThrow(() -> spark.table(table).collectAsList());
+  }
+
+  private static boolean causedByMessage(Throwable error, String text) {
+    for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+      if (cause.getMessage() != null && cause.getMessage().contains(text)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static long latestVersion(String uri) {
+    try (org.lance.Dataset dataset = org.lance.Dataset.open().uri(uri).build()) {
+      return dataset.version();
+    }
+  }
+
+  /** Checks the bytes Lance reads from the {@code data} blob column, ordered by {@code id}. */
+  private void assertBlobBytes(String uri, String table, String... expected) throws Exception {
+    List<Long> rowIds = new ArrayList<>();
+    for (Row row :
+        spark
+            .sql("SELECT " + LanceConstant.ROW_ID + " FROM " + table + " ORDER BY id")
+            .collectAsList()) {
+      rowIds.add(row.getLong(0));
+    }
+    try (org.lance.Dataset dataset = org.lance.Dataset.open().uri(uri).build()) {
+      List<BlobFile> blobs = dataset.takeBlobs(rowIds, "data");
+      assertEquals(expected.length, blobs.size());
+      for (int i = 0; i < expected.length; i++) {
+        try (BlobFile blob = blobs.get(i)) {
+          assertEquals(expected[i], new String(blob.read(), StandardCharsets.UTF_8));
+        }
+      }
+    }
   }
 
   private static String bytesToHex(byte[] bytes) {

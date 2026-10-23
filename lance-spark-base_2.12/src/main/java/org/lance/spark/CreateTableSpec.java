@@ -103,8 +103,8 @@ public final class CreateTableSpec {
     }
 
     if (schemaHasBlobV1) {
-      // Blob v2 columns force the version to 2.2 or newer, which cannot store the v1 columns in
-      // the same schema. Lance would reject the write; say why here instead.
+      // Blob v2 columns force the version to 2.2 or newer, at which the v1 columns cannot stay
+      // blob v1. Say why here instead of letting the write convert them.
       throw new IllegalArgumentException(
           "Schema mixes legacy (v1) blob columns "
               + BlobUtils.blobV1ColumnNames(schema)
@@ -158,11 +158,9 @@ public final class CreateTableSpec {
         throw new IllegalArgumentException(
             "Schema carries legacy (v1) blob columns "
                 + BlobUtils.blobV1ColumnNames(schema)
-                + ", which Lance rejects from file_format_version "
-                + BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION
-                + " on. Requested file_format_version '"
+                + ", which file_format_version '"
                 + tableVersion
-                + "' cannot store them. Use "
+                + "' cannot store. Use "
                 + BlobUtils.MAX_BLOB_V1_FILE_FORMAT_VERSION
                 + " or older, or rebuild the column as blob v2.");
       }

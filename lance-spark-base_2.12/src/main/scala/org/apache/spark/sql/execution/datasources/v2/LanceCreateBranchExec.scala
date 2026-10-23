@@ -33,7 +33,7 @@ case class LanceCreateBranchExec(
   override def output: Seq[Attribute] = LanceCreateBranchOutputType.SCHEMA
 
   override protected def run(): Seq[InternalRow] = {
-    val lanceDataset = LanceDataset.requireWritable(catalog.loadTable(ident), "CreateBranch")
+    val lanceDataset = LanceDataset.requireWritableRef(catalog.loadTable(ident), "CreateBranch")
 
     val dataset = Utils.openDatasetBuilder(lanceDataset.readOptions())
       .initialStorageOptions(lanceDataset.getInitialStorageOptions)

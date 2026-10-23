@@ -26,6 +26,7 @@ import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.utils.BlobSourceContext;
+import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -133,6 +134,10 @@ public class LanceBatchWrite implements BatchWrite {
       try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
         this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
         logger.debug("Resolved dataset ref for batch write: {}", this.writeOptions.getRef());
+        if (!isOverwrite() && BlobUtils.hasBlobV1Fields(schema)) {
+          // An append keeps the table's data files; an overwrite replaces them, which repairs it.
+          BlobUtils.checkBlobV1DataFiles(ds);
+        }
       }
     }
   }
@@ -164,6 +169,8 @@ public class LanceBatchWrite implements BatchWrite {
             .map(LanceDataWriter::stripRowIdMeta)
             .flatMap(List::stream)
             .collect(Collectors.toList());
+    // Checked on the files themselves: fragments passed to taskCommit may use any version.
+    BlobUtils.checkBlobV1Fragments(schema, fragments);
 
     Schema arrowSchema = getCommitSchema();
 

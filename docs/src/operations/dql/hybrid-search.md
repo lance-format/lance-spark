@@ -62,7 +62,7 @@ Use positional arguments for simple calls and Spark 3.4 compatibility.
 | `offset` | Integer | No | Number of reranked results to skip after fusion. Defaults to `0`. |
 | `version` | Long | No | Lance table version to search. |
 | `distance_type` | String | No | Distance metric: `l2` (`euclidean`), `cosine`, `dot` (`ip`, `inner_product`), or `hamming`. Aliases are normalized to the canonical name. |
-| `nprobes`, `ef`, `refine_factor` | Integer | No | Vector index search tuning parameters. |
+| `nprobes`, `ef`, `refine_factor` | Integer | No | Vector index search tuning parameters, as in [`VECTOR_SEARCH`](vector-search.md#arguments). |
 | `lower_bound`, `upper_bound` | Float | No | Distance bounds. |
 | `bypass_vector_index`, `fast_search`, `with_row_id` | Boolean | No | Lance query options. `with_row_id` adds `_rowid` to the output. `bypass_vector_index` and `fast_search` cannot both be true. |
 

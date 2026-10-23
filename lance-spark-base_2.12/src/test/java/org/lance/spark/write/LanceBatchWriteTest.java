@@ -22,11 +22,13 @@ import org.lance.schema.LanceField;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.utils.BlobUtils;
 
 import org.apache.arrow.dataset.scanner.Scanner;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.LargeVarBinaryVector;
 import org.apache.arrow.vector.LargeVarCharVector;
 import org.apache.arrow.vector.TimeStampMicroTZVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -484,6 +486,57 @@ public class LanceBatchWriteTest {
       stagedCommit.commit();
 
       assertEquals(expectedRows(0, 25), readRows(allocator, datasetUri));
+    }
+  }
+
+  /**
+   * Fragments passed to {@link LanceBatchWrite#taskCommit} at file format 2.2 cannot store a 2.1
+   * table's v1 blob column: the commit would turn it into blob v2 and leave it unreadable.
+   */
+  @Test
+  public void testCommitRejectsBlobV1FieldsWrittenAtTwoTwo(TestInfo testInfo) throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Field data =
+          new Field(
+              "data",
+              new FieldType(
+                  true,
+                  ArrowType.LargeBinary.INSTANCE,
+                  null,
+                  Collections.singletonMap(
+                      BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)),
+              null);
+      Schema schema = new Schema(Arrays.asList(intField("a"), data));
+      WriteParams params = new WriteParams.Builder().withDataStorageVersion("2.1").build();
+      Dataset.create(allocator, datasetUri, schema, params).close();
+      List<FragmentMetadata> fragments;
+      try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+        ((IntVector) root.getVector("a")).setSafe(0, 1);
+        ((LargeVarBinaryVector) root.getVector("data")).setSafe(0, new byte[] {1});
+        root.setRowCount(1);
+        fragments =
+            Fragment.write()
+                .datasetUri(datasetUri)
+                .allocator(allocator)
+                .data(root)
+                .mode(WriteMode.APPEND)
+                .dataStorageVersion("2.2")
+                .execute();
+      }
+      LanceBatchWrite batchWrite = newBatchWrite(schema, datasetUri, false);
+
+      IllegalArgumentException error =
+          assertThrows(
+              IllegalArgumentException.class,
+              () ->
+                  batchWrite.commit(
+                      new WriterCommitMessage[] {LanceBatchWrite.taskCommit(fragments)}));
+      assertTrue(error.getMessage().contains("[data]"), error.getMessage());
+      try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
+        assertEquals(1, dataset.version());
+      }
     }
   }
 

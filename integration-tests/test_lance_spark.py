@@ -1350,6 +1350,7 @@ class TestDDLVacuum:
         assert row.transaction_files_removed >= 0
         assert row.index_files_removed == 0
         assert row.deletion_files_removed == 0
+        assert row.failed_deletes == 0
 
     def test_vacuum_with_before_version(self, spark):
         """Test VACUUM with before_version option."""
@@ -1457,6 +1458,7 @@ class TestDDLVacuum:
         assert row.transaction_files_removed > 0
         assert row.index_files_removed == 0
         assert row.deletion_files_removed == 0
+        assert row.failed_deletes == 0
 
         # Verify data integrity
         count = spark.table("default.test_table").count()

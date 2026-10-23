@@ -14,14 +14,20 @@
 package org.lance.spark.write;
 
 import org.lance.Dataset;
+import org.lance.Fragment;
+import org.lance.FragmentMetadata;
 import org.lance.WriteParams;
 import org.lance.spark.LancePositionDeltaOperation;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.utils.BlobUtils;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.LargeVarBinaryVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
@@ -30,6 +36,7 @@ import org.apache.spark.sql.connector.write.DeltaBatchWrite;
 import org.apache.spark.sql.connector.write.DeltaWriteBuilder;
 import org.apache.spark.sql.connector.write.LogicalWriteInfo;
 import org.apache.spark.sql.connector.write.RowLevelOperation;
+import org.apache.spark.sql.connector.write.WriterCommitMessage;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.apache.spark.sql.util.LanceArrowUtils;
@@ -41,9 +48,12 @@ import java.lang.reflect.Method;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class SparkPositionDeltaWriteTest {
   @TempDir static Path tempDir;
@@ -129,6 +139,71 @@ public class SparkPositionDeltaWriteTest {
     assertEquals("configured-catalog", writeOptions.getCatalogName());
     assertEquals("moka://?capacity=1048576", writeOptions.getIndexCacheBackend());
     assertEquals("moka://?capacity=524288", writeOptions.getMetadataCacheBackend());
+  }
+
+  /**
+   * UPDATE and MERGE add the rows they rewrite as fragments at the table's file format version. At
+   * 2.2 those cannot store a 2.1 table's v1 blob column, so the commit fails before Lance turns the
+   * column into blob v2.
+   */
+  @Test
+  public void commitRejectsBlobV1FieldsWrittenAtTwoTwo(TestInfo testInfo) throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    Field data =
+        new Field(
+            "data",
+            new FieldType(
+                true,
+                ArrowType.LargeBinary.INSTANCE,
+                null,
+                Collections.singletonMap(
+                    BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)),
+            null);
+    Schema schema = new Schema(Arrays.asList(ARROW_SCHEMA.getFields().get(0), data));
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      WriteParams params = new WriteParams.Builder().withDataStorageVersion("2.1").build();
+      Dataset.create(allocator, datasetUri, schema, params).close();
+      List<FragmentMetadata> fragments;
+      try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+        ((IntVector) root.getVector("id")).setSafe(0, 1);
+        ((LargeVarBinaryVector) root.getVector("data")).setSafe(0, new byte[] {1});
+        root.setRowCount(1);
+        fragments =
+            Fragment.write()
+                .datasetUri(datasetUri)
+                .allocator(allocator)
+                .data(root)
+                .mode(WriteParams.WriteMode.APPEND)
+                .dataStorageVersion("2.2")
+                .execute();
+      }
+      DeltaBatchWrite batchWrite =
+          new SparkPositionDeltaWrite(
+                  LanceArrowUtils.fromArrowSchema(schema),
+                  LanceSparkWriteOptions.from(datasetUri),
+                  null,
+                  null,
+                  null,
+                  false,
+                  null,
+                  Collections.emptyMap())
+              .toBatch();
+
+      IllegalArgumentException error =
+          assertThrows(
+              IllegalArgumentException.class,
+              () ->
+                  batchWrite.commit(
+                      new WriterCommitMessage[] {
+                        new SparkPositionDeltaWrite.DeltaWriteTaskCommit(
+                            fragments, Collections.emptyMap())
+                      }));
+      assertTrue(error.getMessage().contains("[data]"), error.getMessage());
+      try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
+        assertEquals(1, dataset.version());
+      }
+    }
   }
 
   private static LanceSparkWriteOptions extractWriteOptions(DeltaWriteBuilder builder)

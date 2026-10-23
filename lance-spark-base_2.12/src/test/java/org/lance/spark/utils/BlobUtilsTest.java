@@ -13,19 +13,29 @@
  */
 package org.lance.spark.utils;
 
+import org.lance.FragmentMetadata;
+import org.lance.fragment.DataFile;
+
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
 import org.apache.spark.unsafe.types.UTF8String;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class BlobUtilsTest {
@@ -69,6 +79,43 @@ public class BlobUtilsTest {
               blobV2Field(),
             });
     assertEquals(Collections.singleton("payload"), BlobUtils.blobV2ColumnNames(schema));
+  }
+
+  @Test
+  public void testBlobV1ColumnNamesIncludesNestedFields() {
+    Metadata v1 =
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build();
+    StructType inner = new StructType().add("data", DataTypes.BinaryType, true, v1);
+    Metadata blobElements =
+        new MetadataBuilder()
+            .putString(LanceArrowUtils.LANCE_ELEMENT_METADATA_KEY(), v1.json())
+            .build();
+    Metadata blobValues =
+        new MetadataBuilder()
+            .putString(LanceArrowUtils.LANCE_MAP_VALUE_METADATA_KEY(), v1.json())
+            .build();
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType)
+            .add("payload", inner)
+            .add("items", DataTypes.createArrayType(inner))
+            .add("byName", DataTypes.createMapType(DataTypes.StringType, inner))
+            .add("chunks", DataTypes.createArrayType(DataTypes.BinaryType), true, blobElements)
+            .add(
+                "blobByName",
+                DataTypes.createMapType(DataTypes.StringType, DataTypes.BinaryType),
+                true,
+                blobValues);
+    assertEquals(
+        new HashSet<>(
+            Arrays.asList(
+                "payload.data", "items.data", "byName.value.data", "chunks", "blobByName.value")),
+        BlobUtils.blobV1ColumnNames(schema));
+    assertFalse(
+        BlobUtils.hasBlobV1Fields(
+            new StructType().add("payload", new StructType().add("data", DataTypes.BinaryType))));
   }
 
   @Test
@@ -178,6 +225,58 @@ public class BlobUtilsTest {
     // Lance parses versions against a closed set, so these do not name a newer format at all.
     assertFalse(BlobUtils.knownToRejectBlobV1("2.4"));
     assertFalse(BlobUtils.knownToRejectBlobV1("3.0"));
+  }
+
+  @Test
+  public void checkBlobV1WriteVersionRejectsOnlyVersionsThatCannotStoreV1() {
+    StructType nestedV1 =
+        new StructType().add("payload", new StructType(new StructField[] {blobV1Field("data")}));
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> BlobUtils.checkBlobV1WriteVersion(nestedV1, "stable"));
+    assertTrue(e.getMessage().contains("[payload.data]"), e.getMessage());
+    BlobUtils.checkBlobV1WriteVersion(nestedV1, "2.1");
+    BlobUtils.checkBlobV1WriteVersion(nestedV1, null);
+    BlobUtils.checkBlobV1WriteVersion(new StructType(new StructField[] {blobV2Field()}), "2.2");
+  }
+
+  @Test
+  public void blobV1FieldsInBlobV2FilesOnlyCountsFilesAtTwoTwoAndNewer() {
+    Map<Integer, String> blobV1Fields = new HashMap<>();
+    blobV1Fields.put(1, "data");
+    blobV1Fields.put(3, "payload.data");
+    assertEquals(
+        Collections.emptySet(),
+        BlobUtils.blobV1FieldsInBlobV2Files(
+            blobV1Fields, Arrays.asList(dataFile(2, 1, 0, 1, 3), dataFile(2, 2, 0, 2))));
+    assertEquals(
+        new HashSet<>(Arrays.asList("data", "payload.data")),
+        BlobUtils.blobV1FieldsInBlobV2Files(
+            blobV1Fields, Arrays.asList(dataFile(2, 2, 0, 1), dataFile(3, 0, 3))));
+  }
+
+  @Test
+  public void checkBlobV1FragmentsRejectsV1FieldsWrittenAtTwoTwo() {
+    StructType v1 =
+        new StructType(new StructField[] {field("id", DataTypes.IntegerType), blobV1Field()});
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> BlobUtils.checkBlobV1Fragments(v1, fragments(dataFile(2, 2, 0, 1))));
+    assertTrue(e.getMessage().contains("[payload]"), e.getMessage());
+    BlobUtils.checkBlobV1Fragments(v1, fragments(dataFile(2, 1, 0, 1)));
+    BlobUtils.checkBlobV1Fragments(
+        new StructType(new StructField[] {blobV2Field()}), fragments(dataFile(2, 2, 0)));
+  }
+
+  private static DataFile dataFile(int major, int minor, int... fields) {
+    return new DataFile("file.lance", fields, fields, major, minor, null, null);
+  }
+
+  private static List<FragmentMetadata> fragments(DataFile file) {
+    return Collections.singletonList(
+        new FragmentMetadata(0, Collections.singletonList(file), 1L, null, null));
   }
 
   private static StructField blobV1Field(String name) {
