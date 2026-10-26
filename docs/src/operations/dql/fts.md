@@ -153,7 +153,7 @@ If the table has a stored column named `_score`, Spark resolves `_score` to that
 - **Unbounded WHERE-filter queries return every match.** Without a supported namespace top-k push, every matching row is evaluated. `wand_factor` is not exposed.
 - **One FTS predicate per query.** Only a single FTS function call is allowed per `WHERE` clause. For multi-column search, use `lance_multi_match` instead of combining multiple `lance_match` calls with OR.
 - **FTS predicates cannot appear inside OR.** `WHERE lance_match(a, 'x') OR other_condition` is not supported — OR semantics cannot be preserved when pushing a single FTS query to the scanner.
-- **Query-serving namespaces must implement structured FTS queries.** The directory namespace supports this request format. Custom REST implementations must evaluate the structured full-text query rather than ignore it. Catalog-only namespaces (Glue, Hive, Iceberg) fall back to local per-fragment scans.
+- **Query-serving namespaces must implement structured FTS queries.** The directory namespace supports this request format. Custom REST implementations must evaluate the structured full-text query rather than ignore it. Catalog-only namespaces (Glue, Hive, Iceberg) fall back to local per-fragment scans. Set `spark.sql.lance.search.fts_local.enabled=true` to run the scan locally, for example when the server does not implement the `queryTable` endpoint (see [Configuration](../../config.md#local-full-text-search-execution)).
 
 ## Cost Model
 

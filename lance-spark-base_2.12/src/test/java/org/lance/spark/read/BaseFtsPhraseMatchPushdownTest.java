@@ -48,14 +48,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 public abstract class BaseFtsPhraseMatchPushdownTest {
 
-  @org.junit.jupiter.api.BeforeEach
-  void skipUntilNamespaceStructuredQuerySupported() {
-    // Namespace-configured FTS routes to queryTable, which ignores structured_query until
-    // lance-core dir.rs adds structured support. Skip until the lance-core bump, or migrate to a
-    // path-based table to exercise the local scan path.
-    org.junit.jupiter.api.Assumptions.assumeTrue(false);
-  }
-
   protected SparkSession spark;
   protected String catalogName = "lance_match_phrase_test";
   protected String tableName;
@@ -82,6 +74,7 @@ public abstract class BaseFtsPhraseMatchPushdownTest {
             .config("spark.sql.catalog." + catalogName + ".single_level_ns", "true")
             .config("spark.sql.defaultCatalog", catalogName)
             .config("spark.sql.adaptive.enabled", "false")
+            .config("spark.sql.lance.search.fts_local.enabled", "true")
             .getOrCreate();
 
     tableName = "phrase_test_" + UUID.randomUUID().toString().replace("-", "");
