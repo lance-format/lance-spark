@@ -128,46 +128,7 @@ public class LanceScan
 
   private final java.util.Map<String, String> namespaceProperties;
 
-  public LanceScan(
-      StructType schema,
-      LanceSparkReadOptions readOptions,
-      Optional<String> whereConditions,
-      Optional<Integer> limit,
-      Optional<Integer> offset,
-      Optional<List<ColumnOrdering>> topNSortOrders,
-      Optional<Aggregation> pushedAggregation,
-      Predicate[] pushedPredicates,
-      LanceStatistics statistics,
-      Set<Integer> survivingFragmentIds,
-      List<LanceSplit> precomputedSplits,
-      java.util.Map<Integer, Long> precomputedFragmentRowCounts,
-      Expression activeShardingExpression,
-      java.util.Map<Integer, Object> fragmentShardingKeys,
-      java.util.Map<String, String> initialStorageOptions,
-      String namespaceImpl,
-      java.util.Map<String, String> namespaceProperties) {
-    this(
-        schema,
-        schema,
-        readOptions,
-        whereConditions,
-        limit,
-        offset,
-        topNSortOrders,
-        pushedAggregation,
-        pushedPredicates,
-        statistics,
-        survivingFragmentIds,
-        precomputedSplits,
-        precomputedFragmentRowCounts,
-        activeShardingExpression,
-        fragmentShardingKeys,
-        initialStorageOptions,
-        namespaceImpl,
-        namespaceProperties);
-  }
-
-  public LanceScan(
+  LanceScan(
       StructType sparkReadSchema,
       StructType schema,
       LanceSparkReadOptions readOptions,

@@ -362,6 +362,7 @@ public class LanceScanTest {
     LanceScan scan =
         new LanceScan(
             TEST_SCHEMA,
+            TEST_SCHEMA,
             TestUtils.TestTable1Config.readOptions,
             org.lance.spark.utils.Optional.empty(),
             org.lance.spark.utils.Optional.empty(),
@@ -445,6 +446,7 @@ public class LanceScanTest {
         LanceSplit.planScan(TestUtils.TestTable1Config.readOptions);
     LanceScan scan =
         new LanceScan(
+            TEST_SCHEMA,
             TEST_SCHEMA,
             TestUtils.TestTable1Config.readOptions,
             org.lance.spark.utils.Optional.empty(),
@@ -585,6 +587,7 @@ public class LanceScanTest {
       List<LanceSplit> splits,
       Map<Integer, Long> fragmentRowCounts) {
     return new LanceScan(
+        TEST_SCHEMA,
         TEST_SCHEMA,
         readOptions,
         org.lance.spark.utils.Optional.empty(),
