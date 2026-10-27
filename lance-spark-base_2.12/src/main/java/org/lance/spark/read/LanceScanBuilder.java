@@ -276,6 +276,19 @@ public class LanceScanBuilder
                 .orElse(null);
       }
 
+      // COUNT(*) is only ever pushed partially, so Spark re-runs it as SUM over the per-partition
+      // counts this scan reports. A scan that plans no partition reports nothing at all, and SUM
+      // over zero rows is NULL rather than the 0 that COUNT(*) must return. Pruning never drops a
+      // fragment that could match, so an empty result proves the count is 0: answer on the driver.
+      if (isPushedCountStar()
+          && LanceScan.pruneForPlanning(
+                  scanPlan.getSplits(), pushedPredicates, survivingFragmentIds)
+              .isEmpty()) {
+        LOG.debug("All fragments pruned for a pushed COUNT(*); resolving the count to 0 locally");
+        setLocalCount(0L);
+        return localScan;
+      }
+
       // Scale rows and full size by the surviving-row ratio first, then let
       // LanceStatistics.estimateProjected apply the column-width ratio on top
       // (when the projected schema is narrower than the full schema).
@@ -772,6 +785,15 @@ public class LanceScanBuilder
     InternalRow[] rows = new InternalRow[1];
     rows[0] = new GenericInternalRow(new Object[] {count});
     this.localScan = new LanceLocalScan(countSchema, rows, readOptions.getDatasetUri());
+  }
+
+  /** Whether {@link #pushAggregation} accepted a lone COUNT(*) for a scan-based count. */
+  private boolean isPushedCountStar() {
+    if (!pushedAggregation.isPresent()) {
+      return false;
+    }
+    AggregateFunc[] funcs = pushedAggregation.get().aggregateExpressions();
+    return funcs.length == 1 && funcs[0] instanceof CountStar;
   }
 
   private static Optional<Long> getCountFromMetadata(Dataset dataset) {

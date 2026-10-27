@@ -295,6 +295,29 @@ public abstract class BaseSparkConnectorAggPushdownTest {
   }
 
   @Test
+  public void testCountStarWithFilterPruningEveryFragment() throws Exception {
+    String tableName = "lance.default.count_all_pruned_test_dataset";
+    spark.range(0, 100).toDF("id").repartition(4).writeTo(tableName).create();
+    spark
+        .sql("ALTER TABLE " + tableName + " CREATE INDEX id_zm USING zonemap (id)")
+        .collectAsList();
+    spark.catalog().refreshTable(tableName);
+
+    // Zonemap pruning eliminates every fragment, so the scan would plan no partition at all and
+    // Spark's SUM over the per-partition counts would see zero rows.
+    Dataset<Row> prunedCount =
+        spark.table(tableName).filter("id >= 1000 AND id < 2000").selectExpr("count(*)");
+
+    Row row = prunedCount.first();
+    assertFalse(row.isNullAt(0), "A COUNT(*) matching no row must be 0, not NULL");
+    assertEquals(0L, row.getLong(0));
+    String plan = prunedCount.queryExecution().executedPlan().toString();
+    assertTrue(
+        plan.contains("LocalTableScan"),
+        "A fully pruned COUNT(*) should not plan a distributed scan. Plan: " + plan);
+  }
+
+  @Test
   public void testCountStarWithPartialScalarIndexKeepsDistributedScan() throws Exception {
     String tableName = "lance.default.count_partial_index_test_dataset";
     spark
