@@ -319,7 +319,7 @@ class RangeBasedBTreeIndexJob(
       .table(fullTableName)
     val selectDf = df.select(
       df.col(columns.head).as(VALUE_COLUMN_NAME),
-      df.col(LanceDataset.ROW_ID_COLUMN.name),
+      df.col(LanceDataset.ROW_ADDRESS_COLUMN.name),
       df.col(fragmentColumn))
 
     // Partition by fragment id so each partition holds whole fragments (disjoint coverage),
@@ -384,7 +384,7 @@ case class RangeBTreeIndexBuilder(
     schema: StructType) extends Serializable {
 
   def buildForFragmentGroup(rowsIter: Iterator[InternalRow]): Iterator[String] = {
-    // The input rows carry (value, _rowid, _fragment_id). Only the first two
+    // The input rows carry (value, _rowaddr, _fragment_id). Only the first two
     // columns are written to the pre-sorted Arrow stream that Lance ingests; the
     // fragment ids are collected separately to declare the segment's coverage.
     val streamSchema = StructType(schema.fields.take(2))
@@ -397,7 +397,7 @@ case class RangeBTreeIndexBuilder(
 
     val fragmentIds = scala.collection.mutable.LinkedHashSet[java.lang.Integer]()
 
-    // Write the indexed value and row id of each row to the Arrow stream.
+    // Write the indexed value and row address of each row to the Arrow stream.
     try {
       while (rowsIter.hasNext) {
         val row = rowsIter.next()
