@@ -14,7 +14,6 @@
 package org.lance.spark.write;
 
 import org.lance.Dataset;
-import org.lance.WriteParams;
 import org.lance.spark.LancePositionDeltaOperation;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.LanceSparkWriteOptions;
@@ -60,8 +59,7 @@ public class SparkPositionDeltaWriteTest {
     String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
 
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
-      Dataset.create(allocator, datasetUri, ARROW_SCHEMA, new WriteParams.Builder().build())
-          .close();
+      Dataset.write().allocator(allocator).uri(datasetUri).schema(ARROW_SCHEMA).execute().close();
 
       StructType sparkSchema = LanceArrowUtils.fromArrowSchema(ARROW_SCHEMA);
       SparkPositionDeltaWrite write =

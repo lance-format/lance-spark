@@ -16,7 +16,6 @@ package org.lance.spark.write;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.FragmentMetadata;
-import org.lance.WriteParams;
 import org.lance.WriteParams.WriteMode;
 import org.lance.schema.LanceField;
 import org.lance.spark.LanceRuntime;
@@ -119,7 +118,7 @@ public class LanceBatchWriteTest {
       // Create lance dataset
       Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
       Schema schema = new Schema(Collections.singletonList(field));
-      Dataset.create(allocator, datasetUri, schema, new WriteParams.Builder().build()).close();
+      Dataset.write().allocator(allocator).uri(datasetUri).schema(schema).execute().close();
 
       // Append data to lance dataset
       LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
@@ -149,7 +148,7 @@ public class LanceBatchWriteTest {
       lanceBatchWrite.commit(new WriterCommitMessage[] {message});
 
       // Validate lance dataset data
-      try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
+      try (Dataset dataset = Dataset.open().uri(datasetUri).allocator(allocator).build()) {
         try (Scanner scanner = dataset.newScan()) {
           try (ArrowReader reader = scanner.scanBatches()) {
             VectorSchemaRoot readerRoot = reader.getVectorSchemaRoot();
@@ -195,7 +194,7 @@ public class LanceBatchWriteTest {
           });
 
       assertEquals(expectedRows(0, 50), readRows(allocator, datasetUri));
-      try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
+      try (Dataset dataset = Dataset.open().uri(datasetUri).allocator(allocator).build()) {
         assertEquals(first.size() + second.size(), dataset.getFragments().size());
       }
     }
@@ -238,7 +237,7 @@ public class LanceBatchWriteTest {
           });
 
       assertEquals(expectedRows(100, 50), readRows(allocator, datasetUri));
-      try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
+      try (Dataset dataset = Dataset.open().uri(datasetUri).allocator(allocator).build()) {
         assertEquals(first.size() + second.size(), dataset.getFragments().size());
       }
     }
@@ -321,11 +320,11 @@ public class LanceBatchWriteTest {
             .add("s", DataTypes.StringType)
             .add("b", DataTypes.BinaryType);
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
-      Dataset.create(
-              allocator,
-              datasetUri,
-              LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", true, false),
-              new WriteParams.Builder().build())
+      Dataset.write()
+          .allocator(allocator)
+          .uri(datasetUri)
+          .schema(LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", true, false))
+          .execute()
           .close();
 
       Schema regular =
@@ -365,11 +364,11 @@ public class LanceBatchWriteTest {
     int rows = 25;
     long baseMicros = 1_700_000_000_000_000L;
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
-      Dataset.create(
-              allocator,
-              datasetUri,
-              LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", true, false),
-              new WriteParams.Builder().build())
+      Dataset.write()
+          .allocator(allocator)
+          .uri(datasetUri)
+          .schema(LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", true, false))
+          .execute()
           .close();
       LanceBatchWrite batchWrite =
           newBatchWrite(
@@ -431,7 +430,7 @@ public class LanceBatchWriteTest {
 
       StagedCommit stagedCommit =
           StagedCommit.forExistingTable(
-              Dataset.open(datasetUri, allocator),
+              Dataset.open().uri(datasetUri).allocator(allocator).build(),
               schema,
               StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
       LanceBatchWrite batchWrite =
@@ -499,10 +498,10 @@ public class LanceBatchWriteTest {
       BufferAllocator allocator, String datasetUri) {
     Schema tableSchema = new Schema(Arrays.asList(intField("a"), intField("b"), intField("c")));
     try (Dataset dataset =
-        Dataset.create(allocator, datasetUri, tableSchema, new WriteParams.Builder().build())) {
+        Dataset.write().allocator(allocator).uri(datasetUri).schema(tableSchema).execute()) {
       dataset.dropColumns(Collections.singletonList("b"));
     }
-    try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
+    try (Dataset dataset = Dataset.open().uri(datasetUri).allocator(allocator).build()) {
       List<Integer> fieldIds =
           dataset.getLanceSchema().fields().stream()
               .map(LanceField::getId)
@@ -578,7 +577,7 @@ public class LanceBatchWriteTest {
   private static Map<Integer, String> readColumnById(
       BufferAllocator allocator, String datasetUri, String column) throws Exception {
     Map<Integer, String> rows = new HashMap<>();
-    try (Dataset dataset = Dataset.open(datasetUri, allocator);
+    try (Dataset dataset = Dataset.open().uri(datasetUri).allocator(allocator).build();
         Scanner scanner = dataset.newScan();
         ArrowReader reader = scanner.scanBatches()) {
       VectorSchemaRoot root = reader.getVectorSchemaRoot();
@@ -597,7 +596,7 @@ public class LanceBatchWriteTest {
   private static Map<Integer, Integer> readRows(BufferAllocator allocator, String datasetUri)
       throws Exception {
     Map<Integer, Integer> rows = new HashMap<>();
-    try (Dataset dataset = Dataset.open(datasetUri, allocator);
+    try (Dataset dataset = Dataset.open().uri(datasetUri).allocator(allocator).build();
         Scanner scanner = dataset.newScan();
         ArrowReader reader = scanner.scanBatches()) {
       VectorSchemaRoot root = reader.getVectorSchemaRoot();
@@ -623,7 +622,7 @@ public class LanceBatchWriteTest {
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
       Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
       Schema schema = new Schema(Collections.singletonList(field));
-      Dataset.create(allocator, datasetUri, schema, new WriteParams.Builder().build()).close();
+      Dataset.write().allocator(allocator).uri(datasetUri).schema(schema).execute().close();
 
       LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
       StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
@@ -684,7 +683,8 @@ public class LanceBatchWriteTest {
 
     // The merged options must not break the subsequent commit.
     stagedCommit.commit();
-    try (Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+    try (Dataset dataset =
+        Dataset.open().uri(datasetUri).allocator(LanceRuntime.allocator()).build()) {
       assertEquals(0, dataset.countRows());
     }
   }
