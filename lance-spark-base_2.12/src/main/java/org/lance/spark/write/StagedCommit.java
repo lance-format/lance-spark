@@ -140,7 +140,7 @@ public class StagedCommit {
     return storageOptions;
   }
 
-  /** Returns the file format version this staged commit will use, or null for Lance's default. */
+  /** Returns the file format version currently set, or null for Lance's default. */
   String getFileFormatVersion() {
     return fileFormatVersion;
   }

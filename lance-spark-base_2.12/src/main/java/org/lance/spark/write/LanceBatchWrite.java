@@ -271,9 +271,8 @@ public class LanceBatchWrite implements BatchWrite {
 
   /**
    * Returns the Lance write parameters {@link #commit(WriterCommitMessage[])} expects for fragments
-   * an external writer produces: the write mode {@link #isOverwrite()} requires, the resolved
-   * {@code file_format_version}, the file size limits, and the storage options, including
-   * credentials vended by a namespace.
+   * an external writer produces, such as the resolved {@code file_format_version}. See {@link
+   * FragmentWriteSpec#toWriteParams()} for what they contain.
    */
   @Evolving
   public FragmentWriteSpec getFragmentWriteSpec() {
@@ -306,14 +305,15 @@ public class LanceBatchWrite implements BatchWrite {
    * <p>The returned message must be passed to {@link #commit(WriterCommitMessage[])} on a {@code
    * LanceBatchWrite} for the same target dataset.
    *
-   * <p>Write the fragments with the parameters of {@link #getFragmentWriteSpec()}. On an overwrite,
-   * do not pass the table's schema to {@code WriteFragmentBuilder.schema(...)}, and give the stream
-   * the column types of {@link #getCommitSchema()}. Timestamps must use the same unit, and strings
-   * and binaries the same offset width. The stream may leave out a timestamp's time zone.
+   * <p>Write the fragments with the parameters of {@link #getFragmentWriteSpec()}. When {@link
+   * #isOverwrite()} is true, do not pass the table's schema to {@code
+   * WriteFragmentBuilder.schema(...)}, and give the stream the column types of {@link
+   * #getCommitSchema()}. Timestamps must use the same unit, and strings and binaries the same
+   * offset width. The stream may leave out a timestamp's time zone.
    *
    * <p>{@code commit} does not validate these fragments: not their file format version, field ids
    * or column types. Fragments written in the wrong mode, or with the wrong schema or types, can
-   * commit and read back as nulls or wrong values.
+   * commit and then read back as nulls or wrong values, or leave the table unreadable.
    *
    * @param fragments uncommitted fragments produced by a task
    * @return a message accepted by {@link #commit(WriterCommitMessage[])}

@@ -506,7 +506,7 @@ public class LanceBatchWriteTest {
       options.put(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION, "2.1");
       options.put(LanceSparkWriteOptions.CONFIG_MAX_ROWS_PER_FILE, "10");
       options.put(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS, "true");
-      // The spec takes the write mode from isOverwrite(), not from the write_mode option.
+      // write_mode=create still gives APPEND: the spec takes the write mode from isOverwrite().
       options.put(LanceSparkWriteOptions.CONFIG_WRITE_MODE, "create");
       LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(options, datasetUri);
       Map<String, String> vended = new HashMap<>();
@@ -540,8 +540,8 @@ public class LanceBatchWriteTest {
   @Test
   public void testFragmentWriteSpecKeepsPinnedFileFormatVersion(TestInfo testInfo)
       throws Exception {
-    String datasetUri =
-        TestUtils.getDatasetUri(tempDir.toString(), testInfo.getTestMethod().get().getName());
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
       Schema schema = new Schema(Arrays.asList(intField("a"), intField("c")));
       Dataset.create(
@@ -573,8 +573,8 @@ public class LanceBatchWriteTest {
   /** A staged commit pinned to a file format version when it was staged makes the spec use it. */
   @Test
   public void testFragmentWriteSpecUsesStagedFileFormatVersion(TestInfo testInfo) throws Exception {
-    String datasetUri =
-        TestUtils.getDatasetUri(tempDir.toString(), testInfo.getTestMethod().get().getName());
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
       Schema schema = new Schema(Arrays.asList(intField("a"), intField("c")));
       StagedCommit stagedCommit =
@@ -589,6 +589,8 @@ public class LanceBatchWriteTest {
               false,
               stagedCommit);
       FragmentWriteSpec spec = batchWrite.getFragmentWriteSpec();
+      // A staged create or replace commits as an overwrite.
+      assertEquals(Optional.of("OVERWRITE"), spec.toWriteParams().getMode());
       assertEquals(Optional.of("2.1"), spec.toWriteParams().getDataStorageVersion());
 
       List<FragmentMetadata> fragments = writeFragments(allocator, spec, schema, 0, 25);

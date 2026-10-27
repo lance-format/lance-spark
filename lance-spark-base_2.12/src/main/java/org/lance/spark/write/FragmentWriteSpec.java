@@ -52,9 +52,10 @@ public final class FragmentWriteSpec implements Serializable {
   }
 
   /**
-   * Returns the parameters to pass to {@code Fragment.write()}: the write mode {@code commit}
-   * expects, the resolved {@code file_format_version}, the file size limits, and the storage
-   * options, including credentials vended by a namespace.
+   * Returns the parameters to pass to {@code WriteFragmentBuilder.writeParams(...)}: the write mode
+   * {@code commit} expects, the resolved {@code file_format_version}, the file and row group size
+   * limits, the blob packing threshold, and the storage options, including credentials vended by a
+   * namespace. Stable row ids are off, because {@code commit} assigns them.
    */
   public WriteParams toWriteParams() {
     return writeOptions.toWriteParams(initialStorageOptions);
