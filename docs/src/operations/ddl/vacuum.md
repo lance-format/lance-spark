@@ -65,6 +65,7 @@ The `VACUUM` command returns statistics about the cleanup operation:
 | `transaction_files_removed` | Long | Number of transaction files removed |
 | `index_files_removed` | Long | Number of index files removed |
 | `deletion_files_removed` | Long | Number of deletion files removed |
+| `failed_deletes` | Long | Number of files VACUUM tried and failed to delete |
 
 File counts describe files removed by this operation, not the number of rows deleted.
 Counts are zero for file types with nothing to remove.
