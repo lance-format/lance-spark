@@ -490,8 +490,9 @@ public class LanceBatchWriteTest {
   }
 
   /**
-   * The spec carries what the row writer would use: the write mode the commit expects, resolved
-   * options, and storage options vended by a namespace. It survives serialization.
+   * The spec carries the Lance write parameters the commit expects: the write mode from {@code
+   * isOverwrite()}, resolved options, and storage options vended by a namespace. It survives
+   * serialization.
    */
   @Test
   public void testFragmentWriteSpecCarriesResolvedOptions(TestInfo testInfo) throws Exception {
