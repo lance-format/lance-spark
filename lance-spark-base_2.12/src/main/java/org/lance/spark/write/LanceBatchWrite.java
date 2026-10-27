@@ -18,7 +18,6 @@ import org.lance.Dataset;
 import org.lance.FragmentMetadata;
 import org.lance.Transaction;
 import org.lance.WriteParams;
-import org.lance.fragment.DataFile;
 import org.lance.memwal.ShardingSpec;
 import org.lance.namespace.LanceNamespace;
 import org.lance.operation.Append;
@@ -46,14 +45,10 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public class LanceBatchWrite implements BatchWrite {
   private static final Logger logger = LoggerFactory.getLogger(LanceBatchWrite.class);
-  private static final Pattern CONCRETE_FILE_FORMAT_VERSION =
-      Pattern.compile("(\\d{1,9})\\.(\\d{1,9})");
 
   private final StructType schema;
   private LanceSparkWriteOptions writeOptions;
@@ -163,11 +158,9 @@ public class LanceBatchWrite implements BatchWrite {
 
   @Override
   public void commit(WriterCommitMessage[] messages) {
-    List<TaskCommit> taskCommits =
-        Arrays.stream(messages).map(m -> (TaskCommit) m).collect(Collectors.toList());
-    checkFileFormatVersion(taskCommits);
     List<FragmentMetadata> fragments =
-        taskCommits.stream()
+        Arrays.stream(messages)
+            .map(m -> (TaskCommit) m)
             .map(TaskCommit::getFragments)
             .map(LanceDataWriter::stripRowIdMeta)
             .flatMap(List::stream)
@@ -296,8 +289,8 @@ public class LanceBatchWrite implements BatchWrite {
 
   /**
    * The file format version this write resolves: the write option, or for a staged commit the
-   * version resolved when it was staged. Null means none was resolved: fragments get Lance's
-   * default, and {@code commit} does not check them.
+   * version resolved when it was staged. Null means none was resolved, so fragments get Lance's
+   * default.
    */
   private String effectiveFileFormatVersion() {
     String version = writeOptions.getFileFormatVersion();
@@ -305,47 +298,6 @@ public class LanceBatchWrite implements BatchWrite {
       version = stagedCommit.getFileFormatVersion();
     }
     return version;
-  }
-
-  /**
-   * Rejects fragments from {@link #taskCommit} whose data files use another file format version
-   * than the one this write resolves. lance-spark's own row writer writes that version itself, so
-   * its messages are not checked. Only concrete versions of format 2 and later are compared: a
-   * release name such as "stable" resolves inside Lance, and a legacy "0.1" table writes its data
-   * files as "0.2".
-   */
-  private void checkFileFormatVersion(List<TaskCommit> taskCommits) {
-    String version = effectiveFileFormatVersion();
-    Matcher matcher = version == null ? null : CONCRETE_FILE_FORMAT_VERSION.matcher(version);
-    if (matcher == null || !matcher.matches()) {
-      return;
-    }
-    int major = Integer.parseInt(matcher.group(1));
-    int minor = Integer.parseInt(matcher.group(2));
-    if (major < 2) {
-      return;
-    }
-    for (TaskCommit taskCommit : taskCommits) {
-      if (!taskCommit.isExternal()) {
-        continue;
-      }
-      for (FragmentMetadata fragment : taskCommit.getFragments()) {
-        for (DataFile file : fragment.getFiles()) {
-          if (file.getFileMajorVersion() != major || file.getFileMinorVersion() != minor) {
-            throw new IllegalArgumentException(
-                String.format(
-                    "Data file %s of fragment %d uses Lance file format %d.%d, but this write "
-                        + "uses %s. Write it with the parameters of "
-                        + "LanceBatchWrite.getFragmentWriteSpec().",
-                    file.getPath(),
-                    fragment.getId(),
-                    file.getFileMajorVersion(),
-                    file.getFileMinorVersion(),
-                    version));
-          }
-        }
-      }
-    }
   }
 
   /**
@@ -359,10 +311,9 @@ public class LanceBatchWrite implements BatchWrite {
    * the column types of {@link #getCommitSchema()}. Timestamps must use the same unit, and strings
    * and binaries the same offset width. The stream may leave out a timestamp's time zone.
    *
-   * <p>When the write resolves a concrete file format version of format 2 or later, {@code commit}
-   * rejects these fragments with an {@link IllegalArgumentException}, without committing anything,
-   * if their data files use another version. It does not check field ids or column types, so
-   * fragments written another way can commit and read back as nulls or wrong values.
+   * <p>{@code commit} does not validate these fragments: not their file format version, field ids
+   * or column types. Fragments written in the wrong mode, or with the wrong schema or types, can
+   * commit and read back as nulls or wrong values.
    *
    * @param fragments uncommitted fragments produced by a task
    * @return a message accepted by {@link #commit(WriterCommitMessage[])}
@@ -375,31 +326,18 @@ public class LanceBatchWrite implements BatchWrite {
     for (FragmentMetadata fragment : fragments) {
       copy.add(Objects.requireNonNull(fragment, "fragments must not contain null"));
     }
-    return new TaskCommit(copy, true);
+    return new TaskCommit(copy);
   }
 
   public static class TaskCommit implements WriterCommitMessage {
-    private static final long serialVersionUID = 1L;
-
     private final List<FragmentMetadata> fragments;
-    // True for messages from taskCommit(...), whose fragments commit() checks.
-    private final boolean external;
 
     TaskCommit(List<FragmentMetadata> fragments) {
-      this(fragments, false);
-    }
-
-    private TaskCommit(List<FragmentMetadata> fragments, boolean external) {
       this.fragments = fragments;
-      this.external = external;
     }
 
     List<FragmentMetadata> getFragments() {
       return fragments;
-    }
-
-    boolean isExternal() {
-      return external;
     }
   }
 }
