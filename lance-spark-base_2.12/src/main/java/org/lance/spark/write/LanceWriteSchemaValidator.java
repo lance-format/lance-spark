@@ -114,20 +114,21 @@ public final class LanceWriteSchemaValidator {
 
   private static void checkArray(
       String path, ArrayType tableArray, ArrayType inputArray, List<String> errors) {
-    if (!tableArray.containsNull() && inputArray.containsNull()) {
+    boolean elementsRejectNulls = !tableArray.containsNull() && inputArray.containsNull();
+    if (elementsRejectNulls) {
       errors.add(
           String.format(
               "column '%s': the table array elements do not allow nulls, but the input does;"
                   + " expected %s, got %s",
               path, describe(tableArray), describe(inputArray)));
-      return;
     }
 
     DataType tableElement = tableArray.elementType();
     DataType inputElement = inputArray.elementType();
     if (isNested(tableElement) || isNested(inputElement)) {
       checkType(path + "[]", tableElement, inputElement, errors);
-    } else if (!tableElement.equals(inputElement)) {
+    } else if (!elementsRejectNulls && !tableElement.equals(inputElement)) {
+      // The nullability error above already printed both array types.
       errors.add(
           String.format(
               "column '%s': expected %s, got %s",
@@ -137,13 +138,13 @@ public final class LanceWriteSchemaValidator {
 
   private static void checkMap(
       String path, MapType tableMap, MapType inputMap, List<String> errors) {
-    if (!tableMap.valueContainsNull() && inputMap.valueContainsNull()) {
+    boolean valuesRejectNulls = !tableMap.valueContainsNull() && inputMap.valueContainsNull();
+    if (valuesRejectNulls) {
       errors.add(
           String.format(
               "column '%s': the table map values do not allow nulls, but the input does;"
                   + " expected %s, got %s",
               path, describe(tableMap), describe(inputMap)));
-      return;
     }
 
     DataType tableValue = tableMap.valueType();
@@ -151,7 +152,9 @@ public final class LanceWriteSchemaValidator {
     if (isNested(tableValue) || isNested(inputValue) || isNested(tableMap.keyType())) {
       checkType(path + ".key", tableMap.keyType(), inputMap.keyType(), errors);
       checkType(path + ".value", tableValue, inputValue, errors);
-    } else if (!tableMap.keyType().equals(inputMap.keyType()) || !tableValue.equals(inputValue)) {
+    } else if (!valuesRejectNulls
+        && (!tableMap.keyType().equals(inputMap.keyType()) || !tableValue.equals(inputValue))) {
+      // The nullability error above already printed both map types.
       errors.add(
           String.format(
               "column '%s': expected %s, got %s", path, describe(tableMap), describe(inputMap)));
