@@ -161,8 +161,10 @@ public abstract class BaseSparkConnectorAggPushdownTest {
     assertTrue(filteredPlan.contains("pushedAggregation: Optional["), filteredPlan);
     assertEquals(2L, filteredCount.first().getLong(0));
     assertEquals(
-        0L, lanceDataset.filter("name IS NULL").selectExpr("count(name)").first().getLong(0));
-    assertEquals(0L, lanceDataset.filter("id < 0").selectExpr("count(name)").first().getLong(0));
+        "{\"n\":0}",
+        lanceDataset.filter("name IS NULL").selectExpr("count(name) AS n").toJSON().first());
+    assertEquals(
+        "{\"n\":0}", lanceDataset.filter("id < 0").selectExpr("count(name) AS n").toJSON().first());
 
     Dataset<Row> residualCount = lanceDataset.filter("length(name) = 1").selectExpr("count(name)");
     String residualPlan =
@@ -172,7 +174,8 @@ public abstract class BaseSparkConnectorAggPushdownTest {
 
     String emptyTable = "lance.default.count_column_empty_dataset";
     lanceDataset.limit(0).writeTo(emptyTable).create();
-    assertEquals(0L, spark.table(emptyTable).selectExpr("count(name)").first().getLong(0));
+    assertEquals(
+        "{\"n\":0}", spark.table(emptyTable).selectExpr("count(name) AS n").toJSON().first());
 
     // COUNT(*) should still be pushed down
     long countStar = lanceDataset.selectExpr("count(*)").first().getLong(0);
@@ -209,7 +212,7 @@ public abstract class BaseSparkConnectorAggPushdownTest {
   }
 
   @Test
-  public void testCountColumnWithQuotedNames() {
+  public void testCountColumnWithQuotedNames() throws Exception {
     String tableName = "lance.default.count_quoted_column_test_dataset";
     spark
         .range(0, 3)
@@ -224,6 +227,29 @@ public abstract class BaseSparkConnectorAggPushdownTest {
       String plan = count.queryExecution().explainString(ExplainMode.fromString("formatted"));
       assertTrue(plan.contains("pushedAggregation: Optional["), plan);
       assertEquals(2L, count.first().getLong(0));
+    }
+  }
+
+  @Test
+  public void testCountColumnWithFilterPruningEveryFragment() throws Exception {
+    String tableName = "lance.default.count_column_all_pruned_test_dataset";
+    spark
+        .range(0, 100)
+        .selectExpr("id", "CASE WHEN id % 2 = 0 THEN NULL ELSE CAST(id AS STRING) END AS name")
+        .repartition(4)
+        .writeTo(tableName)
+        .create();
+    spark
+        .sql("ALTER TABLE " + tableName + " CREATE INDEX id_zm USING zonemap (id)")
+        .collectAsList();
+    spark.catalog().refreshTable(tableName);
+
+    for (String filter : Arrays.asList("id >= 1000 AND id < 2000", "_rowaddr = " + (1000L << 32))) {
+      Dataset<Row> count = spark.table(tableName).filter(filter).selectExpr("count(name) AS n");
+      assertEquals("{\"n\":0}", count.toJSON().first());
+      String plan = count.queryExecution().executedPlan().toString();
+      assertTrue(plan.contains("LocalTableScan"), plan);
+      assertFalse(plan.contains("BatchScan"), plan);
     }
   }
 
