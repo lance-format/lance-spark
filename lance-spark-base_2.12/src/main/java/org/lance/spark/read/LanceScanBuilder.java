@@ -278,6 +278,18 @@ public class LanceScanBuilder
                 .orElse(null);
       }
 
+      // Spark re-runs a partially pushed COUNT(*) as SUM over this scan's per-partition counts, so
+      // a scan that plans no partition leaves SUM with zero rows and it yields NULL instead of 0.
+      // Answering 0 is safe here: pruning never drops a fragment that could match.
+      if (isPushedCountStar()
+          && LanceScan.pruneForPlanning(
+                  scanPlan.getSplits(), pushedPredicates, survivingFragmentIds)
+              .isEmpty()) {
+        LOG.debug("All fragments pruned for a pushed COUNT(*); resolving the count to 0 locally");
+        setLocalCount(0L);
+        return localScan;
+      }
+
       // Scale rows and full size by the surviving-row ratio first, then let
       // LanceStatistics.estimateProjected apply the column-width ratio on top
       // (when the projected schema is narrower than the full schema).
@@ -802,6 +814,14 @@ public class LanceScanBuilder
     InternalRow[] rows = new InternalRow[1];
     rows[0] = new GenericInternalRow(new Object[] {count});
     this.localScan = new LanceLocalScan(countSchema, rows, readOptions.getDatasetUri());
+  }
+
+  private boolean isPushedCountStar() {
+    if (!pushedAggregation.isPresent()) {
+      return false;
+    }
+    AggregateFunc[] funcs = pushedAggregation.get().aggregateExpressions();
+    return funcs.length == 1 && funcs[0] instanceof CountStar;
   }
 
   private static Optional<Long> getCountFromMetadata(Dataset dataset) {

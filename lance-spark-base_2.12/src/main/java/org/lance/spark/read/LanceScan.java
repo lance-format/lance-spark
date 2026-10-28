@@ -181,12 +181,8 @@ public class LanceScan
     // Splits and per-fragment row counts are pre-computed on the driver during
     // LanceScanBuilder.build() from the same Dataset handle that loaded manifest /
     // schema / zonemap stats. This avoids a second Dataset.open() at plan time.
-    List<LanceSplit> prunedSplits = pruneByRowAddrFilters(precomputedSplits);
-
-    // Zonemap-based fragment pruning: uses per-column min/max/null_count
-    // statistics to eliminate fragments that provably cannot match
-    // pushed filters.
-    prunedSplits = pruneByZonemapStats(prunedSplits);
+    List<LanceSplit> prunedSplits =
+        pruneForPlanning(precomputedSplits, pushedPredicates, cachedSurvivingFragmentIds);
 
     // Limit-based split pruning: when a LIMIT is pushed down without filters or TopN sort,
     // use per-fragment row counts to plan only enough splits to satisfy the limit.
@@ -235,6 +231,19 @@ public class LanceScan
   }
 
   /**
+   * Shared with {@link LanceScanBuilder#build()} so planning can tell, before the scan exists,
+   * whether pruning leaves anything to read. An empty result means no fragment can match.
+   *
+   * @param survivingFragmentIds fragment IDs kept by zonemap pruning, or null when the builder did
+   *     not prune
+   */
+  static List<LanceSplit> pruneForPlanning(
+      List<LanceSplit> allSplits, Predicate[] pushedPredicates, Set<Integer> survivingFragmentIds) {
+    return pruneByZonemapStats(
+        pruneByRowAddrFilters(allSplits, pushedPredicates), survivingFragmentIds);
+  }
+
+  /**
    * Prunes splits based on {@code _rowaddr} filters — skipping fragment opens, scan setup, and task
    * scheduling for fragments that provably cannot match the query predicate.
    *
@@ -247,7 +256,8 @@ public class LanceScan
    * _rowaddr = 0 AND _rowaddr = 4294967296L}) and no fragments can match, resulting in zero rows
    * returned.
    */
-  private List<LanceSplit> pruneByRowAddrFilters(List<LanceSplit> allSplits) {
+  private static List<LanceSplit> pruneByRowAddrFilters(
+      List<LanceSplit> allSplits, Predicate[] pushedPredicates) {
     java.util.Optional<Set<Integer>> targetFragmentIds =
         RowAddressFilterAnalyzer.extractTargetFragmentIds(pushedPredicates);
     if (!targetFragmentIds.isPresent()) {
@@ -355,12 +365,13 @@ public class LanceScan
    * <p>This is analogous to partition pruning in Hive/Iceberg: fragments whose zones all fail the
    * predicate are skipped entirely, avoiding fragment opens, scan setup, and task scheduling.
    */
-  private List<LanceSplit> pruneByZonemapStats(List<LanceSplit> allSplits) {
+  private static List<LanceSplit> pruneByZonemapStats(
+      List<LanceSplit> allSplits, Set<Integer> survivingFragmentIds) {
     // Null means the builder did not prune. Do not recompute here.
-    if (cachedSurvivingFragmentIds == null) {
+    if (survivingFragmentIds == null) {
       return allSplits;
     }
-    Set<Integer> allowedIds = cachedSurvivingFragmentIds;
+    Set<Integer> allowedIds = survivingFragmentIds;
 
     List<LanceSplit> pruned =
         allSplits.stream()
