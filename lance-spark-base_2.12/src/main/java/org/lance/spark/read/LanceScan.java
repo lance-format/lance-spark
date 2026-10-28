@@ -231,11 +231,8 @@ public class LanceScan
   }
 
   /**
-   * Applies the pruning steps that decide which splits can produce rows: {@code _rowaddr}
-   * constraints first, then zonemap min/max/null_count statistics.
-   *
-   * <p>Shared with {@link LanceScanBuilder#build()} so that planning can tell, before building the
-   * scan, whether pruning leaves anything to read. An empty result means no fragment can match.
+   * Shared with {@link LanceScanBuilder#build()} so planning can tell, before the scan exists,
+   * whether pruning leaves anything to read. An empty result means no fragment can match.
    *
    * @param survivingFragmentIds fragment IDs kept by zonemap pruning, or null when the builder did
    *     not prune
