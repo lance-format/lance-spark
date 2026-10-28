@@ -168,12 +168,8 @@ public class LanceBatchWrite implements BatchWrite {
 
     Schema arrowSchema = getCommitSchema();
 
-    // Spark sink contract: empty immediate append writes should be a noop (not raise).
-    // Lance-Java Append rejects empty fragments, so skip building the operation.
-    // StagedCommit goes through Overwrite which does not enforce this check, so we
-    // only short-circuit the non-staged path. Empty overwrites must still go through
-    // Overwrite.builder() so the table is truncated and OCC is enforced.
-    if (stagedCommit == null && !isOverwrite() && fragments.isEmpty()) {
+    // Lance-Java rejects empty fragments, so empty appends are a noop; empty overwrites truncate.
+    if (fragments.isEmpty() && !isOverwrite()) {
       return;
     }
 
