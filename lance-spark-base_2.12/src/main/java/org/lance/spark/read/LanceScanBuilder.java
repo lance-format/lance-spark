@@ -49,6 +49,7 @@ import org.apache.spark.sql.connector.expressions.SortDirection;
 import org.apache.spark.sql.connector.expressions.SortOrder;
 import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
+import org.apache.spark.sql.connector.expressions.aggregate.Count;
 import org.apache.spark.sql.connector.expressions.aggregate.CountStar;
 import org.apache.spark.sql.connector.expressions.filter.Predicate;
 import org.apache.spark.sql.connector.read.Scan;
@@ -101,6 +102,7 @@ public class LanceScanBuilder
   private Optional<Integer> offset = Optional.empty();
   private Optional<List<ColumnOrdering>> topNSortOrders = Optional.empty();
   private Optional<Aggregation> pushedAggregation = Optional.empty();
+  private Optional<String> countFilter = Optional.empty();
   private LanceLocalScan localScan = null;
   private LanceIndexedCountScan indexedCountScan = null;
 
@@ -310,6 +312,13 @@ public class LanceScanBuilder
       LanceSparkReadOptions resolvedReadOptions = readOptions.withRef(scanPlan.getRef());
       Optional<String> whereCondition =
           FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);
+      if (countFilter.isPresent()) {
+        whereCondition =
+            Optional.of(
+                whereCondition.isPresent()
+                    ? whereCondition.get() + " AND (" + countFilter.get() + ")"
+                    : countFilter.get());
+      }
       return new LanceScan(
           schema,
           resolvedReadOptions,
@@ -699,6 +708,27 @@ public class LanceScanBuilder
     AggregateFunc[] funcs = aggregation.aggregateExpressions();
     if (aggregation.groupByExpressions().length > 0) {
       return false;
+    }
+    if (funcs.length == 1 && funcs[0] instanceof Count) {
+      Count count = (Count) funcs[0];
+      if (count.isDistinct()
+          || !(count.column() instanceof NamedReference)
+          || !readOptions.isPushDownFilters()) {
+        return false;
+      }
+      String[] names = ((NamedReference) count.column()).fieldNames();
+      // shortcut: Keep backtick names in Spark until Lance scan field paths support them.
+      if (names.length != 1
+          || names[0].contains("`")
+          || residualFilterColumns.contains(names[0])
+          || Arrays.stream(fullSchema.fields()).noneMatch(field -> field.name().equals(names[0]))) {
+        return false;
+      }
+      this.countFilter = Optional.of("`" + names[0] + "` IS NOT NULL");
+      // COUNT(column) is COUNT(*) over non-null values; reuse the count-only reader.
+      this.pushedAggregation =
+          Optional.of(new Aggregation(new AggregateFunc[] {new CountStar()}, new Expression[0]));
+      return true;
     }
     if (funcs.length == 1 && funcs[0] instanceof CountStar) {
       // Metadata-based count is only valid when nothing restricts the rows. A full-text query is
