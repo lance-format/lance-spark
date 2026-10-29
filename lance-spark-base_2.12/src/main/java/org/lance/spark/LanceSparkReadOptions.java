@@ -29,6 +29,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 
 /**
  * Read-specific options for Lance Spark connector.
@@ -533,6 +534,60 @@ public class LanceSparkReadOptions implements Serializable {
     }
 
     /**
+     * Resolves catalog defaults, supported table defaults, and per-operation options, in that
+     * order.
+     *
+     * <p>Only tuning options are read from table properties. Spark's {@code option.} aliases,
+     * storage credentials, and operation selectors are not table defaults.
+     *
+     * @param defaults catalog options, including storage options
+     * @param tableProperties persisted table properties (or the staged table's properties)
+     * @param options explicit options for this operation
+     * @return this builder
+     */
+    public Builder fromOptions(
+        Map<String, String> defaults,
+        Map<String, String> tableProperties,
+        Map<String, String> options) {
+      Map<String, String> merged = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+      merged.putAll(defaults);
+      CaseInsensitiveStringMap operationOptions = new CaseInsensitiveStringMap(options);
+      for (String key :
+          new String[] {
+            CONFIG_PUSH_DOWN_FILTERS,
+            CONFIG_BLOCK_SIZE,
+            CONFIG_INDEX_CACHE_SIZE,
+            CONFIG_METADATA_CACHE_SIZE,
+            CONFIG_BATCH_SIZE,
+            CONFIG_USE_SCALAR_INDEX,
+            CONFIG_TOP_N_PUSH_DOWN,
+          }) {
+        if (operationOptions.containsKey(key)) {
+          continue;
+        }
+        String propertyKey = null;
+        for (Map.Entry<String, String> entry : tableProperties.entrySet()) {
+          if (entry.getKey().equalsIgnoreCase(key)) {
+            if (propertyKey != null && !Objects.equals(merged.get(key), entry.getValue())) {
+              throw new IllegalArgumentException(
+                  "Conflicting table defaults for "
+                      + key
+                      + ": "
+                      + propertyKey
+                      + " and "
+                      + entry.getKey()
+                      + "; UNSET one spelling");
+            }
+            propertyKey = entry.getKey();
+            merged.put(key, entry.getValue());
+          }
+        }
+      }
+      merged.putAll(options);
+      return fromOptions(merged);
+    }
+
+    /**
      * Parses options from a map, extracting read-specific settings.
      *
      * @param options the options map
@@ -557,7 +612,8 @@ public class LanceSparkReadOptions implements Serializable {
      */
     public Builder withCatalogDefaults(LanceSparkCatalogConfig catalogConfig) {
       // Merge storage options: catalog options are defaults, current options override
-      Map<String, String> merged = new HashMap<>(catalogConfig.getStorageOptions());
+      Map<String, String> merged = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+      merged.putAll(catalogConfig.getStorageOptions());
       merged.putAll(this.storageOptions);
       this.indexCacheBackend = catalogConfig.getIndexCacheBackend();
       this.metadataCacheBackend = catalogConfig.getMetadataCacheBackend();
@@ -569,15 +625,15 @@ public class LanceSparkReadOptions implements Serializable {
      * {@link #fromOptions(Map)} and {@link #withCatalogDefaults(LanceSparkCatalogConfig)} so that
      * both call sites stay in sync and catalog-level configs reach the typed fields.
      */
-    private void parseTypedFlags(Map<String, String> opts) {
-      CaseInsensitiveStringMap references = new CaseInsensitiveStringMap(opts);
+    private void parseTypedFlags(Map<String, String> options) {
+      CaseInsensitiveStringMap opts = new CaseInsensitiveStringMap(options);
       Preconditions.checkArgument(
           !opts.containsKey(CONFIG_NEAREST),
           "The nearest read option is no longer supported; use VECTOR_SEARCH table function");
       Preconditions.checkArgument(
-          (references.containsKey(CONFIG_VERSION) ? 1 : 0)
-                  + (references.containsKey(CONFIG_BRANCH) ? 1 : 0)
-                  + (references.containsKey(CONFIG_TAG) ? 1 : 0)
+          (opts.containsKey(CONFIG_VERSION) ? 1 : 0)
+                  + (opts.containsKey(CONFIG_BRANCH) ? 1 : 0)
+                  + (opts.containsKey(CONFIG_TAG) ? 1 : 0)
               <= 1,
           "Specify only one of branch, tag, or version");
       if (opts.containsKey(CONFIG_PUSH_DOWN_FILTERS)) {
@@ -586,12 +642,12 @@ public class LanceSparkReadOptions implements Serializable {
       if (opts.containsKey(CONFIG_BLOCK_SIZE)) {
         this.blockSize = Integer.parseInt(opts.get(CONFIG_BLOCK_SIZE));
       }
-      if (references.containsKey(CONFIG_VERSION)) {
-        this.ref = LanceRef.ofMain(Long.parseLong(references.get(CONFIG_VERSION)));
-      } else if (references.containsKey(CONFIG_BRANCH)) {
-        this.ref = LanceRef.ofBranch(references.get(CONFIG_BRANCH));
-      } else if (references.containsKey(CONFIG_TAG)) {
-        this.ref = LanceRef.ofTag(references.get(CONFIG_TAG));
+      if (opts.containsKey(CONFIG_VERSION)) {
+        this.ref = LanceRef.ofMain(Long.parseLong(opts.get(CONFIG_VERSION)));
+      } else if (opts.containsKey(CONFIG_BRANCH)) {
+        this.ref = LanceRef.ofBranch(opts.get(CONFIG_BRANCH));
+      } else if (opts.containsKey(CONFIG_TAG)) {
+        this.ref = LanceRef.ofTag(opts.get(CONFIG_TAG));
       }
       if (opts.containsKey(CONFIG_INDEX_CACHE_SIZE)) {
         this.indexCacheSize = Integer.parseInt(opts.get(CONFIG_INDEX_CACHE_SIZE));

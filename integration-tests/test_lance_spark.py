@@ -3949,5 +3949,34 @@ class TestDQLFullTextSearch:
         )
 
 
+class TestTableOptionDefaults:
+    """Table tuning defaults survive reloads and per-operation overrides."""
+
+    def test_ctas_options_and_append_override(self, spark, test_table):
+        spark.range(0, 6, 1, 1).createOrReplaceTempView("table_default_source")
+        spark.sql(f"""
+            CREATE TABLE {test_table} USING lance
+            OPTIONS ('max_row_per_file' = '2', 'batch_size' = '2')
+            AS SELECT * FROM table_default_source
+        """)
+        spark.catalog.refreshTable(test_table)
+        assert spark.sql(
+            f"SELECT COUNT(DISTINCT _fragid) FROM {test_table}"
+        ).first()[0] == 3
+        spark.range(0, 6, 1, 1).writeTo(test_table).option("MAX_ROW_PER_FILE", "3").append()
+        assert spark.sql(
+            f"SELECT COUNT(DISTINCT _fragid) FROM {test_table}"
+        ).first()[0] == 5
+        properties = {row.key: row.value for row in spark.sql(
+            f"SHOW TBLPROPERTIES {test_table}"
+        ).collect()}
+        assert properties["max_row_per_file"] == "2"
+        spark.sql(f"INSERT INTO {test_table} SELECT * FROM table_default_source")
+        assert spark.sql(
+            f"SELECT COUNT(DISTINCT _fragid) FROM {test_table}"
+        ).first()[0] == 8
+        assert spark.table(test_table).count() == 18
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
