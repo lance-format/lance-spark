@@ -66,6 +66,34 @@ public class LanceScanBuilderTest {
         Collections.emptyMap());
   }
 
+  @Test
+  public void tableReadDefaultsReachScanPartitionsAndAllowOverrides() {
+    LanceDataset table =
+        new LanceDataset(
+            TestUtils.TestTable1Config.readOptions,
+            TEST_SCHEMA,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            false,
+            null,
+            null,
+            Collections.singletonMap("batch_size", "16"),
+            null);
+    LanceScan defaultScan =
+        (LanceScan) table.newScanBuilder(CaseInsensitiveStringMap.empty()).build();
+    LanceInputPartition partition = (LanceInputPartition) defaultScan.planInputPartitions()[0];
+    assertEquals(16, partition.getReadOptions().getBatchSize());
+    LanceScan overriddenScan =
+        (LanceScan)
+            table
+                .newScanBuilder(
+                    new CaseInsensitiveStringMap(Collections.singletonMap("BATCH_SIZE", "32")))
+                .build();
+    LanceInputPartition overridden = (LanceInputPartition) overriddenScan.planInputPartitions()[0];
+    assertEquals(32, overridden.getReadOptions().getBatchSize());
+  }
+
   // --- pruneColumns ---
 
   @Test

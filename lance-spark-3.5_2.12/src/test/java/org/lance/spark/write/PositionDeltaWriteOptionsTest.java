@@ -16,6 +16,9 @@ package org.lance.spark.write;
 import org.lance.spark.LancePositionDeltaOperation;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.TestUtils;
+import org.lance.spark.read.LanceInputPartition;
+import org.lance.spark.read.LanceScan;
 
 import org.apache.spark.sql.connector.write.LogicalWriteInfo;
 import org.apache.spark.sql.connector.write.RowLevelOperation;
@@ -100,6 +103,41 @@ public class PositionDeltaWriteOptionsTest {
     Assertions.assertEquals(128, options.getBatchSize());
     Assertions.assertTrue(options.isUseLargeVarTypes());
     Assertions.assertEquals("7", options.getStorageOptions().get("max_row_per_file"));
+  }
+
+  @Test
+  public void testTableDefaultsApplyBetweenCatalogAndWriteOptions() {
+    Map<String, String> catalog = Collections.singletonMap("max_row_per_file", "1");
+    Map<String, String> properties = new HashMap<>();
+    properties.put("MAX_ROW_PER_FILE", "3");
+    properties.put("batch_size", "16");
+    LanceSparkWriteOptions defaults =
+        newBuilder(catalog, Collections.emptyMap(), null, properties).getWriteOptions();
+    Assertions.assertEquals(3, defaults.getMaxRowsPerFile());
+    Assertions.assertEquals(16, defaults.getBatchSize());
+    LanceSparkWriteOptions override =
+        newBuilder(catalog, Collections.singletonMap("Max_Row_Per_File", "2"), null, properties)
+            .getWriteOptions();
+    Assertions.assertEquals(2, override.getMaxRowsPerFile());
+    Assertions.assertEquals("3", properties.get("MAX_ROW_PER_FILE"));
+  }
+
+  @Test
+  public void testTableReadDefaultsReachRowLevelScan() {
+    LancePositionDeltaOperation operation =
+        new LancePositionDeltaOperation(
+            RowLevelOperation.Command.UPDATE,
+            TestUtils.TestTable1Config.schema,
+            TestUtils.TestTable1Config.readOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            false,
+            null,
+            Collections.singletonMap("batch_size", "16"));
+    LanceScan scan = (LanceScan) operation.newScanBuilder(CaseInsensitiveStringMap.empty()).build();
+    LanceInputPartition partition = (LanceInputPartition) scan.planInputPartitions()[0];
+    Assertions.assertEquals(16, partition.getReadOptions().getBatchSize());
   }
 
   @Test

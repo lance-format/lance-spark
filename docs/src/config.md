@@ -75,6 +75,65 @@ and namespace-specific options:
 | `spark.sql.catalog.{name}.parent`           | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                             |
 | `spark.sql.catalog.{name}.parent_delimiter` | String | ✗        | Delimiter for parent prefix (default: `.`). See [Note on Namespace Levels](#note-on-namespace-levels).                           |
 
+## Table Defaults and Operation Options
+
+Read and write tuning options use this precedence:
+
+1. Explicit DataFrame read/write `.option(...)` for the current operation.
+2. Supported defaults in the table's persisted properties.
+3. Catalog options (`spark.sql.catalog.<name>.<key>`).
+4. The connector or Lance Core default.
+
+SQL `CREATE TABLE ... OPTIONS (...)` and `TBLPROPERTIES (...)` set table properties,
+including for CTAS. They apply to the initial CTAS write and subsequent operations after
+reloading the table. In the DataFrame V2 API, use `.tableProperty(...)` for persistent
+defaults and `.option(...)` for one operation. Operation options never update table properties.
+
+```sql
+CREATE TABLE lance.default.events USING lance
+OPTIONS ('max_row_per_file' = '200000', 'batch_size' = '1024')
+AS SELECT * FROM source_events;
+
+ALTER TABLE lance.default.events
+SET TBLPROPERTIES ('max_row_per_file' = '400000');
+
+-- Later writes use 400000 as the file row limit.
+INSERT INTO lance.default.events SELECT * FROM more_events;
+```
+
+```python
+# Override the file row limit only for this append.
+more_events.writeTo("lance.default.events") \
+    .option("max_row_per_file", "100000") \
+    .append()
+```
+
+Supported table defaults are:
+
+| Applies to | Properties |
+|------------|------------|
+| Reads and writes | `batch_size` |
+| Writes | `max_row_per_file`, `max_rows_per_group`, `max_bytes_per_file`, `max_batch_bytes`, `use_queued_write_buffer`, `queue_depth`, `use_large_var_types`, `blob_pack_file_size_threshold` |
+| Reads | `pushDownFilters`, `block_size`, `index_cache_size`, `metadata_cache_size`, `use_scalar_index`, `topN_push_down` |
+
+These names retain their existing option semantics. In particular, `batch_size` is a shared
+read/write default, and file limits apply within each Spark writer task. They do not repartition
+the input or combine files across tasks. Table defaults also apply to row-level DML scans and writes.
+`file_format_version`, stable row IDs, and column encoding properties retain their existing
+schema and table-creation handling; they are not part of the tuning-default list above.
+
+`path`, `version`, `branch`, `tag`, `write_mode`, and `fullTextQuery` are operation selectors,
+not table defaults. Storage credentials, namespace configuration, cache backend URIs, and
+`executor_credential_refresh` also do not become defaults when stored as table properties.
+Other properties remain metadata unless another documented feature consumes them.
+
+Option names are case-insensitive when consumed. Table property names themselves retain their
+spelling: use that spelling for `ALTER TABLE ... SET/UNSET TBLPROPERTIES`. Conflicting values under
+multiple spellings of a recognized option are rejected; unset the unwanted spelling. Spark's
+internal `option.<key>` copies are not interpreted as defaults, so unsetting the raw key restores
+the catalog or built-in default. Invalid values are checked when the corresponding operation
+consumes them, using the same validation as explicit options.
+
 ## Distributed Vector Search
 
 Set `spark.sql.lance.search.distributed.enabled=true` to execute `VECTOR_SEARCH` with Spark tasks

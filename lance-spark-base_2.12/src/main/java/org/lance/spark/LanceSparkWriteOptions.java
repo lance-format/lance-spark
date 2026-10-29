@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 
 /**
  * Write-specific options for Lance Spark connector.
@@ -516,19 +517,75 @@ public class LanceSparkWriteOptions implements Serializable {
     }
 
     /**
-     * Parses options from a map, extracting write-specific settings.
+     * Resolves catalog defaults, supported table defaults, and per-operation options, in that
+     * order.
      *
-     * @param options the options map
+     * <p>Only tuning options are read from table properties. Spark's {@code option.} aliases,
+     * storage credentials, and operation selectors are not table defaults.
+     *
+     * @param defaults catalog options, including storage options
+     * @param tableProperties persisted table properties (or the staged table's properties)
+     * @param options explicit options for this operation
      * @return this builder
      */
-    public Builder fromOptions(Map<String, String> options) {
-      CaseInsensitiveStringMap references = new CaseInsensitiveStringMap(options);
+    public Builder fromOptions(
+        Map<String, String> defaults,
+        Map<String, String> tableProperties,
+        Map<String, String> options) {
+      Map<String, String> merged = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+      merged.putAll(defaults);
+      CaseInsensitiveStringMap operationOptions = new CaseInsensitiveStringMap(options);
+      for (String key :
+          new String[] {
+            CONFIG_MAX_ROWS_PER_FILE,
+            CONFIG_MAX_ROWS_PER_GROUP,
+            CONFIG_MAX_BYTES_PER_FILE,
+            CONFIG_BATCH_SIZE,
+            CONFIG_MAX_BATCH_BYTES,
+            CONFIG_USE_QUEUED_WRITE_BUFFER,
+            CONFIG_QUEUE_DEPTH,
+            CONFIG_USE_LARGE_VAR_TYPES,
+            CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD,
+          }) {
+        if (operationOptions.containsKey(key)) {
+          continue;
+        }
+        String propertyKey = null;
+        for (Map.Entry<String, String> entry : tableProperties.entrySet()) {
+          if (entry.getKey().equalsIgnoreCase(key)) {
+            if (propertyKey != null && !Objects.equals(merged.get(key), entry.getValue())) {
+              throw new IllegalArgumentException(
+                  "Conflicting table defaults for "
+                      + key
+                      + ": "
+                      + propertyKey
+                      + " and "
+                      + entry.getKey()
+                      + "; UNSET one spelling");
+            }
+            propertyKey = entry.getKey();
+            merged.put(key, entry.getValue());
+          }
+        }
+      }
+      merged.putAll(options);
+      return fromOptions(merged);
+    }
+
+    /**
+     * Parses options from a map, extracting write-specific settings.
+     *
+     * @param rawOptions the options map
+     * @return this builder
+     */
+    public Builder fromOptions(Map<String, String> rawOptions) {
+      CaseInsensitiveStringMap options = new CaseInsensitiveStringMap(rawOptions);
       Preconditions.checkArgument(
-          !references.containsKey(LanceSparkReadOptions.CONFIG_BRANCH),
+          !options.containsKey(LanceSparkReadOptions.CONFIG_BRANCH),
           "The branch option is read-only");
       Preconditions.checkArgument(
-          !references.containsKey(LanceSparkReadOptions.CONFIG_TAG), "The tag option is read-only");
-      this.storageOptions = new HashMap<>(options);
+          !options.containsKey(LanceSparkReadOptions.CONFIG_TAG), "The tag option is read-only");
+      this.storageOptions = new HashMap<>(rawOptions);
       if (options.containsKey(CONFIG_WRITE_MODE)) {
         this.writeMode = WriteMode.valueOf(options.get(CONFIG_WRITE_MODE).toUpperCase(Locale.ROOT));
       }
@@ -593,7 +650,8 @@ public class LanceSparkWriteOptions implements Serializable {
      */
     public Builder withCatalogDefaults(LanceSparkCatalogConfig catalogConfig) {
       // Merge storage options: catalog options are defaults, current options override
-      Map<String, String> merged = new HashMap<>(catalogConfig.getStorageOptions());
+      Map<String, String> merged = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+      merged.putAll(catalogConfig.getStorageOptions());
       merged.putAll(this.storageOptions);
       this.indexCacheBackend = catalogConfig.getIndexCacheBackend();
       this.metadataCacheBackend = catalogConfig.getMetadataCacheBackend();
