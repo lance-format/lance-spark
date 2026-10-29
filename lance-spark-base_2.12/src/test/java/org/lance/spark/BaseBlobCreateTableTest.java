@@ -33,6 +33,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -568,6 +569,62 @@ public abstract class BaseBlobCreateTableTest {
     assertEquals(testData2.getBytes(StandardCharsets.UTF_8).length, descriptors.get(1).getLong(1));
     assertEquals(100000L, descriptors.get(2).getLong(1));
     assertBlobV2Metadata(spark.table(catalogName + ".default." + tableName).schema(), "data");
+    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
+  }
+
+  /**
+   * The DDL-created array column allows null elements, so a DataFrame promising containsNull=false
+   * must be accepted: it can never produce a null element. Blob v2 tables are the ones routed
+   * through LanceWriteSchemaValidator, since they advertise ACCEPT_ANY_SCHEMA.
+   */
+  @Test
+  public void testBlobV2DataFrameAppendWithStricterArrayElementNullability() {
+    String tableName = "blob_v2_array_" + System.currentTimeMillis();
+
+    spark.sql(
+        "CREATE TABLE IF NOT EXISTS "
+            + catalogName
+            + ".default."
+            + tableName
+            + " ("
+            + "id INT NOT NULL, "
+            + "data BINARY, "
+            + "embedding ARRAY<FLOAT>"
+            + ") USING lance "
+            + "TBLPROPERTIES ("
+            + "'data.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.2'"
+            + ")");
+
+    StructType strictSchema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.IntegerType, false),
+              DataTypes.createStructField("data", DataTypes.BinaryType, true),
+              DataTypes.createStructField(
+                  "embedding", DataTypes.createArrayType(DataTypes.FloatType, false), true)
+            });
+    List<Row> rows =
+        Arrays.asList(
+            RowFactory.create(1, "one".getBytes(StandardCharsets.UTF_8), new float[] {0.5f, 1.5f}),
+            RowFactory.create(2, "two".getBytes(StandardCharsets.UTF_8), new float[] {2.5f, 3.5f}));
+    Dataset<Row> df = spark.createDataFrame(rows, strictSchema);
+
+    assertDoesNotThrow(() -> df.writeTo(catalogName + ".default." + tableName).append());
+
+    List<Row> written =
+        spark
+            .sql(
+                "SELECT id, embedding FROM "
+                    + catalogName
+                    + ".default."
+                    + tableName
+                    + " ORDER BY id")
+            .collectAsList();
+    assertEquals(2, written.size());
+    assertEquals(Arrays.asList(0.5f, 1.5f), written.get(0).getList(1));
+    assertEquals(Arrays.asList(2.5f, 3.5f), written.get(1).getList(1));
+
     spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
   }
 

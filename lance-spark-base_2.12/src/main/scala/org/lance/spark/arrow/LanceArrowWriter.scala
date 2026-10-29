@@ -101,6 +101,9 @@ object LanceArrowWriter {
       case (IntegerType, vector: IntVector) => new IntegerWriter(vector)
       case (LongType, vector: BigIntVector) => new LongWriter(vector)
       case (LongType, vector: UInt8Vector) => new UnsignedLongWriter(vector)
+      case (ShortType, vector: UInt1Vector) => new UnsignedByteWriter(vector)
+      case (IntegerType, vector: UInt2Vector) => new UnsignedShortWriter(vector)
+      case (LongType, vector: UInt4Vector) => new UnsignedIntWriter(vector)
       case (FloatType, vector)
           if vector.getClass.getName == "org.apache.arrow.vector.Float2Vector" =>
         new Float2Writer(vector)
@@ -307,6 +310,46 @@ private[arrow] class UnsignedLongWriter(val valueVector: UInt8Vector)
   override def setNull(): Unit = {}
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
     valueVector.setSafe(count, input.getLong(ordinal))
+  }
+}
+
+// Reject out of range values before Arrow silently truncates them.
+private[arrow] class UnsignedByteWriter(val valueVector: UInt1Vector)
+  extends LanceArrowFieldWriter {
+  override def setNull(): Unit = {}
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    val value = input.getShort(ordinal)
+    if (value < 0 || value > 255) {
+      throw new IllegalArgumentException(
+        s"uint8 column '$name' requires values in [0, 255], got $value")
+    }
+    valueVector.setSafe(count, value)
+  }
+}
+
+private[arrow] class UnsignedShortWriter(val valueVector: UInt2Vector)
+  extends LanceArrowFieldWriter {
+  override def setNull(): Unit = {}
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    val value = input.getInt(ordinal)
+    if (value < 0 || value > 65535) {
+      throw new IllegalArgumentException(
+        s"uint16 column '$name' requires values in [0, 65535], got $value")
+    }
+    valueVector.setSafe(count, value)
+  }
+}
+
+private[arrow] class UnsignedIntWriter(val valueVector: UInt4Vector)
+  extends LanceArrowFieldWriter {
+  override def setNull(): Unit = {}
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    val value = input.getLong(ordinal)
+    if (value < 0 || value > 4294967295L) {
+      throw new IllegalArgumentException(
+        s"uint32 column '$name' requires values in [0, 4294967295], got $value")
+    }
+    valueVector.setSafe(count, value.toInt)
   }
 }
 

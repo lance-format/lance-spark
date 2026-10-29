@@ -49,6 +49,7 @@ import org.apache.spark.sql.connector.expressions.SortDirection;
 import org.apache.spark.sql.connector.expressions.SortOrder;
 import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
+import org.apache.spark.sql.connector.expressions.aggregate.Count;
 import org.apache.spark.sql.connector.expressions.aggregate.CountStar;
 import org.apache.spark.sql.connector.expressions.filter.Predicate;
 import org.apache.spark.sql.connector.read.Scan;
@@ -101,6 +102,7 @@ public class LanceScanBuilder
   private Optional<Integer> offset = Optional.empty();
   private Optional<List<ColumnOrdering>> topNSortOrders = Optional.empty();
   private Optional<Aggregation> pushedAggregation = Optional.empty();
+  private Optional<String> countFilter = Optional.empty();
   private LanceLocalScan localScan = null;
   private LanceIndexedCountScan indexedCountScan = null;
 
@@ -276,6 +278,18 @@ public class LanceScanBuilder
                 .orElse(null);
       }
 
+      // Spark re-runs a partially pushed COUNT(*) as SUM over this scan's per-partition counts, so
+      // a scan that plans no partition leaves SUM with zero rows and it yields NULL instead of 0.
+      // Answering 0 is safe here: pruning never drops a fragment that could match.
+      if (isPushedCountStar()
+          && LanceScan.pruneForPlanning(
+                  scanPlan.getSplits(), pushedPredicates, survivingFragmentIds)
+              .isEmpty()) {
+        LOG.debug("All fragments pruned for a pushed COUNT(*); resolving the count to 0 locally");
+        setLocalCount(0L);
+        return localScan;
+      }
+
       // Scale rows and full size by the surviving-row ratio first, then let
       // LanceStatistics.estimateProjected apply the column-width ratio on top
       // (when the projected schema is narrower than the full schema).
@@ -310,6 +324,13 @@ public class LanceScanBuilder
       LanceSparkReadOptions resolvedReadOptions = readOptions.withRef(scanPlan.getRef());
       Optional<String> whereCondition =
           FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);
+      if (countFilter.isPresent()) {
+        whereCondition =
+            Optional.of(
+                whereCondition.isPresent()
+                    ? whereCondition.get() + " AND (" + countFilter.get() + ")"
+                    : countFilter.get());
+      }
       return new LanceScan(
           schema,
           resolvedReadOptions,
@@ -700,6 +721,27 @@ public class LanceScanBuilder
     if (aggregation.groupByExpressions().length > 0) {
       return false;
     }
+    if (funcs.length == 1 && funcs[0] instanceof Count) {
+      Count count = (Count) funcs[0];
+      if (count.isDistinct()
+          || !(count.column() instanceof NamedReference)
+          || !readOptions.isPushDownFilters()) {
+        return false;
+      }
+      String[] names = ((NamedReference) count.column()).fieldNames();
+      // shortcut: Keep backtick names in Spark until Lance scan field paths support them.
+      if (names.length != 1
+          || names[0].contains("`")
+          || residualFilterColumns.contains(names[0])
+          || Arrays.stream(fullSchema.fields()).noneMatch(field -> field.name().equals(names[0]))) {
+        return false;
+      }
+      this.countFilter = Optional.of("`" + names[0] + "` IS NOT NULL");
+      // COUNT(column) is COUNT(*) over non-null values; reuse the count-only reader.
+      this.pushedAggregation =
+          Optional.of(new Aggregation(new AggregateFunc[] {new CountStar()}, new Expression[0]));
+      return true;
+    }
     if (funcs.length == 1 && funcs[0] instanceof CountStar) {
       // Metadata-based count is only valid when nothing restricts the rows. A full-text query is
       // carried in the read options rather than as a pushed predicate, because the FTS rule moves
@@ -772,6 +814,14 @@ public class LanceScanBuilder
     InternalRow[] rows = new InternalRow[1];
     rows[0] = new GenericInternalRow(new Object[] {count});
     this.localScan = new LanceLocalScan(countSchema, rows, readOptions.getDatasetUri());
+  }
+
+  private boolean isPushedCountStar() {
+    if (!pushedAggregation.isPresent()) {
+      return false;
+    }
+    AggregateFunc[] funcs = pushedAggregation.get().aggregateExpressions();
+    return funcs.length == 1 && funcs[0] instanceof CountStar;
   }
 
   private static Optional<Long> getCountFromMetadata(Dataset dataset) {

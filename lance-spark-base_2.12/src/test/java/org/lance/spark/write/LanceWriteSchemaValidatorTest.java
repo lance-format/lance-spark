@@ -15,6 +15,7 @@ package org.lance.spark.write;
 
 import org.lance.spark.utils.BlobUtils;
 
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.MetadataBuilder;
@@ -23,6 +24,7 @@ import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -249,6 +251,152 @@ public class LanceWriteSchemaValidatorTest {
         "fields in the table", () -> LanceWriteSchemaValidator.validate(writeSchema, input));
   }
 
+  @Test
+  public void testValidateAcceptsNonNullableArrayElementsForNullableTable() {
+    StructType writeSchema = arraySchema(DataTypes.FloatType, true);
+    StructType input = arraySchema(DataTypes.FloatType, false);
+
+    assertDoesNotThrow(() -> LanceWriteSchemaValidator.validate(writeSchema, input));
+  }
+
+  @Test
+  public void testValidateRejectsNullableArrayElementsForNonNullableTable() {
+    StructType writeSchema = arraySchema(DataTypes.FloatType, false);
+    StructType input = arraySchema(DataTypes.FloatType, true);
+
+    assertValidationFailure(
+        () -> LanceWriteSchemaValidator.validate(writeSchema, input),
+        "the table array elements do not allow nulls",
+        "array<float> (containsNull=false)",
+        "array<float> (containsNull=true)");
+  }
+
+  @Test
+  public void testValidateReportsContainsNullOnArrayElementTypeMismatch() {
+    StructType writeSchema = arraySchema(DataTypes.FloatType, true);
+    StructType input = arraySchema(DataTypes.StringType, true);
+
+    assertValidationFailure(
+        () -> LanceWriteSchemaValidator.validate(writeSchema, input),
+        "array<float> (containsNull=true)",
+        "array<string> (containsNull=true)");
+  }
+
+  @Test
+  public void testValidateRecursesIntoStructArrayElements() {
+    StructType writeSchema = arraySchema(structWithPrice(DataTypes.IntegerType, false), true);
+    StructType input = arraySchema(structWithPrice(DataTypes.IntegerType, false), false);
+
+    assertDoesNotThrow(() -> LanceWriteSchemaValidator.validate(writeSchema, input));
+
+    StructType looserInput = arraySchema(structWithPrice(DataTypes.IntegerType, true), true);
+    assertValidationFailure(
+        () -> LanceWriteSchemaValidator.validate(writeSchema, looserInput),
+        "embedding[].price",
+        "the table column does not allow nulls");
+  }
+
+  @Test
+  public void testValidateReportsNestedStructErrorsAlongsideArrayNullability() {
+    StructType writeSchema = arraySchema(structWithPrice(DataTypes.IntegerType, false), false);
+    StructType input = arraySchema(structWithPrice(DataTypes.StringType, true), true);
+
+    assertValidationFailure(
+        () -> LanceWriteSchemaValidator.validate(writeSchema, input),
+        "the table array elements do not allow nulls",
+        "embedding[].price",
+        "expected int, got string");
+  }
+
+  @Test
+  public void testValidateReportsArrayNullabilityMismatchOnlyOnce() {
+    StructType writeSchema = arraySchema(DataTypes.IntegerType, false);
+    StructType input = arraySchema(DataTypes.StringType, true);
+
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> LanceWriteSchemaValidator.validate(writeSchema, input));
+
+    // The nullability error already prints both array types; the element mismatch must not repeat
+    // them as a second error.
+    String fragment = "expected array<int> (containsNull=false)";
+    assertTrue(e.getMessage().contains(fragment), e.getMessage());
+    assertEquals(e.getMessage().indexOf(fragment), e.getMessage().lastIndexOf(fragment));
+  }
+
+  @Test
+  public void testValidateRecursesIntoNestedArrayElements() {
+    StructType writeSchema =
+        arraySchema(DataTypes.createArrayType(DataTypes.IntegerType, false), true);
+    StructType input = arraySchema(DataTypes.createArrayType(DataTypes.IntegerType, false), false);
+
+    assertDoesNotThrow(() -> LanceWriteSchemaValidator.validate(writeSchema, input));
+
+    StructType looserInput =
+        arraySchema(DataTypes.createArrayType(DataTypes.IntegerType, true), true);
+    assertValidationFailure(
+        () -> LanceWriteSchemaValidator.validate(writeSchema, looserInput),
+        "embedding[]",
+        "array<int> (containsNull=false)",
+        "array<int> (containsNull=true)");
+  }
+
+  @Test
+  public void testValidateAcceptsNonNullableMapValuesForNullableTable() {
+    StructType writeSchema = mapSchema(DataTypes.StringType, true);
+    StructType input = mapSchema(DataTypes.StringType, false);
+
+    assertDoesNotThrow(() -> LanceWriteSchemaValidator.validate(writeSchema, input));
+  }
+
+  @Test
+  public void testValidateRejectsNullableMapValuesForNonNullableTable() {
+    StructType writeSchema = mapSchema(DataTypes.StringType, false);
+    StructType input = mapSchema(DataTypes.StringType, true);
+
+    assertValidationFailure(
+        () -> LanceWriteSchemaValidator.validate(writeSchema, input),
+        "the table map values do not allow nulls",
+        "map<int,string> (valueContainsNull=false)",
+        "map<int,string> (valueContainsNull=true)");
+  }
+
+  @Test
+  public void testValidateReportsNestedValueErrorsAlongsideMapNullability() {
+    StructType writeSchema = mapSchema(structWithPrice(DataTypes.IntegerType, false), false);
+    StructType input = mapSchema(structWithPrice(DataTypes.StringType, true), true);
+
+    assertValidationFailure(
+        () -> LanceWriteSchemaValidator.validate(writeSchema, input),
+        "the table map values do not allow nulls",
+        "attrs.value.price",
+        "expected int, got string");
+  }
+
+  private static StructType arraySchema(DataType elementType, boolean containsNull) {
+    return new StructType(
+        new StructField[] {
+          DataTypes.createStructField(
+              "embedding", DataTypes.createArrayType(elementType, containsNull), true)
+        });
+  }
+
+  private static StructType structWithPrice(DataType priceType, boolean priceNullable) {
+    return new StructType(
+        new StructField[] {DataTypes.createStructField("price", priceType, priceNullable)});
+  }
+
+  private static StructType mapSchema(DataType valueType, boolean valueContainsNull) {
+    return new StructType(
+        new StructField[] {
+          DataTypes.createStructField(
+              "attrs",
+              DataTypes.createMapType(DataTypes.IntegerType, valueType, valueContainsNull),
+              true)
+        });
+  }
+
   private static StructField blobV2Field(String name) {
     Metadata metadata =
         new MetadataBuilder()
@@ -277,5 +425,14 @@ public class LanceWriteSchemaValidatorTest {
     assertTrue(
         e.getMessage().contains(expectedFragment),
         () -> "expected message to contain '" + expectedFragment + "': " + e.getMessage());
+  }
+
+  private static void assertValidationFailure(Runnable action, String... expectedFragments) {
+    IllegalArgumentException e = assertThrows(IllegalArgumentException.class, action::run);
+    for (String expectedFragment : expectedFragments) {
+      assertTrue(
+          e.getMessage().contains(expectedFragment),
+          () -> "expected message to contain '" + expectedFragment + "': " + e.getMessage());
+    }
   }
 }

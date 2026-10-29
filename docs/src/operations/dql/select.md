@@ -55,6 +55,21 @@ Query data from Lance tables using SQL or DataFrames.
 
 ## Aggregate Queries
 
+An ungrouped query with a single `COUNT(*)` or non-distinct `COUNT(column)` can
+be pushed down to Lance. `COUNT(column)` excludes nulls using `IS NOT NULL`
+and returns partial counts for Spark to combine, without transferring column
+values to Spark.
+
+=== "SQL"
+    ```sql
+    SELECT COUNT(email) FROM users WHERE age > 25;
+    ```
+
+Column counts currently require a top-level column and enabled filter pushdown.
+Nested fields, expressions, distinct counts, multiple aggregates,
+grouping, and queries with filters that Lance cannot evaluate remain in Spark.
+Column names containing backticks also remain in Spark.
+
 === "SQL"
     ```sql
     SELECT department, COUNT(*) as employee_count

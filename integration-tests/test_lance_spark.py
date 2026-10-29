@@ -2128,6 +2128,35 @@ class TestDMLInsert:
         count = spark.table("default.test_table").count()
         assert count == 4
 
+    def test_write_empty_dataframe_overwrite_clears_table(self, spark, tmp_path):
+        """Empty DataFrame overwrite on a populated table must truncate it."""
+        from pyspark.sql.types import StructType, StructField, IntegerType
+
+        schema = StructType([StructField("id", IntegerType())])
+        rows = spark.createDataFrame([(1,), (2,), (3,)], schema)
+        rows.write.format("lance").save(str(tmp_path))
+        assert spark.read.format("lance").load(str(tmp_path)).count() == 3
+
+        empty_df = spark.createDataFrame([], schema)
+        empty_df.write.format("lance").mode("overwrite").save(str(tmp_path))
+
+        assert spark.read.format("lance").load(str(tmp_path)).count() == 0
+
+    def test_append_empty_dataframe_to_existing_path_is_noop(self, spark, tmp_path):
+        """Empty DataFrame append to an existing Lance path must be a noop."""
+        from pyspark.sql.types import StructType, StructField, IntegerType
+
+        schema = StructType([StructField("id", IntegerType())])
+
+        rows = spark.createDataFrame([(1,), (2,), (3,)], schema)
+        rows.write.format("lance").save(str(tmp_path))
+        assert spark.read.format("lance").load(str(tmp_path)).count() == 3
+
+        empty_df = spark.createDataFrame([], schema)
+        empty_df.write.format("lance").mode("append").save(str(tmp_path))
+
+        assert spark.read.format("lance").load(str(tmp_path)).count() == 3
+
 
 @requires_update_or_merge
 class TestDMLUpdate:

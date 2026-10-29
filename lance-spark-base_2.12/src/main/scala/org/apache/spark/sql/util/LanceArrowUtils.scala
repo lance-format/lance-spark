@@ -56,6 +56,11 @@ object LanceArrowUtils {
   val LANCE_TIMESTAMP_UNIT_KEY = "_lance.timestamp_unit"
   val LANCE_TIMESTAMP_TIMEZONE_KEY = "_lance.timestamp_timezone"
 
+  // Spark has no unsigned integer types, so reads widen UInt8/16/32/64 to Short/Int/Long/Long.
+  // Writes into an existing table set this key from the table's Lance schema (see
+  // markUnsignedForWrite) so toArrowField writes those columns back with their unsigned type.
+  val LANCE_UNSIGNED_INT_BIT_WIDTH_KEY = "_lance.unsigned_int_bit_width"
+
   // Namespaced keys used to embed child Spark Metadata on a parent StructField when the
   // child sits inside an ArrayType/MapType — Spark has no per-element metadata slot of its
   // own. The value is the child Metadata serialized as JSON (the same shape produced by
@@ -75,6 +80,7 @@ object LanceArrowUtils {
   private val LANCE_INTERNAL_METADATA_KEYS = Set(
     LANCE_TIMESTAMP_UNIT_KEY,
     LANCE_TIMESTAMP_TIMEZONE_KEY,
+    LANCE_UNSIGNED_INT_BIT_WIDTH_KEY,
     LANCE_ELEMENT_METADATA_KEY,
     LANCE_MAP_KEY_METADATA_KEY,
     LANCE_MAP_VALUE_METADATA_KEY,
@@ -333,6 +339,84 @@ object LanceArrowUtils {
   private def hasContent(metadata: Metadata): Boolean =
     metadata != null && metadata.json != "{}"
 
+  /**
+   * Marks the columns of `schema` that are unsigned integers in `destination`, the Lance schema of
+   * the table being written, so toArrowSchema writes them back unsigned. Columns are matched by
+   * name, including struct fields, list elements and map keys and values. A column is marked only
+   * if its Spark type is the one fromArrowSchema reads that unsigned width as.
+   */
+  def markUnsignedForWrite(schema: StructType, destination: Schema): StructType =
+    markUnsignedFields(schema, destination.getFields.asScala)
+
+  private def markUnsignedFields(schema: StructType, destination: Iterable[Field]): StructType = {
+    val destinationByName = destination.map(field => field.getName -> field).toMap
+    StructType(schema.fields.map { field =>
+      destinationByName.get(field.name) match {
+        case Some(destinationField) =>
+          val (dataType, metadata) =
+            markUnsigned(field.dataType, field.metadata, destinationField)
+          field.copy(dataType = dataType, metadata = metadata)
+        case None => field
+      }
+    })
+  }
+
+  // Returns the data type with nested struct fields marked, and the metadata of this position,
+  // which for a list element or map key or value is embedded in its parent's metadata.
+  private def markUnsigned(
+      dt: DataType,
+      metadata: Metadata,
+      destination: Field): (DataType, Metadata) = (dt, destination.getType) match {
+    case (_, int: ArrowType.Int) if !int.getIsSigned && isUnsignedWidthValid(dt, int.getBitWidth) =>
+      val marked = new MetadataBuilder()
+        .withMetadata(metadata)
+        .putLong(LANCE_UNSIGNED_INT_BIT_WIDTH_KEY, int.getBitWidth.toLong)
+        .build()
+      (dt, marked)
+    case (struct: StructType, _: ArrowType.Struct) =>
+      (markUnsignedFields(struct, destination.getChildren.asScala), metadata)
+    case (
+          ArrayType(elementType, containsNull),
+          _: ArrowType.List | _: ArrowType.LargeList |
+          _: ArrowType.FixedSizeList) =>
+      val (element, elementMetadata) = markUnsigned(
+        elementType,
+        parseEmbeddedMetadata(metadata, LANCE_ELEMENT_METADATA_KEY),
+        destination.getChildren.get(0))
+      (
+        ArrayType(element, containsNull),
+        withEmbeddedMetadata(metadata, LANCE_ELEMENT_METADATA_KEY, elementMetadata))
+    case (MapType(keyType, valueType, valueContainsNull), _: ArrowType.Map) =>
+      val entries = destination.getChildren.get(0).getChildren
+      val (key, keyMetadata) = markUnsigned(
+        keyType,
+        parseEmbeddedMetadata(metadata, LANCE_MAP_KEY_METADATA_KEY),
+        entries.get(0))
+      val (value, valueMetadata) = markUnsigned(
+        valueType,
+        parseEmbeddedMetadata(metadata, LANCE_MAP_VALUE_METADATA_KEY),
+        entries.get(1))
+      val withKey = withEmbeddedMetadata(metadata, LANCE_MAP_KEY_METADATA_KEY, keyMetadata)
+      (
+        MapType(key, value, valueContainsNull),
+        withEmbeddedMetadata(withKey, LANCE_MAP_VALUE_METADATA_KEY, valueMetadata))
+    case _ => (dt, metadata)
+  }
+
+  private def isUnsignedWidthValid(dt: DataType, bitWidth: Int): Boolean = dt match {
+    case ShortType => bitWidth == 8
+    case IntegerType => bitWidth == 16
+    case LongType => bitWidth == 32 || bitWidth == 64
+    case _ => false
+  }
+
+  private def withEmbeddedMetadata(parent: Metadata, key: String, child: Metadata): Metadata =
+    if (hasContent(child)) {
+      new MetadataBuilder().withMetadata(parent).putString(key, child.json).build()
+    } else {
+      parent
+    }
+
   private def parseEmbeddedMetadata(parent: Metadata, key: String): Metadata = {
     if (parent == null || !parent.contains(key)) {
       Metadata.empty
@@ -549,6 +633,12 @@ object LanceArrowUtils {
             toArrowField("uri", StringType, nullable = true, timeZoneId),
             arrowUInt64Field("position"),
             arrowUInt64Field("size")).asJava)
+      case ShortType | IntegerType | LongType
+          if metadata != null && metadata.contains(LANCE_UNSIGNED_INT_BIT_WIDTH_KEY) =>
+        val bitWidth = metadata.getLong(LANCE_UNSIGNED_INT_BIT_WIDTH_KEY).toInt
+        val fieldType =
+          new FieldType(nullable, new ArrowType.Int(bitWidth, false), null, meta.asJava)
+        new Field(name, fieldType, Seq.empty[Field].asJava)
       case _: StringType if JsonUtils.hasJsonMetadata(metadata) =>
         // Lance JSON column. Two things matter here. First, the storage must be UTF-8: Lance
         // encodes the JSON text to its internal JSONB form itself, and rejects a LargeBinary

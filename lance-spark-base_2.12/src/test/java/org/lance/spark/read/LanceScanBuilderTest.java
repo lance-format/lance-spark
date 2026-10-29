@@ -32,9 +32,11 @@ import org.apache.spark.sql.connector.expressions.SortDirection;
 import org.apache.spark.sql.connector.expressions.SortOrder;
 import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
+import org.apache.spark.sql.connector.expressions.aggregate.Count;
 import org.apache.spark.sql.connector.expressions.aggregate.CountStar;
 import org.apache.spark.sql.connector.expressions.aggregate.Sum;
 import org.apache.spark.sql.connector.expressions.filter.Predicate;
+import org.apache.spark.sql.connector.read.PartitionReader;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataType;
@@ -332,6 +334,11 @@ public class LanceScanBuilderTest {
             null,
             Collections.emptyMap());
 
+    assertFalse(
+        builder.pushAggregation(
+            new Aggregation(
+                new AggregateFunc[] {new Count(FieldReference.apply("payload"), false)},
+                new Expression[0])));
     Predicate onId = TestPredicates.gt("id", 1L);
     Predicate onBlob = TestPredicates.gt("payload", 1L);
     Predicate[] postScan = builder.pushPredicates(new Predicate[] {onId, onBlob});
@@ -565,6 +572,93 @@ public class LanceScanBuilderTest {
         new Aggregation(new AggregateFunc[] {new CountStar()}, new Expression[] {});
     // With pushed predicates, metadata count cannot be used; falls back to scanner-based count
     assertTrue(builder.pushAggregation(countStar));
+  }
+
+  @Test
+  public void testPushAggregationCountColumnUsesCountOnlyReader() throws Exception {
+    LanceScanBuilder builder = createBuilder();
+    Predicate filter = TestPredicates.gt("x", 0L);
+    builder.pushPredicates(new Predicate[] {filter});
+    assertTrue(
+        builder.pushAggregation(
+            new Aggregation(
+                new AggregateFunc[] {new Count(FieldReference.apply("b"), false)},
+                new Expression[0])));
+    assertArrayEquals(new Predicate[] {filter}, builder.pushedPredicates());
+    LanceScan scan = (LanceScan) builder.build();
+    assertEquals(new StructType().add("count", DataTypes.LongType), scan.readSchema());
+    LanceInputPartition partition = (LanceInputPartition) scan.planInputPartitions()[0];
+    assertEquals(Optional.of("(x > 0) AND (`b` IS NOT NULL)"), partition.getWhereCondition());
+    try (PartitionReader<?> reader = scan.createReaderFactory().createColumnarReader(partition)) {
+      assertInstanceOf(LanceCountStarPartitionReader.class, reader);
+    }
+  }
+
+  @Test
+  public void testPushAggregationRejectsUnsupportedColumnCountsWithoutChangingFilters() {
+    AggregateFunc[][] unsupported = {
+      {new Count(FieldReference.apply("b"), true)},
+      {new Count(TestPredicates.literalOf(1), false)},
+      {new Count(FieldReference.apply("nested.value"), false)},
+      {new Count(FieldReference.apply("missing"), false)},
+      {new Count(FieldReference.apply(LanceConstant.SCORE), false)},
+      {new Count(FieldReference.apply("b"), false), new CountStar()}
+    };
+    for (AggregateFunc[] funcs : unsupported) {
+      LanceScanBuilder builder = createBuilder();
+      Predicate[] filters = {TestPredicates.gt("x", 0L)};
+      builder.pushPredicates(filters);
+      assertFalse(builder.pushAggregation(new Aggregation(funcs, new Expression[0])));
+      assertArrayEquals(filters, builder.pushedPredicates());
+    }
+  }
+
+  @Test
+  public void testPushAggregationRejectsCountColumnWithResidualFilters() {
+    LanceScanBuilder builder = createBuilder();
+    builder.pushPredicates(new Predicate[] {TestPredicates.contains("b", "test")});
+    assertFalse(
+        builder.pushAggregation(
+            new Aggregation(
+                new AggregateFunc[] {new Count(FieldReference.apply("b"), false)},
+                new Expression[0])));
+    assertEquals(0, builder.pushedPredicates().length);
+  }
+
+  @Test
+  public void testPushAggregationRejectsCountColumnWhenFiltersDisabled() {
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            TEST_SCHEMA,
+            LanceSparkReadOptions.builder()
+                .datasetUri(TestUtils.TestTable1Config.datasetUri)
+                .pushDownFilters(false)
+                .build(),
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+    assertFalse(
+        builder.pushAggregation(
+            new Aggregation(
+                new AggregateFunc[] {new Count(FieldReference.apply("b"), false)},
+                new Expression[0])));
+    assertEquals(0, builder.pushedPredicates().length);
+  }
+
+  @Test
+  public void testPushAggregationRejectsCountColumnWithBacktickName() {
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            new StructType().add("a`b", DataTypes.StringType),
+            TestUtils.TestTable1Config.readOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+    assertFalse(
+        builder.pushAggregation(
+            new Aggregation(
+                new AggregateFunc[] {new Count(FieldReference.apply("`a``b`"), false)},
+                new Expression[0])));
   }
 
   @Test

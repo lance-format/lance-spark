@@ -15,8 +15,10 @@ package org.lance.spark.write;
 
 import org.lance.spark.utils.BlobUtils;
 
+import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.MapType;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
@@ -79,17 +81,103 @@ public final class LanceWriteSchemaValidator {
       return;
     }
 
+    checkType(path, tableType, inputType, errors);
+  }
+
+  /**
+   * Compares types structurally rather than with {@link DataType#equals(DataType)} so that an input
+   * whose nested elements are stricter than the table's is still accepted.
+   */
+  private static void checkType(
+      String path, DataType tableType, DataType inputType, List<String> errors) {
     if (tableType instanceof StructType && inputType instanceof StructType) {
       checkStruct(path, (StructType) tableType, (StructType) inputType, errors);
+      return;
+    }
+
+    if (tableType instanceof ArrayType && inputType instanceof ArrayType) {
+      checkArray(path, (ArrayType) tableType, (ArrayType) inputType, errors);
+      return;
+    }
+
+    if (tableType instanceof MapType && inputType instanceof MapType) {
+      checkMap(path, (MapType) tableType, (MapType) inputType, errors);
       return;
     }
 
     if (!tableType.equals(inputType)) {
       errors.add(
           String.format(
-              "column '%s': expected %s, got %s",
-              path, tableType.simpleString(), inputType.simpleString()));
+              "column '%s': expected %s, got %s", path, describe(tableType), describe(inputType)));
     }
+  }
+
+  private static void checkArray(
+      String path, ArrayType tableArray, ArrayType inputArray, List<String> errors) {
+    boolean elementsRejectNulls = !tableArray.containsNull() && inputArray.containsNull();
+    if (elementsRejectNulls) {
+      errors.add(
+          String.format(
+              "column '%s': the table array elements do not allow nulls, but the input does;"
+                  + " expected %s, got %s",
+              path, describe(tableArray), describe(inputArray)));
+    }
+
+    DataType tableElement = tableArray.elementType();
+    DataType inputElement = inputArray.elementType();
+    if (isNested(tableElement) || isNested(inputElement)) {
+      checkType(path + "[]", tableElement, inputElement, errors);
+    } else if (!elementsRejectNulls && !tableElement.equals(inputElement)) {
+      // The nullability error above already printed both array types.
+      errors.add(
+          String.format(
+              "column '%s': expected %s, got %s",
+              path, describe(tableArray), describe(inputArray)));
+    }
+  }
+
+  private static void checkMap(
+      String path, MapType tableMap, MapType inputMap, List<String> errors) {
+    boolean valuesRejectNulls = !tableMap.valueContainsNull() && inputMap.valueContainsNull();
+    if (valuesRejectNulls) {
+      errors.add(
+          String.format(
+              "column '%s': the table map values do not allow nulls, but the input does;"
+                  + " expected %s, got %s",
+              path, describe(tableMap), describe(inputMap)));
+    }
+
+    DataType tableValue = tableMap.valueType();
+    DataType inputValue = inputMap.valueType();
+    if (isNested(tableValue) || isNested(inputValue) || isNested(tableMap.keyType())) {
+      checkType(path + ".key", tableMap.keyType(), inputMap.keyType(), errors);
+      checkType(path + ".value", tableValue, inputValue, errors);
+    } else if (!valuesRejectNulls
+        && (!tableMap.keyType().equals(inputMap.keyType()) || !tableValue.equals(inputValue))) {
+      // The nullability error above already printed both map types.
+      errors.add(
+          String.format(
+              "column '%s': expected %s, got %s", path, describe(tableMap), describe(inputMap)));
+    }
+  }
+
+  private static boolean isNested(DataType type) {
+    return type instanceof StructType || type instanceof ArrayType || type instanceof MapType;
+  }
+
+  // simpleString() hides element nullability, which would print array<float> for both
+  // containsNull=true and containsNull=false and leave the mismatch unexplained.
+  private static String describe(DataType type) {
+    if (type instanceof ArrayType) {
+      ArrayType array = (ArrayType) type;
+      return String.format("%s (containsNull=%s)", array.simpleString(), array.containsNull());
+    }
+    if (type instanceof MapType) {
+      MapType map = (MapType) type;
+      return String.format(
+          "%s (valueContainsNull=%s)", map.simpleString(), map.valueContainsNull());
+    }
+    return type.simpleString();
   }
 
   private static void checkStruct(

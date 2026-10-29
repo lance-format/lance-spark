@@ -8,6 +8,15 @@ while nanosecond values lose sub-microsecond precision when read through Spark.
 Conversions outside the target unit's range are rejected. New timestamp columns
 continue to use microseconds.
 
+Writes into an existing table, including `INSERT OVERWRITE`, keep its unsigned
+integer columns unsigned. Spark reads `uint8`, `uint16`, `uint32` and `uint64` as
+`SMALLINT`, `INT`, `BIGINT` and `BIGINT`, and a write rejects a value outside a
+`uint8`, `uint16` or `uint32` column's range. `uint64` values keep all 64 bits:
+those of 2^63 or more read as negative numbers, and a negative number is written
+with the same bits, so `-1` is stored as 2^64 - 1. Creating or replacing a table,
+as `CREATE TABLE AS SELECT`, `REPLACE TABLE` and `saveAsTable` in overwrite mode
+do, uses the Spark types even when the query reads an unsigned column.
+
 ## Basic Insert
 
 === "SQL"
