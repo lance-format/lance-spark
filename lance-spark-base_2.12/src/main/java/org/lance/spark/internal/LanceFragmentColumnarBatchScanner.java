@@ -15,7 +15,6 @@ package org.lance.spark.internal;
 
 import org.lance.ipc.ScanStats;
 import org.lance.spark.LanceConstant;
-import org.lance.spark.LanceRuntime;
 import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.utils.Utils;
 import org.lance.spark.vectorized.BlobStructAccessor;
@@ -33,6 +32,7 @@ import org.apache.spark.sql.execution.vectorized.ConstantColumnVector;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.ArrowUtils;
 import org.apache.spark.sql.vectorized.ColumnVector;
 import org.apache.spark.sql.vectorized.ColumnarArray;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
@@ -51,42 +51,59 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
   private final LanceFragmentScanner fragmentScanner;
   private final ArrowReader arrowReader;
 
-  /** Whether the batches are Arrow batches; see {@link ArrowBatches}. */
-  private final boolean arrowBatches;
+  private final boolean arrowBatchReadsEnabled;
 
-  /** The vectors of the current Arrow batch besides the reader's root, released for the next. */
-  private final List<FieldVector> batchVectors = new ArrayList<>();
+  /**
+   * Allocates the vectors of Arrow batches, or null without Arrow batch reads. A child of Spark's
+   * root allocator, so that a consumer sharing that root moves the vectors without copying.
+   */
+  private final BufferAllocator arrowBatchAllocator;
+
+  /** Vectors this scanner built for the current Arrow batch; the reader owns the others. */
+  private final List<FieldVector> ownedVectors = new ArrayList<>();
 
   private ColumnarBatch currentColumnarBatch;
   private long lastBatchLoadTimeNs;
 
   public LanceFragmentColumnarBatchScanner(
       LanceFragmentScanner fragmentScanner, ArrowReader arrowReader) {
-    this(fragmentScanner, arrowReader, false);
+    this(fragmentScanner, arrowReader, null);
   }
 
   private LanceFragmentColumnarBatchScanner(
-      LanceFragmentScanner fragmentScanner, ArrowReader arrowReader, boolean arrowBatches) {
+      LanceFragmentScanner fragmentScanner,
+      ArrowReader arrowReader,
+      BufferAllocator arrowBatchAllocator) {
     this.fragmentScanner = fragmentScanner;
     this.arrowReader = arrowReader;
-    this.arrowBatches = arrowBatches;
+    this.arrowBatchAllocator = arrowBatchAllocator;
+    this.arrowBatchReadsEnabled = arrowBatchAllocator != null;
   }
 
   public static LanceFragmentColumnarBatchScanner create(
       int fragmentId, LanceInputPartition inputPartition) {
     LanceFragmentScanner fragmentScanner = LanceFragmentScanner.create(fragmentId, inputPartition);
-    if (!inputPartition.getReadOptions().isArrowBatches()) {
+    if (!inputPartition.getReadOptions().isArrowBatchReadsEnabled()) {
       return new LanceFragmentColumnarBatchScanner(
           fragmentScanner, fragmentScanner.getArrowReader());
     }
+    BufferAllocator allocator = null;
     try {
+      allocator =
+          ArrowUtils.rootAllocator()
+              .newChildAllocator(
+                  "lance arrow batches of fragment " + fragmentId, 0, Long.MAX_VALUE);
       return new LanceFragmentColumnarBatchScanner(
-          fragmentScanner, importArrowStream(fragmentScanner), true);
+          fragmentScanner, importArrowStream(fragmentScanner, allocator), allocator);
     } catch (RuntimeException | Error e) {
-      try {
-        fragmentScanner.close();
-      } catch (Throwable closeError) {
-        e.addSuppressed(closeError);
+      for (AutoCloseable resource : new AutoCloseable[] {allocator, fragmentScanner}) {
+        try {
+          if (resource != null) {
+            resource.close();
+          }
+        } catch (Throwable closeError) {
+          e.addSuppressed(closeError);
+        }
       }
       throw e;
     }
@@ -97,8 +114,8 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
    * lance-core. Only the C-struct address crosses from lance-core, so the vectors of the batches
    * are built with the Arrow classes lance-spark runs with, which a consumer of the batches shares.
    */
-  private static ArrowReader importArrowStream(LanceFragmentScanner fragmentScanner) {
-    BufferAllocator allocator = LanceRuntime.allocator();
+  private static ArrowReader importArrowStream(
+      LanceFragmentScanner fragmentScanner, BufferAllocator allocator) {
     try (ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator)) {
       fragmentScanner.exportArrowStream(stream.memoryAddress());
       return Data.importArrayStream(allocator, stream);
@@ -110,9 +127,9 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
   public boolean loadNextBatch() throws IOException {
     long start = System.nanoTime();
     try {
-      if (arrowBatches) {
+      if (arrowBatchReadsEnabled) {
         // An Arrow batch is valid until the next one is requested.
-        releaseBatchVectors();
+        releaseOwnedVectors();
       }
       if (!arrowReader.loadNextBatch()) {
         return false;
@@ -120,13 +137,13 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
       VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
       LanceInputPartition inputPartition = fragmentScanner.getInputPartition();
       ColumnVector[] columns =
-          arrowBatches
-              ? ArrowBatches.columns(
+          arrowBatchReadsEnabled
+              ? ArrowBatchAdapter.buildColumns(
                   root,
                   inputPartition.getSchema(),
                   fragmentScanner.fragmentId(),
-                  LanceRuntime.allocator(),
-                  batchVectors)
+                  arrowBatchAllocator,
+                  ownedVectors)
               : buildSparkOrderedVectors(root, inputPartition).toArray(new ColumnVector[] {});
       currentColumnarBatch = new ColumnarBatch(columns, root.getRowCount());
       return true;
@@ -168,22 +185,28 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
       try {
         // Closing the batch closes the vectors it holds; this also covers vectors of a batch that
         // failed to build.
-        releaseBatchVectors();
+        releaseOwnedVectors();
       } finally {
         try {
           arrowReader.close();
         } finally {
-          fragmentScanner.close();
+          try {
+            if (arrowBatchAllocator != null) {
+              arrowBatchAllocator.close();
+            }
+          } finally {
+            fragmentScanner.close();
+          }
         }
       }
     }
   }
 
-  private void releaseBatchVectors() {
+  private void releaseOwnedVectors() {
     try {
-      batchVectors.forEach(FieldVector::close);
+      ownedVectors.forEach(FieldVector::close);
     } finally {
-      batchVectors.clear();
+      ownedVectors.clear();
     }
   }
 

@@ -30,7 +30,7 @@ import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
-import org.lance.spark.internal.ArrowBatches;
+import org.lance.spark.internal.ArrowBatchAdapter;
 import org.lance.spark.search.LanceSearchQuery;
 import org.lance.spark.search.LanceSearchScan;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
@@ -323,18 +323,18 @@ public class LanceScanBuilder
       }
 
       // Plan Arrow batches from the dataset schema already loaded here. A scan that cannot emit
-      // them reads as usual, also when the arrow_batches read option asks for them.
-      ArrowBatches.Plan arrowBatchPlan =
+      // them reads as usual, also when the arrow_batch_reads read option asks for them.
+      ArrowBatchAdapter.Plan arrowBatchPlan =
           pushedAggregation.isPresent()
-              ? ArrowBatches.Plan.unsupported("the scan has a pushed aggregation")
-              : ArrowBatches.plan(schema, dataset.getSchema());
+              ? ArrowBatchAdapter.Plan.unsupported("the scan has a pushed aggregation")
+              : ArrowBatchAdapter.plan(schema, dataset.getSchema());
       LanceSparkReadOptions resolvedReadOptions = readOptions.withRef(scanPlan.getRef());
-      if (resolvedReadOptions.isArrowBatches() && !arrowBatchPlan.isSupported()) {
+      if (resolvedReadOptions.isArrowBatchReadsEnabled() && !arrowBatchPlan.isSupported()) {
         LOG.info(
             "Reading {} without Arrow batches: {}",
             resolvedReadOptions.getDatasetUri(),
             arrowBatchPlan.unsupportedReason());
-        resolvedReadOptions = resolvedReadOptions.withArrowBatches(false);
+        resolvedReadOptions = resolvedReadOptions.withArrowBatchReads(false);
       }
       Optional<String> whereCondition =
           FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);

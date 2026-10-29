@@ -53,33 +53,14 @@ import java.util.Optional;
 import java.util.stream.Collectors;
 
 /**
- * Arrow batches for the {@link LanceSparkReadOptions#CONFIG_ARROW_BATCHES} read option: every
- * column of a batch is a Spark {@link ArrowColumnVector} over an Arrow vector that Spark reads as
- * the column's read type, so a consumer that processes Arrow data can take the batch as Arrow.
- *
- * <p>Most columns are the vectors of the native scan as they are. A few are rebuilt so that Spark
- * reads them as declared, without copying their values:
- *
- * <ul>
- *   <li>A FixedSizeList (a vector column), which Spark does not read, becomes a List over the same
- *       child values, also when it is nested in a struct, list, or map. Element {@code i} of a
- *       FixedSizeList of size {@code n} is child range {@code [i * n, (i + 1) * n)}, also for null
- *       entries, so only an offsets buffer is new.
- *   <li>{@code _rowid}, {@code _rowaddr}, and the row version columns, which the native scan
- *       returns as unsigned 64-bit integers, become signed 64-bit integers over the same buffers,
- *       the type the Spark reader reads them as.
- *   <li>{@code _fragid}, which the native scan does not return, is a 32-bit integer vector holding
- *       the fragment id.
- * </ul>
- *
- * <p>Other columns have no Arrow batch form: blob and JSON columns, which the Spark reader converts
- * on the JVM, the full-text {@code _score}, and any Arrow type Spark's {@link ArrowColumnVector}
- * does not read as the declared Spark type. {@link #plan} finds them at planning time, so such a
- * scan reads as usual.
+ * Plans and builds Arrow batches for {@link LanceSparkReadOptions#CONFIG_ARROW_BATCH_READS}: every
+ * column is a Spark {@link ArrowColumnVector} that Spark reads as the column's declared type.
+ * Vector and row metadata columns are adapted without copying values; a scan with a column that
+ * cannot be adapted has no Arrow batch form ({@link #plan}).
  */
-public final class ArrowBatches {
+public final class ArrowBatchAdapter {
 
-  private ArrowBatches() {}
+  private ArrowBatchAdapter() {}
 
   /**
    * Plans the Arrow batches of a scan of {@code scanSchema}, the read schema, over a dataset with
@@ -116,7 +97,7 @@ public final class ArrowBatches {
    * are added to {@code owned}, also when this method throws; the caller closes them once the batch
    * is no longer valid.
    */
-  public static ColumnVector[] columns(
+  public static ColumnVector[] buildColumns(
       VectorSchemaRoot root,
       StructType scanSchema,
       int fragmentId,
@@ -209,16 +190,15 @@ public final class ArrowBatches {
     if (datasetField == null || !containsFixedSizeList(datasetField)) {
       return datasetField;
     }
-    // The field of the vector columns() builds, as Arrow names list children itself.
+    // The field of the vector buildColumns() builds, as Arrow names list children itself.
     try (FieldVector vector = toListField(datasetField).createVector(LanceRuntime.allocator())) {
       return vector.getField();
     }
   }
 
   /**
-   * Why Spark's {@link ArrowColumnVector} does not read a vector of {@code arrowField} as {@code
-   * declared}, if it does not. Probes an empty vector, so it allocates nothing and follows whatever
-   * the running Spark version supports.
+   * Checks how the running Spark version reads an empty Arrow vector of {@code arrowField}: empty
+   * if as {@code declared}, else why not.
    */
   private static Optional<String> readMismatch(Field arrowField, DataType declared) {
     FieldVector vector = arrowField.createVector(LanceRuntime.allocator());
@@ -295,7 +275,7 @@ public final class ArrowBatches {
 
   private static boolean containsFixedSizeList(Field field) {
     return field.getType() instanceof ArrowType.FixedSizeList
-        || field.getChildren().stream().anyMatch(ArrowBatches::containsFixedSizeList);
+        || field.getChildren().stream().anyMatch(ArrowBatchAdapter::containsFixedSizeList);
   }
 
   /** {@code field} with every FixedSizeList, at any depth, replaced by a List. */
@@ -314,12 +294,17 @@ public final class ArrowBatches {
     return new Field(
         field.getName(),
         fieldType,
-        field.getChildren().stream().map(ArrowBatches::toListField).collect(Collectors.toList()));
+        field.getChildren().stream()
+            .map(ArrowBatchAdapter::toListField)
+            .collect(Collectors.toList()));
   }
 
   /**
    * Loads {@code source} into {@code target}, a vector of {@code toListField(source.getField())} or
-   * a signed 64-bit vector over an unsigned one, sharing or moving the buffers of {@code source}.
+   * a signed 64-bit vector over an unsigned one, sharing or moving the buffers of {@code source}
+   * rather than copying values. A FixedSizeList becomes a List over the same child values: element
+   * {@code i} of a FixedSizeList of size {@code n} is child range {@code [i * n, (i + 1) * n)},
+   * also for null entries, so only an offsets buffer is new.
    */
   private static void load(FieldVector source, FieldVector target, BufferAllocator allocator) {
     if (!containsFixedSizeList(source.getField()) && !isUnsigned64(source.getField())) {
@@ -355,7 +340,7 @@ public final class ArrowBatches {
     }
     return field.getType()
         + field.getChildren().stream()
-            .map(ArrowBatches::typeTree)
+            .map(ArrowBatchAdapter::typeTree)
             .collect(Collectors.joining(",", "<", ">"));
   }
 

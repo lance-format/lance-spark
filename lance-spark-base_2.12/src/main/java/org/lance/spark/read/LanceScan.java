@@ -16,7 +16,7 @@ package org.lance.spark.read;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
-import org.lance.spark.internal.ArrowBatches;
+import org.lance.spark.internal.ArrowBatchAdapter;
 import org.lance.spark.read.metric.LanceCustomMetrics;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
 import org.lance.spark.utils.FullTextQueryUtils;
@@ -123,7 +123,7 @@ public class LanceScan
   private final java.util.Map<String, String> namespaceProperties;
 
   /** The Arrow batches the scan can emit; see {@link #arrowBatchSchema()}. */
-  private final ArrowBatches.Plan arrowBatchPlan;
+  private final ArrowBatchAdapter.Plan arrowBatchPlan;
 
   public LanceScan(
       StructType schema,
@@ -142,8 +142,51 @@ public class LanceScan
       java.util.Map<Integer, Object> fragmentShardingKeys,
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
+      java.util.Map<String, String> namespaceProperties) {
+    this(
+        schema,
+        readOptions,
+        whereConditions,
+        limit,
+        offset,
+        topNSortOrders,
+        pushedAggregation,
+        pushedPredicates,
+        statistics,
+        survivingFragmentIds,
+        precomputedSplits,
+        precomputedFragmentRowCounts,
+        activeShardingExpression,
+        fragmentShardingKeys,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        null);
+  }
+
+  /**
+   * @param arrowBatchPlan the Arrow batches the scan can emit (see {@link #arrowBatchSchema()}), or
+   *     null if it has none
+   */
+  public LanceScan(
+      StructType schema,
+      LanceSparkReadOptions readOptions,
+      Optional<String> whereConditions,
+      Optional<Integer> limit,
+      Optional<Integer> offset,
+      Optional<List<ColumnOrdering>> topNSortOrders,
+      Optional<Aggregation> pushedAggregation,
+      Predicate[] pushedPredicates,
+      LanceStatistics statistics,
+      Set<Integer> survivingFragmentIds,
+      List<LanceSplit> precomputedSplits,
+      java.util.Map<Integer, Long> precomputedFragmentRowCounts,
+      Expression activeShardingExpression,
+      java.util.Map<Integer, Object> fragmentShardingKeys,
+      java.util.Map<String, String> initialStorageOptions,
+      String namespaceImpl,
       java.util.Map<String, String> namespaceProperties,
-      ArrowBatches.Plan arrowBatchPlan) {
+      ArrowBatchAdapter.Plan arrowBatchPlan) {
     this.schema = schema;
     this.readOptions = readOptions;
     this.whereConditions = whereConditions;
@@ -170,7 +213,7 @@ public class LanceScan
     this.arrowBatchPlan =
         arrowBatchPlan != null
             ? arrowBatchPlan
-            : ArrowBatches.Plan.unsupported("the scan was built without an Arrow batch plan");
+            : ArrowBatchAdapter.Plan.unsupported("the scan was built without an Arrow batch plan");
   }
 
   /**
@@ -182,8 +225,8 @@ public class LanceScan
   }
 
   /**
-   * The Arrow schema of the batches the columnar reader emits with Arrow batches ({@link
-   * LanceSparkReadOptions#CONFIG_ARROW_BATCHES}, {@link #withArrowBatches()}), or empty if this
+   * The Arrow schema of the batches the columnar reader emits with Arrow batch reads ({@link
+   * LanceSparkReadOptions#CONFIG_ARROW_BATCH_READS}, {@link #withArrowBatches()}), or empty if this
    * scan cannot emit Arrow batches; {@link #arrowBatchUnsupportedReason()} then says why. A
    * consumer that takes the batches as Arrow can check here that it reads every type.
    *
@@ -205,7 +248,7 @@ public class LanceScan
 
   /**
    * A copy of this scan whose columnar reader emits Arrow batches, as with the {@link
-   * LanceSparkReadOptions#CONFIG_ARROW_BATCHES} read option.
+   * LanceSparkReadOptions#CONFIG_ARROW_BATCH_READS} read option.
    *
    * @throws IllegalStateException if this scan cannot emit Arrow batches (see {@link
    *     #arrowBatchUnsupportedReason()})
@@ -215,28 +258,32 @@ public class LanceScan
       throw new IllegalStateException(
           "Lance scan cannot emit Arrow batches: " + arrowBatchPlan.unsupportedReason());
     }
-    if (readOptions.isArrowBatches()) {
+    if (readOptions.isArrowBatchReadsEnabled()) {
       return this;
     }
-    return new LanceScan(
-        schema,
-        readOptions.withArrowBatches(true),
-        whereConditions,
-        limit,
-        offset,
-        topNSortOrders,
-        pushedAggregation,
-        pushedPredicates,
-        statistics,
-        cachedSurvivingFragmentIds,
-        precomputedSplits,
-        precomputedFragmentRowCounts,
-        activeShardingExpression,
-        fragmentShardingKeys,
-        initialStorageOptions,
-        namespaceImpl,
-        namespaceProperties,
-        arrowBatchPlan);
+    LanceScan copy =
+        new LanceScan(
+            schema,
+            readOptions.withArrowBatchReads(true),
+            whereConditions,
+            limit,
+            offset,
+            topNSortOrders,
+            pushedAggregation,
+            pushedPredicates,
+            statistics,
+            cachedSurvivingFragmentIds,
+            precomputedSplits,
+            precomputedFragmentRowCounts,
+            activeShardingExpression,
+            fragmentShardingKeys,
+            initialStorageOptions,
+            namespaceImpl,
+            namespaceProperties,
+            arrowBatchPlan);
+    // Planned partitions are the same, so the copy reports the same partitioning.
+    copy.numPartitions = numPartitions;
+    return copy;
   }
 
   @Override

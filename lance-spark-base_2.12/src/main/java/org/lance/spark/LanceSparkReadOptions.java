@@ -98,14 +98,8 @@ public class LanceSparkReadOptions implements Serializable {
    */
   public static final String CONFIG_EXECUTOR_CREDENTIAL_REFRESH = "executor_credential_refresh";
 
-  /**
-   * Whether the columnar reader emits Arrow batches: every column is a Spark {@link
-   * org.apache.spark.sql.vectorized.ArrowColumnVector}, in the read schema's order, so a consumer
-   * that processes Arrow data (such as Apache Gluten) can take the batches as Arrow. A scan with a
-   * column that has no such representation reads as usual; see {@link
-   * org.lance.spark.read.LanceScan#arrowBatchSchema()}. Default: {@code false}.
-   */
-  public static final String CONFIG_ARROW_BATCHES = "arrow_batches";
+  /** Enable Arrow batches when supported, otherwise use the regular reader. Default: false. */
+  public static final String CONFIG_ARROW_BATCH_READS = "arrow_batch_reads";
 
   public static final String LANCE_FILE_SUFFIX = ".lance";
 
@@ -115,7 +109,7 @@ public class LanceSparkReadOptions implements Serializable {
   private static final boolean DEFAULT_USE_SCALAR_INDEX = true;
   private static final boolean DEFAULT_TOP_N_PUSH_DOWN = true;
   private static final boolean DEFAULT_EXECUTOR_CREDENTIAL_REFRESH = true;
-  private static final boolean DEFAULT_ARROW_BATCHES = false;
+  private static final boolean DEFAULT_ARROW_BATCH_READS = false;
 
   private final String datasetUri;
   private final String datasetName;
@@ -150,8 +144,7 @@ public class LanceSparkReadOptions implements Serializable {
    */
   private final boolean executorCredentialRefresh;
 
-  /** See {@link #CONFIG_ARROW_BATCHES}. */
-  private final boolean arrowBatches;
+  private final boolean arrowBatchReads;
 
   private LanceSparkReadOptions(Builder builder) {
     this.datasetUri = builder.datasetUri;
@@ -172,7 +165,7 @@ public class LanceSparkReadOptions implements Serializable {
     this.indexCacheBackend = builder.indexCacheBackend;
     this.metadataCacheBackend = builder.metadataCacheBackend;
     this.executorCredentialRefresh = builder.executorCredentialRefresh;
-    this.arrowBatches = builder.arrowBatches;
+    this.arrowBatchReads = builder.arrowBatchReads;
   }
 
   /** Creates a new builder for LanceSparkReadOptions. */
@@ -314,9 +307,9 @@ public class LanceSparkReadOptions implements Serializable {
     return executorCredentialRefresh;
   }
 
-  /** Returns whether the columnar reader emits Arrow batches. See {@link #CONFIG_ARROW_BATCHES}. */
-  public boolean isArrowBatches() {
-    return arrowBatches;
+  /** Returns whether Arrow batch reads are enabled. See {@link #CONFIG_ARROW_BATCH_READS}. */
+  public boolean isArrowBatchReadsEnabled() {
+    return arrowBatchReads;
   }
 
   public boolean hasNamespace() {
@@ -341,32 +334,16 @@ public class LanceSparkReadOptions implements Serializable {
    * @return new read options with the specified reference
    */
   public LanceSparkReadOptions withRef(LanceRef newRef) {
-    return builder()
-        .datasetUri(this.datasetUri)
-        .pushDownFilters(this.pushDownFilters)
-        .blockSize(this.blockSize)
-        .ref(newRef)
-        .indexCacheSize(this.indexCacheSize)
-        .metadataCacheSize(this.metadataCacheSize)
-        .batchSize(this.batchSize)
-        .fullTextQuery(this.fullTextQuery)
-        .useScalarIndex(this.useScalarIndex)
-        .topNPushDown(this.topNPushDown)
-        .storageOptions(this.storageOptions)
-        .namespace(this.namespace)
-        .tableId(this.tableId)
-        .catalogName(this.catalogName)
-        .indexCacheBackend(this.indexCacheBackend)
-        .metadataCacheBackend(this.metadataCacheBackend)
-        .executorCredentialRefresh(this.executorCredentialRefresh)
-        .arrowBatches(this.arrowBatches)
-        .build();
+    return toBuilder().ref(newRef).build();
   }
 
-  /**
-   * Creates a copy of these options with {@link #CONFIG_ARROW_BATCHES} set to {@code arrowBatches}.
-   */
-  public LanceSparkReadOptions withArrowBatches(boolean arrowBatches) {
+  /** Creates a copy of these options with {@link #CONFIG_ARROW_BATCH_READS} set as given. */
+  public LanceSparkReadOptions withArrowBatchReads(boolean arrowBatchReads) {
+    return toBuilder().arrowBatchReads(arrowBatchReads).build();
+  }
+
+  /** Creates a builder holding these options. */
+  public Builder toBuilder() {
     return builder()
         .datasetUri(this.datasetUri)
         .pushDownFilters(this.pushDownFilters)
@@ -385,8 +362,7 @@ public class LanceSparkReadOptions implements Serializable {
         .indexCacheBackend(this.indexCacheBackend)
         .metadataCacheBackend(this.metadataCacheBackend)
         .executorCredentialRefresh(this.executorCredentialRefresh)
-        .arrowBatches(arrowBatches)
-        .build();
+        .arrowBatchReads(this.arrowBatchReads);
   }
 
   /**
@@ -437,7 +413,7 @@ public class LanceSparkReadOptions implements Serializable {
         && useScalarIndex == that.useScalarIndex
         && topNPushDown == that.topNPushDown
         && executorCredentialRefresh == that.executorCredentialRefresh
-        && arrowBatches == that.arrowBatches
+        && arrowBatchReads == that.arrowBatchReads
         && FullTextQueryUtils.equals(fullTextQuery, that.fullTextQuery)
         && Objects.equals(datasetUri, that.datasetUri)
         && Objects.equals(blockSize, that.blockSize)
@@ -470,7 +446,7 @@ public class LanceSparkReadOptions implements Serializable {
         indexCacheBackend,
         metadataCacheBackend,
         executorCredentialRefresh,
-        arrowBatches);
+        arrowBatchReads);
   }
 
   /** Builder for creating LanceSparkReadOptions instances. */
@@ -492,7 +468,7 @@ public class LanceSparkReadOptions implements Serializable {
     private String indexCacheBackend;
     private String metadataCacheBackend;
     private boolean executorCredentialRefresh = DEFAULT_EXECUTOR_CREDENTIAL_REFRESH;
-    private boolean arrowBatches = DEFAULT_ARROW_BATCHES;
+    private boolean arrowBatchReads = DEFAULT_ARROW_BATCH_READS;
 
     private Builder() {}
 
@@ -581,8 +557,8 @@ public class LanceSparkReadOptions implements Serializable {
       return this;
     }
 
-    public Builder arrowBatches(boolean arrowBatches) {
-      this.arrowBatches = arrowBatches;
+    public Builder arrowBatchReads(boolean arrowBatchReads) {
+      this.arrowBatchReads = arrowBatchReads;
       return this;
     }
 
@@ -672,8 +648,8 @@ public class LanceSparkReadOptions implements Serializable {
         this.executorCredentialRefresh =
             Boolean.parseBoolean(opts.get(CONFIG_EXECUTOR_CREDENTIAL_REFRESH));
       }
-      if (opts.containsKey(CONFIG_ARROW_BATCHES)) {
-        this.arrowBatches = Boolean.parseBoolean(opts.get(CONFIG_ARROW_BATCHES));
+      if (opts.containsKey(CONFIG_ARROW_BATCH_READS)) {
+        this.arrowBatchReads = Boolean.parseBoolean(opts.get(CONFIG_ARROW_BATCH_READS));
       }
     }
 

@@ -41,10 +41,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Tests {@link ArrowBatches#plan}, which decides at planning time whether a scan emits Arrow
+ * Tests {@link ArrowBatchAdapter#plan}, which decides at planning time whether a scan emits Arrow
  * batches.
  */
-public class ArrowBatchesTest {
+public class ArrowBatchAdapterTest {
 
   private static Field field(String name, ArrowType type, Field... children) {
     return new Field(name, FieldType.nullable(type), Arrays.asList(children));
@@ -57,9 +57,9 @@ public class ArrowBatchesTest {
   private static final ArrowType FLOAT = new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE);
 
   /** Plans a scan of the whole dataset, read as the Spark reader reads it. */
-  private static ArrowBatches.Plan planWholeDataset(Field... datasetFields) {
+  private static ArrowBatchAdapter.Plan planWholeDataset(Field... datasetFields) {
     Schema dataset = new Schema(Arrays.asList(datasetFields));
-    return ArrowBatches.plan(LanceArrowUtils.fromArrowSchema(dataset), dataset);
+    return ArrowBatchAdapter.plan(LanceArrowUtils.fromArrowSchema(dataset), dataset);
   }
 
   @Test
@@ -67,14 +67,14 @@ public class ArrowBatchesTest {
     Field id = field("id", new ArrowType.Int(64, true));
     Field name = field("name", ArrowType.Utf8.INSTANCE);
     Field tags = field("tags", ArrowType.List.INSTANCE, field("item", ArrowType.Utf8.INSTANCE));
-    ArrowBatches.Plan plan = planWholeDataset(id, name, tags);
+    ArrowBatchAdapter.Plan plan = planWholeDataset(id, name, tags);
     assertTrue(plan.isSupported(), plan.unsupportedReason());
     assertEquals(new Schema(Arrays.asList(id, name, tags)), plan.schema());
   }
 
   @Test
   public void vectorsBecomeListsAtAnyDepth() {
-    ArrowBatches.Plan plan =
+    ArrowBatchAdapter.Plan plan =
         planWholeDataset(
             vector("vec", 4, FLOAT),
             vector("i8", 2, new ArrowType.Int(8, true)),
@@ -106,7 +106,7 @@ public class ArrowBatchesTest {
             .add(LanceConstant.ROW_CREATED_AT_VERSION, DataTypes.LongType)
             .add(LanceConstant.ROW_LAST_UPDATED_AT_VERSION, DataTypes.LongType)
             .add(LanceConstant.FRAGMENT_ID, DataTypes.IntegerType);
-    ArrowBatches.Plan plan = ArrowBatches.plan(scan, dataset);
+    ArrowBatchAdapter.Plan plan = ArrowBatchAdapter.plan(scan, dataset);
     assertTrue(plan.isSupported(), plan.unsupportedReason());
     Schema schema = plan.schema();
     for (int i = 0; i < 5; i++) {
@@ -119,8 +119,8 @@ public class ArrowBatchesTest {
   /** An empty projection reads only row counts, so its batches have no column. */
   @Test
   public void emptyProjectionHasNoColumns() {
-    ArrowBatches.Plan plan =
-        ArrowBatches.plan(
+    ArrowBatchAdapter.Plan plan =
+        ArrowBatchAdapter.plan(
             new StructType(),
             new Schema(Collections.singletonList(field("x", new ArrowType.Int(64, true)))));
     assertTrue(plan.isSupported(), plan.unsupportedReason());
@@ -135,7 +135,7 @@ public class ArrowBatchesTest {
             field("fsb", new ArrowType.FixedSizeBinary(16)),
             field("ns", new ArrowType.Timestamp(TimeUnit.NANOSECOND, null)),
             field("doc", ArrowType.Struct.INSTANCE, field("u", new ArrowType.Int(64, false))))) {
-      ArrowBatches.Plan plan = planWholeDataset(unsupported);
+      ArrowBatchAdapter.Plan plan = planWholeDataset(unsupported);
       assertFalse(plan.isSupported(), unsupported.toString());
       assertTrue(
           plan.unsupportedReason().startsWith("column " + unsupported.getName() + ": "),
@@ -169,7 +169,7 @@ public class ArrowBatchesTest {
                     .add("score", DataTypes.FloatType)
                     .add("extra", DataTypes.StringType));
     for (StructType scan : Arrays.asList(fewer, more)) {
-      ArrowBatches.Plan plan = ArrowBatches.plan(scan, dataset);
+      ArrowBatchAdapter.Plan plan = ArrowBatchAdapter.plan(scan, dataset);
       assertFalse(plan.isSupported(), scan.simpleString());
       assertTrue(plan.unsupportedReason().startsWith("column doc: "), plan.unsupportedReason());
     }
@@ -194,15 +194,15 @@ public class ArrowBatchesTest {
             new StructType().add("x", DataTypes.StringType, true, json),
             new StructType().add("x" + LanceConstant.BLOB_SIZE_SUFFIX, DataTypes.LongType),
             new StructType().add(LanceConstant.SCORE, score, true, scoreMetadata))) {
-      ArrowBatches.Plan plan = ArrowBatches.plan(scan, dataset);
+      ArrowBatchAdapter.Plan plan = ArrowBatchAdapter.plan(scan, dataset);
       assertFalse(plan.isSupported(), scan.simpleString());
     }
   }
 
   @Test
   public void columnsMissingFromTheDatasetHaveNoArrowBatchForm() {
-    ArrowBatches.Plan plan =
-        ArrowBatches.plan(
+    ArrowBatchAdapter.Plan plan =
+        ArrowBatchAdapter.plan(
             new StructType().add("y", DataTypes.LongType),
             new Schema(Collections.singletonList(field("x", new ArrowType.Int(64, true)))));
     assertFalse(plan.isSupported());

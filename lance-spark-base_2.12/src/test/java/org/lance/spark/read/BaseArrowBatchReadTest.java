@@ -51,6 +51,7 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.ArrowUtils;
 import org.apache.spark.sql.vectorized.ArrowColumnVector;
 import org.apache.spark.sql.vectorized.ColumnVector;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
@@ -80,9 +81,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Tests the {@code arrow_batches} read option ({@link LanceSparkReadOptions#CONFIG_ARROW_BATCHES}):
- * each test reads a dataset with and without Arrow batches and compares the rows, and checks the
- * batches through the scan's own columnar reader.
+ * Tests the {@code arrow_batch_reads} read option ({@link
+ * LanceSparkReadOptions#CONFIG_ARROW_BATCH_READS}): each test reads a dataset with and without
+ * Arrow batches and compares the rows, and checks the batches through the scan's own columnar
+ * reader.
  */
 public abstract class BaseArrowBatchReadTest {
 
@@ -164,7 +166,7 @@ public abstract class BaseArrowBatchReadTest {
     return spark
         .read()
         .format(LanceDataSource.name)
-        .option(LanceSparkReadOptions.CONFIG_ARROW_BATCHES, String.valueOf(arrowBatches))
+        .option(LanceSparkReadOptions.CONFIG_ARROW_BATCH_READS, String.valueOf(arrowBatches))
         .load(uri);
   }
 
@@ -223,7 +225,8 @@ public abstract class BaseArrowBatchReadTest {
 
   /**
    * Passes the Arrow vectors of every batch to {@code consumer} while the batch is valid, checking
-   * that every column is a Spark Arrow column. Returns the number of batches.
+   * that every column is a Spark Arrow column whose buffers come from Spark's root allocator.
+   * Returns the number of batches.
    */
   private static int forEachArrowBatch(LanceScan scan, Consumer<List<FieldVector>> consumer)
       throws Exception {
@@ -235,7 +238,9 @@ public abstract class BaseArrowBatchReadTest {
           for (int i = 0; i < batch.numCols(); i++) {
             ColumnVector column = batch.column(i);
             assertSame(ArrowColumnVector.class, column.getClass());
-            vectors.add((FieldVector) ((ArrowColumnVector) column).getValueVector());
+            FieldVector vector = (FieldVector) ((ArrowColumnVector) column).getValueVector();
+            assertSame(ArrowUtils.rootAllocator(), vector.getAllocator().getRoot());
+            vectors.add(vector);
           }
           consumer.accept(vectors);
           batches[0]++;
@@ -250,7 +255,7 @@ public abstract class BaseArrowBatchReadTest {
     assertSameRows(uri, "select id, vec[1], doc.emb, multi from t where id % 2 = 0 order by id");
 
     LanceScan scan = lanceScan(read(uri, true));
-    assertTrue(scan.readOptions().isArrowBatches());
+    assertTrue(scan.readOptions().isArrowBatchReadsEnabled());
     Schema schema = scan.arrowBatchSchema().get();
     assertEquals(ArrowType.List.INSTANCE, schema.findField("vec").getType());
     assertEquals(
@@ -276,7 +281,7 @@ public abstract class BaseArrowBatchReadTest {
   public void readsAsUsualWithoutTheOption() {
     String uri = writeSparkDataset("default");
     LanceScan scan = lanceScan(read(uri, false));
-    assertFalse(scan.readOptions().isArrowBatches());
+    assertFalse(scan.readOptions().isArrowBatchReadsEnabled());
     // The plan is there for a consumer that turns Arrow batches on (withArrowBatches).
     assertTrue(scan.arrowBatchSchema().isPresent());
   }
@@ -329,7 +334,7 @@ public abstract class BaseArrowBatchReadTest {
     read(uri, true).createOrReplaceTempView("t");
     for (String column : Arrays.asList("fsb", "u")) {
       LanceScan scan = lanceScan(spark.sql("select id, " + column + " from t"));
-      assertFalse(scan.readOptions().isArrowBatches());
+      assertFalse(scan.readOptions().isArrowBatchReadsEnabled());
       assertFalse(scan.arrowBatchSchema().isPresent());
       assertTrue(
           scan.arrowBatchUnsupportedReason().get().contains("column " + column),
@@ -385,8 +390,11 @@ public abstract class BaseArrowBatchReadTest {
   public void withArrowBatchesTurnsArrowBatchesOnForAPlannedScan() throws Exception {
     String uri = writeSparkDataset("planned");
     LanceScan scan = lanceScan(read(uri, false));
+    int partitions = scan.planInputPartitions().length;
     LanceScan arrowScan = scan.withArrowBatches();
-    assertTrue(arrowScan.readOptions().isArrowBatches());
+    // The copy reports the planned partitioning without being planned again.
+    assertEquals(partitions, arrowScan.outputPartitioning().numPartitions());
+    assertTrue(arrowScan.readOptions().isArrowBatchReadsEnabled());
     assertNotEquals(scan, arrowScan);
     assertSame(arrowScan, arrowScan.withArrowBatches());
     int[] rows = {0};
@@ -416,13 +424,14 @@ public abstract class BaseArrowBatchReadTest {
         spark
             .read()
             .format(LanceDataSource.name)
-            .option(LanceSparkReadOptions.CONFIG_ARROW_BATCHES, "true")
+            .option(LanceSparkReadOptions.CONFIG_ARROW_BATCH_READS, "true")
             .option(LanceSparkReadOptions.CONFIG_BATCH_SIZE, "4")
             .load(many)
             .select("id", "vec", "_fragid");
     LanceScan scan = lanceScan(df);
 
-    BufferAllocator allocator = LanceRuntime.allocator();
+    // Arrow batches are allocated from Spark's root allocator.
+    BufferAllocator allocator = ArrowUtils.rootAllocator();
     long before = allocator.getAllocatedMemory();
     int[] batches = {0};
     int[] rows = {0};
