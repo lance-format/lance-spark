@@ -631,6 +631,30 @@ Select columns compatible with the snapshot; missing columns or incompatible typ
 including nested fields, fail during planning. Use SQL `VERSION AS OF 'release_candidate'`
 to analyze the query against the historical schema instead.
 
+## Arrow Batch Reads
+
+Set `arrow_batches` to `true` to make the columnar reader emit Arrow batches: every column is
+a Spark `ArrowColumnVector`, in the read schema's order, so an engine that processes Arrow
+data, such as Apache Gluten, can take the batches as Arrow. Default: `false`.
+
+```python
+df = spark.read \
+    .format("lance") \
+    .option("arrow_batches", "true") \
+    .load("/path/to/dataset.lance")
+```
+
+Vector (`FixedSizeList`) columns are read as Spark arrays (Arrow `List`) over the same values,
+and `_rowid`, `_rowaddr`, and the row version columns as signed 64-bit integers. A scan with a
+column that has no Arrow batch form reads as usual: blob and JSON columns, the full-text
+`_score`, and Arrow types Spark does not read as the column's Spark type, such as unsigned
+integers or nanosecond timestamps. Engines can check this at planning time with
+`LanceScan.arrowBatchSchema()`, or turn Arrow batches on for a planned scan with
+`LanceScan.withArrowBatches()`.
+
+A batch is valid until the next batch is requested, as the reader reuses or releases its
+vectors.
+
 ## Memory Configuration
 
 Lance Spark uses Arrow for data transfer between native code and Spark, and maintains caches for improved performance.

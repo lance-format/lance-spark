@@ -16,12 +16,14 @@ package org.lance.spark.read;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.internal.ArrowBatches;
 import org.lance.spark.read.metric.LanceCustomMetrics;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
 import org.lance.spark.utils.FullTextQueryUtils;
 import org.lance.spark.utils.Optional;
 
 import org.apache.arrow.util.Preconditions;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
@@ -120,6 +122,9 @@ public class LanceScan
 
   private final java.util.Map<String, String> namespaceProperties;
 
+  /** The Arrow batches the scan can emit; see {@link #arrowBatchSchema()}. */
+  private final ArrowBatches.Plan arrowBatchPlan;
+
   public LanceScan(
       StructType schema,
       LanceSparkReadOptions readOptions,
@@ -137,7 +142,8 @@ public class LanceScan
       java.util.Map<Integer, Object> fragmentShardingKeys,
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
-      java.util.Map<String, String> namespaceProperties) {
+      java.util.Map<String, String> namespaceProperties,
+      ArrowBatches.Plan arrowBatchPlan) {
     this.schema = schema;
     this.readOptions = readOptions;
     this.whereConditions = whereConditions;
@@ -161,6 +167,10 @@ public class LanceScan
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
+    this.arrowBatchPlan =
+        arrowBatchPlan != null
+            ? arrowBatchPlan
+            : ArrowBatches.Plan.unsupported("the scan was built without an Arrow batch plan");
   }
 
   /**
@@ -169,6 +179,64 @@ public class LanceScan
    */
   public LanceSparkReadOptions readOptions() {
     return readOptions;
+  }
+
+  /**
+   * The Arrow schema of the batches the columnar reader emits with Arrow batches ({@link
+   * LanceSparkReadOptions#CONFIG_ARROW_BATCHES}, {@link #withArrowBatches()}), or empty if this
+   * scan cannot emit Arrow batches; {@link #arrowBatchUnsupportedReason()} then says why. A
+   * consumer that takes the batches as Arrow can check here that it reads every type.
+   *
+   * <p>Every column of an Arrow batch is a Spark {@link
+   * org.apache.spark.sql.vectorized.ArrowColumnVector}, in {@link #readSchema()} order. A batch is
+   * valid until the reader's next {@code next()} or {@code close()} call, which reuses or releases
+   * its vectors, so a consumer that keeps a batch longer transfers its vectors first.
+   */
+  public Optional<Schema> arrowBatchSchema() {
+    return arrowBatchPlan.isSupported() ? Optional.of(arrowBatchPlan.schema()) : Optional.empty();
+  }
+
+  /** Why this scan cannot emit Arrow batches, if it cannot. See {@link #arrowBatchSchema()}. */
+  public Optional<String> arrowBatchUnsupportedReason() {
+    return arrowBatchPlan.isSupported()
+        ? Optional.empty()
+        : Optional.of(arrowBatchPlan.unsupportedReason());
+  }
+
+  /**
+   * A copy of this scan whose columnar reader emits Arrow batches, as with the {@link
+   * LanceSparkReadOptions#CONFIG_ARROW_BATCHES} read option.
+   *
+   * @throws IllegalStateException if this scan cannot emit Arrow batches (see {@link
+   *     #arrowBatchUnsupportedReason()})
+   */
+  public LanceScan withArrowBatches() {
+    if (!arrowBatchPlan.isSupported()) {
+      throw new IllegalStateException(
+          "Lance scan cannot emit Arrow batches: " + arrowBatchPlan.unsupportedReason());
+    }
+    if (readOptions.isArrowBatches()) {
+      return this;
+    }
+    return new LanceScan(
+        schema,
+        readOptions.withArrowBatches(true),
+        whereConditions,
+        limit,
+        offset,
+        topNSortOrders,
+        pushedAggregation,
+        pushedPredicates,
+        statistics,
+        cachedSurvivingFragmentIds,
+        precomputedSplits,
+        precomputedFragmentRowCounts,
+        activeShardingExpression,
+        fragmentShardingKeys,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        arrowBatchPlan);
   }
 
   @Override

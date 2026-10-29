@@ -217,7 +217,8 @@ public class LanceScanTest {
             fragKeys,
             Collections.emptyMap(),
             null,
-            Collections.emptyMap());
+            Collections.emptyMap(),
+            null /* arrowBatchPlan */);
 
     // Plan partitions to set numPartitions
     scan.planInputPartitions();
@@ -301,7 +302,8 @@ public class LanceScanTest {
             fragKeys,
             Collections.emptyMap(),
             null,
-            Collections.emptyMap());
+            Collections.emptyMap(),
+            null /* arrowBatchPlan */);
 
     Partitioning partitioning = scan.outputPartitioning();
     assertInstanceOf(KeyGroupedPartitioning.class, partitioning);
