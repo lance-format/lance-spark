@@ -15,6 +15,8 @@ package org.lance.spark.write;
 
 import org.lance.namespace.LanceNamespace;
 
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -26,6 +28,7 @@ public class StagedCommitOptions {
   private static final boolean NO_MANAGED_VERSIONING = false;
 
   private final Map<String, String> storageOptions;
+  private Map<String, String> tableProperties = Collections.emptyMap();
   private final boolean enableStableRowIds;
   private final String fileFormatVersion;
   private final LanceNamespace namespace;
@@ -74,6 +77,22 @@ public class StagedCommitOptions {
         NO_NAMESPACE,
         NO_TABLE_ID,
         NO_MANAGED_VERSIONING);
+  }
+
+  /**
+   * Sets the table configuration to upsert atomically with the staged data. Unspecified properties
+   * of an existing table are retained.
+   *
+   * @param properties configuration supplied by the table creation or replacement statement
+   * @return this options instance
+   */
+  public StagedCommitOptions withTableProperties(Map<String, String> properties) {
+    this.tableProperties = Collections.unmodifiableMap(new HashMap<>(properties));
+    return this;
+  }
+
+  public Map<String, String> getTableProperties() {
+    return tableProperties;
   }
 
   public Map<String, String> getStorageOptions() {

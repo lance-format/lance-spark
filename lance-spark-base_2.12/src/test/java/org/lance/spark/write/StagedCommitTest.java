@@ -16,7 +16,9 @@ package org.lance.spark.write;
 import org.lance.Dataset;
 import org.lance.WriteParams;
 import org.lance.spark.LanceRuntime;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
@@ -106,6 +108,25 @@ public class StagedCommitTest {
             ARROW_SCHEMA,
             StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
     commit.abort();
+  }
+
+  @Test
+  public void testFailedCommitDoesNotPersistProperties(TestInfo testInfo) {
+    String datasetUri = createDataset(testInfo.getTestMethod().get().getName());
+    LanceSparkReadOptions readOptions =
+        LanceSparkReadOptions.builder().datasetUri(datasetUri).build();
+    Dataset dataset = Utils.openDatasetBuilder(readOptions).build();
+    StagedCommit commit =
+        StagedCommit.forExistingTable(
+            dataset,
+            ARROW_SCHEMA,
+            StagedCommitOptions.pathBased(Collections.emptyMap(), false, "invalid-format")
+                .withTableProperties(Collections.singletonMap("app.owner", "uncommitted")));
+    assertThrows(RuntimeException.class, commit::commit);
+    try (Dataset reopened = Utils.openDatasetBuilder(readOptions).build()) {
+      assertEquals(1, reopened.version());
+      assertFalse(reopened.getConfig().containsKey("app.owner"));
+    }
   }
 
   @Test
