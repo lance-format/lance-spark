@@ -45,6 +45,55 @@ CREATE TABLE users (id BIGINT, name STRING)
 ALTER TABLE users SET TBLPROPERTIES ('enable_stable_row_ids' = 'true');
 ```
 
+## ADD COLUMN
+
+Add one or more top-level columns. New columns are appended and filled with `NULL` for existing rows:
+
+```sql
+ALTER TABLE users ADD COLUMN age INT;
+ALTER TABLE users ADD COLUMNS (age INT, email STRING);
+```
+
+## DROP COLUMN
+
+Remove a column from the table:
+
+```sql
+ALTER TABLE users DROP COLUMN age;
+ALTER TABLE users DROP COLUMN IF EXISTS age;
+```
+
+## RENAME COLUMN
+
+Rename a column:
+
+```sql
+ALTER TABLE users RENAME COLUMN name TO full_name;
+```
+
+## ALTER COLUMN
+
+Change a column's nullability:
+
+```sql
+ALTER TABLE users ALTER COLUMN id DROP NOT NULL;
+```
+
+!!! note
+Column schema evolution operates on top-level columns. Each `ALTER TABLE` is committed as a single
+atomic Lance operation against the current schema, so one statement may batch changes of the same
+kind that target distinct columns (e.g. adding several columns), but it may not mix column
+additions, drops, and alterations, combine a column change with `TBLPROPERTIES` changes, target the
+same column more than once, or apply a change that depends on an earlier change in the same
+statement (such as altering a column by its just-assigned new name) — issue those as separate
+statements. The whole request is validated first, so if any change is unsupported, none is applied.
+The following are **not** currently supported and are rejected before any change is written:
+
+- Adding a column at a specific position (`FIRST`/`AFTER`) — columns are always appended.
+- Adding a column with a `DEFAULT` value — new columns are filled with `NULL`.
+- Adding a column to a legacy-format (`file_format_version='LEGACY'`) table.
+- Changing a column's data type (`ALTER COLUMN ... TYPE`) or updating a column comment.
+
 ## Rename Table
 
 Rename a table within the same namespace:
