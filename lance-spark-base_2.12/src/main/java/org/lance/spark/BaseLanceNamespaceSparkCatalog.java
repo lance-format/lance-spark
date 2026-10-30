@@ -1022,7 +1022,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     ResolvedTable resolved = resolveIdentifier(ident);
 
     try (Dataset dataset = Utils.openDatasetBuilder(resolved.readOptions).build()) {
-      // Dataset.updateConfig uses replace semantics (overwrites entire config),
+      // The config update uses replace semantics (overwrites entire config),
       // so we must read-merge-write to preserve existing properties.
       Map<String, String> merged = new HashMap<>(dataset.getConfig());
       merged.putAll(propsToSet);
@@ -1701,18 +1701,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Map<String, String> config,
       boolean managedVersioning,
       List<String> tableIdList) {
-    if (!managedVersioning) {
-      dataset.updateConfig(config);
-      return;
-    }
-
     UpdateMap updateMap = UpdateMap.builder().updates(config).replace(true).build();
     UpdateConfig updateConfig = UpdateConfig.builder().configUpdates(updateMap).build();
-    CommitBuilder commitBuilder =
-        new CommitBuilder(dataset)
-            .namespaceClient(namespace)
-            .tableId(tableIdList)
-            .namespaceClientManagedVersioning(true);
+    CommitBuilder commitBuilder = new CommitBuilder(dataset);
+    if (managedVersioning) {
+      commitBuilder
+          .namespaceClient(namespace)
+          .tableId(tableIdList)
+          .namespaceClientManagedVersioning(true);
+    }
     try (Transaction txn =
             new Transaction.Builder()
                 .readVersion(dataset.version())

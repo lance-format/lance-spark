@@ -13,7 +13,6 @@
  */
 package org.lance.spark.update;
 
-import org.lance.WriteParams;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
@@ -277,7 +276,11 @@ public abstract class BaseAddColumnsBackfillTest {
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
       Field field = new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null);
       Schema schema = new Schema(Collections.singletonList(field));
-      org.lance.Dataset.create(allocator, datasetUri, schema, new WriteParams.Builder().build())
+      org.lance.Dataset.write()
+          .allocator(allocator)
+          .uri(datasetUri)
+          .schema(schema)
+          .execute()
           .close();
 
       LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);

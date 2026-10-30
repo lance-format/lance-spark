@@ -14,7 +14,6 @@
 package org.lance.spark.write;
 
 import org.lance.Version;
-import org.lance.WriteParams;
 import org.lance.spark.LanceDataSource;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
@@ -825,7 +824,11 @@ public abstract class BaseSparkConnectorWriteTest {
     Field idField = new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null);
     Schema legacySchema = new Schema(Arrays.asList(idField, tagsField));
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
-      org.lance.Dataset.create(allocator, path, legacySchema, new WriteParams.Builder().build())
+      org.lance.Dataset.write()
+          .allocator(allocator)
+          .uri(path)
+          .schema(legacySchema)
+          .execute()
           .close();
     }
 

@@ -100,7 +100,8 @@ public abstract class BaseVacuumTest {
           "data_files_removed",
           "transaction_files_removed",
           "index_files_removed",
-          "deletion_files_removed"
+          "deletion_files_removed",
+          "failed_deletes"
         },
         result.columns());
     for (StructField field : result.schema().fields()) {

@@ -14,7 +14,6 @@
 package org.lance.spark.write;
 
 import org.lance.Dataset;
-import org.lance.WriteParams;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.TestUtils;
 
@@ -48,8 +47,7 @@ public class StagedCommitTest {
   private String createDataset(String name) {
     String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), name);
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
-      Dataset.create(allocator, datasetUri, ARROW_SCHEMA, new WriteParams.Builder().build())
-          .close();
+      Dataset.write().allocator(allocator).uri(datasetUri).schema(ARROW_SCHEMA).execute().close();
     }
     return datasetUri;
   }
@@ -64,7 +62,8 @@ public class StagedCommitTest {
             datasetUri,
             StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
     commit.commit();
-    try (Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+    try (Dataset dataset =
+        Dataset.open().uri(datasetUri).allocator(LanceRuntime.allocator()).build()) {
       assertEquals(0, dataset.countRows());
     }
   }
@@ -72,14 +71,15 @@ public class StagedCommitTest {
   @Test
   public void testCommitExistingTable(TestInfo testInfo) {
     String datasetUri = createDataset(testInfo.getTestMethod().get().getName());
-    Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator());
+    Dataset dataset = Dataset.open().uri(datasetUri).allocator(LanceRuntime.allocator()).build();
     StagedCommit commit =
         StagedCommit.forExistingTable(
             dataset,
             ARROW_SCHEMA,
             StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
     commit.commit();
-    try (Dataset reopened = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+    try (Dataset reopened =
+        Dataset.open().uri(datasetUri).allocator(LanceRuntime.allocator()).build()) {
       assertEquals(0, reopened.countRows());
     }
   }
@@ -99,7 +99,7 @@ public class StagedCommitTest {
   @Test
   public void testAbortExistingTableClosesDataset(TestInfo testInfo) {
     String datasetUri = createDataset(testInfo.getTestMethod().get().getName());
-    Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator());
+    Dataset dataset = Dataset.open().uri(datasetUri).allocator(LanceRuntime.allocator()).build();
     StagedCommit commit =
         StagedCommit.forExistingTable(
             dataset,
@@ -178,7 +178,8 @@ public class StagedCommitTest {
             datasetUri,
             StagedCommitOptions.pathBased(Collections.emptyMap(), false, "2.1"));
     commit.commit();
-    try (Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+    try (Dataset dataset =
+        Dataset.open().uri(datasetUri).allocator(LanceRuntime.allocator()).build()) {
       assertEquals("2.1", dataset.getLanceFileFormatVersion());
     }
   }
@@ -194,7 +195,8 @@ public class StagedCommitTest {
             StagedCommitOptions.pathBased(Collections.emptyMap(), false, "2.0"));
     commit.setFileFormatVersion("2.1");
     commit.commit();
-    try (Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+    try (Dataset dataset =
+        Dataset.open().uri(datasetUri).allocator(LanceRuntime.allocator()).build()) {
       assertEquals("2.1", dataset.getLanceFileFormatVersion());
     }
   }
