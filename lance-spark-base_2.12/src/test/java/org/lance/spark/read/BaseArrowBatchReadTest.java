@@ -38,6 +38,7 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.arrow.vector.util.TransferPair;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
@@ -455,6 +456,13 @@ public abstract class BaseArrowBatchReadTest {
     assertTrue(batches[0] > scan.planInputPartitions().length, "expected several batches");
   }
 
+  /** The address of the values of {@code vector}: its data buffer, or its list elements'. */
+  private static long valuesAddress(FieldVector vector) {
+    return vector instanceof ListVector
+        ? valuesAddress(((ListVector) vector).getDataVector())
+        : vector.getDataBuffer().memoryAddress();
+  }
+
   private static List<Field> fieldsOf(List<FieldVector> vectors) {
     List<Field> fields = new ArrayList<>(vectors.size());
     for (FieldVector vector : vectors) {
@@ -536,5 +544,53 @@ public abstract class BaseArrowBatchReadTest {
         org.lance.Dataset.write().stream(stream).uri(uri).execute().close();
       }
     }
+  }
+
+  /**
+   * A consumer that transfers the vectors of a batch into its own allocator under Spark's root
+   * allocator moves them without copying and keeps them after the reader closes, both a vector of
+   * the native scan and one the reader built. Their memory is released with the consumer's vectors.
+   */
+  @Test
+  public void transferredVectorsOutliveTheReader() throws Exception {
+    String uri = writeSparkDataset("transferred");
+    LanceScan scan = lanceScan(read(uri, true).select("id", "vec"));
+    InputPartition partition = scan.planInputPartitions()[0];
+    BufferAllocator root = ArrowUtils.rootAllocator();
+    long before = root.getAllocatedMemory();
+    try (BufferAllocator consumer = root.newChildAllocator("consumer", 0, Long.MAX_VALUE)) {
+      List<FieldVector> retained = new ArrayList<>();
+      List<List<Object>> expected = new ArrayList<>();
+      try (PartitionReader<ColumnarBatch> reader =
+          scan.createReaderFactory().createColumnarReader(partition)) {
+        assertTrue(reader.next());
+        for (int c = 0; c < 2; c++) {
+          FieldVector source =
+              (FieldVector) ((ArrowColumnVector) reader.get().column(c)).getValueVector();
+          List<Object> values = new ArrayList<>();
+          for (int i = 0; i < source.getValueCount(); i++) {
+            values.add(source.getObject(i));
+          }
+          expected.add(values);
+          long address = valuesAddress(source);
+          TransferPair pair = source.getTransferPair(consumer);
+          pair.transfer();
+          FieldVector moved = (FieldVector) pair.getTo();
+          retained.add(moved);
+          assertEquals(address, valuesAddress(moved));
+        }
+        while (reader.next()) {
+          // Drain the reader, which releases its batches.
+        }
+      }
+      for (int c = 0; c < 2; c++) {
+        FieldVector moved = retained.get(c);
+        for (int i = 0; i < moved.getValueCount(); i++) {
+          assertEquals(expected.get(c).get(i), moved.getObject(i));
+        }
+        moved.close();
+      }
+    }
+    assertEquals(before, root.getAllocatedMemory());
   }
 }
