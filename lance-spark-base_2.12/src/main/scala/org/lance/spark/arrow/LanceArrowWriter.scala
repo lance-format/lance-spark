@@ -664,9 +664,19 @@ private[arrow] class IntervalYearWriter(val valueVector: IntervalYearVector)
 }
 
 private[arrow] class DurationWriter(val valueVector: DurationVector) extends LanceArrowFieldWriter {
+  private val unit = valueVector.getUnit
+
   override def setNull(): Unit = {}
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
-    valueVector.setSafe(count, input.getLong(ordinal))
+    val micros = input.getLong(ordinal)
+    // Round down, as Spark does when it converts a java.time.Duration to microseconds.
+    val value = unit match {
+      case TimeUnit.SECOND => Math.floorDiv(micros, 1000000L)
+      case TimeUnit.MILLISECOND => Math.floorDiv(micros, 1000L)
+      case TimeUnit.MICROSECOND => micros
+      case TimeUnit.NANOSECOND => Math.multiplyExact(micros, 1000L)
+    }
+    valueVector.setSafe(count, value)
   }
 }
 

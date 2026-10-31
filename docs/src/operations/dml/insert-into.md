@@ -6,7 +6,10 @@ Writes to existing timestamp columns preserve their Arrow unit and timezone.
 Spark uses microsecond precision: second/millisecond columns round values down,
 while nanosecond values lose sub-microsecond precision when read through Spark.
 Conversions outside the target unit's range are rejected. New timestamp columns
-continue to use microseconds.
+continue to use microseconds. Arrow `duration` columns read as `INTERVAL DAY TO SECOND`
+in any unit, and writes to them keep their unit in the same way. `UPDATE` and `MERGE`
+rewrite each row they change, so nanosecond timestamps and durations in those rows lose
+their sub-microsecond digits even when the command does not set them.
 
 Writes into an existing table, including `INSERT OVERWRITE`, keep its unsigned
 integer columns unsigned. Spark reads `uint8`, `uint16`, `uint32` and `uint64` as

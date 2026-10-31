@@ -18,6 +18,7 @@ import org.lance.spark.utils.BlobUtils;
 import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.vector.DateMilliVector;
 import org.apache.arrow.vector.DecimalVector;
+import org.apache.arrow.vector.DurationVector;
 import org.apache.arrow.vector.FixedSizeBinaryVector;
 import org.apache.arrow.vector.LargeVarBinaryVector;
 import org.apache.arrow.vector.LargeVarCharVector;
@@ -41,6 +42,7 @@ import org.apache.arrow.vector.complex.LargeListVector;
 import org.apache.arrow.vector.complex.ListVector;
 import org.apache.arrow.vector.complex.MapVector;
 import org.apache.arrow.vector.complex.StructVector;
+import org.apache.arrow.vector.types.TimeUnit;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.Decimal;
 import org.apache.spark.sql.types.StructField;
@@ -67,6 +69,7 @@ public class LanceArrowColumnVector extends ColumnVector {
   private Float2Accessor float2Accessor;
   private DateMilliAccessor dateMilliAccessor;
   private TimestampUnitAccessor timestampUnitAccessor;
+  private DurationUnitAccessor durationUnitAccessor;
   private TimeUnitAccessor timeUnitAccessor;
   private LanceStructAccessor structAccessor;
   private LanceDecimalAccessor decimalAccessor;
@@ -132,6 +135,10 @@ public class LanceArrowColumnVector extends ColumnVector {
       timestampUnitAccessor = new TimestampUnitAccessor((TimeStampNanoVector) vector, 1L, 1_000L);
     } else if (vector instanceof TimeStampNanoTZVector) {
       timestampUnitAccessor = new TimestampUnitAccessor((TimeStampNanoTZVector) vector, 1L, 1_000L);
+    } else if (vector instanceof DurationVector
+        && ((DurationVector) vector).getUnit() != TimeUnit.MICROSECOND) {
+      // Spark's ArrowColumnVector accepts only microsecond durations.
+      durationUnitAccessor = new DurationUnitAccessor((DurationVector) vector);
     } else if (vector instanceof TimeNanoVector) {
       // Spark 4.1 TimeType stores nanos internally; Arrow TimeNano also nanos
       timeUnitAccessor = new TimeUnitAccessor((TimeNanoVector) vector, 1L, 1L);
@@ -207,6 +214,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     if (timestampUnitAccessor != null) {
       timestampUnitAccessor.close();
     }
+    if (durationUnitAccessor != null) {
+      durationUnitAccessor.close();
+    }
     if (timeUnitAccessor != null) {
       timeUnitAccessor.close();
     }
@@ -267,6 +277,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (timestampUnitAccessor != null) {
       return timestampUnitAccessor.getNullCount() > 0;
+    }
+    if (durationUnitAccessor != null) {
+      return durationUnitAccessor.getNullCount() > 0;
     }
     if (timeUnitAccessor != null) {
       return timeUnitAccessor.getNullCount() > 0;
@@ -330,6 +343,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     if (timestampUnitAccessor != null) {
       return timestampUnitAccessor.getNullCount();
     }
+    if (durationUnitAccessor != null) {
+      return durationUnitAccessor.getNullCount();
+    }
     if (timeUnitAccessor != null) {
       return timeUnitAccessor.getNullCount();
     }
@@ -391,6 +407,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (timestampUnitAccessor != null) {
       return timestampUnitAccessor.isNullAt(rowId);
+    }
+    if (durationUnitAccessor != null) {
+      return durationUnitAccessor.isNullAt(rowId);
     }
     if (timeUnitAccessor != null) {
       return timeUnitAccessor.isNullAt(rowId);
@@ -458,6 +477,9 @@ public class LanceArrowColumnVector extends ColumnVector {
     }
     if (timestampUnitAccessor != null) {
       return timestampUnitAccessor.getLong(rowId);
+    }
+    if (durationUnitAccessor != null) {
+      return durationUnitAccessor.getLong(rowId);
     }
     if (timeUnitAccessor != null) {
       return timeUnitAccessor.getLong(rowId);

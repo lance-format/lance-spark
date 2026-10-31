@@ -15,7 +15,12 @@ package org.lance.spark.read;
 
 import org.lance.spark.utils.Optional;
 
+import org.apache.spark.sql.connector.expressions.Expression;
+import org.apache.spark.sql.connector.expressions.FieldReference;
+import org.apache.spark.sql.connector.expressions.Literal;
+import org.apache.spark.sql.connector.expressions.LiteralValue;
 import org.apache.spark.sql.connector.expressions.filter.Predicate;
+import org.apache.spark.sql.types.DataTypes;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
@@ -311,6 +316,13 @@ public class FilterPushDownTest {
 
     Predicate intGt = TestPredicates.gt("age", 30);
     assertTrue(FilterPushDown.isPredicateSupported(intGt));
+  }
+
+  @Test
+  public void testIntervalFilterRejected() {
+    Literal<?> twoSeconds = new LiteralValue<>(2_000_000L, DataTypes.createDayTimeIntervalType());
+    Predicate gt = new Predicate(">", new Expression[] {FieldReference.apply("d"), twoSeconds});
+    assertFalse(FilterPushDown.isPredicateSupported(gt));
   }
 
   @Test
