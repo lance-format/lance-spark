@@ -417,7 +417,7 @@ object LanceArrowUtils {
       parent
     }
 
-  private def parseEmbeddedMetadata(parent: Metadata, key: String): Metadata = {
+  def parseEmbeddedMetadata(parent: Metadata, key: String): Metadata = {
     if (parent == null || !parent.contains(key)) {
       Metadata.empty
     } else {

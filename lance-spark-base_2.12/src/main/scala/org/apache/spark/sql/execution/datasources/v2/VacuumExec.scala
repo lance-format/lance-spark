@@ -68,6 +68,7 @@ case class VacuumExec(
       stats.getDataFilesRemoved,
       stats.getTransactionFilesRemoved,
       stats.getIndexFilesRemoved,
-      stats.getDeletionFilesRemoved)))
+      stats.getDeletionFilesRemoved,
+      stats.getFailedDeletes)))
   }
 }

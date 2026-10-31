@@ -16,15 +16,18 @@ package org.lance.spark.write;
 import org.lance.spark.LancePositionDeltaOperation;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.utils.BlobUtils;
 
 import org.apache.spark.sql.connector.write.LogicalWriteInfo;
 import org.apache.spark.sql.connector.write.RowLevelOperation;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -144,5 +147,46 @@ public class PositionDeltaWriteOptionsTest {
         newBuilder(Collections.emptyMap(), writeOptions, null, tableProperties).getWriteOptions();
 
     Assertions.assertEquals(Boolean.FALSE, options.getEnableStableRowIds());
+  }
+
+  /** UPDATE and MERGE write rows, which a table recorded at 2.2 cannot store as v1 blobs. */
+  @Test
+  public void testRowWritesRejectBlobV1FieldsAtTwoTwo() {
+    StructType schema =
+        SCHEMA.add(
+            "data",
+            DataTypes.BinaryType,
+            true,
+            new MetadataBuilder()
+                .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+                .build());
+    LogicalWriteInfo info = writeInfo(Collections.emptyMap());
+    for (RowLevelOperation.Command command :
+        Arrays.asList(RowLevelOperation.Command.UPDATE, RowLevelOperation.Command.MERGE)) {
+      IllegalArgumentException e =
+          Assertions.assertThrows(
+              IllegalArgumentException.class,
+              () -> operation(command, schema, "2.2").newWriteBuilder(info));
+      Assertions.assertTrue(e.getMessage().contains("[data]"), e.getMessage());
+    }
+    // A DELETE writes no rows, and at 2.1 the fields stay v1.
+    operation(RowLevelOperation.Command.DELETE, schema, "2.2").newWriteBuilder(info);
+    operation(RowLevelOperation.Command.UPDATE, schema, "2.1").newWriteBuilder(info);
+  }
+
+  private static LancePositionDeltaOperation operation(
+      RowLevelOperation.Command command, StructType schema, String tableFormat) {
+    return new LancePositionDeltaOperation(
+        command,
+        schema,
+        LanceSparkReadOptions.builder()
+            .datasetUri("/tmp/position-delta-write-options.lance")
+            .build(),
+        Collections.emptyMap(),
+        null,
+        Collections.emptyMap(),
+        false,
+        tableFormat,
+        Collections.emptyMap());
   }
 }

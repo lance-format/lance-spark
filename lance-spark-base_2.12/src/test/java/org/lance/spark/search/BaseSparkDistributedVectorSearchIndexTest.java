@@ -54,6 +54,7 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -466,6 +467,30 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
     List<Integer> unindexedRows = ids(collect(vectorSearchSql(unindexed, 5, filterArg), true));
     assertEquals(java.util.Arrays.asList(0, 2, 4, 6, 8), unindexedRows, "unindexed table");
     assertEquals(unindexedRows, indexedRows, "an index must not change which rows match");
+  }
+
+  @Test
+  void explicitNprobesIsAnExactProbeCountOnBothPaths() throws Exception {
+    // The query sits at the origin, nearest the IVF partition of the small ids, and the filter
+    // keeps only ids from the other partition. Probing exactly one partition finds nothing on
+    // either path; without nprobes, the probe count Lance picks covers both partitions.
+    String table = createTable("idx_exact_nprobes", 4);
+    buildSegmentPerFragment(table, fragmentIds(table));
+
+    String search =
+        "SELECT id FROM VECTOR_SEARCH(table => '"
+            + table
+            + "', query_vector => "
+            + queryVectorSql()
+            + ", k => 5, filter => 'id >= 240', prefilter => true";
+    String exact = search + ", nprobes => 1)";
+    assertEquals(Collections.emptyList(), ids(collect(exact, false)), "namespace path");
+    assertEquals(Collections.emptyList(), ids(collect(exact, true)), "distributed path");
+
+    String adaptive = search + ")";
+    List<Integer> expected = Arrays.asList(240, 241, 242, 243, 244);
+    assertEquals(expected, ids(collect(adaptive, false)), "namespace path");
+    assertEquals(expected, ids(collect(adaptive, true)), "distributed path");
   }
 
   @Test

@@ -479,6 +479,7 @@ public class LanceDataset
               tableProperties.get(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS)));
     }
     LanceSparkWriteOptions writeOptions = writeOptionsBuilder.build();
+    BlobUtils.checkBlobV1WriteVersion(sparkSchema, writeOptions.getFileFormatVersion());
 
     List<String> backfillColumns =
         Arrays.stream(

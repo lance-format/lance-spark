@@ -24,6 +24,7 @@ import org.lance.operation.Operation;
 import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
+import org.lance.spark.utils.LanceCommits;
 
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.slf4j.Logger;
@@ -166,7 +167,7 @@ public class StagedCommit {
     }
     applyManagedVersioning(builder);
     try (Transaction txn = new Transaction.Builder().operation(operation).build();
-        Dataset committed = builder.execute(txn)) {
+        Dataset committed = LanceCommits.replace(builder, txn)) {
       SparkLanceShardingUtils.initializeMemWal(committed, shardingSpec);
     }
   }
@@ -200,7 +201,7 @@ public class StagedCommit {
       final CommitBuilder builder, final long readVersion, final Operation operation) {
     try (Transaction txn =
         new Transaction.Builder().readVersion(readVersion).operation(operation).build()) {
-      return builder.execute(txn);
+      return LanceCommits.replace(builder, txn);
     }
   }
 

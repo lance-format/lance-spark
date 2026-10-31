@@ -22,6 +22,7 @@ import org.lance.memwal.ShardingSpec;
 import org.lance.schema.LanceField;
 import org.lance.schema.LanceSchema;
 import org.lance.spark.utils.BucketHashUtil;
+import org.lance.spark.utils.LanceCommits;
 
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
@@ -104,7 +105,7 @@ public final class SparkLanceShardingUtils {
       throw new UnsupportedOperationException(
           "Unsupported MemWAL sharding transform: " + transform);
     }
-    dataset.initializeMemWal(params);
+    LanceCommits.run(dataset, () -> dataset.initializeMemWal(params));
   }
 
   public static List<ShardingField> fields(ShardingSpec spec) {

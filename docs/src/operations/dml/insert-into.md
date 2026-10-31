@@ -303,7 +303,7 @@ These options control how data is written to Lance datasets. They can be set usi
 | `max_row_per_file`       | Integer | -        | Maximum number of rows per Lance file.                                               |
 | `max_rows_per_group`     | Integer | -        | Maximum number of rows per row group within a file.                                  |
 | `max_bytes_per_file`     | Long    | -        | Maximum size in bytes per Lance file.                                                |
-| `file_format_version`   | String  | -        | Lance file format version: `LEGACY` or `STABLE`.                                     |
+| `file_format_version`   | String  | -        | Lance file format version: `LEGACY` or `STABLE`. Tables with blob v1 columns must be written at `2.1` or older; see [Blob v2 Writes](../../config.md#blob-v2-writes). |
 | `batch_size`             | Integer | `8192`   | Number of rows per batch during writing.                                             |
 | `max_batch_bytes`        | Long    | `268435456` (256 MiB) | Maximum bytes per write batch. The batch flushes at `batch_size` rows or at this size. |
 | `use_queued_write_buffer`| Boolean | `false`  | Use pipelined write buffer for improved throughput.                                  |

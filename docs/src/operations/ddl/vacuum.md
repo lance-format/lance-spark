@@ -24,7 +24,7 @@ The `VACUUM` command supports several options to control cleanup behavior:
 |--------|------|-------------|
 | `before_version` | Long | Remove versions older than this version number |
 | `before_timestamp_millis` | Long | Remove versions older than this timestamp (milliseconds since epoch) |
-| `delete_unverified` | Boolean | Whether to delete unverified files (default: false) |
+| `delete_unverified` | Boolean | Delete unreferenced files without waiting until they are 7 days old (default: false). This includes the files of writes that have not committed yet, so enable it only when nothing writes to the table, including `OPTIMIZE` and index builds. |
 | `error_if_tagged_old_versions` | Boolean | Error if old versions have tags (default: false) |
 
 ### Examples
@@ -65,6 +65,7 @@ The `VACUUM` command returns statistics about the cleanup operation:
 | `transaction_files_removed` | Long | Number of transaction files removed |
 | `index_files_removed` | Long | Number of index files removed |
 | `deletion_files_removed` | Long | Number of deletion files removed |
+| `failed_deletes` | Long | Number of files VACUUM tried and failed to delete |
 
 File counts describe files removed by this operation, not the number of rows deleted.
 Counts are zero for file types with nothing to remove.
@@ -80,6 +81,7 @@ Consider running VACUUM when:
 ## Important Notes
 
 - **Irreversible**: VACUUM permanently deletes data. Removed versions cannot be recovered.
+- **Best effort**: A file VACUUM fails to delete, for example without delete permission on the storage, is counted in `failed_deletes` and the command still succeeds. A later VACUUM retries it or, if the version that referenced it is already removed, deletes it once it is 7 days old.
 - **Time travel**: After vacuuming, you cannot time travel to removed versions.
 - **Tags**: If you have tagged versions, use `error_if_tagged_old_versions` to prevent accidental deletion of important snapshots.
 - **Concurrent operations**: VACUUM is safe to run alongside read operations but should not run concurrently with writes.

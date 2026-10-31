@@ -21,7 +21,7 @@ import org.apache.spark.unsafe.types.UTF8String
 import org.lance.Dataset
 import org.lance.index.IndexType
 import org.lance.spark.{LanceDataset, LanceSparkReadOptions}
-import org.lance.spark.utils.{FieldPathUtils, Utils}
+import org.lance.spark.utils.{FieldPathUtils, LanceCommits, Utils}
 
 import java.util.Collections
 
@@ -91,11 +91,13 @@ case class RefreshIndexExec(
           retainedSegments,
           segments)
         IndexUtils.requireCommittableCoverage(liveFragmentIds, segments, plan.resolvedName)
-        val committed =
-          dataset.commitExistingIndexSegments(
-            plan.resolvedName,
-            plan.column,
-            segments.toList.asJava)
+        val committed = LanceCommits.call(
+          dataset,
+          () =>
+            dataset.commitExistingIndexSegments(
+              plan.resolvedName,
+              plan.column,
+              segments.toList.asJava))
         IndexUtils
           .establishedCoverage(
             segments,

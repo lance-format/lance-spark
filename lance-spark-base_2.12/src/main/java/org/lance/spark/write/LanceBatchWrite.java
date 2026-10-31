@@ -27,6 +27,7 @@ import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.utils.BlobSourceContext;
+import org.lance.spark.utils.LanceCommits;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -237,7 +238,7 @@ public class LanceBatchWrite implements BatchWrite {
         }
         try (Transaction txn =
                 new Transaction.Builder().readVersion(version).operation(operation).build();
-            Dataset committed = commitBuilder.execute(txn)) {
+            Dataset committed = LanceCommits.execute(ds, commitBuilder, txn)) {
           // auto-close txn and committed dataset
         }
       }

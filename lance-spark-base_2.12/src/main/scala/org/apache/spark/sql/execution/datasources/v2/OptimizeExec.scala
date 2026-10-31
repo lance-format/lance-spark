@@ -20,7 +20,7 @@ import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
 import org.lance.compaction.{Compaction, CompactionOptions, CompactionTask, RewriteResult}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceSparkReadOptions}
-import org.lance.spark.utils.Utils
+import org.lance.spark.utils.{LanceCommits, Utils}
 
 import scala.collection.JavaConverters._
 
@@ -129,7 +129,7 @@ case class OptimizeExec(
         .initialStorageOptions(initialStorageOpts.map(_.asJava).orNull)
         .build()
       try {
-        Compaction.commitCompaction(dataset, result, options)
+        LanceCommits.call(dataset, () => Compaction.commitCompaction(dataset, result, options))
       } finally {
         dataset.close()
       }

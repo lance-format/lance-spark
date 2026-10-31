@@ -22,7 +22,7 @@ import org.lance.Dataset
 import org.lance.index.{Index, IndexCriteria, OptimizeOptions}
 import org.lance.operation.CreateIndex
 import org.lance.spark.LanceDataset
-import org.lance.spark.utils.Utils
+import org.lance.spark.utils.{LanceCommits, Utils}
 
 import java.util.{Collections, Locale}
 
@@ -154,7 +154,7 @@ case class LanceOptimizeIndexExec(
     try {
       val before = indexState(dataset)
       val beforeVersion = dataset.version()
-      dataset.optimizeIndices(options)
+      LanceCommits.run(dataset, () => dataset.optimizeIndices(options))
       val afterVersion = dataset.version()
       val after = indexState(dataset)
 

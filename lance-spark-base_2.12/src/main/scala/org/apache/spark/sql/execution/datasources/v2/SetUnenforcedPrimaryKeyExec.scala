@@ -21,7 +21,7 @@ import org.apache.spark.unsafe.types.UTF8String
 import org.lance.{CommitBuilder, Transaction}
 import org.lance.operation.{UpdateConfig, UpdateMap}
 import org.lance.spark.LanceDataset
-import org.lance.spark.utils.Utils
+import org.lance.spark.utils.{LanceCommits, Utils}
 
 import scala.collection.JavaConverters._
 
@@ -114,9 +114,10 @@ case class SetUnenforcedPrimaryKeyExec(
         .operation(updateConfig)
         .build()
       try {
-        val newDataset = new CommitBuilder(dataset)
-          .writeParams(readOptions.getStorageOptions)
-          .execute(txn)
+        val newDataset = LanceCommits.execute(
+          dataset,
+          new CommitBuilder(dataset).writeParams(readOptions.getStorageOptions),
+          txn)
         newDataset.close()
       } finally {
         txn.close()

@@ -702,11 +702,52 @@ Lance's default version, which is `2.2`, so its blob columns are blob v2. A cata
 still produces v1 blob columns.
 
 Creating a table from a schema read back from an existing v1 blob table is the exception:
-that schema already carries `lance-encoding:blob = true`, which Lance rejects from `2.2`
-on, so the new table is created at `2.1` and its blob columns stay v1. Pinning a version
+that schema already carries `lance-encoding:blob = true`, which only `2.1` and older store
+as v1, so the new table is created at `2.1` and its blob columns stay v1. Pinning a version
 of `2.2` or newer for such a schema is rejected — rebuild the column as blob v2 instead.
 A schema that mixes v1 and v2 blob columns is rejected as well, because no single file
-format version can store both.
+format version can store both. The same holds for writes: a `file_format_version` of `2.2` or
+newer, `stable` or `next` is rejected for a table with v1 blob fields, top-level or nested.
+
+Earlier connector releases, on Lance 12, accepted such writes and kept the fields v1, but
+stored the new data files at the requested version. With Lance 13, any commit to a table that
+holds such a file turns its v1 blob fields into blob v2 and leaves the new version unreadable.
+Until the connector moves to a Lance release that reads these files, every connector commit
+checks the data files of the table version the write or command started from, and the files it
+adds, and fails, without committing, if one of them is such a file. That rejects every write
+and command on such a table except an overwrite or replace, which drops all of its files;
+reads, tags, branches and `VACUUM` commit no table version and still work. A write or command
+rejected this way may already have written files; no version references them, and `VACUUM`
+removes them once they are 7 days old.
+
+Other clients can add such files to any table with v1 blob fields: Lance's fragment writer,
+such as Python's `LanceFragment.create`, writes 2.2 files unless given a version, in Lance 12
+and 13 alike. Have them write at `2.1`, or stop them. Otherwise a repaired table needs the
+repair again, and a file they commit while a connector write or command runs is not checked, so
+that write or command breaks the table when it commits.
+
+If the table's v1 blob fields are all top-level columns, overwrite it with its own rows at
+`2.1`:
+
+```python
+from pyspark.sql.functions import lit
+
+spark.table("lance.ns.docs").writeTo("lance.ns.docs") \
+    .option("file_format_version", "2.1") \
+    .overwrite(lit(True))
+```
+
+The overwrite rewrites every row, including the blob bytes, drops the table's indexes, which
+have to be rebuilt afterwards, and assigns new row ids on tables with stable row ids. Nested
+v1 blob fields, such as `payload.data`, read back empty in Spark
+([#852](https://github.com/lance-format/lance-spark/issues/852)), so overwriting such a table
+with its own rows would replace their bytes with empty values; overwrite it from its source
+data instead.
+
+A table that another Lance 13 client already broke still reads at its earlier versions.
+Restore the last readable one with Lance, for example `lance.dataset(uri, version=n).restore()`,
+then repair it as above; writes made after version `n` have to be redone. Do not `VACUUM` the
+table before that, since it can remove the versions that still read.
 
 With an older version, such as `2.0`, `2.1` or `legacy`, blob columns use the legacy v1
 encoding with `lance-encoding:blob = true` metadata. Pin one of those versions to keep a

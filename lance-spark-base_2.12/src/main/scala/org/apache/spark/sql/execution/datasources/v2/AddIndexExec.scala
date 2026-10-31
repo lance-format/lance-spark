@@ -37,7 +37,7 @@ import org.lance.operation.{CreateIndex => AddIndexOperation}
 import org.lance.schema.{LanceField, LanceSchema}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceRuntime, LanceSparkReadOptions}
 import org.lance.spark.arrow.LanceArrowWriter
-import org.lance.spark.utils.{CloseableUtil, FieldPathUtils, Utils}
+import org.lance.spark.utils.{CloseableUtil, FieldPathUtils, LanceCommits, Utils}
 import org.lance.spark.write.SingleBatchArrowReader
 
 import java.util.{Collections, Locale, UUID}
@@ -214,7 +214,7 @@ case class AddIndexExec(
 
     // Without fragmentIds, Lance commits createIndex atomically. Do not manually commit the
     // returned metadata a second time.
-    dataset.createIndex(opts)
+    LanceCommits.call(dataset, () => dataset.createIndex(opts))
 
     Seq(new GenericInternalRow(Array[Any](0L, UTF8String.fromString(indexName))))
   }
@@ -234,10 +234,13 @@ case class AddIndexExec(
         IndexUtils.liveFragmentIds(dataset),
         segments,
         indexName)
-      val committed = dataset.commitExistingIndexSegments(
-        indexName,
-        column,
-        segments.toList.asJava)
+      val committed = LanceCommits.call(
+        dataset,
+        () =>
+          dataset.commitExistingIndexSegments(
+            indexName,
+            column,
+            segments.toList.asJava))
       // The commit advances this handle to the manifest it wrote, so both the returned metadata and
       // the fragment list below describe the committed state rather than the one validated above.
       IndexUtils

@@ -163,6 +163,10 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
       }
     }
     LanceSparkWriteOptions writeOptions = writeOptionsBuilder.build();
+    if (command != Command.DELETE) {
+      // UPDATE and MERGE write rows, so they take the same version check as an INSERT.
+      BlobUtils.checkBlobV1WriteVersion(sparkSchema, writeOptions.getFileFormatVersion());
+    }
     Map<String, BlobSourceContext> contexts =
         blobSourceContexts.isEmpty()
             ? BlobSourceContext.decodeFromWriteOptions(logicalWriteInfo.options())

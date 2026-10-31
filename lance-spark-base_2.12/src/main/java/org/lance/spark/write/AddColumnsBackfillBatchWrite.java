@@ -25,6 +25,7 @@ import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
+import org.lance.spark.utils.LanceCommits;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.c.ArrowArrayStream;
@@ -182,7 +183,7 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
       }
       try (Transaction txn =
               new Transaction.Builder().readVersion(version).operation(merge).build();
-          Dataset committed = commitBuilder.execute(txn)) {
+          Dataset committed = LanceCommits.execute(dataset, commitBuilder, txn)) {
         // auto-close txn and committed dataset
       }
     }

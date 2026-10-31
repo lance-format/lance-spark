@@ -19,7 +19,7 @@ import org.apache.spark.sql.catalyst.plans.logical.LanceDropIndexOutputType
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.unsafe.types.UTF8String
 import org.lance.spark.LanceDataset
-import org.lance.spark.utils.Utils
+import org.lance.spark.utils.{LanceCommits, Utils}
 
 /**
  * Physical execution of DROP INDEX for Lance datasets.
@@ -41,7 +41,7 @@ case class LanceDropIndexExec(
 
     val dataset = Utils.openDatasetBuilder(readOptions).build()
     try {
-      dataset.dropIndex(indexName)
+      LanceCommits.run(dataset, () => dataset.dropIndex(indexName))
     } catch {
       // Add table context while preserving the underlying Lance error.
       case e: Exception =>
