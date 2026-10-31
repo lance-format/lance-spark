@@ -43,6 +43,7 @@ import org.lance.spark.function.LanceMultiMatchFunction;
 import org.lance.spark.function.LancePhraseFunction;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
 import org.lance.spark.utils.Optional;
+import org.lance.spark.utils.SchemaConverter;
 import org.lance.spark.utils.Utils;
 import org.lance.spark.write.StagedCommit;
 import org.lance.spark.write.StagedCommitOptions;
@@ -1022,18 +1023,53 @@ public abstract class BaseLanceNamespaceSparkCatalog
     ResolvedTable resolved = resolveIdentifier(ident);
 
     try (Dataset dataset = Utils.openDatasetBuilder(resolved.readOptions).build()) {
-      // Dataset.updateConfig uses replace semantics (overwrites entire config),
-      // so we must read-merge-write to preserve existing properties.
-      Map<String, String> merged = new HashMap<>(dataset.getConfig());
-      merged.putAll(propsToSet);
-      keysToRemove.forEach(merged::remove);
       boolean managedVersioning =
           resolved.describeResponse != null
               && Boolean.TRUE.equals(resolved.describeResponse.getManagedVersioning());
-      updateDatasetConfig(dataset, merged, managedVersioning, resolved.tableIdList);
+      alterTableProperties(
+          dataset, propsToSet, keysToRemove, managedVersioning, resolved.tableIdList);
     }
 
     return loadTable(ident);
+  }
+
+  void alterTableProperties(
+      Dataset dataset,
+      Map<String, String> propsToSet,
+      Set<String> keysToRemove,
+      boolean managedVersioning,
+      List<String> tableIdList) {
+    rejectSchemaPropertiesForExistingColumns(dataset.getSchema(), propsToSet);
+    Map<String, String> merged = new HashMap<>(dataset.getConfig());
+    merged.putAll(propsToSet);
+    keysToRemove.forEach(merged::remove);
+    boolean protectSchema =
+        propsToSet.keySet().stream()
+            .anyMatch(key -> SchemaConverter.schemaPropertyColumn(key) != null);
+    updateDatasetConfig(dataset, merged, managedVersioning, tableIdList, protectSchema);
+  }
+
+  /** Allow future column properties for ADD COLUMNS, but reject changes to existing columns. */
+  private static void rejectSchemaPropertiesForExistingColumns(
+      Schema arrowSchema, Map<String, String> propsToSet) {
+    if (propsToSet.isEmpty()) {
+      return;
+    }
+    String[] fieldNames = LanceArrowUtils.fromArrowSchema(arrowSchema).fieldNames();
+    Set<String> existingColumns = new HashSet<>(Arrays.asList(fieldNames));
+    for (String property : propsToSet.keySet()) {
+      String column = SchemaConverter.schemaPropertyColumn(property);
+      if (column != null && existingColumns.contains(column)) {
+        throw new UnsupportedOperationException(
+            "Cannot set property '"
+                + property
+                + "' because column '"
+                + column
+                + "' already exists. Schema and encoding properties must be configured before"
+                + " the column exists. UNSET TBLPROPERTIES removes config without changing"
+                + " the stored schema.");
+      }
+    }
   }
 
   @Override
@@ -1701,22 +1737,42 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Map<String, String> config,
       boolean managedVersioning,
       List<String> tableIdList) {
-    if (!managedVersioning) {
+    updateDatasetConfig(dataset, config, managedVersioning, tableIdList, false);
+  }
+
+  private void updateDatasetConfig(
+      Dataset dataset,
+      Map<String, String> config,
+      boolean managedVersioning,
+      List<String> tableIdList,
+      boolean protectSchema) {
+    if (!managedVersioning && !protectSchema) {
       dataset.updateConfig(config);
       return;
     }
 
     UpdateMap updateMap = UpdateMap.builder().updates(config).replace(true).build();
-    UpdateConfig updateConfig = UpdateConfig.builder().configUpdates(updateMap).build();
-    CommitBuilder commitBuilder =
-        new CommitBuilder(dataset)
-            .namespaceClient(namespace)
-            .tableId(tableIdList)
-            .namespaceClientManagedVersioning(true);
+    UpdateConfig.Builder updateConfig = UpdateConfig.builder().configUpdates(updateMap);
+    if (protectSchema) {
+      // A config-only update can rebase over ADD COLUMNS. Retaining schema metadata makes
+      // Lance reject concurrent Merge/Overwrite commits, preserving the schema we validated.
+      updateConfig.schemaMetadataUpdates(
+          UpdateMap.builder()
+              .updates(dataset.getSchema().getCustomMetadata())
+              .replace(true)
+              .build());
+    }
+    CommitBuilder commitBuilder = new CommitBuilder(dataset);
+    if (managedVersioning) {
+      commitBuilder
+          .namespaceClient(namespace)
+          .tableId(tableIdList)
+          .namespaceClientManagedVersioning(true);
+    }
     try (Transaction txn =
             new Transaction.Builder()
                 .readVersion(dataset.version())
-                .operation(updateConfig)
+                .operation(updateConfig.build())
                 .build();
         Dataset committed = commitBuilder.execute(txn)) {
       // auto-close txn and committed dataset
