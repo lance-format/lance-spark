@@ -66,6 +66,15 @@ public final class FieldPathUtils {
     return null;
   }
 
+  /** Returns the ids of every field in the schema, nested fields included, in pre-order. */
+  public static long[] allFieldIds(LanceSchema schema) {
+    List<Long> ids = new ArrayList<>();
+    for (LanceField field : schema.fields()) {
+      collectFieldIds(field, ids);
+    }
+    return ids.stream().mapToLong(Long::longValue).toArray();
+  }
+
   public static List<String> parseCanonicalPath(String path) {
     if (path == null || path.isEmpty()) {
       throw new IllegalArgumentException("Field path must not be empty");
@@ -161,6 +170,13 @@ public final class FieldPathUtils {
       return null;
     } finally {
       ancestors.remove(ancestors.size() - 1);
+    }
+  }
+
+  private static void collectFieldIds(LanceField field, List<Long> ids) {
+    ids.add((long) field.getId());
+    for (LanceField child : field.getChildren()) {
+      collectFieldIds(child, ids);
     }
   }
 
