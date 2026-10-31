@@ -18,6 +18,7 @@ import org.lance.Dataset;
 import org.lance.Transaction;
 import org.lance.WriteDatasetBuilder;
 import org.lance.WriteParams;
+import org.lance.index.Index;
 import org.lance.memwal.ShardingSpec;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.errors.ErrorCode;
@@ -36,13 +37,17 @@ import org.lance.namespace.model.RegisterTableRequest;
 import org.lance.namespace.model.RenameTableRequest;
 import org.lance.operation.UpdateConfig;
 import org.lance.operation.UpdateMap;
+import org.lance.schema.LanceField;
+import org.lance.schema.LanceSchema;
 import org.lance.spark.function.LanceBucketFunction;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
 import org.lance.spark.function.LanceMatchFunction;
 import org.lance.spark.function.LanceMultiMatchFunction;
 import org.lance.spark.function.LancePhraseFunction;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
+import org.lance.spark.utils.FieldPathUtils;
 import org.lance.spark.utils.Optional;
+import org.lance.spark.utils.SchemaConverter;
 import org.lance.spark.utils.Utils;
 import org.lance.spark.write.StagedCommit;
 import org.lance.spark.write.StagedCommitOptions;
@@ -992,6 +997,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     Map<String, String> propsToSet = new HashMap<>();
     Set<String> keysToRemove = new HashSet<>();
 
+    List<TableChange.DeleteColumn> columnsToDrop = new ArrayList<>();
     for (TableChange change : changes) {
       if (change instanceof TableChange.SetProperty) {
         TableChange.SetProperty setProp = (TableChange.SetProperty) change;
@@ -999,12 +1005,22 @@ public abstract class BaseLanceNamespaceSparkCatalog
       } else if (change instanceof TableChange.RemoveProperty) {
         TableChange.RemoveProperty removeProp = (TableChange.RemoveProperty) change;
         keysToRemove.add(removeProp.property());
+      } else if (change instanceof TableChange.DeleteColumn) {
+        columnsToDrop.add((TableChange.DeleteColumn) change);
       } else {
         throw new UnsupportedOperationException(
             "Unsupported table change type: "
                 + change.getClass().getSimpleName()
-                + ". Only SET/UNSET TBLPROPERTIES is supported.");
+                + ". Only SET/UNSET TBLPROPERTIES and DROP COLUMN are supported.");
       }
+    }
+
+    if (!columnsToDrop.isEmpty()) {
+      if (!propsToSet.isEmpty() || !keysToRemove.isEmpty()) {
+        throw new UnsupportedOperationException(
+            "DROP COLUMN cannot be combined with SET or UNSET TBLPROPERTIES.");
+      }
+      return dropColumns(ident, columnsToDrop);
     }
 
     if (propsToSet.containsKey(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS)
@@ -1034,6 +1050,217 @@ public abstract class BaseLanceNamespaceSparkCatalog
     }
 
     return loadTable(ident);
+  }
+
+  private static final String DROP_ALL_COLUMNS_MESSAGE =
+      "Cannot drop all columns from a Lance table. At least one column must remain.";
+
+  /**
+   * Drops Lance fields and the schema or encoding config keys that name those fields. Config is
+   * updated first so a failed {@code dropColumns} can restore it.
+   */
+  private Table dropColumns(Identifier ident, List<TableChange.DeleteColumn> columnsToDrop)
+      throws NoSuchTableException {
+    ResolvedTable resolved = resolveIdentifier(ident);
+    boolean managedVersioning =
+        resolved.describeResponse != null
+            && Boolean.TRUE.equals(resolved.describeResponse.getManagedVersioning());
+    try (Dataset dataset = Utils.openDatasetBuilder(resolved.readOptions).build()) {
+      DropResolution resolution = resolveColumnsToDrop(dataset, columnsToDrop);
+      if (resolution.paths.isEmpty()) {
+        return loadTable(ident);
+      }
+      Map<String, String> originalConfig = new HashMap<>(dataset.getConfig());
+      Map<String, String> updatedConfig =
+          configWithoutDroppedColumns(
+              originalConfig, dataset.getLanceSchema(), resolution.removedFieldIds);
+      boolean configChanged = !updatedConfig.equals(originalConfig);
+      if (configChanged) {
+        updateDatasetConfig(dataset, updatedConfig, managedVersioning, resolved.tableIdList);
+      }
+      try {
+        dataset.dropColumns(resolution.paths);
+      } catch (RuntimeException dropFailure) {
+        restoreConfigAfterFailedDrop(
+            dataset,
+            originalConfig,
+            configChanged,
+            managedVersioning,
+            resolved.tableIdList,
+            dropFailure);
+        throw dropFailure;
+      }
+    }
+    return loadTable(ident);
+  }
+
+  private static DropResolution resolveColumnsToDrop(
+      Dataset dataset, List<TableChange.DeleteColumn> columnsToDrop) {
+    LanceSchema schema = dataset.getLanceSchema();
+    List<LanceField> topLevel = schema.fields();
+    List<String> paths = new ArrayList<>();
+    Map<Integer, String> removedFieldIds = new HashMap<>();
+    Set<String> droppedTopLevel = new HashSet<>();
+    for (TableChange.DeleteColumn drop : columnsToDrop) {
+      String[] parts = drop.fieldNames();
+      if (parts == null || parts.length == 0) {
+        throw new IllegalArgumentException("DROP COLUMN requires a column name.");
+      }
+      LanceField field = findField(topLevel, parts, 0);
+      String path = FieldPathUtils.canonicalPath(Arrays.asList(parts));
+      if (field == null) {
+        if (Boolean.TRUE.equals(drop.ifExists())) {
+          continue;
+        }
+        throw new IllegalArgumentException("Column " + path + " does not exist in the dataset");
+      }
+      if (paths.contains(path)) {
+        continue;
+      }
+      paths.add(path);
+      collectFieldIds(field, Arrays.asList(parts), removedFieldIds);
+      if (parts.length == 1) {
+        droppedTopLevel.add(parts[0]);
+      }
+    }
+    if (paths.isEmpty()) {
+      return new DropResolution(paths, new HashSet<>(removedFieldIds.keySet()));
+    }
+    boolean keepsAColumn = false;
+    for (LanceField field : topLevel) {
+      if (!droppedTopLevel.contains(field.getName())) {
+        keepsAColumn = true;
+        break;
+      }
+    }
+    if (!keepsAColumn) {
+      throw new UnsupportedOperationException(DROP_ALL_COLUMNS_MESSAGE);
+    }
+    rejectIndexedDrop(dataset.getIndexes(), removedFieldIds);
+    return new DropResolution(paths, new HashSet<>(removedFieldIds.keySet()));
+  }
+
+  private static final class DropResolution {
+    private final List<String> paths;
+    private final Set<Integer> removedFieldIds;
+
+    private DropResolution(List<String> paths, Set<Integer> removedFieldIds) {
+      this.paths = paths;
+      this.removedFieldIds = removedFieldIds;
+    }
+  }
+
+  private static LanceField findField(List<LanceField> fields, String[] parts, int index) {
+    LanceField match = null;
+    for (LanceField field : fields) {
+      if (parts[index].equals(field.getName())) {
+        match = field;
+        break;
+      }
+    }
+    if (match == null || index == parts.length - 1) {
+      return match;
+    }
+    return findField(match.getChildren(), parts, index + 1);
+  }
+
+  private static void collectFieldIds(
+      LanceField field, List<String> parts, Map<Integer, String> fieldIds) {
+    String path = FieldPathUtils.canonicalPath(parts);
+    fieldIds.put(field.getId(), path);
+    if (isUnenforcedPrimaryKey(field)) {
+      throw new UnsupportedOperationException(
+          "Cannot drop column '"
+              + path
+              + "' because it is part of the unenforced primary key. "
+              + "The primary key cannot be changed or removed once set.");
+    }
+    for (LanceField child : field.getChildren()) {
+      List<String> childParts = new ArrayList<>(parts);
+      childParts.add(child.getName());
+      collectFieldIds(child, childParts, fieldIds);
+    }
+  }
+
+  private static boolean isUnenforcedPrimaryKey(LanceField field) {
+    if (field.isUnenforcedPrimaryKey()) {
+      return true;
+    }
+    Map<String, String> metadata = field.getMetadata();
+    return metadata != null
+        && "true".equalsIgnoreCase(metadata.get("lance-schema:unenforced-primary-key"));
+  }
+
+  private static void rejectIndexedDrop(List<Index> indexes, Map<Integer, String> removedFieldIds) {
+    if (indexes == null) {
+      return;
+    }
+    for (Index index : indexes) {
+      String column = indexedColumn(index.fields(), removedFieldIds);
+      if (column == null) {
+        column = indexedColumn(index.coveringFields(), removedFieldIds);
+      }
+      if (column != null) {
+        throw new UnsupportedOperationException(
+            "Cannot drop column '"
+                + column
+                + "' because index '"
+                + index.name()
+                + "' still references it. Drop the index with ALTER TABLE ... DROP INDEX first.");
+      }
+    }
+  }
+
+  private static String indexedColumn(
+      List<Integer> fieldIds, Map<Integer, String> removedFieldIds) {
+    if (fieldIds == null) {
+      return null;
+    }
+    for (Integer fieldId : fieldIds) {
+      String column = removedFieldIds.get(fieldId);
+      if (column != null) {
+        return column;
+      }
+    }
+    return null;
+  }
+
+  private static Map<String, String> configWithoutDroppedColumns(
+      Map<String, String> config, LanceSchema schema, Set<Integer> removedFieldIds) {
+    Map<String, String> updated = new HashMap<>(config);
+    updated.keySet().removeIf(key -> configKeyTargetsRemovedField(schema, removedFieldIds, key));
+    return updated;
+  }
+
+  private static boolean configKeyTargetsRemovedField(
+      LanceSchema schema, Set<Integer> removedFieldIds, String key) {
+    String column = SchemaConverter.schemaPropertyColumn(key);
+    if (column == null) {
+      return false;
+    }
+    try {
+      LanceField field = FieldPathUtils.resolveField(schema, column);
+      return removedFieldIds.contains(field.getId());
+    } catch (IllegalArgumentException notAStoredField) {
+      return false;
+    }
+  }
+
+  private void restoreConfigAfterFailedDrop(
+      Dataset dataset,
+      Map<String, String> originalConfig,
+      boolean configChanged,
+      boolean managedVersioning,
+      List<String> tableIdList,
+      RuntimeException dropFailure) {
+    if (!configChanged) {
+      return;
+    }
+    try {
+      updateDatasetConfig(dataset, originalConfig, managedVersioning, tableIdList);
+    } catch (RuntimeException restoreFailure) {
+      dropFailure.addSuppressed(restoreFailure);
+    }
   }
 
   @Override

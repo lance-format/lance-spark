@@ -32,6 +32,47 @@ ALTER TABLE users UNSET TBLPROPERTIES ('team', 'env');
 
 Unsetting a property that does not exist is a no-op (no error is raised).
 
+## DROP COLUMN
+
+Remove one or more columns. The Lance field is dropped, and schema or encoding properties for that
+column are removed. Other properties stay. Nested names use the same quoted field path as other
+Lance commands. Quote a name that contains a dot. The last example drops that literal child and
+leaves the nested path in place.
+
+```sql
+ALTER TABLE users DROP COLUMN name;
+
+ALTER TABLE users DROP COLUMNS name, city;
+
+ALTER TABLE users DROP COLUMN IF EXISTS missing_column;
+
+ALTER TABLE users DROP COLUMN address.city;
+
+ALTER TABLE users DROP COLUMN s.`a.b`;
+```
+
+`DROP COLUMN IF EXISTS` does nothing when the column is absent, including leaving a property that
+was stored for a column that has not been added yet.
+
+Dropping every remaining column fails before the table changes. The SQL error is:
+
+```text
+Cannot drop all columns from a Lance table. At least one column must remain.
+```
+
+A column that belongs to the unenforced primary key cannot be dropped. That declaration is
+write-once and stays in place.
+
+A column that still has an index cannot be dropped. Drop the index first:
+
+```sql
+ALTER TABLE users DROP INDEX name_idx;
+ALTER TABLE users DROP COLUMN name;
+```
+
+This command updates metadata only. The removed column's bytes stay in existing data files until
+optimize and vacuum.
+
 ## Limitations
 
 The `enable_stable_row_ids` property controls stable row ID tracking in the Lance format and can only be set at table creation time via `TBLPROPERTIES` in `CREATE TABLE`. Changing it via `ALTER TABLE` updates the stored config value but does **not** change the actual row ID tracking behavior.

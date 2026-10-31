@@ -24,6 +24,8 @@ import org.apache.spark.sql.types.StringType;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 import static org.lance.spark.utils.BlobUtils.ARROW_EXTENSION_BLOB_V2;
@@ -44,7 +46,48 @@ import static org.lance.spark.utils.VectorUtils.ARROW_FIXED_SIZE_LIST_SIZE_KEY;
  */
 public class SchemaConverter {
 
+  private static final List<String> SCHEMA_PROPERTY_SUFFIXES = schemaPropertySuffixes();
+
   private SchemaConverter() {}
+
+  private static List<String> schemaPropertySuffixes() {
+    List<String> suffixes = new ArrayList<>();
+    suffixes.add(VectorUtils.createVectorSizePropertyKey(""));
+    suffixes.add(Float16Utils.createPropertyKey(""));
+    suffixes.add(FixedSizeBinaryUtils.createPropertyKey(""));
+    suffixes.add(LargeVarCharUtils.createPropertyKey(""));
+    suffixes.add(LargeVarBinaryUtils.createPropertyKey(""));
+    suffixes.add(BlobUtils.BLOB_ENCODING_PROPERTY_SUFFIX);
+    for (LanceEncodingUtils.EncodingPropertyRule rule :
+        LanceEncodingUtils.getSupportedEncodingPropertyRules()) {
+      suffixes.add("." + rule.getPropertySuffix());
+    }
+    return List.copyOf(suffixes);
+  }
+
+  /**
+   * Column configured by a schema or encoding property.
+   *
+   * @param property table property key
+   * @return the column prefix, or {@code null} when the key is not a schema or encoding property
+   */
+  public static String schemaPropertyColumn(String property) {
+    if (property == null) {
+      return null;
+    }
+    String matchedSuffix = null;
+    for (String suffix : SCHEMA_PROPERTY_SUFFIXES) {
+      if (property.length() > suffix.length()
+          && property.endsWith(suffix)
+          && (matchedSuffix == null || suffix.length() > matchedSuffix.length())) {
+        matchedSuffix = suffix;
+      }
+    }
+    if (matchedSuffix == null) {
+      return null;
+    }
+    return property.substring(0, property.length() - matchedSuffix.length());
+  }
 
   public static StructType processSchemaWithProperties(
       StructType sparkSchema, Map<String, String> properties) {

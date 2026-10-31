@@ -537,6 +537,25 @@ class TestDDLStagingTable:
 class TestDDLAlterTableProperties:
     """Test ALTER TABLE SET/UNSET TBLPROPERTIES operations."""
 
+    def test_drop_column_removes_encoding_property(self, spark):
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'alpha')")
+        spark.sql("""
+            ALTER TABLE default.test_table
+            SET TBLPROPERTIES ('name.lance.compression' = 'zstd', 'team' = 'search')
+        """)
+        spark.sql("ALTER TABLE default.test_table DROP COLUMN name")
+
+        rows = spark.sql("SELECT * FROM default.test_table").collect()
+        assert [row.id for row in rows] == [1]
+        assert "name" not in spark.table("default.test_table").columns
+        properties = {
+            row.key: row.value
+            for row in spark.sql("SHOW TBLPROPERTIES default.test_table").collect()
+        }
+        assert "name.lance.compression" not in properties
+        assert properties["team"] == "search"
+
     def test_set_tblproperties(self, spark):
         """SET TBLPROPERTIES stores properties visible via SHOW TBLPROPERTIES."""
         spark.sql("""
