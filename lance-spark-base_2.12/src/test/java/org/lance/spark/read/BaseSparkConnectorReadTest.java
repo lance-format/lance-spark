@@ -31,11 +31,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import scala.collection.JavaConverters;
 
+import java.math.BigDecimal;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
+import static org.apache.spark.sql.functions.col;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -432,6 +434,125 @@ public abstract class BaseSparkConnectorReadTest {
     assertEquals(1, rows.size());
     assertEquals(1, rows.get(0).getInt(0));
     assertEquals("O'Brien", rows.get(0).getString(1));
+  }
+
+  /**
+   * Spark widens these literals to the column's scale, and Lance parses a bare non-integer number
+   * in a pushed filter as a double, which cannot hold a value such as 1234.570000000000000000
+   * exactly.
+   */
+  @Test
+  public void testDecimalFilterMatchesExactValue() {
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("amount", DataTypes.createDecimalType(38, 18), true);
+    Dataset<Row> lanceData =
+        writeAndRead(
+            "decimal_filter_test",
+            schema,
+            RowFactory.create(1, new BigDecimal("1234.57")),
+            RowFactory.create(2, new BigDecimal("590.29")),
+            RowFactory.create(3, new BigDecimal("-1234.57")),
+            RowFactory.create(4, new BigDecimal("12345678901234567890.123456789012345678")));
+
+    assertEquals(Arrays.asList(1), pushedIds(lanceData.filter("amount = 1234.57"), "amount =="));
+    assertEquals(
+        Arrays.asList(1, 2, 3), pushedIds(lanceData.filter("amount <= 1234.57"), "amount <="));
+    assertEquals(
+        Arrays.asList(3), pushedIds(lanceData.filter("amount IN (-1234.57, 0)"), "amount IN"));
+    assertEquals(
+        Arrays.asList(4),
+        pushedIds(
+            lanceData.filter("amount = 12345678901234567890.123456789012345678"), "amount =="));
+  }
+
+  /**
+   * Spark pushes {@code <>} and {@code NOT IN} as NOT over {@code =} or {@code IN}, and Lance does
+   * not narrow a literal under NOT to the column's FLOAT type.
+   */
+  @Test
+  public void testNegatedFloatFilterExcludesEqualRows() {
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("score", DataTypes.FloatType, true);
+    Dataset<Row> lanceData =
+        writeAndRead(
+            "float_filter_test",
+            schema,
+            RowFactory.create(1, 0.1f),
+            RowFactory.create(2, 0.5f),
+            RowFactory.create(3, 1.1f),
+            RowFactory.create(4, null));
+
+    assertEquals(
+        Arrays.asList(2, 3), pushedIds(lanceData.filter("score <> 0.1F"), "NOT (score =="));
+    assertEquals(
+        Arrays.asList(2),
+        pushedIds(lanceData.filter("score NOT IN (0.1F, 1.1F)"), "NOT (score IN"));
+  }
+
+  @Test
+  public void testBigintMinValueFilter() {
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("big", DataTypes.LongType, true);
+    Dataset<Row> lanceData =
+        writeAndRead(
+            "bigint_filter_test",
+            schema,
+            RowFactory.create(1, Long.MIN_VALUE),
+            RowFactory.create(2, 0L),
+            RowFactory.create(3, Long.MAX_VALUE));
+
+    assertEquals(
+        Arrays.asList(1),
+        pushedIds(lanceData.filter(col("big").equalTo(Long.MIN_VALUE)), "big =="));
+  }
+
+  /** Lance's SQL has no NaN or infinity literal, so Spark evaluates these filters. */
+  @Test
+  public void testNonFiniteDoubleFilters() {
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("ratio", DataTypes.DoubleType, true);
+    Dataset<Row> lanceData =
+        writeAndRead(
+            "double_filter_test",
+            schema,
+            RowFactory.create(1, Double.NaN),
+            RowFactory.create(2, 1.5),
+            RowFactory.create(3, Double.POSITIVE_INFINITY));
+
+    assertEquals(Arrays.asList(1), ids(lanceData.filter(col("ratio").equalTo(Double.NaN))));
+    assertEquals(
+        Arrays.asList(2), ids(lanceData.filter(col("ratio").lt(Double.POSITIVE_INFINITY))));
+  }
+
+  private Dataset<Row> writeAndRead(String name, StructType schema, Row... rows) {
+    String datasetPath = tempDir.toString() + "/" + name;
+    spark
+        .createDataFrame(Arrays.asList(rows), schema)
+        .write()
+        .format(LanceDataSource.name)
+        .save(datasetPath);
+    return spark.read().format(LanceDataSource.name).load(datasetPath);
+  }
+
+  private static List<Integer> ids(Dataset<Row> result) {
+    return result.select("id").orderBy("id").collectAsList().stream()
+        .map(r -> r.getInt(0))
+        .collect(Collectors.toList());
+  }
+
+  /** Returns the ids in {@code result} after checking that its filter reached Lance. */
+  private static List<Integer> pushedIds(Dataset<Row> result, String pushed) {
+    String where = LanceScanTestHelper.extractLanceScanMetadata(result).get("whereConditions");
+    assertTrue(where.contains(pushed), "Expected " + pushed + " in the pushed filter: " + where);
+    return ids(result);
   }
 
   @Test
