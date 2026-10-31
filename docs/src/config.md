@@ -631,6 +631,31 @@ Select columns compatible with the snapshot; missing columns or incompatible typ
 including nested fields, fail during planning. Use SQL `VERSION AS OF 'release_candidate'`
 to analyze the query against the historical schema instead.
 
+## Arrow Batch Reads
+
+Set `arrow_batch_reads` to `true` to expose supported scans as Spark `ArrowColumnVector`
+batches, so an engine that processes Arrow data, such as Apache Gluten, can take them as Arrow.
+This is disabled by default.
+
+```python
+df = spark.read \
+    .format("lance") \
+    .option("arrow_batch_reads", "true") \
+    .load("/path/to/dataset.lance")
+```
+
+If any selected column is unsupported, the whole scan uses the regular reader. This includes
+blob and JSON columns, `_score`, and Arrow types Spark cannot read directly, such as unsigned
+integers or nanosecond timestamps. `LanceScan.arrowBatchSchema()` reports whether a scan
+supports Arrow batches; `LanceScan.withArrowBatches()` turns them on for a planned scan and
+throws if it does not.
+
+`FixedSizeList` (vector) columns become Arrow `List`s, and `_rowid`, `_rowaddr`, and the row
+version columns are exposed as signed 64-bit integers.
+
+Native vectors may be reused on `next()`, while converted vectors are released. Consumers must
+copy or transfer data they need to keep before advancing.
+
 ## Memory Configuration
 
 Lance Spark uses Arrow for data transfer between native code and Spark, and maintains caches for improved performance.
