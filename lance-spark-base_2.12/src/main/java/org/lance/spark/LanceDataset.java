@@ -19,6 +19,7 @@ import org.lance.spark.read.LanceScanBuilder;
 import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Utils;
+import org.lance.spark.utils.VectorUtils;
 import org.lance.spark.write.AddColumnsBackfillWrite;
 import org.lance.spark.write.LanceWriteSchemaValidator;
 import org.lance.spark.write.SparkWrite;
@@ -403,6 +404,14 @@ public class LanceDataset
     // physical URI is invisible to DESCRIBE EXTENDED and to any tooling that relies on it.
     Map<String, String> props = new HashMap<>(tableProperties);
     props.put("location", readOptions.getDatasetUri());
+    // Schema dimensions take precedence over stored config.
+    for (StructField field : sparkSchema.fields()) {
+      if (VectorUtils.shouldBeFixedSizeList(field.dataType(), field.metadata())) {
+        props.put(
+            VectorUtils.createVectorSizePropertyKey(field.name()),
+            Long.toString(field.metadata().getLong(VectorUtils.ARROW_FIXED_SIZE_LIST_SIZE_KEY)));
+      }
+    }
     return props;
   }
 

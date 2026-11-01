@@ -201,6 +201,47 @@ class TestDDLTable:
         assert "name" in col_names
         assert "value" in col_names
 
+    def test_describe_extended_vector_dimensions(self, spark):
+        """DESCRIBE EXTENDED exposes fixed-size-list dimensions as table properties."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                embedding ARRAY<FLOAT>,
+                embedding_double ARRAY<DOUBLE>,
+                values ARRAY<FLOAT>
+            ) USING lance
+            TBLPROPERTIES (
+                'embedding.arrow.fixed-size-list.size' = '756',
+                'embedding_double.arrow.fixed-size-list.size' = '64'
+            )
+        """)
+        spark.sql("REFRESH TABLE default.test_table")
+
+        rows = spark.sql("DESCRIBE EXTENDED default.test_table").collect()
+        description = {row.col_name: row.data_type for row in rows}
+        assert description["embedding"] == "array<float>"
+        properties = description["Table Properties"]
+        assert "embedding.arrow.fixed-size-list.size=756" in properties
+        assert "embedding_double.arrow.fixed-size-list.size=64" in properties
+        assert "values.arrow.fixed-size-list.size" not in properties
+
+        dimension = spark.sql("""
+            SHOW TBLPROPERTIES default.test_table ('embedding.arrow.fixed-size-list.size')
+        """).collect()
+        assert dimension[0].value == "756"
+
+        spark.sql("""
+            ALTER TABLE default.test_table
+            UNSET TBLPROPERTIES ('embedding.arrow.fixed-size-list.size')
+        """)
+        spark.sql("REFRESH TABLE default.test_table")
+        dimension = spark.sql("""
+            SHOW TBLPROPERTIES default.test_table ('embedding.arrow.fixed-size-list.size')
+        """).collect()
+        assert dimension[0].value == "756"
+        assert spark.table("default.test_table").schema["embedding"].metadata[
+            "arrow.fixed-size-list.size"
+        ] == 756
+
     def test_drop_table(self, spark):
         """Test DROP TABLE."""
         spark.sql("""
