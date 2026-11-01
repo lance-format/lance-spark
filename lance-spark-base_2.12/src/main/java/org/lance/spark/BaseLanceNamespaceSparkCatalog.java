@@ -1756,9 +1756,10 @@ public abstract class BaseLanceNamespaceSparkCatalog
     if (protectSchema) {
       // A config-only update can rebase over ADD COLUMNS. Retaining schema metadata makes
       // Lance reject concurrent Merge/Overwrite commits, preserving the schema we validated.
+      Map<String, String> metadata = dataset.getSchema().getCustomMetadata();
       updateConfig.schemaMetadataUpdates(
           UpdateMap.builder()
-              .updates(dataset.getSchema().getCustomMetadata())
+              .updates(metadata == null ? Map.of() : metadata)
               .replace(true)
               .build());
     }
