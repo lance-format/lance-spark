@@ -92,6 +92,36 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
     assertRuntimePruned(joined);
   }
 
+  /**
+   * Spark's default path: AQE on, a broadcast hash join, and DPP that only reuses that broadcast.
+   * The dimension is a non-Lance (Parquet) table, as when joining an Iceberg dimension. The hint
+   * stands in for a fact table too large to broadcast: DPP needs the dimension's broadcast to
+   * reuse.
+   */
+  @Test
+  public void testRuntimeFilteringReusesBroadcastUnderAqeDefaults() {
+    spark.conf().set("spark.sql.adaptive.enabled", "true");
+    spark.conf().unset("spark.sql.optimizer.dynamicPartitionPruning.reuseBroadcastOnly");
+    spark.conf().unset("spark.sql.optimizer.dynamicPartitionPruning.fallbackFilterRatio");
+    spark.conf().unset("spark.sql.autoBroadcastJoinThreshold");
+    String fact = createFact(defaultCatalog, true, false);
+    String dimPath = tempDir.resolve("parquet_dim_" + suffix()).toString();
+    spark.table(createDimension(defaultCatalog, false)).write().parquet(dimPath);
+    spark.read().parquet(dimPath).createOrReplaceTempView("parquet_dim");
+
+    Dataset<Row> joined =
+        spark.sql(
+            "SELECT /*+ BROADCAST(d) */ f.id, d.label FROM "
+                + fact
+                + " f JOIN parquet_dim d ON f.k = d.k WHERE length(d.label) = 5");
+
+    assertEquals(9, joined.collectAsList().size());
+    String plan = joined.queryExecution().executedPlan().toString();
+    assertTrue(plan.contains("AdaptiveSparkPlan"), plan);
+    assertTrue(plan.contains("BroadcastHashJoin"), plan);
+    assertRuntimePruned(joined);
+  }
+
   @Test
   public void testLeftSemiJoinRuntimeFiltering() {
     String fact = createFact(defaultCatalog, true, false);
