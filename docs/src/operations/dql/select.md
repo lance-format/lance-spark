@@ -383,6 +383,13 @@ Setting `use_scalar_index=false` disables native scalar-index lookup but still a
 driver memory and generated filter size; a rejected runtime filter is observable in scan metadata
 as `rejectedRuntimeFilterCount` and does not affect query correctness.
 
+The guardrails can also be set for every table in a catalog, for example
+`spark.sql.catalog.lance.runtime_filter_max_keys=100000`; a per-read `.option()` overrides it.
+
+With Spark's defaults (`dynamicPartitionPruning.reuseBroadcastOnly=true`), a runtime filter
+reaches the Lance scan only when the other join side is broadcast and has a selective filter.
+If the Lance table is the broadcast side, or the join is a shuffle join, Spark drops the filter.
+
 ## User-Defined Types
 
 Spark UDT columns (e.g. MLlib's `VectorUDT`) round-trip transparently. On write the column is unwrapped to the UDT's `sqlType` (a struct) for storage, and the UDT's fully qualified class name is stamped onto the Arrow field's user metadata under the `__udt` key. On read, that marker is consulted and the schema is rewrapped to the original UDT automatically. No configuration needed; the user-facing class (e.g. `Vector` for `VectorUDT`) is materialized in rows as usual.
