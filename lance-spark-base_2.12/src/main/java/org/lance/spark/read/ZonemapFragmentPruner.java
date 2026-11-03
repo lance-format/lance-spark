@@ -15,6 +15,8 @@ package org.lance.spark.read;
 
 import org.lance.index.scalar.ZoneStats;
 
+import org.apache.arrow.vector.types.DateUnit;
+import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.Literal;
 import org.apache.spark.sql.connector.expressions.NamedReference;
@@ -115,6 +117,68 @@ public final class ZonemapFragmentPruner {
     }
 
     return Optional.of(Collections.unmodifiableSet(result));
+  }
+
+  /**
+   * Rescales zone bounds from the column's Lance storage unit to the unit Spark uses for its
+   * literals: microseconds for timestamps and days for dates.
+   *
+   * <p>Lance reports timestamp bounds in the column's own unit (s/ms/us/ns) and {@code
+   * Date(MILLISECOND)} bounds in milliseconds, while Spark's literals for the {@code TimestampType}
+   * and {@code DateType} these columns map to are in microseconds and days. Comparing them unscaled
+   * prunes fragments that do match. Bounds are rescaled with {@code floorDiv}, as the reader does,
+   * so pruning sees the same values a query does.
+   *
+   * @return the rescaled zones, or null if a bound cannot be represented in Spark's unit
+   */
+  public static List<ZoneStats> toSparkUnits(List<ZoneStats> zones, ArrowType type) {
+    long multiplier = 1;
+    long divisor = 1;
+    if (type instanceof ArrowType.Timestamp) {
+      switch (((ArrowType.Timestamp) type).getUnit()) {
+        case SECOND:
+          multiplier = 1_000_000L;
+          break;
+        case MILLISECOND:
+          multiplier = 1_000L;
+          break;
+        case NANOSECOND:
+          divisor = 1_000L;
+          break;
+        default:
+          return zones;
+      }
+    } else if (type instanceof ArrowType.Date
+        && ((ArrowType.Date) type).getUnit() == DateUnit.MILLISECOND) {
+      divisor = 86_400_000L;
+    } else {
+      return zones;
+    }
+
+    List<ZoneStats> rescaled = new ArrayList<>(zones.size());
+    try {
+      for (ZoneStats zone : zones) {
+        rescaled.add(
+            new ZoneStats(
+                zone.getFragmentId(),
+                zone.getZoneStart(),
+                zone.getZoneLength(),
+                rescale(zone.getMin(), multiplier, divisor),
+                rescale(zone.getMax(), multiplier, divisor),
+                zone.getNullCount()));
+      }
+    } catch (ArithmeticException | ClassCastException e) {
+      return null;
+    }
+    return rescaled;
+  }
+
+  private static Long rescale(Comparable<?> bound, long multiplier, long divisor) {
+    if (bound == null) {
+      return null;
+    }
+    long value = (Long) bound;
+    return divisor > 1 ? Math.floorDiv(value, divisor) : Math.multiplyExact(value, multiplier);
   }
 
   /** Every column referenced anywhere in a predicate tree, including nested AND/OR/NOT. */

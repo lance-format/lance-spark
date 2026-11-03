@@ -39,6 +39,8 @@ import org.lance.spark.utils.FullTextQueryUtils;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.Utils;
 
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.connector.expressions.Expression;
@@ -844,17 +846,46 @@ public class LanceScanBuilder
   /** Loads zone stats for every requested column, without consulting index coverage. */
   private Map<String, List<ZoneStats>> loadStatsForColumns(Dataset dataset, Set<String> columns) {
     Map<String, List<ZoneStats>> result = new HashMap<>();
+    Schema schema = dataset.getSchema();
     for (String col : columns) {
       try {
         List<ZoneStats> stats = dataset.getZonemapStats(col);
-        if (!stats.isEmpty()) {
-          result.put(col, stats);
+        if (stats.isEmpty()) {
+          continue;
+        }
+        Field field = findField(schema.getFields(), col);
+        if (field == null) {
+          LOG.debug("Cannot resolve the type of column '{}'; skipping its zonemap stats", col);
+          continue;
+        }
+        List<ZoneStats> sparkStats = ZonemapFragmentPruner.toSparkUnits(stats, field.getType());
+        if (sparkStats != null) {
+          result.put(col, sparkStats);
+        } else {
+          LOG.debug("Zonemap bounds for '{}' do not fit Spark's unit; skipping them", col);
         }
       } catch (Exception e) {
         LOG.debug("Failed to load zonemap stats for column '{}': {}", col, e.getMessage());
       }
     }
     return result;
+  }
+
+  /** Resolves a possibly dotted column path to its Arrow field. */
+  private static Field findField(List<Field> fields, String column) {
+    for (Field field : fields) {
+      if (field.getName().equals(column)) {
+        return field;
+      }
+      if (column.startsWith(field.getName() + ".")) {
+        Field nested =
+            findField(field.getChildren(), column.substring(field.getName().length() + 1));
+        if (nested != null) {
+          return nested;
+        }
+      }
+    }
+    return null;
   }
 
   /** Zone stats plus, per column, the dataset fragments those stats do not describe. */
