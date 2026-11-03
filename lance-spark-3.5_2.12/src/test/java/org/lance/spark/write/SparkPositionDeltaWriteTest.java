@@ -18,10 +18,12 @@ import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.WriteParams;
 import org.lance.fragment.RowIdMeta;
+import org.lance.spark.LanceConstant;
 import org.lance.spark.LancePositionDeltaOperation;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.memory.BufferAllocator;
@@ -32,6 +34,9 @@ import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
+import org.apache.spark.sql.connector.distributions.ClusteredDistribution;
+import org.apache.spark.sql.connector.expressions.NamedReference;
+import org.apache.spark.sql.connector.expressions.Transform;
 import org.apache.spark.sql.connector.write.DataWriter;
 import org.apache.spark.sql.connector.write.DeltaBatchWrite;
 import org.apache.spark.sql.connector.write.DeltaWriteBuilder;
@@ -60,8 +65,10 @@ import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -152,6 +159,31 @@ public class SparkPositionDeltaWriteTest {
     assertEquals("moka://?capacity=524288", writeOptions.getMetadataCacheBackend());
   }
 
+  @Test
+  public void deleteClustersOnBareFragmentId(TestInfo testInfo) throws Exception {
+    String uri = createDataset(testInfo, false);
+
+    // The commit rejects a fragment claimed by two tasks, so DELETE must cluster on the bare
+    // _fragid that the scan reports for every row of its single fragment.
+    ClusteredDistribution delete =
+        assertInstanceOf(
+            ClusteredDistribution.class,
+            newPositionDeltaWrite(uri, RowLevelOperation.Command.DELETE).requiredDistribution());
+    assertEquals(1, delete.clustering().length);
+    NamedReference deleteKey = assertInstanceOf(NamedReference.class, delete.clustering()[0]);
+    assertArrayEquals(new String[] {LanceConstant.FRAGMENT_ID}, deleteKey.fieldNames());
+
+    // UPDATE and MERGE also write insert rows, whose _fragid is null, so they keep the function
+    // that spreads those rows instead of sending every insert to a single task.
+    ClusteredDistribution update =
+        assertInstanceOf(
+            ClusteredDistribution.class,
+            newPositionDeltaWrite(uri, RowLevelOperation.Command.UPDATE).requiredDistribution());
+    assertEquals(1, update.clustering().length);
+    Transform updateKey = assertInstanceOf(Transform.class, update.clustering()[0]);
+    assertEquals(LanceFragmentIdWithDefaultFunction.NAME, updateKey.name());
+  }
+
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
   public void deleteTasksReturnUncommittedFragmentMetadata(boolean stableRowIds, TestInfo testInfo)
@@ -166,7 +198,6 @@ public class SparkPositionDeltaWriteTest {
     }
     RowIdMeta rowIds = original.get(0).getRowIdMeta();
     SparkPositionDeltaWrite write = newDeleteWrite(uri);
-    assertTrue(write.distributionStrictlyRequired());
     DeltaBatchWrite batch = write.toBatch();
     DeltaWriterFactory factory =
         roundTrip(batch.createBatchWriterFactory(() -> 2), DeltaWriterFactory.class);
@@ -202,6 +233,36 @@ public class SparkPositionDeltaWriteTest {
       assertEquals(1, dataset.getFragments().size());
       assertEquals(stableRowIds, dataset.hasStableRowIds());
       assertEquals(rowIds, dataset.getFragments().get(0).metadata().getRowIdMeta());
+    }
+  }
+
+  @Test
+  public void oneDeleteTaskWritesEveryFragmentItOwns(TestInfo testInfo) throws Exception {
+    String uri = createDataset(testInfo, false);
+    List<FragmentMetadata> original;
+    try (Dataset dataset = Utils.openDatasetBuilder(LanceSparkWriteOptions.from(uri)).build()) {
+      original =
+          dataset.getFragments().stream().map(Fragment::metadata).collect(Collectors.toList());
+    }
+    DeltaBatchWrite batch = newDeleteWrite(uri).toBatch();
+    SparkPositionDeltaWrite.DeleteTaskCommit commit;
+    try (DeltaWriter<InternalRow> writer =
+        batch.createBatchWriterFactory(() -> 1).createWriter(0, 0)) {
+      deleteRow(writer, original.get(0).getId(), 0);
+      for (int i = 0; i < 5; i++) {
+        deleteRow(writer, original.get(1).getId(), i);
+      }
+      commit = (SparkPositionDeltaWrite.DeleteTaskCommit) writer.commit();
+    }
+    assertEquals(1, commit.updatedFragments().size());
+    assertEquals(original.get(0).getId(), commit.updatedFragments().get(0).getId());
+    assertEquals(1, commit.updatedFragments().get(0).getNumDeletions());
+    assertEquals(
+        Collections.singletonList((long) original.get(1).getId()), commit.removedFragmentIds());
+    batch.commit(new WriterCommitMessage[] {commit});
+    try (Dataset dataset = Utils.openDatasetBuilder(LanceSparkWriteOptions.from(uri)).build()) {
+      assertEquals(4, dataset.countRows());
+      assertEquals(1, dataset.getFragments().size());
     }
   }
 
@@ -330,10 +391,15 @@ public class SparkPositionDeltaWriteTest {
   }
 
   private SparkPositionDeltaWrite newDeleteWrite(String uri) {
+    return newPositionDeltaWrite(uri, RowLevelOperation.Command.DELETE);
+  }
+
+  private SparkPositionDeltaWrite newPositionDeltaWrite(
+      String uri, RowLevelOperation.Command command) {
     StructType schema = LanceArrowUtils.fromArrowSchema(ARROW_SCHEMA);
     LancePositionDeltaOperation operation =
         new LancePositionDeltaOperation(
-            RowLevelOperation.Command.DELETE,
+            command,
             schema,
             LanceSparkReadOptions.builder().datasetUri(uri).build(),
             Collections.emptyMap(),
@@ -342,11 +408,12 @@ public class SparkPositionDeltaWriteTest {
             false,
             null,
             Collections.emptyMap());
+    String queryId = command.name() + "-test";
     LogicalWriteInfo info =
         new LogicalWriteInfo() {
           @Override
           public String queryId() {
-            return "delete-test";
+            return queryId;
           }
 
           @Override

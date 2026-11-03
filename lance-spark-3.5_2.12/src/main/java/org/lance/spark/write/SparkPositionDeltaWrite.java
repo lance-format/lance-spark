@@ -73,6 +73,10 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
 import java.util.stream.Collectors;
 
@@ -161,7 +165,11 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
   public Distribution requiredDistribution() {
     NamedReference segmentId = Expressions.column(LanceConstant.FRAGMENT_ID);
     if (deleteOnly) {
-      // Each fragment must have one owner: independent deletion files cannot be merged at commit.
+      // Co-locate every row of a fragment onto one task. Clustered distribution does not give
+      // each fragment its own task: AQE can coalesce a small shuffle into one task that owns many
+      // fragments, and LanceDeleteWriter writes those deletion files itself. Two tasks still must
+      // not own the same fragment, because their deletion files cannot be merged. DELETE rows
+      // always come from the scan, so `_fragid` is never null here and needs no spreading function.
       return Distributions.clustered(new Expression[] {segmentId});
     }
     // Avoid skew by spreading null segment_id rows across tasks.
@@ -213,18 +221,18 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       Map<Integer, RoaringBitmap> aggregatedDeletions = new HashMap<>();
       List<Long> removedFragmentIds = new ArrayList<>();
       List<FragmentMetadata> updatedFragments = new ArrayList<>();
-      Set<Long> deletedFragments = new HashSet<>();
+      Set<Long> claimedFragmentIds = new HashSet<>();
       boolean useStableRowIds = hasStableRowIds;
 
       for (WriterCommitMessage msg : messages) {
         if (deleteOnly) {
           DeleteTaskCommit taskCommit = (DeleteTaskCommit) msg;
           for (FragmentMetadata fragment : taskCommit.updatedFragments()) {
-            requireUniqueFragment(deletedFragments, (long) fragment.getId());
+            requireUniqueFragmentOwner(claimedFragmentIds, (long) fragment.getId());
             updatedFragments.add(fragment);
           }
           for (Long fragmentId : taskCommit.removedFragmentIds()) {
-            requireUniqueFragment(deletedFragments, fragmentId);
+            requireUniqueFragmentOwner(claimedFragmentIds, fragmentId);
             removedFragmentIds.add(fragmentId);
           }
           continue;
@@ -308,10 +316,22 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     public void abort(WriterCommitMessage[] messages) {}
   }
 
-  private static void requireUniqueFragment(Set<Long> fragmentIds, long fragmentId) {
-    if (!fragmentIds.add(fragmentId)) {
-      throw new IllegalStateException("Multiple DELETE task commits for fragment " + fragmentId);
+  private static void requireUniqueFragmentOwner(Set<Long> claimedFragmentIds, long fragmentId) {
+    if (!claimedFragmentIds.add(fragmentId)) {
+      throw new IllegalStateException(
+          "Multiple DELETE task commits claimed fragment "
+              + fragmentId
+              + ". Deletion files from two owners of one fragment cannot be merged, so the commit"
+              + " is rejected. This means the _fragid clustering from requiredDistribution() was"
+              + " not applied to this write.");
     }
+  }
+
+  /** Records one deleted row address into a per-fragment deletion map. */
+  private static void recordDeletion(Map<Integer, RoaringBitmap> deletionMap, long rowAddr) {
+    deletionMap
+        .computeIfAbsent(extractFragmentId(rowAddr), fragmentId -> new RoaringBitmap())
+        .add(extractRowIndex(rowAddr));
   }
 
   private static class LanceDeleteWriter implements DeltaWriter<InternalRow> {
@@ -325,19 +345,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
         LanceSparkWriteOptions writeOptions,
         Map<String, String> initialStorageOptions,
         String namespaceImpl,
-        Map<String, String> namespaceProperties,
-        List<String> tableId) {
-      this.readOptions =
-          LanceSparkReadOptions.builder()
-              .datasetUri(writeOptions.getDatasetUri())
-              .fromOptions(writeOptions.getStorageOptions())
-              .namespace(writeOptions.getNamespace())
-              .tableId(tableId)
-              .catalogName(writeOptions.getCatalogName())
-              .indexCacheBackend(writeOptions.getIndexCacheBackend())
-              .metadataCacheBackend(writeOptions.getMetadataCacheBackend())
-              .build()
-              .withRef(writeOptions.getRef());
+        Map<String, String> namespaceProperties) {
+      this.readOptions = writeOptions.toReadOptions();
       this.initialStorageOptions = initialStorageOptions;
       this.namespaceImpl = namespaceImpl;
       this.namespaceProperties = namespaceProperties;
@@ -345,10 +354,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
     @Override
     public void delete(InternalRow metadata, InternalRow id) {
-      long rowAddr = id.getLong(ID_COL_ROW_ADDR);
-      deletionMap
-          .computeIfAbsent(extractFragmentId(rowAddr), fragmentId -> new RoaringBitmap())
-          .add(extractRowIndex(rowAddr));
+      recordDeletion(deletionMap, id.getLong(ID_COL_ROW_ADDR));
     }
 
     @Override
@@ -372,9 +378,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
                 Utils.openDatasetBuilder(readOptions)
                     .initialStorageOptions(initialStorageOptions)
                     .build()) {
-          for (Map.Entry<Integer, RoaringBitmap> entry : deletionMap.entrySet()) {
-            Map.Entry<Integer, FragmentMetadata> result =
-                deleteFragmentRows(dataset, entry.getKey(), entry.getValue());
+          for (Map.Entry<Integer, FragmentMetadata> result :
+              deleteFragments(dataset, deletionMap)) {
             if (result.getValue() == null) {
               removedFragmentIds.add((long) result.getKey());
             } else {
@@ -461,7 +466,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     public DeltaWriter<InternalRow> createWriter(int partitionId, long taskId) {
       if (deleteOnly) {
         return new LanceDeleteWriter(
-            writeOptions, initialStorageOptions, namespaceImpl, namespaceProperties, tableId);
+            writeOptions, initialStorageOptions, namespaceImpl, namespaceProperties);
       }
       int batchSize = writeOptions.getBatchSize();
       boolean useQueuedBuffer = writeOptions.isUseQueuedWriteBuffer();
@@ -546,7 +551,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
     @Override
     public void delete(InternalRow metadata, InternalRow id) throws IOException {
-      recordDeletion(id.getLong(ID_COL_ROW_ADDR));
+      recordDeletion(deletionMap, id.getLong(ID_COL_ROW_ADDR));
     }
 
     @Override
@@ -556,14 +561,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       if (hasStableRowIds) {
         capturedRowIds.add(rowId);
       }
-      recordDeletion(rowAddr);
+      recordDeletion(deletionMap, rowAddr);
       writer.write(row);
-    }
-
-    private void recordDeletion(long rowAddr) {
-      deletionMap
-          .computeIfAbsent(extractFragmentId(rowAddr), fragmentId -> new RoaringBitmap())
-          .add(extractRowIndex(rowAddr));
     }
 
     @Override
@@ -603,6 +602,69 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     @Override
     public void close() throws IOException {
       writer.close();
+    }
+  }
+
+  /**
+   * Writes one deletion file per fragment. A single fragment stays on the caller thread. Several
+   * fragments use a daemon pool bounded by the processor count, because a small DELETE shuffle can
+   * be coalesced into one task and this pool is not the JVM common pool shared by every task.
+   */
+  private static List<Map.Entry<Integer, FragmentMetadata>> deleteFragments(
+      Dataset dataset, Map<Integer, RoaringBitmap> deletionMap) {
+    int parallelism = Math.min(deletionMap.size(), Runtime.getRuntime().availableProcessors());
+    if (parallelism <= 1) {
+      List<Map.Entry<Integer, FragmentMetadata>> results = new ArrayList<>(deletionMap.size());
+      for (Map.Entry<Integer, RoaringBitmap> entry : deletionMap.entrySet()) {
+        results.add(deleteFragmentRows(dataset, entry.getKey(), entry.getValue()));
+      }
+      return results;
+    }
+
+    ExecutorService pool =
+        Executors.newFixedThreadPool(
+            parallelism,
+            runnable -> {
+              Thread thread = new Thread(runnable, "lance-delete-rows");
+              thread.setDaemon(true);
+              return thread;
+            });
+    try {
+      List<Future<Map.Entry<Integer, FragmentMetadata>>> futures =
+          new ArrayList<>(deletionMap.size());
+      for (Map.Entry<Integer, RoaringBitmap> entry : deletionMap.entrySet()) {
+        futures.add(
+            pool.submit(() -> deleteFragmentRows(dataset, entry.getKey(), entry.getValue())));
+      }
+      List<Map.Entry<Integer, FragmentMetadata>> results = new ArrayList<>(futures.size());
+      RuntimeException failure = null;
+      for (Future<Map.Entry<Integer, FragmentMetadata>> future : futures) {
+        if (failure != null) {
+          future.cancel(true);
+          continue;
+        }
+        try {
+          results.add(future.get());
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          failure = new RuntimeException("Interrupted while writing deletion files", e);
+        } catch (ExecutionException e) {
+          Throwable cause = e.getCause() == null ? e : e.getCause();
+          if (cause instanceof RuntimeException) {
+            failure = (RuntimeException) cause;
+          } else if (cause instanceof Error) {
+            throw (Error) cause;
+          } else {
+            failure = new RuntimeException(cause);
+          }
+        }
+      }
+      if (failure != null) {
+        throw failure;
+      }
+      return results;
+    } finally {
+      pool.shutdownNow();
     }
   }
 
