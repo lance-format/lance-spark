@@ -109,8 +109,8 @@ public class LanceSparkReadOptions implements Serializable {
   // Changed from 512 to 8192 for better OLAP scan performance (33x improvement)
   private static final int DEFAULT_BATCH_SIZE = 8192;
   private static final boolean DEFAULT_USE_SCALAR_INDEX = true;
-  private static final int DEFAULT_RUNTIME_FILTER_MAX_KEYS = 10_000;
-  private static final int DEFAULT_RUNTIME_FILTER_MAX_BYTES = 1_048_576;
+  private static final int DEFAULT_RUNTIME_FILTER_MAX_KEYS = 100_000;
+  private static final int DEFAULT_RUNTIME_FILTER_MAX_BYTES = 4_194_304;
   private static final boolean DEFAULT_TOP_N_PUSH_DOWN = true;
   private static final boolean DEFAULT_EXECUTOR_CREDENTIAL_REFRESH = true;
   private static final boolean DEFAULT_ARROW_BATCH_READS = false;
