@@ -431,7 +431,8 @@ public abstract class BaseLanceRuntimeFilteringTest {
         shardingKeys,
         Collections.emptyMap(),
         null,
-        Collections.emptyMap());
+        Collections.emptyMap(),
+        true);
   }
 
   private static Map<String, List<ZoneStats>> defaultStats() {

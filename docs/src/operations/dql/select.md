@@ -370,7 +370,7 @@ These options control how data is read from Lance datasets. They can be set usin
 ### Runtime Join Filtering
 
 Spark 4.1 and newer can route join-generated dynamic partition pruning filters into Lance scans.
-Lance accepts exact `IN` predicates for projected `_rowaddr`, active sharding columns, and
+Lance accepts exact `IN` predicates for projected `_rowaddr` and `_rowid`, active sharding columns, and
 top-level scalar columns backed by a compatible scalar or zonemap index. Runtime filters prune a
 subset of the snapshot-pinned fragments and are also passed to the native Lance scanner; Spark
 still evaluates the normal join, including duplicate-key multiplicity.
@@ -389,6 +389,20 @@ The guardrails can also be set for every table in a catalog, for example
 With Spark's defaults (`dynamicPartitionPruning.reuseBroadcastOnly=true`), a runtime filter
 reaches the Lance scan only when the other join side is broadcast and has a selective filter.
 If the Lance table is the broadcast side, or the join is a shuffle join, Spark drops the filter.
+
+A `_rowid` runtime filter lets a table that stores Lance row IDs (for example, an Iceberg table)
+join back to the Lance table:
+
+```sql
+SELECT /*+ BROADCAST(o) */ i.image_bytes
+FROM lance.default.images i
+JOIN iceberg.db.observations o ON i._rowid = o.lance_row_id
+WHERE o.ingestion_date = '2026-05-01';
+```
+
+Without stable row IDs, `_rowid` equals `_rowaddr`, so fragments are pruned. With
+`enable_stable_row_ids`, a row ID does not identify its fragment: every fragment is still
+scanned, and Lance applies the `IN` filter natively.
 
 ## User-Defined Types
 

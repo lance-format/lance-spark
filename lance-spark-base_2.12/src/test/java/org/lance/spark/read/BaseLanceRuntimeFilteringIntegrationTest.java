@@ -294,6 +294,52 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
             .toArray(String[]::new));
   }
 
+  /**
+   * An external (Parquet, standing in for Iceberg) table that captured Lance {@code _rowid} values
+   * is joined back to the Lance table. Without stable row IDs, {@code _rowid} is the row address,
+   * so fragments are pruned.
+   */
+  @Test
+  public void testRowIdJoinPrunesFragmentsWithoutStableRowIds() {
+    String fact = createFact(defaultCatalog, false, false);
+    Dataset<Row> joined = joinOnCapturedRowIds(fact);
+
+    assertEquals(
+        Arrays.asList("30:v_3_0", "31:v_3_1", "32:v_3_2"),
+        joined.collectAsList().stream()
+            .map(row -> row.getInt(0) + ":" + row.getString(1))
+            .sorted()
+            .collect(Collectors.toList()));
+    assertRuntimePruned(joined);
+    long matchingFragments =
+        spark
+            .sql("SELECT DISTINCT shiftrightunsigned(_rowaddr, 32) FROM " + fact + " WHERE k = 3")
+            .count();
+    assertEquals(
+        String.valueOf(matchingFragments), runtimeMetadata(joined).get("survivingFragmentCount"));
+  }
+
+  /**
+   * With stable row IDs, {@code _rowid} no longer encodes the fragment, so Lance applies the
+   * runtime {@code IN} filter natively but no fragment is pruned.
+   */
+  @Test
+  public void testRowIdJoinFiltersNativelyWithStableRowIds() {
+    String fact = createFact(defaultCatalog, false, false, true);
+    Dataset<Row> joined = joinOnCapturedRowIds(fact);
+
+    assertEquals(
+        Arrays.asList("30:v_3_0", "31:v_3_1", "32:v_3_2"),
+        joined.collectAsList().stream()
+            .map(row -> row.getInt(0) + ":" + row.getString(1))
+            .sorted()
+            .collect(Collectors.toList()));
+    assertTrue(LanceScanTestHelper.hasLanceRuntimeFilters(joined));
+    Map<String, String> metadata = runtimeMetadata(joined);
+    assertTrue(metadata.get("runtimePredicates").contains("_rowid"), metadata.toString());
+    assertEquals(metadata.get("originalFragmentCount"), metadata.get("survivingFragmentCount"));
+  }
+
   @Test
   public void testBtreeScalarIndexAdvertisesProjectedScalarColumn() {
     String table = defaultCatalog + ".default.btree_" + suffix();
@@ -421,12 +467,33 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
     assertInstanceOf(KeyGroupedPartitioning.class, scan.outputPartitioning());
   }
 
+  private Dataset<Row> joinOnCapturedRowIds(String fact) {
+    spark.conf().set("spark.sql.adaptive.enabled", "true");
+    spark.conf().unset("spark.sql.optimizer.dynamicPartitionPruning.reuseBroadcastOnly");
+    spark.conf().unset("spark.sql.optimizer.dynamicPartitionPruning.fallbackFilterRatio");
+    spark.conf().unset("spark.sql.autoBroadcastJoinThreshold");
+    String capturedPath = tempDir.resolve("captured_rowids_" + suffix()).toString();
+    spark.sql("SELECT _rowid AS rid, k FROM " + fact).write().parquet(capturedPath);
+    spark.read().parquet(capturedPath).createOrReplaceTempView("captured_rowids");
+    return spark.sql(
+        "SELECT /*+ BROADCAST(c) */ f.id, f.payload FROM "
+            + fact
+            + " f JOIN captured_rowids c ON f._rowid = c.rid WHERE c.k = 3");
+  }
+
   private String createFact(String catalog, boolean indexed, boolean partitioned) {
+    return createFact(catalog, indexed, partitioned, false);
+  }
+
+  private String createFact(
+      String catalog, boolean indexed, boolean partitioned, boolean stableRowIds) {
     String table = catalog + ".default.fact_" + suffix();
     spark.sql(
         String.format(
-            "CREATE TABLE %s (id INT, k INT, payload STRING) USING lance%s",
-            table, partitioned ? " PARTITIONED BY (k)" : ""));
+            "CREATE TABLE %s (id INT, k INT, payload STRING) USING lance%s%s",
+            table,
+            partitioned ? " PARTITIONED BY (k)" : "",
+            stableRowIds ? " TBLPROPERTIES ('enable_stable_row_ids' = 'true')" : ""));
     for (int key = 0; key < 5; key++) {
       int currentKey = key;
       String values =
