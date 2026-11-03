@@ -17,6 +17,7 @@ import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.FragmentMetadata;
+import org.lance.LockManager;
 import org.lance.Transaction;
 import org.lance.WriteParams;
 import org.lance.fragment.RowIdMeta;
@@ -37,6 +38,8 @@ import org.lance.spark.utils.Utils;
 import com.google.common.collect.ImmutableList;
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
+import org.apache.spark.SparkConf;
+import org.apache.spark.SparkEnv;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.distributions.Distribution;
 import org.apache.spark.sql.connector.distributions.Distributions;
@@ -607,12 +610,14 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
   /**
    * Writes one deletion file per fragment. A single fragment stays on the caller thread. Several
-   * fragments use a daemon pool bounded by the processor count, because a small DELETE shuffle can
-   * be coalesced into one task and this pool is not the JVM common pool shared by every task.
+   * fragments use a daemon pool bounded by the executor's configured cores, because a small DELETE
+   * shuffle can be coalesced into one task. An unset core count defaults to two concurrent writes.
    */
   private static List<Map.Entry<Integer, FragmentMetadata>> deleteFragments(
       Dataset dataset, Map<Integer, RoaringBitmap> deletionMap) {
-    int parallelism = Math.min(deletionMap.size(), Runtime.getRuntime().availableProcessors());
+    SparkEnv sparkEnv = SparkEnv.get();
+    int parallelism =
+        deleteParallelism(deletionMap.size(), sparkEnv == null ? null : sparkEnv.conf());
     if (parallelism <= 1) {
       List<Map.Entry<Integer, FragmentMetadata>> results = new ArrayList<>(deletionMap.size());
       for (Map.Entry<Integer, RoaringBitmap> entry : deletionMap.entrySet()) {
@@ -621,6 +626,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       return results;
     }
 
+    // TODO: Share a pool across DELETE tasks in each executor to bound aggregate concurrency.
     ExecutorService pool =
         Executors.newFixedThreadPool(
             parallelism,
@@ -668,20 +674,28 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     }
   }
 
+  static int deleteParallelism(int fragmentCount, SparkConf sparkConf) {
+    int executorCores = sparkConf == null ? 2 : sparkConf.getInt("spark.executor.cores", 2);
+    return Math.min(fragmentCount, Math.max(1, executorCores));
+  }
+
   /**
    * Writes deletion metadata for a single fragment. Returns the fragment ID paired with the updated
    * fragment metadata, or {@code null} if all rows were deleted (fragment removed).
    */
-  private static Map.Entry<Integer, FragmentMetadata> deleteFragmentRows(
+  static Map.Entry<Integer, FragmentMetadata> deleteFragmentRows(
       Dataset dataset, int fragmentId, RoaringBitmap bitmap) {
-    List<Integer> rowIndexes = new ArrayList<>();
-    IntIterator it = bitmap.getIntIterator();
-    while (it.hasNext()) {
-      rowIndexes.add(it.next());
+    // Keep the native dataset alive across getFragment(), which does not acquire its own lock.
+    try (LockManager.ReadLock ignored = dataset.acquireReadLock()) {
+      List<Integer> rowIndexes = new ArrayList<>();
+      IntIterator it = bitmap.getIntIterator();
+      while (it.hasNext()) {
+        rowIndexes.add(it.next());
+      }
+      FragmentMetadata updatedFragment =
+          dataset.getFragment(fragmentId).deleteRows(ImmutableList.copyOf(rowIndexes));
+      return new AbstractMap.SimpleEntry<>(fragmentId, updatedFragment);
     }
-    FragmentMetadata updatedFragment =
-        dataset.getFragment(fragmentId).deleteRows(ImmutableList.copyOf(rowIndexes));
-    return new AbstractMap.SimpleEntry<>(fragmentId, updatedFragment);
   }
 
   // ---------------------------------------------------------------------------

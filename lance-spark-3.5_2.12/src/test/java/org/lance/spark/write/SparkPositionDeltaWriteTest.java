@@ -32,6 +32,7 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.spark.SparkConf;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.connector.distributions.ClusteredDistribution;
@@ -53,6 +54,8 @@ import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.roaringbitmap.PeekableIntIterator;
+import org.roaringbitmap.RoaringBitmap;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -63,6 +66,12 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -81,6 +90,75 @@ public class SparkPositionDeltaWriteTest {
           Arrays.asList(
               new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
               new Field("value", FieldType.nullable(new ArrowType.Int(32, true)), null)));
+
+  @Test
+  public void deleteParallelismUsesExecutorCores() {
+    SparkConf conf = new SparkConf(false);
+    assertEquals(2, SparkPositionDeltaWrite.deleteParallelism(100, conf));
+    assertEquals(2, SparkPositionDeltaWrite.deleteParallelism(100, null));
+    conf.set("spark.executor.cores", "4");
+    assertEquals(4, SparkPositionDeltaWrite.deleteParallelism(100, conf));
+    assertEquals(1, SparkPositionDeltaWrite.deleteParallelism(1, conf));
+    conf.set("spark.executor.cores", "1");
+    assertEquals(1, SparkPositionDeltaWrite.deleteParallelism(100, conf));
+  }
+
+  @Test
+  public void datasetCloseWaitsForFragmentDeletion(TestInfo testInfo) throws Exception {
+    String uri = createDataset(testInfo, false);
+    CountDownLatch preparingDeletion = new CountDownLatch(1);
+    CountDownLatch allowDeletion = new CountDownLatch(1);
+    CountDownLatch closingDataset = new CountDownLatch(1);
+    RoaringBitmap bitmap =
+        new RoaringBitmap() {
+          @Override
+          public PeekableIntIterator getIntIterator() {
+            preparingDeletion.countDown();
+            try {
+              if (!allowDeletion.await(10, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("Timed out waiting to resume deletion");
+              }
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+              throw new IllegalStateException("Interrupted while preparing deletion", e);
+            }
+            return super.getIntIterator();
+          }
+        };
+    bitmap.add(0);
+    ExecutorService pool = Executors.newFixedThreadPool(2);
+    try (Dataset dataset = Utils.openDatasetBuilder(LanceSparkWriteOptions.from(uri)).build()) {
+      int fragmentId = dataset.getFragments().get(0).getId();
+      try {
+        Future<FragmentMetadata> deleting =
+            pool.submit(
+                () ->
+                    SparkPositionDeltaWrite.deleteFragmentRows(dataset, fragmentId, bitmap)
+                        .getValue());
+        assertTrue(preparingDeletion.await(10, TimeUnit.SECONDS));
+        Future<?> closing =
+            pool.submit(
+                () -> {
+                  closingDataset.countDown();
+                  dataset.close();
+                });
+        assertTrue(closingDataset.await(10, TimeUnit.SECONDS));
+        assertThrows(TimeoutException.class, () -> closing.get(200, TimeUnit.MILLISECONDS));
+        allowDeletion.countDown();
+        assertEquals(1, deleting.get(10, TimeUnit.SECONDS).getNumDeletions());
+        closing.get(10, TimeUnit.SECONDS);
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                SparkPositionDeltaWrite.deleteFragmentRows(
+                    dataset, fragmentId, RoaringBitmap.bitmapOf(1)));
+      } finally {
+        allowDeletion.countDown();
+        pool.shutdownNow();
+        assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS));
+      }
+    }
+  }
 
   @Test
   public void positionDeltaWriteDoesNotUseCommitCoordinator(TestInfo testInfo) throws Exception {
