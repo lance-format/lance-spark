@@ -129,12 +129,19 @@ public final class ZonemapFragmentPruner {
    * prunes fragments that do match. Bounds are rescaled with {@code floorDiv}, as the reader does,
    * so pruning sees the same values a query does.
    *
+   * <p>{@code UInt64} bounds are rejected: Spark reads the column as signed longs, so values of
+   * 2^63 or more wrap negative and the bounds no longer order the zone's values.
+   *
    * @return the rescaled zones, or null if a bound cannot be represented in Spark's unit
    */
   public static List<ZoneStats> toSparkUnits(List<ZoneStats> zones, ArrowType type) {
     long multiplier = 1;
     long divisor = 1;
-    if (type instanceof ArrowType.Timestamp) {
+    if (type instanceof ArrowType.Int
+        && !((ArrowType.Int) type).getIsSigned()
+        && ((ArrowType.Int) type).getBitWidth() == 64) {
+      return null;
+    } else if (type instanceof ArrowType.Timestamp) {
       switch (((ArrowType.Timestamp) type).getUnit()) {
         case SECOND:
           multiplier = 1_000_000L;
@@ -276,10 +283,10 @@ public final class ZonemapFragmentPruner {
     Comparable<Object> min = (Comparable<Object>) zone.getMin();
     Comparable<Object> max = (Comparable<Object>) zone.getMax();
 
-    // If min or max is null, the zone contains only nulls for the indexed range;
-    // non-null comparisons cannot match.
+    // Missing bounds mean either an all-null zone, which no comparison matches, or a type whose
+    // bounds Lance does not report (e.g. decimals), which may match anything.
     if (min == null || max == null) {
-      return false;
+      return zone.getNullCount() < zone.getZoneLength();
     }
 
     try {
