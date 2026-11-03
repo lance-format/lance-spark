@@ -68,13 +68,11 @@ ALTER TABLE users ADD COLUMNS content FROM content_backfill;
 
 The source column must have Spark type `BINARY`. A blob v2 source column is not accepted because
 Spark reads it as a descriptor struct rather than `BINARY`; copy blob columns between existing
-tables with [INSERT INTO](insert-into.md#copying-blob-v2-columns) instead. The
-`content.lance.encoding` property must be persisted before `ADD COLUMNS` runs. If it is omitted,
-`ADD COLUMNS` still succeeds but writes a plain `BINARY` column. Setting the property after the
-column has been added does not retroactively convert that column to blob v2, so descriptor access
-such as `content.size` is not available. When the property is set to `blob` before the operation,
-reads expose `content` as a blob v2 descriptor struct, so descriptor fields can be queried without
-loading the bytes:
+tables with [INSERT INTO](insert-into.md#copying-blob-v2-columns) instead.
+
+If blob encoding is not set before `ADD COLUMNS`, the column stays `BINARY` and cannot be
+changed to blob encoding afterward. With blob v2 encoding set beforehand, reads expose a
+descriptor struct:
 
 ```sql
 SELECT id, content.size, content.kind FROM users;

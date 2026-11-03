@@ -13,8 +13,17 @@
  */
 package org.lance.spark;
 
+import org.lance.CommitBuilder;
+import org.lance.Transaction;
+import org.lance.operation.Merge;
+import org.lance.operation.UpdateConfig;
+import org.lance.operation.UpdateMap;
 import org.lance.spark.utils.Utils;
 
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
@@ -37,7 +46,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 
+import static org.apache.spark.sql.connector.catalog.TableChange.removeProperty;
+import static org.apache.spark.sql.connector.catalog.TableChange.setProperty;
 import static org.junit.jupiter.api.Assertions.*;
 
 public abstract class BaseVectorCreateTableTest {
@@ -589,5 +601,271 @@ public abstract class BaseVectorCreateTableTest {
 
     // Clean up
     spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
+  }
+
+  @Test
+  public void testVectorDimensionSetIsRejected() {
+    String fullName = catalogName + ".default.vector_dimension_set";
+    spark.sql(
+        "CREATE TABLE "
+            + fullName
+            + " (embedding ARRAY<FLOAT>) USING lance "
+            + "TBLPROPERTIES ('embedding.arrow.fixed-size-list.size' = '756')");
+    for (String size : new String[] {"128", "756"}) {
+      UnsupportedOperationException error =
+          assertThrows(
+              UnsupportedOperationException.class,
+              () ->
+                  spark.sql(
+                      "ALTER TABLE "
+                          + fullName
+                          + " SET TBLPROPERTIES ('embedding.arrow.fixed-size-list.size' = '"
+                          + size
+                          + "')"));
+      assertTrue(
+          error
+              .getMessage()
+              .contains(
+                  "Cannot set property 'embedding.arrow.fixed-size-list.size'"
+                      + " because column 'embedding' already exists."));
+    }
+    assertFixedSizeListMetadata(spark.table(fullName).schema(), "embedding", 756);
+  }
+
+  @Test
+  public void testSchemaPropertySetIsRejectedAtomically() throws Exception {
+    String tableName = "protected_properties";
+    String fullName = catalogName + ".default." + tableName;
+    spark.sql(
+        "CREATE TABLE "
+            + fullName
+            + " (embedding ARRAY<FLOAT>, payload BINARY, text STRING) USING lance "
+            + "TBLPROPERTIES ('embedding.arrow.fixed-size-list.size' = '756')");
+    spark.sql(
+        "ALTER TABLE "
+            + fullName
+            + " SET TBLPROPERTIES ('team' = 'search', 'custom.arrow.note' = 'keep')");
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    LanceDataset table = (LanceDataset) catalog.loadTable(ident);
+    Map<String, String> originalConfig;
+    long originalVersion;
+    try (var dataset = Utils.openDatasetBuilder(table.readOptions()).build()) {
+      originalConfig = dataset.getConfig();
+      originalVersion = dataset.getVersion().getId();
+    }
+    for (String property :
+        List.of(
+            "embedding.arrow.fixed-size-list.size",
+            "embedding.arrow.float16",
+            "payload.arrow.fixed-size-binary.byte-width",
+            "text.arrow.large_var_char",
+            "payload.lance.encoding",
+            "text.lance.compression",
+            "text.lance.compression-level",
+            "text.lance.structural-encoding",
+            "text.lance.rle-threshold",
+            "text.lance.bss")) {
+      UnsupportedOperationException error =
+          assertThrows(
+              UnsupportedOperationException.class,
+              () ->
+                  catalog.alterTable(
+                      ident,
+                      setProperty("team", "changed"),
+                      removeProperty("custom.arrow.note"),
+                      setProperty(property, "1")));
+      assertTrue(error.getMessage().contains(property));
+    }
+    try (var dataset = Utils.openDatasetBuilder(table.readOptions()).build()) {
+      assertEquals(originalConfig, dataset.getConfig());
+      assertEquals(originalVersion, dataset.getVersion().getId());
+    }
+  }
+
+  @Test
+  public void testFutureColumnEncodingPropertyCanBeSet() throws Exception {
+    String tableName = "future_blob_encoding";
+    String fullName = catalogName + ".default." + tableName;
+    spark.sql("CREATE TABLE " + fullName + " (id INT, name STRING) USING lance");
+    spark.sql(
+        "ALTER TABLE "
+            + fullName
+            + " SET TBLPROPERTIES ('content.lance.encoding' = 'blob', 'team' = 'search')");
+    spark.sql("REFRESH TABLE " + fullName);
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    LanceDataset table =
+        (LanceDataset) catalog.loadTable(Identifier.of(new String[] {"default"}, tableName));
+    try (var dataset = Utils.openDatasetBuilder(table.readOptions()).build()) {
+      assertEquals("blob", dataset.getConfig().get("content.lance.encoding"));
+      assertEquals("search", dataset.getConfig().get("team"));
+    }
+  }
+
+  @Test
+  public void testConcurrentColumnAdditionRejectsStaleEncodingConfig() throws Exception {
+    String tableName = "concurrent_blob_encoding";
+    String fullName = catalogName + ".default." + tableName;
+    spark.sql("CREATE TABLE " + fullName + " (id INT) USING lance");
+    spark.sql("ALTER TABLE " + fullName + " SET TBLPROPERTIES ('team' = 'search')");
+    BaseLanceNamespaceSparkCatalog catalog =
+        (BaseLanceNamespaceSparkCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    LanceDataset table = (LanceDataset) catalog.loadTable(ident);
+    try (var stale = Utils.openDatasetBuilder(table.readOptions()).build();
+        var concurrent = Utils.openDatasetBuilder(table.readOptions()).build()) {
+      assertFalse(
+          stale.getSchema().getFields().stream().anyMatch(f -> f.getName().equals("content")));
+      concurrent.addColumns(
+          List.of(new Field("content", FieldType.nullable(new ArrowType.Binary()), null)));
+      long concurrentVersion = concurrent.version();
+      assertThrows(
+          RuntimeException.class,
+          () ->
+              catalog.alterTableProperties(
+                  stale,
+                  Map.of("content.lance.encoding", "blob", "other", "value"),
+                  Set.of("team"),
+                  false,
+                  List.of("default", tableName)));
+      try (var latest = Utils.openDatasetBuilder(table.readOptions()).build()) {
+        assertEquals(concurrentVersion, latest.version());
+        assertEquals(Map.of("team", "search"), latest.getConfig());
+        assertEquals(new ArrowType.Binary(), latest.getSchema().findField("content").getType());
+      }
+    }
+    assertThrows(
+        UnsupportedOperationException.class,
+        () -> catalog.alterTable(ident, setProperty("content.lance.encoding", "blob")));
+  }
+
+  @Test
+  public void testEncodingConfigRejectsStaleColumnAddition() throws Exception {
+    String tableName = "stale_blob_column";
+    String fullName = catalogName + ".default." + tableName;
+    spark.sql("CREATE TABLE " + fullName + " (id INT) USING lance");
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    LanceDataset table =
+        (LanceDataset) catalog.loadTable(Identifier.of(new String[] {"default"}, tableName));
+    Map<String, String> schemaMetadata = Map.of("owner", "search");
+    try (var dataset = Utils.openDatasetBuilder(table.readOptions()).build();
+        Transaction txn =
+            new Transaction.Builder()
+                .readVersion(dataset.version())
+                .operation(
+                    UpdateConfig.builder()
+                        .schemaMetadataUpdates(
+                            UpdateMap.builder().updates(schemaMetadata).replace(true).build())
+                        .build())
+                .build();
+        var committed = new CommitBuilder(dataset).execute(txn)) {
+      assertEquals(schemaMetadata, committed.getSchema().getCustomMetadata());
+    }
+    try (var stale = Utils.openDatasetBuilder(table.readOptions()).build()) {
+      List<Field> fields = new ArrayList<>(stale.getSchema().getFields());
+      fields.add(new Field("content", FieldType.nullable(new ArrowType.Binary()), null));
+      try (Transaction txn =
+          new Transaction.Builder()
+              .readVersion(stale.version())
+              .operation(
+                  Merge.builder()
+                      .fragments(List.of())
+                      .schema(new Schema(fields, schemaMetadata))
+                      .build())
+              .build()) {
+        spark.sql(
+            "ALTER TABLE " + fullName + " SET TBLPROPERTIES ('content.lance.encoding' = 'blob')");
+        long configVersion;
+        try (var latest = Utils.openDatasetBuilder(table.readOptions()).build()) {
+          configVersion = latest.version();
+          assertEquals(schemaMetadata, latest.getSchema().getCustomMetadata());
+        }
+        assertThrows(
+            RuntimeException.class,
+            () -> {
+              try (var ignored = new CommitBuilder(stale).execute(txn)) {
+                fail("A stale ADD COLUMNS must not commit over the encoding configuration");
+              }
+            });
+        try (var latest = Utils.openDatasetBuilder(table.readOptions()).build()) {
+          assertEquals(configVersion, latest.version());
+          assertEquals("blob", latest.getConfig().get("content.lance.encoding"));
+          assertEquals(1, latest.getSchema().getFields().size());
+          assertEquals(schemaMetadata, latest.getSchema().getCustomMetadata());
+        }
+      }
+    }
+  }
+
+  @Test
+  public void testMixedExistingAndFutureSchemaPropertiesRejectedAtomically() throws Exception {
+    String tableName = "mixed_schema_properties";
+    String fullName = catalogName + ".default." + tableName;
+    spark.sql(
+        "CREATE TABLE "
+            + fullName
+            + " (embedding ARRAY<FLOAT>, name STRING) USING lance "
+            + "TBLPROPERTIES ('embedding.arrow.fixed-size-list.size' = '756')");
+    spark.sql("ALTER TABLE " + fullName + " SET TBLPROPERTIES ('team' = 'search')");
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    LanceDataset table = (LanceDataset) catalog.loadTable(ident);
+    Map<String, String> originalConfig;
+    long originalVersion;
+    try (var dataset = Utils.openDatasetBuilder(table.readOptions()).build()) {
+      originalConfig = dataset.getConfig();
+      originalVersion = dataset.getVersion().getId();
+    }
+    UnsupportedOperationException error =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () ->
+                catalog.alterTable(
+                    ident,
+                    setProperty("team", "changed"),
+                    setProperty("content.lance.encoding", "blob"),
+                    setProperty("embedding.arrow.fixed-size-list.size", "128")));
+    assertTrue(error.getMessage().contains("embedding.arrow.fixed-size-list.size"));
+    try (var dataset = Utils.openDatasetBuilder(table.readOptions()).build()) {
+      assertEquals(originalConfig, dataset.getConfig());
+      assertEquals(originalVersion, dataset.getVersion().getId());
+      assertFalse(dataset.getConfig().containsKey("content.lance.encoding"));
+    }
+  }
+
+  @Test
+  public void testUnsetLegacyVectorConfigKeepsSchemaDimension() throws Exception {
+    String tableName = "legacy_vector_config";
+    String fullName = catalogName + ".default." + tableName;
+    spark.sql(
+        "CREATE TABLE "
+            + fullName
+            + " (embedding ARRAY<FLOAT>) USING lance "
+            + "TBLPROPERTIES ('embedding.arrow.fixed-size-list.size' = '756')");
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    LanceDataset table =
+        (LanceDataset) catalog.loadTable(Identifier.of(new String[] {"default"}, tableName));
+    // Simulate config persisted by a connector version that allowed conflicting SET operations.
+    try (var dataset = Utils.openDatasetBuilder(table.readOptions()).build()) {
+      Map<String, String> config = new HashMap<>(dataset.getConfig());
+      config.put("embedding.arrow.fixed-size-list.size", "128");
+      config.put("team", "search");
+      dataset.updateConfig(config);
+    }
+    spark.sql(
+        "ALTER TABLE "
+            + fullName
+            + " UNSET TBLPROPERTIES ('embedding.arrow.fixed-size-list.size', 'missing.arrow.float16')");
+    spark.sql("REFRESH TABLE " + fullName);
+    try (var dataset = Utils.openDatasetBuilder(table.readOptions()).build()) {
+      assertFalse(dataset.getConfig().containsKey("embedding.arrow.fixed-size-list.size"));
+      assertEquals("search", dataset.getConfig().get("team"));
+    }
+    assertFixedSizeListMetadata(spark.table(fullName).schema(), "embedding", 756);
   }
 }
