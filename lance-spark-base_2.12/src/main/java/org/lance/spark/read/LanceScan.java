@@ -154,6 +154,9 @@ public class LanceScan
 
   private final java.util.Map<String, String> namespaceProperties;
 
+  /** True when the dataset has no stable row IDs, so {@code _rowid} equals {@code _rowaddr}. */
+  private final boolean rowIdIsRowAddress;
+
   public LanceScan(
       StructType schema,
       LanceSparkReadOptions readOptions,
@@ -175,7 +178,8 @@ public class LanceScan
       java.util.Map<Integer, Object> fragmentShardingKeys,
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
-      java.util.Map<String, String> namespaceProperties) {
+      java.util.Map<String, String> namespaceProperties,
+      boolean rowIdIsRowAddress) {
     this.schema = schema;
     this.readOptions = readOptions;
     this.whereConditions = whereConditions;
@@ -207,6 +211,7 @@ public class LanceScan
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
+    this.rowIdIsRowAddress = rowIdIsRowAddress;
   }
 
   /**
@@ -236,7 +241,8 @@ public class LanceScan
     // LanceScanBuilder.build() from the same Dataset handle that loaded manifest /
     // schema / zonemap stats. This avoids a second Dataset.open() at plan time.
     List<LanceSplit> prunedSplits =
-        pruneForPlanning(precomputedSplits, effectivePredicates, cachedSurvivingFragmentIds);
+        pruneForPlanning(
+            precomputedSplits, effectivePredicates, cachedSurvivingFragmentIds, rowIdIsRowAddress);
 
     // Sharding keys are exact per-fragment values. Equality and IN predicates on the sharding
     // source column can therefore remove fragments without consulting native index state.
@@ -313,9 +319,13 @@ public class LanceScan
    *     not prune
    */
   static List<LanceSplit> pruneForPlanning(
-      List<LanceSplit> allSplits, Predicate[] pushedPredicates, Set<Integer> survivingFragmentIds) {
+      List<LanceSplit> allSplits,
+      Predicate[] pushedPredicates,
+      Set<Integer> survivingFragmentIds,
+      boolean rowIdIsRowAddress) {
     return pruneByZonemapStats(
-        pruneByRowAddrFilters(allSplits, pushedPredicates), survivingFragmentIds);
+        pruneByRowAddrFilters(allSplits, pushedPredicates, rowIdIsRowAddress),
+        survivingFragmentIds);
   }
 
   /**
@@ -332,9 +342,9 @@ public class LanceScan
    * returned.
    */
   private static List<LanceSplit> pruneByRowAddrFilters(
-      List<LanceSplit> allSplits, Predicate[] effectivePredicates) {
+      List<LanceSplit> allSplits, Predicate[] effectivePredicates, boolean rowIdIsRowAddress) {
     java.util.Optional<Set<Integer>> targetFragmentIds =
-        RowAddressFilterAnalyzer.extractTargetFragmentIds(effectivePredicates);
+        RowAddressFilterAnalyzer.extractTargetFragmentIds(effectivePredicates, rowIdIsRowAddress);
     if (!targetFragmentIds.isPresent()) {
       return allSplits;
     }

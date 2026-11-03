@@ -233,6 +233,7 @@ public class LanceScanBuilder
       // zonemap stats and splits come from the same snapshot. The version is kept as a long
       // end-to-end so long-lived high-write-frequency datasets do not silently truncate it.
       LanceSplit.ScanPlanResult scanPlan = LanceSplit.planScan(dataset, readOptions);
+      boolean rowIdIsRowAddress = !dataset.hasStableRowIds();
       Set<Integer> liveFragmentIds = new HashSet<>(scanPlan.getFragmentRowCounts().keySet());
 
       for (ShardingField field : SparkLanceShardingUtils.fields(activeShardingSpec)) {
@@ -302,7 +303,7 @@ public class LanceScanBuilder
       // Answering 0 is safe here: pruning never drops a fragment that could match.
       if (isPushedCountStar()
           && LanceScan.pruneForPlanning(
-                  scanPlan.getSplits(), pushedPredicates, survivingFragmentIds)
+                  scanPlan.getSplits(), pushedPredicates, survivingFragmentIds, rowIdIsRowAddress)
               .isEmpty()) {
         LOG.debug("All fragments pruned for a pushed COUNT(*); resolving the count to 0 locally");
         setLocalCount(0L);
@@ -374,7 +375,8 @@ public class LanceScanBuilder
           fragmentShardingKeys,
           initialStorageOptions,
           namespaceImpl,
-          namespaceProperties);
+          namespaceProperties,
+          rowIdIsRowAddress);
     } finally {
       closeLazyDataset();
     }
@@ -1004,7 +1006,7 @@ public class LanceScanBuilder
     Set<String> result = new HashSet<>();
     for (StructField field : projectedSchema.fields()) {
       String column = field.name();
-      if (LanceConstant.ROW_ADDRESS.equals(column)) {
+      if (LanceConstant.ROW_ADDRESS.equals(column) || LanceConstant.ROW_ID.equals(column)) {
         result.add(column);
       } else if (isRuntimeFilterScalarType(field)
           && (column.equals(activeShardingColumn)
