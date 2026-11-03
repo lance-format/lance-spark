@@ -373,7 +373,9 @@ Spark 4.1 and newer can route join-generated dynamic partition pruning filters i
 Lance accepts exact `IN` predicates for projected `_rowaddr` and `_rowid`, active sharding columns, and
 top-level scalar columns backed by a compatible scalar or zonemap index. Runtime filters prune a
 subset of the snapshot-pinned fragments and are also passed to the native Lance scanner; Spark
-still evaluates the normal join, including duplicate-key multiplicity.
+still evaluates the normal join, including duplicate-key multiplicity. Columns that Spark reads
+lossily are not eligible: nanosecond timestamps and `Date(MILLISECOND)` (truncated on read), and
+`UInt64` (values of 2^63 or more read as negative longs).
 
 Repeated runtime filters are combined with `AND`. Null equality keys are discarded, an empty or
 null-only key set produces an empty scan, and uncovered fragments from a partially built zonemap
