@@ -40,6 +40,9 @@ import org.lance.spark.utils.FullTextQueryUtils;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.Utils;
 
+import org.apache.arrow.vector.types.DateUnit;
+import org.apache.arrow.vector.types.TimeUnit;
+import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.InternalRow;
@@ -284,6 +287,7 @@ public class LanceScanBuilder
               ? Collections.emptySet()
               : runtimeFilterColumns(
                   schema,
+                  dataset.getSchema(),
                   readOptions,
                   exactEqualityIndexedColumns,
                   zonemapStats.keySet(),
@@ -1026,6 +1030,7 @@ public class LanceScanBuilder
 
   private static Set<String> runtimeFilterColumns(
       StructType projectedSchema,
+      Schema arrowSchema,
       LanceSparkReadOptions readOptions,
       Set<String> exactEqualityIndexedColumns,
       Set<String> zonemapColumns,
@@ -1040,6 +1045,7 @@ public class LanceScanBuilder
       if (LanceConstant.ROW_ADDRESS.equals(column) || LanceConstant.ROW_ID.equals(column)) {
         result.add(column);
       } else if (isRuntimeFilterScalarType(field)
+          && hasExactSparkMapping(findField(arrowSchema.getFields(), column))
           && (column.equals(activeShardingColumn)
               || zonemapColumns.contains(column)
               || (readOptions.isUseScalarIndex()
@@ -1048,6 +1054,31 @@ public class LanceScanBuilder
       }
     }
     return result;
+  }
+
+  /**
+   * Whether every stored value maps to a distinct Spark value, so filtering in Lance with Spark's
+   * join keys keeps every row Spark would join. Nanosecond timestamps and {@code Date(MILLISECOND)}
+   * are truncated on read, so an exact match in Lance misses values that only truncate to a key.
+   * {@code UInt64} values of 2^63 or more read as negative longs, which Lance cannot compare with
+   * the column.
+   */
+  private static boolean hasExactSparkMapping(Field field) {
+    if (field == null) {
+      return false;
+    }
+    ArrowType type = field.getType();
+    if (type instanceof ArrowType.Timestamp) {
+      return ((ArrowType.Timestamp) type).getUnit() != TimeUnit.NANOSECOND;
+    }
+    if (type instanceof ArrowType.Date) {
+      return ((ArrowType.Date) type).getUnit() == DateUnit.DAY;
+    }
+    if (type instanceof ArrowType.Int) {
+      ArrowType.Int intType = (ArrowType.Int) type;
+      return intType.getIsSigned() || intType.getBitWidth() < 64;
+    }
+    return true;
   }
 
   private static boolean isRuntimeFilterScalarType(StructField field) {

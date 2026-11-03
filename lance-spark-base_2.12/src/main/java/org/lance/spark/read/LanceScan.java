@@ -157,6 +157,56 @@ public class LanceScan
   /** True when the dataset has no stable row IDs, so {@code _rowid} equals {@code _rowaddr}. */
   private final boolean rowIdIsRowAddress;
 
+  /**
+   * The constructor from before runtime filtering, kept so existing callers still compile. The scan
+   * advertises no runtime filter columns and treats {@code _rowid} as distinct from {@code
+   * _rowaddr}.
+   */
+  public LanceScan(
+      StructType schema,
+      LanceSparkReadOptions readOptions,
+      Optional<String> whereConditions,
+      Optional<Integer> limit,
+      Optional<Integer> offset,
+      Optional<List<ColumnOrdering>> topNSortOrders,
+      Optional<Aggregation> pushedAggregation,
+      Predicate[] pushedPredicates,
+      LanceStatistics statistics,
+      Set<Integer> survivingFragmentIds,
+      List<LanceSplit> precomputedSplits,
+      java.util.Map<Integer, Long> precomputedFragmentRowCounts,
+      Expression activeShardingExpression,
+      java.util.Map<Integer, Object> fragmentShardingKeys,
+      java.util.Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      java.util.Map<String, String> namespaceProperties) {
+    this(
+        schema,
+        readOptions,
+        whereConditions,
+        limit,
+        offset,
+        topNSortOrders,
+        pushedAggregation,
+        pushedPredicates,
+        statistics,
+        survivingFragmentIds,
+        null,
+        null,
+        null,
+        precomputedSplits,
+        precomputedFragmentRowCounts,
+        activeShardingExpression,
+        activeShardingExpression instanceof NamedReference
+            ? String.join(".", ((NamedReference) activeShardingExpression).fieldNames())
+            : null,
+        fragmentShardingKeys,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        false);
+  }
+
   public LanceScan(
       StructType schema,
       LanceSparkReadOptions readOptions,

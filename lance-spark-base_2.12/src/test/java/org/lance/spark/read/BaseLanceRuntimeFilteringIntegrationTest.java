@@ -13,8 +13,28 @@
  */
 package org.lance.spark.read;
 
+import org.lance.spark.LanceRuntime;
+
+import org.apache.arrow.c.ArrowArrayStream;
+import org.apache.arrow.c.Data;
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.vector.DateMilliVector;
+import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.TimeStampNanoTZVector;
+import org.apache.arrow.vector.TimeStampSecTZVector;
+import org.apache.arrow.vector.UInt8Vector;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.ipc.ArrowStreamReader;
+import org.apache.arrow.vector.ipc.ArrowStreamWriter;
+import org.apache.arrow.vector.types.DateUnit;
+import org.apache.arrow.vector.types.TimeUnit;
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.connector.expressions.filter.Predicate;
 import org.apache.spark.sql.connector.read.partitioning.KeyGroupedPartitioning;
@@ -23,11 +43,16 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.nio.file.Path;
+import java.time.LocalDate;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -450,6 +475,105 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
   }
 
   @Test
+  public void testDecimalZonemapRuntimeFilterPreservesJoinRows() {
+    // Lance reports no zonemap bounds for decimals; runtime pruning must keep those zones.
+    String fact = defaultCatalog + ".default.decimal_fact_" + suffix();
+    String dim = defaultCatalog + ".default.decimal_dim_" + suffix();
+    spark.sql("CREATE TABLE " + fact + " (id INT, x DECIMAL(10,2)) USING lance");
+    spark.sql("INSERT INTO " + fact + " VALUES (1, 1.23), (2, 4.56)");
+    spark.sql("ALTER TABLE " + fact + " CREATE INDEX decimal_idx USING zonemap (x)");
+    spark.sql("CREATE TABLE " + dim + " (x DECIMAL(10,2), label STRING) USING lance");
+    spark.sql("INSERT INTO " + dim + " VALUES (1.23, 'match'), (7.89, 'other-long')");
+
+    Dataset<Row> joined =
+        spark.sql(
+            "SELECT f.id FROM "
+                + fact
+                + " f JOIN "
+                + dim
+                + " d ON f.x = d.x "
+                + "WHERE length(d.label) = 5");
+    assertEquals(1, joined.collectAsList().size());
+    assertTrue(LanceScanTestHelper.hasLanceRuntimeFilters(joined));
+  }
+
+  @Test
+  public void testRuntimeFilteringSkipsColumnsSparkReadsLossily() throws Exception {
+    // Spark truncates nanosecond timestamps and Date64 values and reads UInt64 values of 2^63 or
+    // more as negative longs, so Lance cannot match them exactly against Spark's join keys.
+    String name = "lossy_" + suffix();
+    long ts1Seconds = 1718451000L;
+    long day1 = LocalDate.of(2024, 6, 15).toEpochDay();
+    Schema schema =
+        new Schema(
+            Arrays.asList(
+                new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
+                new Field(
+                    "ns",
+                    FieldType.nullable(new ArrowType.Timestamp(TimeUnit.NANOSECOND, "UTC")),
+                    null),
+                new Field(
+                    "d64", FieldType.nullable(new ArrowType.Date(DateUnit.MILLISECOND)), null),
+                new Field("u64", FieldType.nullable(new ArrowType.Int(64, false)), null),
+                new Field(
+                    "sec",
+                    FieldType.nullable(new ArrowType.Timestamp(TimeUnit.SECOND, "UTC")),
+                    null)));
+    writeArrowTable(
+        tempDir.resolve(name + ".lance").toString(),
+        schema,
+        root -> {
+          ((IntVector) root.getVector("id")).setSafe(0, 1);
+          ((IntVector) root.getVector("id")).setSafe(1, 2);
+          ((TimeStampNanoTZVector) root.getVector("ns"))
+              .setSafe(0, ts1Seconds * 1_000_000_000L + 1);
+          ((TimeStampNanoTZVector) root.getVector("ns")).setSafe(1, 1_000_000_001L);
+          ((DateMilliVector) root.getVector("d64")).setSafe(0, day1 * 86_400_000L + 1);
+          ((DateMilliVector) root.getVector("d64")).setSafe(1, 86_400_000L);
+          ((UInt8Vector) root.getVector("u64")).setSafe(0, -1L);
+          ((UInt8Vector) root.getVector("u64")).setSafe(1, 1L);
+          ((TimeStampSecTZVector) root.getVector("sec")).setSafe(0, ts1Seconds);
+          ((TimeStampSecTZVector) root.getVector("sec")).setSafe(1, 1L);
+        });
+    String fact = defaultCatalog + ".default." + name;
+    for (String column : new String[] {"ns", "d64", "u64", "sec"}) {
+      spark.sql(
+          String.format(
+              "ALTER TABLE %s CREATE INDEX %s_idx USING zonemap (%s)", fact, column, column));
+    }
+    String dim = defaultCatalog + ".default.lossy_dim_" + suffix();
+    spark.sql(
+        "CREATE TABLE " + dim + " (ts TIMESTAMP, dt DATE, u BIGINT, label STRING) USING lance");
+    spark.sql(
+        String.format(
+            "INSERT INTO %s VALUES "
+                + "(timestamp_seconds(%d), date_from_unix_date(%d), -1, 'match'), "
+                + "(timestamp_seconds(5), date_from_unix_date(5), 5, 'other-long')",
+            dim, ts1Seconds, day1));
+
+    Dataset<Row> ordinary = spark.sql("SELECT ns, d64, u64, sec FROM " + fact);
+    ordinary.collectAsList();
+    LanceScan scan = LanceScanTestHelper.extractLanceScan(ordinary);
+    assertNotNull(scan);
+    assertArrayEquals(
+        new String[] {"sec"},
+        Arrays.stream(scan.filterAttributes())
+            .map(attribute -> String.join(".", attribute.fieldNames()))
+            .toArray());
+
+    String[][] joins = {{"ns", "ts"}, {"d64", "dt"}, {"u64", "u"}, {"sec", "ts"}};
+    for (String[] join : joins) {
+      Dataset<Row> joined =
+          spark.sql(
+              String.format(
+                  "SELECT f.id FROM %s f JOIN %s d ON f.%s = d.%s WHERE length(d.label) = 5",
+                  fact, dim, join[0], join[1]));
+      assertEquals(
+          Collections.singletonList(RowFactory.create(1)), joined.collectAsList(), join[0]);
+    }
+  }
+
+  @Test
   public void testStoragePartitionedJoinCoexistsWithRuntimeFiltering() {
     String fact = createFact(defaultCatalog, true, true);
     String dim = createDimension(defaultCatalog, true);
@@ -531,6 +655,29 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
       spark.sql(String.format("ALTER TABLE %s CREATE INDEX k_idx USING zonemap (k)", table));
     }
     return table;
+  }
+
+  private static void writeArrowTable(String uri, Schema schema, Consumer<VectorSchemaRoot> rows)
+      throws Exception {
+    BufferAllocator allocator = LanceRuntime.allocator();
+    try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+      root.allocateNew();
+      rows.accept(root);
+      root.setRowCount(2);
+      ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+      try (ArrowStreamWriter writer = new ArrowStreamWriter(root, null, bytes)) {
+        writer.start();
+        writer.writeBatch();
+        writer.end();
+      }
+      try (ArrowStreamReader reader =
+              new ArrowStreamReader(new ByteArrayInputStream(bytes.toByteArray()), allocator);
+          ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator)) {
+        Data.exportArrayStream(allocator, reader, stream);
+        // One row per fragment, so pruning has a fragment to drop.
+        org.lance.Dataset.write().stream(stream).uri(uri).maxRowsPerFile(1).execute().close();
+      }
+    }
   }
 
   private void assertRuntimePruned(Dataset<Row> dataset) {
