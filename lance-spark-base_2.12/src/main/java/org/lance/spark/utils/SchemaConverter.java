@@ -89,6 +89,11 @@ public class SchemaConverter {
     return property.substring(0, property.length() - matchedSuffix.length());
   }
 
+  /** Whether a property configures stored Arrow schema metadata or Lance field encoding. */
+  public static boolean isSchemaProperty(String property) {
+    return schemaPropertyColumn(property) != null;
+  }
+
   public static StructType processSchemaWithProperties(
       StructType sparkSchema, Map<String, String> properties) {
     return processSchemaWithProperties(sparkSchema, properties, null);

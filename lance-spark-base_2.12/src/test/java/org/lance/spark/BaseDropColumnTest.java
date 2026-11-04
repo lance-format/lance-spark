@@ -70,7 +70,7 @@ public abstract class BaseDropColumnTest {
   public void testDropColumnRemovesFieldDataAndEncodingProperty() throws Exception {
     createTable("kept", "id INT, name STRING");
     spark.sql("INSERT INTO " + full("kept") + " VALUES (1, 'alpha')");
-    setProperties("kept", "'name.lance.compression' = 'zstd', 'team' = 'search'");
+    setLegacyConfig("kept", Map.of("name.lance.compression", "zstd", "team", "search"));
     spark.sql("ALTER TABLE " + full("kept") + " DROP COLUMN name");
     refresh("kept");
 
@@ -86,7 +86,8 @@ public abstract class BaseDropColumnTest {
   public void testDropTwoColumnsRemovesBothEncodingProperties() throws Exception {
     createTable("both", "id INT, name STRING, payload STRING");
     spark.sql("INSERT INTO " + full("both") + " VALUES (1, 'alpha', 'blob')");
-    setProperties("both", "'name.lance.compression' = 'zstd', 'payload.lance.encoding' = 'blob'");
+    setLegacyConfig(
+        "both", Map.of("name.lance.compression", "zstd", "payload.lance.encoding", "blob"));
     spark.sql("ALTER TABLE " + full("both") + " DROP COLUMNS name, payload");
     refresh("both");
 
@@ -101,7 +102,7 @@ public abstract class BaseDropColumnTest {
   @Test
   public void testDropStructRemovesChildEncodingProperty() throws Exception {
     createTable("nested", "id INT, s STRUCT<d: INT>");
-    setProperties("nested", "'s.d.lance.compression' = 'zstd', 'team' = 'search'");
+    setLegacyConfig("nested", Map.of("s.d.lance.compression", "zstd", "team", "search"));
     spark.sql("ALTER TABLE " + full("nested") + " DROP COLUMN s");
     refresh("nested");
 
@@ -114,7 +115,7 @@ public abstract class BaseDropColumnTest {
   @Test
   public void testDropMissingColumnLeavesTableUnchanged() throws Exception {
     createTable("missing", "id INT, name STRING");
-    setProperties("missing", "'name.lance.compression' = 'zstd'");
+    setLegacyConfig("missing", Map.of("name.lance.compression", "zstd"));
     Map<String, String> before = config("missing");
     assertSqlFails(() -> spark.sql("ALTER TABLE " + full("missing") + " DROP COLUMN absent"));
     refresh("missing");
@@ -160,7 +161,7 @@ public abstract class BaseDropColumnTest {
   public void testDropIndexedColumnIsRejected() throws Exception {
     createTable("indexed", "id INT, region STRING");
     spark.sql("INSERT INTO " + full("indexed") + " VALUES (1, 'east')");
-    setProperties("indexed", "'region.lance.compression' = 'zstd'");
+    setLegacyConfig("indexed", Map.of("region.lance.compression", "zstd"));
     spark.sql("ALTER TABLE " + full("indexed") + " CREATE INDEX region_idx USING btree (region)");
     Map<String, String> before = config("indexed");
     assertSqlFails(
@@ -180,9 +181,15 @@ public abstract class BaseDropColumnTest {
         "INSERT INTO "
             + full("collision")
             + " VALUES (1, named_struct('a.b', 11, 'a', named_struct('b', 22), 'keep', 33))");
-    setProperties(
+    setLegacyConfig(
         "collision",
-        "'s.`a.b`.lance.compression' = 'zstd', 's.a.b.lance.compression' = 'lz4', 'team' = 'search'");
+        Map.of(
+            "s.`a.b`.lance.compression",
+            "zstd",
+            "s.a.b.lance.compression",
+            "lz4",
+            "team",
+            "search"));
     spark.sql("ALTER TABLE " + full("collision") + " DROP COLUMN s.`a.b`");
     refresh("collision");
 
@@ -207,7 +214,7 @@ public abstract class BaseDropColumnTest {
     createTable("pk", "id INT NOT NULL, other INT NOT NULL");
     spark.sql("INSERT INTO " + full("pk") + " VALUES (1, 2)");
     spark.sql("ALTER TABLE " + full("pk") + " SET UNENFORCED PRIMARY KEY (id)");
-    setProperties("pk", "'id.lance.compression' = 'zstd'");
+    setLegacyConfig("pk", Map.of("id.lance.compression", "zstd"));
     Map<String, String> before = config("pk");
     assertSqlFails(
         () -> spark.sql("ALTER TABLE " + full("pk") + " DROP COLUMN id"), "unenforced primary key");
@@ -226,6 +233,19 @@ public abstract class BaseDropColumnTest {
 
   private void setProperties(String name, String properties) {
     spark.sql("ALTER TABLE " + full(name) + " SET TBLPROPERTIES (" + properties + ")");
+  }
+
+  private void setLegacyConfig(String name, Map<String, String> properties) throws Exception {
+    TableCatalog catalog = (TableCatalog) spark.sessionState().catalogManager().catalog(CATALOG);
+    LanceDataset table =
+        (LanceDataset) catalog.loadTable(Identifier.of(new String[] {"default"}, name));
+    // Existing schema properties may be stored by connector versions predating SET protection.
+    try (var dataset = Utils.openDatasetBuilder(table.readOptions()).build()) {
+      Map<String, String> config = new HashMap<>(dataset.getConfig());
+      config.putAll(properties);
+      dataset.updateConfig(config);
+      properties.forEach((key, value) -> assertEquals(value, dataset.getConfig().get(key), key));
+    }
   }
 
   private void refresh(String name) {
