@@ -48,5 +48,6 @@ abstract class BaseLance12BlobRowLevelTest extends Lance12BlobFixtureTest {
     }
     assertTrue(version(uri) > before)
     assertPayloads(uri, expected)
+    assertSubsequentAppend(uri, expected)
   }
 }

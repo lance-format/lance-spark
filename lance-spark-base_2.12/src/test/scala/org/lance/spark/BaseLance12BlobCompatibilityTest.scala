@@ -14,9 +14,10 @@
 package org.lance.spark
 
 import org.apache.arrow.vector.{IntVector, LargeVarBinaryVector, VectorSchemaRoot}
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.connector.write.WriterCommitMessage
 import org.apache.spark.sql.functions.lit
+import org.apache.spark.sql.types.BinaryType
 import org.apache.spark.sql.util.LanceArrowUtils
 import org.junit.jupiter.api.{AfterEach, BeforeEach, Test}
 import org.junit.jupiter.api.Assertions._
@@ -24,7 +25,7 @@ import org.junit.jupiter.api.io.TempDir
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.{CsvSource, ValueSource}
 import org.lance.{Dataset => LanceTable, Fragment}
-import org.lance.spark.utils.Utils
+import org.lance.spark.utils.{BlobReference, BlobUtils, Utils}
 import org.lance.spark.write.{LanceBatchWrite, StagedCommit, StagedCommitOptions}
 
 import java.nio.charset.StandardCharsets.UTF_8
@@ -40,6 +41,7 @@ abstract class BaseLance12BlobCompatibilityTest extends Lance12BlobFixtureTest {
   @CsvSource(Array(
     "top_level, append",
     "top_level, append22",
+    "top_level, appendPath",
     "top_level, delete",
     "top_level, createIndex",
     "top_level, createUntrainedIndex",
@@ -47,6 +49,7 @@ abstract class BaseLance12BlobCompatibilityTest extends Lance12BlobFixtureTest {
     "top_level, optimizeIndex",
     "top_level, dropIndex",
     "top_level, properties",
+    "top_level, unsetProperties",
     "top_level, primaryKey",
     "top_level, addColumns",
     "top_level, updateColumns",
@@ -56,6 +59,7 @@ abstract class BaseLance12BlobCompatibilityTest extends Lance12BlobFixtureTest {
     "spark_append_22, createIndex",
     "spark_append_22, properties",
     "nested, append",
+    "nested, append22",
     "nested, delete",
     "nested, createIndex",
     "nested, properties",
@@ -74,8 +78,14 @@ abstract class BaseLance12BlobCompatibilityTest extends Lance12BlobFixtureTest {
         spark.sql(s"INSERT INTO $table VALUES (4, $value)")
         expected :+= 4 -> bytes("four")
       case "append22" =>
-        spark.sql("SELECT 4 AS id, X'666F7572' AS data")
+        val value = if (fixture == "nested") "named_struct('data', X'666F7572') AS payload"
+        else "X'666F7572' AS data"
+        spark.sql(s"SELECT 4 AS id, $value")
           .writeTo(table).option("file_format_version", "2.2").append()
+        expected :+= 4 -> bytes("four")
+      case "appendPath" =>
+        spark.sql("SELECT 4 AS id, X'666F7572' AS data")
+          .write.format("lance").mode("append").save(uri)
         expected :+= 4 -> bytes("four")
       case "delete" =>
         spark.sql(s"DELETE FROM $table WHERE id = 1")
@@ -104,6 +114,11 @@ abstract class BaseLance12BlobCompatibilityTest extends Lance12BlobFixtureTest {
         assertEquals(
           "checked",
           spark.sql(s"SHOW TBLPROPERTIES $table ('compatibility')").first().getString(1))
+      case "unsetProperties" =>
+        spark.sql(s"ALTER TABLE $table SET TBLPROPERTIES ('compatibility' = 'checked')")
+        assertPayloads(uri, original, column)
+        spark.sql(s"ALTER TABLE $table UNSET TBLPROPERTIES ('compatibility')")
+        withDataset(uri)(dataset => assertFalse(dataset.getConfig.containsKey("compatibility")))
       case "primaryKey" =>
         spark.sql(s"ALTER TABLE $table SET UNENFORCED PRIMARY KEY (id)")
         withDataset(uri) { dataset =>
@@ -133,6 +148,15 @@ abstract class BaseLance12BlobCompatibilityTest extends Lance12BlobFixtureTest {
     }
     assertTrue(version(uri) > before, s"$operation must publish a manifest")
     assertPayloads(uri, expected, column)
+    if (operation.toLowerCase.contains("index")) {
+      assertEquals(
+        expected.filter(_._1 == 2).map(_._1),
+        spark.sql(s"SELECT id FROM $table WHERE id = 2").collect().map(_.getInt(0)).toVector)
+      assertEquals(
+        expected.filter(_._1 >= 2).map(_._1),
+        spark.sql(s"SELECT id FROM $table WHERE id >= 2 ORDER BY id")
+          .collect().map(_.getInt(0)).toVector)
+    }
     // A readable commit is insufficient if its promoted schema prevents the next write.
     val value = if (fixture == "nested") "named_struct('data', X'6E657874')" else "X'6E657874'"
     val field = if (fixture == "nested") "payload" else "data"
@@ -144,16 +168,18 @@ abstract class BaseLance12BlobCompatibilityTest extends Lance12BlobFixtureTest {
 
   @ParameterizedTest
   @ValueSource(strings = Array("2.1", "2.2"))
-  def overwriteAndSubsequentAppendPreserveBytes(fileVersion: String): Unit = {
+  def rewriteAndSubsequentAppendPreserveBytes(fileVersion: String): Unit = {
     val uri = copyFixture("top_level")
     val table = tableAt(uri)
     val before = version(uri)
-    spark.sql("SELECT 10 AS id, X'6E6577' AS data")
+    spark.table(table)
       .writeTo(table).option("file_format_version", fileVersion).overwrite(lit(true))
     assertTrue(version(uri) > before)
-    assertPayloads(uri, Vector(10 -> bytes("new")))
+    assertEquals(Set(fileVersion), physicalFileVersions(uri))
+    val expected = fixtureRows("top_level")
+    assertPayloads(uri, expected)
     spark.sql(s"INSERT INTO $table VALUES (11, X'6E657874')")
-    assertPayloads(uri, Vector(10 -> bytes("new"), 11 -> bytes("next")))
+    assertPayloads(uri, expected :+ (11 -> bytes("next")))
   }
 
   @Test
@@ -178,9 +204,47 @@ abstract class BaseLance12BlobCompatibilityTest extends Lance12BlobFixtureTest {
       .tableProperty("data.lance.encoding", "blob")
       .tableProperty("file_format_version", "2.1")
       .option("file_format_version", fileVersion).create()
+    assertEquals(Set("2.2"), physicalFileVersions(uri))
     assertPayloads(uri, Vector(1 -> bytes("one")))
     spark.sql(s"INSERT INTO $table VALUES (2, X'74776F')")
     assertPayloads(uri, Vector(1 -> bytes("one"), 2 -> bytes("two")))
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = Array("catalog", "path"))
+  def clean21TableAccepts22Append(writer: String): Unit = {
+    val uri = tempDir.resolve("clean21.lance").toString
+    val table = tableAt(uri)
+    spark.sql(s"""CREATE TABLE $table (id INT NOT NULL, data BINARY) USING lance
+                 |TBLPROPERTIES ('data.lance.encoding' = 'blob',
+                 |'file_format_version' = '2.1')""".stripMargin)
+    spark.sql(s"INSERT INTO $table VALUES (1, X'6F6E65')")
+    assertEquals(Set("2.1"), physicalFileVersions(uri))
+    assertPayloads(uri, Vector(1 -> bytes("one")))
+    val appended = spark.sql("SELECT 2 AS id, X'74776F' AS data")
+    if (writer == "catalog") {
+      appended.writeTo(table).option("file_format_version", "2.2").append()
+    } else {
+      appended.write.format("lance").mode("append")
+        .option("file_format_version", "2.2").save(uri)
+    }
+    assertEquals(Set("2.1", "2.2"), physicalFileVersions(uri))
+    val expected = Vector(1 -> bytes("one"), 2 -> bytes("two"))
+    assertPayloads(uri, expected)
+    assertSubsequentAppend(uri, expected)
+  }
+
+  @Test
+  def nestedBlobCreateAndAppendPreserveStoredBytes(): Unit = {
+    val source = copyFixture("nested")
+    val schema = withDataset(source)(dataset => LanceArrowUtils.fromArrowSchema(dataset.getSchema))
+    val uri = tempDir.resolve("nested-created.lance").toString
+    val table = tableAt(uri)
+    spark.createDataFrame(Collections.singletonList(Row(1, Row(bytes("one")))), schema)
+      .writeTo(table).using("lance").create()
+    assertPayloads(uri, Vector(1 -> bytes("one")), "payload.data")
+    spark.sql(s"INSERT INTO $table VALUES (2, named_struct('data', X'74776F'))")
+    assertPayloads(uri, Vector(1 -> bytes("one"), 2 -> bytes("two")), "payload.data")
   }
 
   @Test
@@ -254,6 +318,7 @@ abstract class BaseLance12BlobCompatibilityTest extends Lance12BlobFixtureTest {
     val expected = if (mode == "append") fixtureRows("top_level") :+ (4 -> bytes("four"))
     else Vector(4 -> bytes("four"))
     assertPayloads(uri, expected)
+    assertSubsequentAppend(uri, expected)
   }
 }
 
@@ -308,14 +373,47 @@ abstract class Lance12BlobFixtureTest {
 
   protected def version(uri: String): Long = withDataset(uri)(_.version())
 
-  // Resolve IDs through Spark and payloads through Lance's blob API. Nested blob materialization
-  // in Spark is tracked separately in #852; scalar projection alone cannot validate stored bytes.
+  protected def physicalFileVersions(uri: String): Set[String] = withDataset(uri) { dataset =>
+    dataset.getFragments.asScala.flatMap(_.metadata().getFiles.asScala)
+      .map(file => s"${file.getFileMajorVersion}.${file.getFileMinorVersion}").toSet
+  }
+
+  protected def assertSubsequentAppend(
+      uri: String,
+      expected: Vector[(Int, Array[Byte])]): Unit = {
+    val before = version(uri)
+    spark.sql(s"INSERT INTO ${tableAt(uri)} VALUES (9, X'6E657874')")
+    assertTrue(version(uri) > before)
+    assertPayloads(uri, (expected :+ (9 -> bytes("next"))).sortBy(_._1))
+  }
+
+  // Force Spark to decode top-level blob references/descriptors, then verify stored bytes through
+  // Lance's blob API. Nested Spark materialization is tracked separately in #852.
   protected def assertPayloads(
       uri: String,
       expected: Vector[(Int, Array[Byte])],
       column: String = "data"): Unit = {
     val rows = spark.sql(s"SELECT id, _rowaddr FROM ${tableAt(uri)} ORDER BY id").collect()
     assertEquals(expected.map(_._1), rows.map(_.getInt(0)).toVector)
+    if (column == "data") {
+      val projected = spark.sql(s"SELECT id, _rowaddr, data FROM ${tableAt(uri)} ORDER BY id")
+      val blobField = projected.schema("data")
+      val blobRows = projected.collect()
+      assertEquals(expected.map(_._1), blobRows.map(_.getInt(0)).toVector)
+      blobRows.zip(expected).foreach { case (row, (id, data)) =>
+        assertFalse(row.isNullAt(2), s"Spark blob for id=$id")
+        if (blobField.dataType == BinaryType) {
+          val reference = BlobReference.deserialize(row.getAs[Array[Byte]](2))
+          assertEquals(uri, reference.getDatasetUri)
+          assertEquals(column, reference.getColumnName)
+          assertEquals(row.getLong(1), reference.getRowAddress)
+          assertEquals(data.length.toLong, reference.getSize)
+        } else {
+          assertEquals(BlobUtils.BLOB_DESCRIPTOR_STRUCT, blobField.dataType)
+          assertEquals(data.length.toLong, row.getStruct(2).getAs[Long]("size"))
+        }
+      }
+    }
     val addresses = rows.map(row => Long.box(row.getLong(1))).toList.asJava
     withDataset(uri) { dataset =>
       val blobs = dataset.takeBlobs(addresses, column).asScala

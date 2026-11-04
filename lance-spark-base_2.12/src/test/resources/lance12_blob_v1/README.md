@@ -37,9 +37,13 @@ manifest/index UUIDs need not be identical when regenerated; the rows, blob
 metadata, file versions and partial index coverage must be identical.
 
 The JUnit suites copy each fixture into a fresh temporary directory per case,
-execute a real Spark operation, reopen the dataset, and compare IDs and every
-blob's bytes. Compaction and index refresh must perform actual work. Spark 3.5+
-also exercises UPDATE and MERGE. Nested stored bytes are checked through Lance's
+execute a real Spark operation, collect top-level blob references/descriptors
+through Spark, reopen the dataset, and compare IDs and every blob's bytes.
+Compaction and index refresh must perform actual work; index operations also
+check point/range query results. Clean 2.1 tables receive their first 2.2 append
+through both catalog and path writers, with assertions on physical file versions.
+Rewrites, staged/external commits and Spark 3.5+ UPDATE/MERGE also verify a
+subsequent append. Nested stored bytes are checked through Lance's
 blob API; Spark's nested blob materialization limitation is tracked in
 [#852](https://github.com/lance-format/lance-spark/issues/852).
 
