@@ -1746,11 +1746,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
       boolean managedVersioning,
       List<String> tableIdList,
       boolean protectSchema) {
-    if (!managedVersioning && !protectSchema) {
-      dataset.updateConfig(config);
-      return;
-    }
-
     UpdateMap updateMap = UpdateMap.builder().updates(config).replace(true).build();
     UpdateConfig.Builder updateConfig = UpdateConfig.builder().configUpdates(updateMap);
     if (protectSchema) {

@@ -61,8 +61,7 @@ public class SparkWriteTest {
   private String createDataset(String name) {
     String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), name);
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
-      Dataset.create(allocator, datasetUri, ARROW_SCHEMA, new WriteParams.Builder().build())
-          .close();
+      Dataset.write().allocator(allocator).uri(datasetUri).schema(ARROW_SCHEMA).execute().close();
     }
     return datasetUri;
   }
@@ -70,7 +69,7 @@ public class SparkWriteTest {
   private String createIdentityShardedDataset(String name) {
     String datasetUri = createDataset(name);
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
-        Dataset dataset = Dataset.open(datasetUri, allocator)) {
+        Dataset dataset = Dataset.open().uri(datasetUri).allocator(allocator).build()) {
       dataset.initializeMemWal(new InitializeMemWalParams().withIdentitySharding("name"));
     }
     return datasetUri;

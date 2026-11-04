@@ -195,7 +195,7 @@ public abstract class BaseVectorCreateTableTest {
     try (var dataset = Utils.openDatasetBuilder(table.readOptions()).build()) {
       Map<String, String> config = new HashMap<>(dataset.getConfig());
       config.put("embedding.arrow.fixed-size-list.size", "128");
-      dataset.updateConfig(config);
+      replaceConfig(dataset, config);
     }
     spark.sql("REFRESH TABLE " + fullName);
     List<Row> conflictingDimension =
@@ -855,7 +855,7 @@ public abstract class BaseVectorCreateTableTest {
       Map<String, String> config = new HashMap<>(dataset.getConfig());
       config.put("embedding.arrow.fixed-size-list.size", "128");
       config.put("team", "search");
-      dataset.updateConfig(config);
+      replaceConfig(dataset, config);
     }
     spark.sql(
         "ALTER TABLE "
@@ -867,5 +867,19 @@ public abstract class BaseVectorCreateTableTest {
       assertEquals("search", dataset.getConfig().get("team"));
     }
     assertFixedSizeListMetadata(spark.table(fullName).schema(), "embedding", 756);
+  }
+
+  private static void replaceConfig(org.lance.Dataset dataset, Map<String, String> config) {
+    try (Transaction txn =
+            new Transaction.Builder()
+                .readVersion(dataset.version())
+                .operation(
+                    UpdateConfig.builder()
+                        .configUpdates(UpdateMap.builder().updates(config).replace(true).build())
+                        .build())
+                .build();
+        var committed = new CommitBuilder(dataset).execute(txn)) {
+      // auto-close txn and committed dataset
+    }
   }
 }

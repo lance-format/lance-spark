@@ -702,8 +702,8 @@ Lance's default version, which is `2.2`, so its blob columns are blob v2. A cata
 still produces v1 blob columns.
 
 Creating a table from a schema read back from an existing v1 blob table is the exception:
-that schema already carries `lance-encoding:blob = true`, which Lance rejects from `2.2`
-on, so the new table is created at `2.1` and its blob columns stay v1. Pinning a version
+that schema already carries `lance-encoding:blob = true`, which Lance writes as blob v2
+from `2.2` on, so the new table is created at `2.1` and its blob columns stay v1. Pinning a version
 of `2.2` or newer for such a schema is rejected — rebuild the column as blob v2 instead.
 A schema that mixes v1 and v2 blob columns is rejected as well, because no single file
 format version can store both.

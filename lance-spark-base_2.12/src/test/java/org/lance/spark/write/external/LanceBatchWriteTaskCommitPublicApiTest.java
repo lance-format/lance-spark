@@ -15,7 +15,6 @@ package org.lance.spark.write.external;
 
 import org.lance.Dataset;
 import org.lance.FragmentMetadata;
-import org.lance.WriteParams;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
 import org.lance.spark.write.FragmentWriteSpec;
@@ -50,7 +49,7 @@ public class LanceBatchWriteTaskCommitPublicApiTest {
             Collections.singletonList(
                 new Field("a", FieldType.nullable(new ArrowType.Int(32, true)), null)));
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
-      Dataset.create(allocator, datasetUri, schema, new WriteParams.Builder().build()).close();
+      Dataset.write().allocator(allocator).uri(datasetUri).schema(schema).execute().close();
     }
     LanceBatchWrite batchWrite =
         new LanceBatchWrite(

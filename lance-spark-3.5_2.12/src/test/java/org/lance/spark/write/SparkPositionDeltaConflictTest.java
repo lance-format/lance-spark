@@ -16,7 +16,6 @@ package org.lance.spark.write;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.FragmentMetadata;
-import org.lance.WriteParams;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
 
@@ -85,8 +84,7 @@ public class SparkPositionDeltaConflictTest {
 
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
       // Create dataset with initial rows
-      Dataset.create(allocator, datasetUri, ARROW_SCHEMA, new WriteParams.Builder().build())
-          .close();
+      Dataset.write().allocator(allocator).uri(datasetUri).schema(ARROW_SCHEMA).execute().close();
 
       // Append some data so we have a fragment to work with
       LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
@@ -112,7 +110,7 @@ public class SparkPositionDeltaConflictTest {
       // Dataset now at V2 with one fragment
 
       long originalFragmentId;
-      try (Dataset ds = Dataset.open(datasetUri, allocator)) {
+      try (Dataset ds = Dataset.open().uri(datasetUri).allocator(allocator).build()) {
         originalFragmentId = ds.getFragments().get(0).getId();
       }
 

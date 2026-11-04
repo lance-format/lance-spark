@@ -205,6 +205,8 @@ public abstract class BaseLanceCustomMetricsTest {
                 5, // indicesLoaded
                 20, // partsLoaded
                 1000, // indexComparisons
+                0L, // indexCacheHits
+                0L, // indexCacheMisses
                 new HashMap<>(),
                 new HashMap<>())));
 
@@ -225,6 +227,8 @@ public abstract class BaseLanceCustomMetricsTest {
                 10, // indicesLoaded
                 30, // partsLoaded
                 2000, // indexComparisons
+                0L, // indexCacheHits
+                0L, // indexCacheMisses
                 new HashMap<>(),
                 new HashMap<>())));
 

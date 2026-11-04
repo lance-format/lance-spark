@@ -358,10 +358,10 @@ public class LanceSparkReadOptions implements Serializable {
       ref.getVersionNumber().ifPresent(builder::setVersion);
     }
     if (indexCacheSize != null) {
-      builder.setIndexCacheSize(indexCacheSize);
+      builder.setIndexCacheSizeBytes(indexCacheSize * 20L * 1024 * 1024);
     }
     if (metadataCacheSize != null) {
-      builder.setMetadataCacheSize(metadataCacheSize);
+      builder.setMetadataCacheSizeBytes(metadataCacheSize * 4L * 1024 * 1024);
     }
     if (!storageOptions.isEmpty()) {
       builder.setStorageOptions(storageOptions);
