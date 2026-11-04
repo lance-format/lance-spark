@@ -77,11 +77,12 @@ public class SparkPositionDeltaWriteTest {
     Schema schema = new Schema(Arrays.asList(ARROW_SCHEMA.getFields().get(0), data));
     byte[] expected = new byte[] {1, 2, 3};
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
-      Dataset.create(
-              allocator,
-              uri,
-              schema,
-              new WriteParams.Builder().withDataStorageVersion("2.1").build())
+      Dataset.write()
+          .allocator(allocator)
+          .uri(uri)
+          .schema(schema)
+          .dataStorageVersion("2.1")
+          .execute()
           .close();
       List<FragmentMetadata> fragments;
       try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
