@@ -13,15 +13,23 @@
  */
 package org.lance.spark.write;
 
+import org.lance.BlobFile;
 import org.lance.Dataset;
+import org.lance.Fragment;
+import org.lance.FragmentMetadata;
 import org.lance.WriteParams;
 import org.lance.spark.LancePositionDeltaOperation;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.utils.BlobUtils;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.LargeVarBinaryVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
@@ -30,6 +38,7 @@ import org.apache.spark.sql.connector.write.DeltaBatchWrite;
 import org.apache.spark.sql.connector.write.DeltaWriteBuilder;
 import org.apache.spark.sql.connector.write.LogicalWriteInfo;
 import org.apache.spark.sql.connector.write.RowLevelOperation;
+import org.apache.spark.sql.connector.write.WriterCommitMessage;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.apache.spark.sql.util.LanceArrowUtils;
@@ -41,12 +50,86 @@ import java.lang.reflect.Method;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
 public class SparkPositionDeltaWriteTest {
   @TempDir static Path tempDir;
+
+  /** The delta commit must also accept legacy blob fields written directly as 2.2 fragments. */
+  @Test
+  public void commitPreservesBlobV1FieldsWrittenAtTwoTwo(TestInfo testInfo) throws Exception {
+    String uri =
+        TestUtils.getDatasetUri(tempDir.toString(), testInfo.getTestMethod().get().getName());
+    Field data =
+        new Field(
+            "data",
+            new FieldType(
+                true,
+                ArrowType.LargeBinary.INSTANCE,
+                null,
+                Collections.singletonMap(
+                    BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)),
+            null);
+    Schema schema = new Schema(Arrays.asList(ARROW_SCHEMA.getFields().get(0), data));
+    byte[] expected = new byte[] {1, 2, 3};
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Dataset.write()
+          .allocator(allocator)
+          .uri(uri)
+          .schema(schema)
+          .dataStorageVersion("2.1")
+          .execute()
+          .close();
+      List<FragmentMetadata> fragments;
+      try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+        ((IntVector) root.getVector("id")).setSafe(0, 1);
+        ((LargeVarBinaryVector) root.getVector("data")).setSafe(0, expected);
+        root.setRowCount(1);
+        fragments =
+            Fragment.write()
+                .datasetUri(uri)
+                .allocator(allocator)
+                .data(root)
+                .mode(WriteParams.WriteMode.APPEND)
+                .dataStorageVersion("2.2")
+                .execute();
+      }
+      DeltaBatchWrite batch =
+          new SparkPositionDeltaWrite(
+                  LanceArrowUtils.fromArrowSchema(schema),
+                  LanceSparkWriteOptions.from(uri).toBuilder().fileFormatVersion("2.2").build(),
+                  null,
+                  null,
+                  null,
+                  false,
+                  null)
+              .toBatch();
+      batch.commit(
+          new WriterCommitMessage[] {
+            new SparkPositionDeltaWrite.DeltaWriteTaskCommit(fragments, Collections.emptyMap())
+          });
+      try (Dataset dataset =
+          Utils.openDatasetBuilder(LanceSparkReadOptions.builder().datasetUri(uri).build())
+              .build()) {
+        assertEquals(2, dataset.version());
+        assertEquals(1, dataset.countRows());
+        long rowAddress = ((long) dataset.getFragments().get(0).getId()) << 32;
+        List<BlobFile> blobs = dataset.takeBlobs(Collections.singletonList(rowAddress), "data");
+        try {
+          assertEquals(1, blobs.size());
+          assertArrayEquals(expected, blobs.get(0).read());
+        } finally {
+          for (BlobFile blob : blobs) {
+            blob.close();
+          }
+        }
+      }
+    }
+  }
 
   private static final Schema ARROW_SCHEMA =
       new Schema(
