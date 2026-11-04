@@ -106,6 +106,10 @@ abstract class BaseLance12BlobCompatibilityTest extends Lance12BlobFixtureTest {
           spark.sql(s"SHOW TBLPROPERTIES $table ('compatibility')").first().getString(1))
       case "primaryKey" =>
         spark.sql(s"ALTER TABLE $table SET UNENFORCED PRIMARY KEY (id)")
+        withDataset(uri) { dataset =>
+          val id = dataset.getLanceSchema.fields().asScala.find(_.getName == "id").get
+          assertEquals("1", id.getMetadata.get("lance-schema:unenforced-primary-key:position"))
+        }
       case "addColumns" =>
         spark.sql(s"CREATE OR REPLACE TEMP VIEW legacy_columns AS SELECT _rowaddr, _fragid, id * 2 AS id2 FROM $table")
         spark.sql(s"ALTER TABLE $table ADD COLUMNS id2 FROM legacy_columns")
@@ -129,6 +133,13 @@ abstract class BaseLance12BlobCompatibilityTest extends Lance12BlobFixtureTest {
     }
     assertTrue(version(uri) > before, s"$operation must publish a manifest")
     assertPayloads(uri, expected, column)
+    // A readable commit is insufficient if its promoted schema prevents the next write.
+    val value = if (fixture == "nested") "named_struct('data', X'6E657874')" else "X'6E657874'"
+    val field = if (fixture == "nested") "payload" else "data"
+    val extraColumn = if (operation == "addColumns") ", id2" else ""
+    val extraValue = if (operation == "addColumns") ", 18" else ""
+    spark.sql(s"INSERT INTO $table (id, $field$extraColumn) VALUES (9, $value$extraValue)")
+    assertPayloads(uri, (expected :+ (9 -> bytes("next"))).sortBy(_._1), column)
   }
 
   @ParameterizedTest
