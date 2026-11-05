@@ -211,13 +211,19 @@ public class LanceScanTest {
             new Predicate[0],
             null,
             null,
+            Collections.emptyMap(),
+            Collections.emptyMap(),
+            new org.apache.spark.sql.connector.expressions.NamedReference[0],
             plan.getSplits(),
             plan.getFragmentRowCounts(),
             partitionExpression,
+            "region",
             fragKeys,
             Collections.emptyMap(),
             null,
-            Collections.emptyMap());
+            Collections.emptyMap(),
+            true,
+            null);
 
     // Plan partitions to set numPartitions
     scan.planInputPartitions();
@@ -295,13 +301,19 @@ public class LanceScanTest {
             new Predicate[0],
             null,
             null,
+            Collections.emptyMap(),
+            Collections.emptyMap(),
+            new org.apache.spark.sql.connector.expressions.NamedReference[0],
             bucketPlan.getSplits(),
             bucketPlan.getFragmentRowCounts(),
             partitionExpression,
+            "region",
             fragKeys,
             Collections.emptyMap(),
             null,
-            Collections.emptyMap());
+            Collections.emptyMap(),
+            true,
+            null);
 
     Partitioning partitioning = scan.outputPartitioning();
     assertInstanceOf(KeyGroupedPartitioning.class, partitioning);

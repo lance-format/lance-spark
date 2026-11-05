@@ -208,7 +208,16 @@ public class FilterPushDown {
   }
 
   private static String columnName(Expression expr) {
-    return String.join(".", ((NamedReference) expr).fieldNames());
+    return java.util.Arrays.stream(((NamedReference) expr).fieldNames())
+        .map(FilterPushDown::quoteIdentifierIfNeeded)
+        .collect(Collectors.joining("."));
+  }
+
+  private static String quoteIdentifierIfNeeded(String identifier) {
+    if (identifier.matches("[A-Za-z_][A-Za-z0-9_]*")) {
+      return identifier;
+    }
+    return "`" + identifier.replace("`", "``") + "`";
   }
 
   private static String compileLiteral(Literal<?> literal) {

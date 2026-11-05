@@ -363,7 +363,52 @@ These options control how data is read from Lance datasets. They can be set usin
 | `index_cache_size`    | Integer | -       | Size of the index cache in number of entries.                                                                     |
 | `metadata_cache_size` | Integer | -       | Size of the metadata cache in number of entries.                                                                  |
 | `pushDownFilters`     | Boolean | `true`  | Whether to push down filter predicates to the Lance reader for optimized scanning.                                |
+| `runtime_filter_max_keys` | Integer | `100000` | Maximum accumulated non-null keys accepted from Spark runtime `IN` filters. Oversized filters are ignored.       |
+| `runtime_filter_max_bytes` | Integer | `4194304` | Maximum estimated serialized size of accumulated Spark runtime filters. Oversized filters are ignored.         |
 | `topN_push_down`      | Boolean | `true`  | Whether to push down TopN (ORDER BY ... LIMIT) operations to Lance for optimized sorting.                         |
+
+### Runtime Join Filtering
+
+Spark 4.1 and newer can route join-generated dynamic partition pruning filters into Lance scans.
+Lance accepts exact `IN` predicates for projected `_rowaddr` and `_rowid`, active sharding columns, and
+top-level scalar columns backed by a compatible scalar or zonemap index. Runtime filters prune a
+subset of the snapshot-pinned fragments and are also passed to the native Lance scanner; Spark
+still evaluates the normal join, including duplicate-key multiplicity. Columns that Spark reads
+lossily are not eligible: nanosecond timestamps and `Date(MILLISECOND)` (truncated on read), and
+`UInt64` (values of 2^63 or more read as negative longs).
+
+Repeated runtime filters are combined with `AND`. Null equality keys are discarded, an empty or
+null-only key set produces an empty scan, and uncovered fragments from a partially built zonemap
+index are retained conservatively. Setting `pushDownFilters=false` disables runtime filtering.
+Setting `use_scalar_index=false` disables native scalar-index lookup but still allows exact
+`_rowaddr`/sharding pruning and zonemap fragment pruning. The two guardrail options above bound
+driver memory and generated filter size; a rejected runtime filter is observable in scan metadata
+as `rejectedRuntimeFilterCount` and does not affect query correctness.
+
+The guardrails can also be set for every table in a catalog, for example
+`spark.sql.catalog.lance.runtime_filter_max_keys=200000`; a per-read `.option()` overrides it.
+
+With Spark's defaults (`dynamicPartitionPruning.reuseBroadcastOnly=true`), a runtime filter
+reaches the Lance scan only when the other join side is broadcast and has a selective filter.
+If the Lance table is the broadcast side, or the join is a shuffle join, Spark drops the filter.
+
+A `_rowid` runtime filter lets a table that stores Lance row IDs (for example, an Iceberg table)
+join back to the Lance table:
+
+```sql
+SELECT /*+ BROADCAST(o) */ i.image_bytes
+FROM lance.default.images i
+JOIN iceberg.db.observations o ON i._rowid = o.lance_row_id
+WHERE o.ingestion_date = '2026-05-01';
+```
+
+Without stable row IDs, `_rowid` equals `_rowaddr`, so fragments are pruned. With
+`enable_stable_row_ids`, a row ID does not identify its fragment: every fragment is still
+scanned, and Lance turns the `IN` filter into a row take within each fragment, so only matching
+rows are read.
+
+Each Spark task carries its own copy of the accepted filter, so raising the guardrails grows every
+task's payload; size them with the number of scanned fragments in mind.
 
 ## User-Defined Types
 

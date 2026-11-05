@@ -48,7 +48,7 @@ import java.util.Objects;
  * }</pre>
  */
 public class LanceSparkReadOptions implements Serializable {
-  private static final long serialVersionUID = 4L;
+  private static final long serialVersionUID = 5L;
 
   public static final String CONFIG_DATASET_URI = "path";
   public static final String CONFIG_PUSH_DOWN_FILTERS = "pushDownFilters";
@@ -60,6 +60,8 @@ public class LanceSparkReadOptions implements Serializable {
   public static final String CONFIG_METADATA_CACHE_SIZE = "metadata_cache_size";
   public static final String CONFIG_BATCH_SIZE = "batch_size";
   public static final String CONFIG_USE_SCALAR_INDEX = "use_scalar_index";
+  public static final String CONFIG_RUNTIME_FILTER_MAX_KEYS = "runtime_filter_max_keys";
+  public static final String CONFIG_RUNTIME_FILTER_MAX_BYTES = "runtime_filter_max_bytes";
   public static final String CONFIG_TOP_N_PUSH_DOWN = "topN_push_down";
   public static final String CONFIG_NEAREST = "nearest";
   public static final String CONFIG_FULL_TEXT_QUERY = "fullTextQuery";
@@ -104,6 +106,8 @@ public class LanceSparkReadOptions implements Serializable {
   // Changed from 512 to 8192 for better OLAP scan performance (33x improvement)
   private static final int DEFAULT_BATCH_SIZE = 8192;
   private static final boolean DEFAULT_USE_SCALAR_INDEX = true;
+  private static final int DEFAULT_RUNTIME_FILTER_MAX_KEYS = 100_000;
+  private static final int DEFAULT_RUNTIME_FILTER_MAX_BYTES = 4_194_304;
   private static final boolean DEFAULT_TOP_N_PUSH_DOWN = true;
   private static final boolean DEFAULT_EXECUTOR_CREDENTIAL_REFRESH = true;
 
@@ -117,6 +121,8 @@ public class LanceSparkReadOptions implements Serializable {
   private final int batchSize;
   private transient FullTextQuery fullTextQuery;
   private final boolean useScalarIndex;
+  private final int runtimeFilterMaxKeys;
+  private final int runtimeFilterMaxBytes;
   private final boolean topNPushDown;
   private final Map<String, String> storageOptions;
 
@@ -151,6 +157,8 @@ public class LanceSparkReadOptions implements Serializable {
     this.batchSize = builder.batchSize;
     this.fullTextQuery = builder.fullTextQuery;
     this.useScalarIndex = builder.useScalarIndex;
+    this.runtimeFilterMaxKeys = builder.runtimeFilterMaxKeys;
+    this.runtimeFilterMaxBytes = builder.runtimeFilterMaxBytes;
     this.topNPushDown = builder.topNPushDown;
     this.storageOptions = new HashMap<>(builder.storageOptions);
     this.namespace = builder.namespace;
@@ -263,6 +271,14 @@ public class LanceSparkReadOptions implements Serializable {
     return useScalarIndex;
   }
 
+  public int getRuntimeFilterMaxKeys() {
+    return runtimeFilterMaxKeys;
+  }
+
+  public int getRuntimeFilterMaxBytes() {
+    return runtimeFilterMaxBytes;
+  }
+
   public boolean isTopNPushDown() {
     return topNPushDown;
   }
@@ -332,6 +348,8 @@ public class LanceSparkReadOptions implements Serializable {
         .batchSize(this.batchSize)
         .fullTextQuery(this.fullTextQuery)
         .useScalarIndex(this.useScalarIndex)
+        .runtimeFilterMaxKeys(this.runtimeFilterMaxKeys)
+        .runtimeFilterMaxBytes(this.runtimeFilterMaxBytes)
         .topNPushDown(this.topNPushDown)
         .storageOptions(this.storageOptions)
         .namespace(this.namespace)
@@ -389,6 +407,8 @@ public class LanceSparkReadOptions implements Serializable {
     return pushDownFilters == that.pushDownFilters
         && batchSize == that.batchSize
         && useScalarIndex == that.useScalarIndex
+        && runtimeFilterMaxKeys == that.runtimeFilterMaxKeys
+        && runtimeFilterMaxBytes == that.runtimeFilterMaxBytes
         && topNPushDown == that.topNPushDown
         && executorCredentialRefresh == that.executorCredentialRefresh
         && FullTextQueryUtils.equals(fullTextQuery, that.fullTextQuery)
@@ -416,6 +436,8 @@ public class LanceSparkReadOptions implements Serializable {
         batchSize,
         FullTextQueryUtils.fullTextQueryToString(fullTextQuery),
         useScalarIndex,
+        runtimeFilterMaxKeys,
+        runtimeFilterMaxBytes,
         topNPushDown,
         storageOptions,
         tableId,
@@ -436,6 +458,8 @@ public class LanceSparkReadOptions implements Serializable {
     private Integer metadataCacheSize;
     private int batchSize = DEFAULT_BATCH_SIZE;
     private boolean useScalarIndex = DEFAULT_USE_SCALAR_INDEX;
+    private int runtimeFilterMaxKeys = DEFAULT_RUNTIME_FILTER_MAX_KEYS;
+    private int runtimeFilterMaxBytes = DEFAULT_RUNTIME_FILTER_MAX_BYTES;
     private boolean topNPushDown = DEFAULT_TOP_N_PUSH_DOWN;
     private Map<String, String> storageOptions = new HashMap<>();
     private LanceNamespace namespace;
@@ -489,6 +513,20 @@ public class LanceSparkReadOptions implements Serializable {
 
     public Builder useScalarIndex(boolean useScalarIndex) {
       this.useScalarIndex = useScalarIndex;
+      return this;
+    }
+
+    public Builder runtimeFilterMaxKeys(int runtimeFilterMaxKeys) {
+      Preconditions.checkArgument(
+          runtimeFilterMaxKeys > 0, "runtime_filter_max_keys must be positive");
+      this.runtimeFilterMaxKeys = runtimeFilterMaxKeys;
+      return this;
+    }
+
+    public Builder runtimeFilterMaxBytes(int runtimeFilterMaxBytes) {
+      Preconditions.checkArgument(
+          runtimeFilterMaxBytes > 0, "runtime_filter_max_bytes must be positive");
+      this.runtimeFilterMaxBytes = runtimeFilterMaxBytes;
       return this;
     }
 
@@ -613,6 +651,12 @@ public class LanceSparkReadOptions implements Serializable {
       }
       if (opts.containsKey(CONFIG_USE_SCALAR_INDEX)) {
         this.useScalarIndex = Boolean.parseBoolean(opts.get(CONFIG_USE_SCALAR_INDEX));
+      }
+      if (opts.containsKey(CONFIG_RUNTIME_FILTER_MAX_KEYS)) {
+        runtimeFilterMaxKeys(Integer.parseInt(opts.get(CONFIG_RUNTIME_FILTER_MAX_KEYS)));
+      }
+      if (opts.containsKey(CONFIG_RUNTIME_FILTER_MAX_BYTES)) {
+        runtimeFilterMaxBytes(Integer.parseInt(opts.get(CONFIG_RUNTIME_FILTER_MAX_BYTES)));
       }
       if (opts.containsKey(CONFIG_EXECUTOR_CREDENTIAL_REFRESH)) {
         this.executorCredentialRefresh =

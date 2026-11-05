@@ -16,9 +16,13 @@ package org.lance.spark.read;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.execution.SparkPlan;
+import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec;
+import org.apache.spark.sql.execution.adaptive.QueryStageExec;
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec;
 import org.apache.spark.sql.internal.connector.SupportsMetadata;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 
 /** Shared test utilities for inspecting the executed Lance scan plan. */
@@ -35,6 +39,26 @@ public final class LanceScanTestHelper {
     return findLanceScanMetadata(ds.queryExecution().executedPlan());
   }
 
+  /** Returns metadata for the Lance scan that actually accepted a runtime predicate. */
+  public static Map<String, String> extractRuntimeFilteredLanceScanMetadata(Dataset<Row> ds) {
+    return findRuntimeFilteredLanceScanMetadata(ds.queryExecution().executedPlan());
+  }
+
+  /** Returns the Lance scan whose BatchScanExec contains Spark runtime filters. */
+  public static LanceScan extractRuntimeFilteredLanceScan(Dataset<Row> ds) {
+    return findRuntimeFilteredLanceScan(ds.queryExecution().executedPlan());
+  }
+
+  /** Returns whether a Lance BatchScanExec contains at least one Spark runtime filter. */
+  public static boolean hasLanceRuntimeFilters(Dataset<Row> ds) {
+    return hasLanceRuntimeFilters(ds.queryExecution().executedPlan());
+  }
+
+  /** Returns the first LanceScan in an executed plan, or null when none is present. */
+  public static LanceScan extractLanceScan(Dataset<Row> ds) {
+    return findLanceScan(ds.queryExecution().executedPlan());
+  }
+
   private static Map<String, String> findLanceScanMetadata(SparkPlan plan) {
     if (plan instanceof BatchScanExec) {
       BatchScanExec bse = (BatchScanExec) plan;
@@ -44,12 +68,85 @@ public final class LanceScanTestHelper {
         return scala.collection.JavaConverters.mapAsJavaMap(scalaMeta);
       }
     }
-    for (int i = 0; i < plan.children().size(); i++) {
-      Map<String, String> result = findLanceScanMetadata((SparkPlan) plan.children().apply(i));
+    for (SparkPlan child : childrenOf(plan)) {
+      Map<String, String> result = findLanceScanMetadata(child);
       if (result != null) {
         return result;
       }
     }
     return null;
+  }
+
+  private static Map<String, String> findRuntimeFilteredLanceScanMetadata(SparkPlan plan) {
+    if (plan instanceof BatchScanExec) {
+      BatchScanExec bse = (BatchScanExec) plan;
+      if (bse.scan() instanceof LanceScan && !bse.runtimeFilters().isEmpty()) {
+        scala.collection.immutable.Map<String, String> scalaMeta =
+            ((LanceScan) bse.scan()).getMetaData();
+        return scala.collection.JavaConverters.mapAsJavaMap(scalaMeta);
+      }
+    }
+    for (SparkPlan child : childrenOf(plan)) {
+      Map<String, String> result = findRuntimeFilteredLanceScanMetadata(child);
+      if (result != null) {
+        return result;
+      }
+    }
+    return null;
+  }
+
+  private static boolean hasLanceRuntimeFilters(SparkPlan plan) {
+    if (plan instanceof BatchScanExec) {
+      BatchScanExec bse = (BatchScanExec) plan;
+      if (bse.scan() instanceof LanceScan && !bse.runtimeFilters().isEmpty()) {
+        return true;
+      }
+    }
+    for (SparkPlan child : childrenOf(plan)) {
+      if (hasLanceRuntimeFilters(child)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static LanceScan findLanceScan(SparkPlan plan) {
+    if (plan instanceof BatchScanExec && ((BatchScanExec) plan).scan() instanceof LanceScan) {
+      return (LanceScan) ((BatchScanExec) plan).scan();
+    }
+    for (SparkPlan child : childrenOf(plan)) {
+      LanceScan result = findLanceScan(child);
+      if (result != null) {
+        return result;
+      }
+    }
+    return null;
+  }
+
+  private static LanceScan findRuntimeFilteredLanceScan(SparkPlan plan) {
+    if (plan instanceof BatchScanExec) {
+      BatchScanExec bse = (BatchScanExec) plan;
+      if (bse.scan() instanceof LanceScan && !bse.runtimeFilters().isEmpty()) {
+        return (LanceScan) bse.scan();
+      }
+    }
+    for (SparkPlan child : childrenOf(plan)) {
+      LanceScan result = findRuntimeFilteredLanceScan(child);
+      if (result != null) {
+        return result;
+      }
+    }
+    return null;
+  }
+
+  /** Children of a plan node, looking through AQE wrappers and query stages. */
+  private static List<SparkPlan> childrenOf(SparkPlan plan) {
+    if (plan instanceof AdaptiveSparkPlanExec) {
+      return Collections.singletonList(((AdaptiveSparkPlanExec) plan).executedPlan());
+    }
+    if (plan instanceof QueryStageExec) {
+      return Collections.singletonList(((QueryStageExec) plan).plan());
+    }
+    return scala.collection.JavaConverters.seqAsJavaList(plan.children());
   }
 }
