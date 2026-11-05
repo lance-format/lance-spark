@@ -99,6 +99,17 @@ silently changing what the filter means.
 apply them yet. Disable `spark.sql.lance.search.distributed.enabled` to run any of these through
 the namespace.
 
+## Local Full-Text Search Execution
+
+Set `spark.sql.lance.search.fts_local.enabled=true` to run full-text search (the
+`lance_match` / `lance_match_phrase` / `lance_multi_match` predicates and the `SEARCH` table
+function) locally in Spark instead of dispatching it to the namespace server's `queryTable`
+endpoint. The default is `false`.
+
+When enabled, full-text scans run on the local per-fragment path: each Spark task scans one
+fragment, applies the FTS predicate through the inverted index, and produces the `_score`
+column, exactly like a catalog-only namespace such as Glue or Hive.
+
 ## Cache Backends
 
 Each Spark catalog owns an isolated Lance `Session`. Select registered native cache backends for

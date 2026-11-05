@@ -202,8 +202,9 @@ public class LanceScanBuilder
 
       // Namespace-configured full-text search executes server-side via queryTable (single
       // partition). A full-text query without a namespace, or against a catalog-only namespace such
-      // as Glue that does not implement queryTable, falls through to the local per-fragment scan
-      // below. COUNT(*) is excluded because countTableRows has no full-text field.
+      // as Glue that does not implement queryTable, or with
+      // spark.sql.lance.search.fts_local.enabled=true, falls through to the local per-fragment
+      // scan below. COUNT(*) is excluded because countTableRows has no full-text field.
       if (shouldNamespaceFtsScan()) {
         return buildNamespaceFtsScan();
       }
@@ -554,6 +555,7 @@ public class LanceScanBuilder
 
     return readOptions.getFullTextQuery() != null
         && LanceRuntime.supportsQueryTable(namespaceImpl)
+        && !LanceRuntime.ftsLocalEnabled()
         && !pushedAggregation.isPresent();
   }
 

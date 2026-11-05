@@ -63,7 +63,7 @@ The result includes the requested table columns and a nullable `_score` float co
 
 ## Execution
 
-Spark plans `SEARCH` as a batch read carrying the full-text query as a scan option, wrapped in an optional filter, a projection, `ORDER BY _score DESC`, and `LIMIT k`. The scan then runs either as a single-partition server-side read through the Lance namespace `queryTable` API, or otherwise as a distributed per-fragment scan. The server-side route requires a namespace that implements `queryTable`, a read that does not target a branch or tag, and no pushed-down aggregation.
+Spark plans `SEARCH` as a batch read carrying the full-text query as a scan option, wrapped in an optional filter, a projection, `ORDER BY _score DESC`, and `LIMIT k`. The scan then runs either as a single-partition server-side read through the Lance namespace `queryTable` API, or otherwise as a distributed per-fragment scan. The server-side route requires a namespace that implements `queryTable`, a read that does not target a branch or tag, and no pushed-down aggregation. Set `spark.sql.lance.search.fts_local.enabled=true` to always use the per-fragment route, for example when the server does not implement the `queryTable` endpoint (see [Configuration](../../config.md#local-full-text-search-execution)).
 
 ## Validation
 
