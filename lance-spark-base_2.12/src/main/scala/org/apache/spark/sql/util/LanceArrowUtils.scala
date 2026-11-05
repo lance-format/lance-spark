@@ -55,6 +55,7 @@ object LanceArrowUtils {
 
   val LANCE_TIMESTAMP_UNIT_KEY = "_lance.timestamp_unit"
   val LANCE_TIMESTAMP_TIMEZONE_KEY = "_lance.timestamp_timezone"
+  val LANCE_DURATION_UNIT_KEY = "_lance.duration_unit"
 
   // Spark has no unsigned integer types, so reads widen UInt8/16/32/64 to Short/Int/Long/Long.
   // Writes into an existing table set this key from the table's Lance schema (see
@@ -80,6 +81,7 @@ object LanceArrowUtils {
   private val LANCE_INTERNAL_METADATA_KEYS = Set(
     LANCE_TIMESTAMP_UNIT_KEY,
     LANCE_TIMESTAMP_TIMEZONE_KEY,
+    LANCE_DURATION_UNIT_KEY,
     LANCE_UNSIGNED_INT_BIT_WIDTH_KEY,
     LANCE_ELEMENT_METADATA_KEY,
     LANCE_MAP_KEY_METADATA_KEY,
@@ -171,6 +173,10 @@ object LanceArrowUtils {
       case ts: ArrowType.Timestamp =>
         if (ts.getTimezone != null && ts.getTimezone.nonEmpty) TimestampType
         else TimestampNTZType
+      case _: ArrowType.Duration =>
+        // Spark's ArrowUtils accepts only microsecond durations. Accept every unit, as for
+        // timestamps; DurationUnitAccessor rescales the values to microseconds.
+        DayTimeIntervalType()
       case _: ArrowType.List | _: ArrowType.LargeList =>
         val children = field.getChildren
         if (children.isEmpty) {
@@ -258,6 +264,8 @@ object LanceArrowUtils {
         if (ts.getTimezone != null) {
           builder.putString(LANCE_TIMESTAMP_TIMEZONE_KEY, ts.getTimezone)
         }
+      case d: ArrowType.Duration if d.getUnit != TimeUnit.MICROSECOND =>
+        builder.putString(LANCE_DURATION_UNIT_KEY, d.getUnit.name())
       case fixedSizeList: ArrowType.FixedSizeList =>
         builder.putLong(ARROW_FIXED_SIZE_LIST_SIZE_KEY, fixedSizeList.getListSize.toLong)
         if (Float16Utils.isFloat16ArrowField(field)) {
@@ -604,6 +612,11 @@ object LanceArrowUtils {
         }
         val fieldType =
           new FieldType(nullable, new ArrowType.Timestamp(unit, timezone), null, meta.asJava)
+        new Field(name, fieldType, Seq.empty[Field].asJava)
+      case _: DayTimeIntervalType
+          if metadata != null && metadata.contains(LANCE_DURATION_UNIT_KEY) =>
+        val unit = TimeUnit.valueOf(metadata.getString(LANCE_DURATION_UNIT_KEY))
+        val fieldType = new FieldType(nullable, new ArrowType.Duration(unit), null, meta.asJava)
         new Field(name, fieldType, Seq.empty[Field].asJava)
       case DateType if DateMilliUtils.hasDateMilliMetadata(metadata) =>
         val fieldType = new FieldType(
