@@ -2335,6 +2335,58 @@ class TestDMLUpdate:
 class TestDMLDelete:
     """Test DML DELETE FROM operations."""
 
+    @pytest.mark.skipif(
+        SPARK_VERSION < Version("3.5"),
+        reason="Executor-side DELETE is implemented for Spark 3.5+",
+    )
+    @pytest.mark.rest_dir_compatible
+    @pytest.mark.parametrize("stable_row_ids", [False, True])
+    def test_delete_across_fragments_preserves_snapshot(self, spark, stable_row_ids):
+        spark.sql(f"""
+            CREATE TABLE default.test_table (id INT)
+            TBLPROPERTIES ('enable_stable_row_ids' = '{str(stable_row_ids).lower()}')
+        """)
+        # Separate single-partition appends give DELETE both whole and partial fragments.
+        for start in range(0, 24, 6):
+            (spark.range(start, start + 6, numPartitions=1)
+             .selectExpr("CAST(id AS INT) AS id")
+             .writeTo("default.test_table").append())
+
+        before = spark.sql("""
+            SELECT id, _rowid, _rowaddr, _fragid FROM default.test_table
+        """).collect()
+        assert len({row._fragid for row in before}) == 4
+        spark.sql("ALTER TABLE default.test_table CREATE TAG before_delete")
+        expected = {
+            row.id: (row._rowid, row._rowaddr)
+            for row in before if row.id >= 6 and row.id % 2 == 1
+        }
+
+        settings = {
+            "spark.sql.shuffle.partitions": "4",
+            "spark.sql.adaptive.enabled": "false",
+        }
+        previous = {key: spark.conf.get(key) for key in settings}
+        try:
+            for key, value in settings.items():
+                spark.conf.set(key, value)
+            for condition in ["id < 6 OR id % 2 = 0", "id < 6 OR id % 2 = 0", "id < 0"]:
+                spark.sql(f"DELETE FROM default.test_table WHERE {condition}")
+                after = spark.sql("""
+                    SELECT id, _rowid, _rowaddr FROM default.test_table
+                """).collect()
+                assert {row.id: (row._rowid, row._rowaddr) for row in after} == expected
+
+            spark.sql("DELETE FROM default.test_table")
+            assert spark.table("default.test_table").count() == 0
+            historical = spark.sql("""
+                SELECT id FROM default.test_table VERSION AS OF 'before_delete' ORDER BY id
+            """).collect()
+            assert [row.id for row in historical] == list(range(24))
+        finally:
+            for key, value in previous.items():
+                spark.conf.set(key, value)
+
     def test_delete_with_condition(self, spark):
         """Test DELETE FROM with WHERE clause."""
         spark.sql("""
