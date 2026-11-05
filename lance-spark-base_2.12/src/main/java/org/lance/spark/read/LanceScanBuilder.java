@@ -332,6 +332,7 @@ public class LanceScanBuilder
                     : countFilter.get());
       }
       return new LanceScan(
+          fullSchema,
           schema,
           resolvedReadOptions,
           whereCondition,
