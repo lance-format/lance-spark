@@ -256,8 +256,8 @@ public class LanceSparkReadOptionsSerializationTest {
   public void testRuntimeFilterGuardrailDefaultsAndOverrides() {
     LanceSparkReadOptions defaults =
         LanceSparkReadOptions.builder().datasetUri("s3://bucket/path").build();
-    Assertions.assertEquals(10_000, defaults.getRuntimeFilterMaxKeys());
-    Assertions.assertEquals(1_048_576, defaults.getRuntimeFilterMaxBytes());
+    Assertions.assertEquals(100_000, defaults.getRuntimeFilterMaxKeys());
+    Assertions.assertEquals(4_194_304, defaults.getRuntimeFilterMaxBytes());
 
     Map<String, String> configured = new HashMap<>();
     configured.put(LanceSparkReadOptions.CONFIG_RUNTIME_FILTER_MAX_KEYS, "25");
