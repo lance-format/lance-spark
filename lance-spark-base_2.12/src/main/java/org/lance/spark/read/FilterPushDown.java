@@ -133,8 +133,23 @@ public class FilterPushDown {
         // and let Spark evaluate the predicate post-scan.
         return false;
       }
+      if (isNonFiniteFloatingPointLiteral((Literal<?>) children[i])) {
+        // Lance's SQL has no NaN or infinity number literal. Let Spark evaluate the predicate.
+        return false;
+      }
     }
     return true;
+  }
+
+  private static boolean isNonFiniteFloatingPointLiteral(Literal<?> literal) {
+    Object value = literal.value();
+    if (value instanceof Double) {
+      return !Double.isFinite((Double) value);
+    }
+    if (value instanceof Float) {
+      return !Float.isFinite((Float) value);
+    }
+    return false;
   }
 
   /**
@@ -247,12 +262,23 @@ public class FilterPushDown {
     if (value instanceof BigDecimal) {
       return formatDecimalCast((BigDecimal) value);
     }
+    // Lance reads a bare number that is not an integer as a double, and does not convert a
+    // literal under NOT to the column's type. Render each value so that its double reading is
+    // the value itself.
+    if (value instanceof Float) {
+      return Double.toString(((Float) value).doubleValue());
+    }
+    if (literal.dataType() == DataTypes.LongType && Long.valueOf(Long.MIN_VALUE).equals(value)) {
+      // -9223372036854775808 parses as the negation of an out-of-range integer.
+      return "CAST('" + Long.MIN_VALUE + "' AS BIGINT)";
+    }
     return value.toString();
   }
 
   private static String formatDecimalCast(BigDecimal bd) {
     int scale = bd.scale();
     int precision = Math.max(bd.precision(), scale);
-    return "CAST(" + bd.toPlainString() + " AS DECIMAL(" + precision + ", " + scale + "))";
+    // A quoted value casts exactly; a bare one would be read as a double first.
+    return "CAST('" + bd.toPlainString() + "' AS DECIMAL(" + precision + ", " + scale + "))";
   }
 }

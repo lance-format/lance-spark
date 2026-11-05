@@ -133,7 +133,8 @@ public class FilterPushDownTest {
   @Test
   public void testDecimalFilterPushDown() {
     // Decimal comparisons must use CAST so Lance's DataFusion parser produces Decimal128,
-    // not Float64, which would fail type resolution against Decimal columns.
+    // not Float64, which would fail type resolution against Decimal columns. The value is quoted
+    // so the cast parses it exactly instead of rounding it through a double.
     Predicate[] filters =
         new Predicate[] {
           TestPredicates.gte("net_profit", new BigDecimal("100.00")),
@@ -142,7 +143,7 @@ public class FilterPushDownTest {
     Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
     assertTrue(whereClause.isPresent());
     assertEquals(
-        "(net_profit >= CAST(100.00 AS DECIMAL(5, 2))) AND (net_profit <= CAST(200.00 AS DECIMAL(5, 2)))",
+        "(net_profit >= CAST('100.00' AS DECIMAL(5, 2))) AND (net_profit <= CAST('200.00' AS DECIMAL(5, 2)))",
         whereClause.get());
   }
 
@@ -154,7 +155,7 @@ public class FilterPushDownTest {
     Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
     assertTrue(whereClause.isPresent());
     assertEquals(
-        "(price IN (CAST(100.00 AS DECIMAL(5, 2)),CAST(150.00 AS DECIMAL(5, 2)),CAST(200.00 AS DECIMAL(5, 2))))",
+        "(price IN (CAST('100.00' AS DECIMAL(5, 2)),CAST('150.00' AS DECIMAL(5, 2)),CAST('200.00' AS DECIMAL(5, 2))))",
         whereClause.get());
   }
 
@@ -169,7 +170,7 @@ public class FilterPushDownTest {
     Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
     assertTrue(whereClause.isPresent());
     assertEquals(
-        "(amount > CAST(1234567.89 AS DECIMAL(9, 2))) AND (amount < CAST(0.5 AS DECIMAL(1, 1)))",
+        "(amount > CAST('1234567.89' AS DECIMAL(9, 2))) AND (amount < CAST('0.5' AS DECIMAL(1, 1)))",
         whereClause.get());
   }
 
@@ -186,8 +187,31 @@ public class FilterPushDownTest {
     Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
     assertTrue(whereClause.isPresent());
     assertEquals(
-        "(net_paid > CAST(0.00 AS DECIMAL(2, 2))) AND (net_profit > CAST(1.00 AS DECIMAL(3, 2)))",
+        "(net_paid > CAST('0.00' AS DECIMAL(2, 2))) AND (net_profit > CAST('1.00' AS DECIMAL(3, 2)))",
         whereClause.get());
+  }
+
+  @Test
+  public void testFloatAndBigintMinLiteralsRenderExactly() {
+    Predicate[] filters =
+        new Predicate[] {
+          TestPredicates.not(TestPredicates.eq("score", 0.1f)),
+          TestPredicates.eq("big", Long.MIN_VALUE)
+        };
+    Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
+    assertTrue(whereClause.isPresent());
+    assertEquals(
+        "(NOT (score == 0.10000000149011612)) AND (big == CAST('-9223372036854775808' AS BIGINT))",
+        whereClause.get());
+  }
+
+  @Test
+  public void testNonFiniteFloatingPointLiteralsAreNotPushed() {
+    assertFalse(FilterPushDown.isPredicateSupported(TestPredicates.eq("ratio", Double.NaN)));
+    assertFalse(
+        FilterPushDown.isPredicateSupported(TestPredicates.lt("ratio", Double.POSITIVE_INFINITY)));
+    assertFalse(FilterPushDown.isPredicateSupported(TestPredicates.eq("score", Float.NaN)));
+    assertTrue(FilterPushDown.isPredicateSupported(TestPredicates.eq("ratio", 1.5)));
   }
 
   @Test
