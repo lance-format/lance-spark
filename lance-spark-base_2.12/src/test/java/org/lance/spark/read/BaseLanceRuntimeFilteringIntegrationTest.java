@@ -22,6 +22,9 @@ import org.apache.arrow.vector.DateMilliVector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.TimeStampNanoTZVector;
 import org.apache.arrow.vector.TimeStampSecTZVector;
+import org.apache.arrow.vector.UInt1Vector;
+import org.apache.arrow.vector.UInt2Vector;
+import org.apache.arrow.vector.UInt4Vector;
 import org.apache.arrow.vector.UInt8Vector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowStreamReader;
@@ -573,6 +576,62 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
     }
   }
 
+  /**
+   * Spark widens UInt8, UInt16 and UInt32 to a larger signed type, so a join key can fall outside
+   * what the column stores. Such keys cannot match and are dropped before Lance sees them.
+   */
+  @Test
+  public void testRuntimeKeysOutsideUnsignedRangeAreDropped() throws Exception {
+    String name = "unsigned_" + suffix();
+    Schema schema =
+        new Schema(
+            Arrays.asList(
+                new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
+                new Field("u8", FieldType.nullable(new ArrowType.Int(8, false)), null),
+                new Field("u16", FieldType.nullable(new ArrowType.Int(16, false)), null),
+                new Field("u32", FieldType.nullable(new ArrowType.Int(32, false)), null)));
+    writeArrowTable(
+        tempDir.resolve(name + ".lance").toString(),
+        schema,
+        root -> {
+          ((IntVector) root.getVector("id")).setSafe(0, 1);
+          ((IntVector) root.getVector("id")).setSafe(1, 2);
+          ((UInt1Vector) root.getVector("u8")).setSafe(0, 255);
+          ((UInt1Vector) root.getVector("u8")).setSafe(1, 1);
+          ((UInt2Vector) root.getVector("u16")).setSafe(0, 65535);
+          ((UInt2Vector) root.getVector("u16")).setSafe(1, 1);
+          ((UInt4Vector) root.getVector("u32")).setSafe(0, -1);
+          ((UInt4Vector) root.getVector("u32")).setSafe(1, 1);
+        });
+    String fact = defaultCatalog + ".default." + name;
+    for (String column : new String[] {"u8", "u16", "u32"}) {
+      spark.sql(
+          String.format(
+              "ALTER TABLE %s CREATE INDEX %s_idx USING btree (%s)", fact, column, column));
+    }
+    String dim = defaultCatalog + ".default.unsigned_dim_" + suffix();
+    spark.sql("CREATE TABLE " + dim + " (s SMALLINT, i INT, b BIGINT, label STRING) USING lance");
+    spark.sql(
+        "INSERT INTO "
+            + dim
+            + " VALUES (-1, -1, -1, 'match'), (256, 65536, 4294967296, 'match'), "
+            + "(255, 65535, 4294967295, 'match'), (2, 2, 2, 'other-long')");
+
+    String[][] joins = {{"u8", "s", "255"}, {"u16", "i", "65535"}, {"u32", "b", "4294967295"}};
+    for (String[] join : joins) {
+      Dataset<Row> joined =
+          spark.sql(
+              String.format(
+                  "SELECT f.id FROM %s f JOIN %s d ON f.%s = d.%s WHERE length(d.label) = 5",
+                  fact, dim, join[0], join[1]));
+      assertEquals(
+          Collections.singletonList(RowFactory.create(1)), joined.collectAsList(), join[0]);
+      String predicates = runtimeMetadata(joined).get("runtimePredicates");
+      assertTrue(predicates.contains(join[2]), predicates);
+      assertFalse(predicates.contains("-1"), predicates);
+    }
+  }
+
   @Test
   public void testStoragePartitionedJoinCoexistsWithRuntimeFiltering() {
     String fact = createFact(defaultCatalog, true, true);
@@ -598,6 +657,12 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
     spark.conf().unset("spark.sql.autoBroadcastJoinThreshold");
     String capturedPath = tempDir.resolve("captured_rowids_" + suffix()).toString();
     spark.sql("SELECT _rowid AS rid, k FROM " + fact).write().parquet(capturedPath);
+    // Row IDs are stored as UInt64, so a negative captured key cannot match any row.
+    spark
+        .sql("SELECT CAST(-1 AS BIGINT) AS rid, 3 AS k")
+        .write()
+        .mode("append")
+        .parquet(capturedPath);
     spark.read().parquet(capturedPath).createOrReplaceTempView("captured_rowids");
     return spark.sql(
         "SELECT /*+ BROADCAST(c) */ f.id, f.payload FROM "
