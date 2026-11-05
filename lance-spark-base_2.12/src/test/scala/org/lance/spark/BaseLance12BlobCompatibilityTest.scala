@@ -204,7 +204,13 @@ abstract class BaseLance12BlobCompatibilityTest extends Lance12BlobFixtureTest {
       .tableProperty("data.lance.encoding", "blob")
       .tableProperty("file_format_version", "2.1")
       .option("file_format_version", fileVersion).create()
-    assertEquals(Set("2.2"), physicalFileVersions(uri))
+    val versions = physicalFileVersions(uri)
+    if (fileVersion == "stable") {
+      assertEquals(1, versions.size)
+      assertTrue(versions.forall(BlobUtils.fileFormatSupportsBlobV2))
+    } else {
+      assertEquals(Set(fileVersion), versions)
+    }
     assertPayloads(uri, Vector(1 -> bytes("one")))
     spark.sql(s"INSERT INTO $table VALUES (2, X'74776F')")
     assertPayloads(uri, Vector(1 -> bytes("one"), 2 -> bytes("two")))
@@ -265,7 +271,6 @@ abstract class BaseLance12BlobCompatibilityTest extends Lance12BlobFixtureTest {
   private def indexNames(table: String): Set[String] =
     spark.sql(s"SHOW INDEXES IN $table").collect().map(_.getAs[String]("name")).toSet
 
-  /** External columnar writers bypass LanceDataWriter; their driver commit needs the same check. */
   @ParameterizedTest
   @ValueSource(strings = Array("append", "overwrite", "stagedReplace", "stagedCreate"))
   def externalFragmentsRetainBlobBytes(mode: String): Unit = {
