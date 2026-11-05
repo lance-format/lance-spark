@@ -15,6 +15,7 @@ package org.lance.spark.internal;
 
 import org.lance.ipc.ScanStats;
 import org.lance.spark.LanceConstant;
+import org.lance.spark.LanceRuntime;
 import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.utils.Utils;
 import org.lance.spark.vectorized.BlobStructAccessor;
@@ -32,7 +33,6 @@ import org.apache.spark.sql.execution.vectorized.ConstantColumnVector;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
-import org.apache.spark.sql.util.ArrowUtils;
 import org.apache.spark.sql.vectorized.ColumnVector;
 import org.apache.spark.sql.vectorized.ColumnarArray;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
@@ -98,13 +98,13 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
    * lance-core. Only the C-struct address crosses from lance-core, so the vectors of the batches
    * are built with the Arrow classes lance-spark runs with, which a consumer of the batches shares.
    *
-   * <p>The batches are allocated from Spark's root allocator, which outlives the reader: a consumer
-   * that transfers their vectors into an allocator under that root moves them without copying and
-   * can keep them after the reader closes. Their memory, including the imported C structs, is
-   * released with the last reference to it.
+   * <p>The batches are allocated from {@link LanceRuntime#arrowBatchAllocator()}, under Spark's
+   * root allocator, which outlives the reader: a consumer that transfers their vectors into an
+   * allocator under that root moves them without copying and can keep them after the reader closes.
+   * Their memory, including the imported C structs, is released with the last reference to it.
    */
   private static ArrowReader importArrowStream(LanceFragmentScanner fragmentScanner) {
-    BufferAllocator allocator = ArrowUtils.rootAllocator();
+    BufferAllocator allocator = LanceRuntime.arrowBatchAllocator();
     try (ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator)) {
       fragmentScanner.exportArrowStream(stream.memoryAddress());
       return Data.importArrayStream(allocator, stream);
@@ -131,7 +131,7 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
                   root,
                   inputPartition.getSchema(),
                   fragmentScanner.fragmentId(),
-                  ArrowUtils.rootAllocator(),
+                  LanceRuntime.arrowBatchAllocator(),
                   ownedVectors)
               : buildSparkOrderedVectors(root, inputPartition).toArray(new ColumnVector[] {});
       currentColumnarBatch = new ColumnarBatch(columns, root.getRowCount());

@@ -17,6 +17,8 @@ import org.lance.spark.LanceDataSource;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.internal.ArrowBatchAdapter;
+import org.lance.spark.utils.BlobUtils;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
@@ -26,11 +28,14 @@ import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.FixedSizeBinaryVector;
 import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.LargeVarBinaryVector;
 import org.apache.arrow.vector.TinyIntVector;
 import org.apache.arrow.vector.UInt4Vector;
+import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.complex.FixedSizeListVector;
 import org.apache.arrow.vector.complex.ListVector;
+import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import org.apache.arrow.vector.ipc.ArrowStreamWriter;
 import org.apache.arrow.vector.types.FloatingPointPrecision;
@@ -43,6 +48,7 @@ import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.connector.expressions.filter.Predicate;
 import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.PartitionReader;
 import org.apache.spark.sql.execution.SparkPlan;
@@ -63,6 +69,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -226,8 +233,8 @@ public abstract class BaseArrowBatchReadTest {
 
   /**
    * Passes the Arrow vectors of every batch to {@code consumer} while the batch is valid, checking
-   * that every column is a Spark Arrow column whose buffers come from Spark's root allocator.
-   * Returns the number of batches.
+   * that every column is a Spark Arrow column whose buffers come from the Arrow batch allocator,
+   * under Spark's root allocator. Returns the number of batches.
    */
   private static int forEachArrowBatch(LanceScan scan, Consumer<List<FieldVector>> consumer)
       throws Exception {
@@ -240,6 +247,7 @@ public abstract class BaseArrowBatchReadTest {
             ColumnVector column = batch.column(i);
             assertSame(ArrowColumnVector.class, column.getClass());
             FieldVector vector = (FieldVector) ((ArrowColumnVector) column).getValueVector();
+            assertSame(LanceRuntime.arrowBatchAllocator(), vector.getAllocator());
             assertSame(ArrowUtils.rootAllocator(), vector.getAllocator().getRoot());
             vectors.add(vector);
           }
@@ -404,6 +412,66 @@ public abstract class BaseArrowBatchReadTest {
   }
 
   /**
+   * A scan built without a supported Arrow batch plan, such as through the constructor without one,
+   * reads as usual, also when its read options ask for Arrow batches.
+   */
+  @Test
+  public void scansWithoutAnArrowBatchPlanReadAsUsual() throws Exception {
+    String uri = writeSparkDataset("without-plan");
+    LanceScan planned = lanceScan(read(uri, true));
+    LanceSparkReadOptions options = planned.readOptions();
+    assertTrue(options.isArrowBatchReadsEnabled());
+    LanceSplit.ScanPlanResult splits = LanceSplit.planScan(options);
+    for (ArrowBatchAdapter.Plan plan :
+        Arrays.asList(null, ArrowBatchAdapter.Plan.unsupported("unsupported for the test"))) {
+      LanceScan scan =
+          new LanceScan(
+              planned.readSchema(),
+              options,
+              org.lance.spark.utils.Optional.empty(),
+              org.lance.spark.utils.Optional.empty(),
+              org.lance.spark.utils.Optional.empty(),
+              org.lance.spark.utils.Optional.empty(),
+              org.lance.spark.utils.Optional.empty(),
+              new Predicate[0],
+              null,
+              null,
+              splits.getSplits(),
+              splits.getFragmentRowCounts(),
+              null,
+              null,
+              Collections.emptyMap(),
+              null,
+              Collections.emptyMap(),
+              plan);
+      assertFalse(scan.readOptions().isArrowBatchReadsEnabled());
+      assertFalse(scan.arrowBatchSchema().isPresent());
+      int[] rows = {0};
+      forEachBatch(
+          scan,
+          batch -> {
+            for (int i = 0; i < batch.numCols(); i++) {
+              assertNotEquals(ArrowColumnVector.class, batch.column(i).getClass());
+            }
+            rows[0] += batch.numRows();
+          });
+      assertEquals(20, rows[0]);
+    }
+  }
+
+  /**
+   * Arrow batches are allocated from an allocator under Spark's root allocator that {@code
+   * LANCE_ALLOCATOR_SIZE} caps like the Lance allocator.
+   */
+  @Test
+  public void arrowBatchAllocatorIsCappedLikeTheLanceAllocator() {
+    BufferAllocator allocator = LanceRuntime.arrowBatchAllocator();
+    assertSame(allocator, LanceRuntime.arrowBatchAllocator());
+    assertSame(ArrowUtils.rootAllocator(), allocator.getParentAllocator());
+    assertEquals(LanceRuntime.allocator().getLimit(), allocator.getLimit());
+  }
+
+  /**
    * Reads many fragments in many batches, and checks that the vectors an Arrow batch adds (here the
    * vector and {@code _fragid} columns) are released once the reader moves on and closes.
    */
@@ -431,8 +499,7 @@ public abstract class BaseArrowBatchReadTest {
             .select("id", "vec", "_fragid");
     LanceScan scan = lanceScan(df);
 
-    // Arrow batches are allocated from Spark's root allocator.
-    BufferAllocator allocator = ArrowUtils.rootAllocator();
+    BufferAllocator allocator = LanceRuntime.arrowBatchAllocator();
     long before = allocator.getAllocatedMemory();
     int[] batches = {0};
     int[] rows = {0};
@@ -447,6 +514,7 @@ public abstract class BaseArrowBatchReadTest {
           FieldVector fragmentIds =
               (FieldVector) ((ArrowColumnVector) batch.column(2)).getValueVector();
           assertEquals(batch.numRows(), fragmentIds.getValueCount());
+          assertTrue(allocator.getAllocatedMemory() > before);
           previousFragmentIds[0] = fragmentIds;
           batches[0]++;
           rows[0] += batch.numRows();
@@ -531,17 +599,157 @@ public abstract class BaseArrowBatchReadTest {
         }
       }
       root.setRowCount(3);
-      ByteArrayOutputStream ipc = new ByteArrayOutputStream();
-      try (ArrowStreamWriter writer = new ArrowStreamWriter(root, null, ipc)) {
-        writer.start();
-        writer.writeBatch();
-        writer.end();
+      writeLanceDataset(root, uri, null);
+    }
+  }
+
+  /**
+   * Writes 3 rows through lance-core's Arrow API with blobs nested in a struct {@code info}: a
+   * legacy (v1) blob in file format 2.1, else a blob v2 in file format 2.2, along with a list of
+   * structs {@code media} holding blob v2s. Row 1's blobs are null.
+   */
+  private static void writeNestedBlobDataset(String uri, boolean blobV2) throws Exception {
+    Field blob =
+        blobV2
+            ? new Field(
+                "blob",
+                new FieldType(
+                    true,
+                    ArrowType.Struct.INSTANCE,
+                    null,
+                    Collections.singletonMap(
+                        BlobUtils.ARROW_EXTENSION_NAME_KEY, BlobUtils.ARROW_EXTENSION_BLOB_V2)),
+                Arrays.asList(
+                    new Field("data", FieldType.nullable(ArrowType.LargeBinary.INSTANCE), null),
+                    new Field("uri", FieldType.nullable(ArrowType.Utf8.INSTANCE), null)))
+            : new Field(
+                "blob",
+                new FieldType(
+                    true,
+                    ArrowType.LargeBinary.INSTANCE,
+                    null,
+                    Collections.singletonMap(
+                        BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)),
+                null);
+    Field info =
+        new Field(
+            "info",
+            FieldType.nullable(ArrowType.Struct.INSTANCE),
+            Arrays.asList(
+                new Field("name", FieldType.nullable(ArrowType.Utf8.INSTANCE), null), blob));
+    List<Field> fields =
+        new ArrayList<>(
+            Arrays.asList(
+                new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null), info));
+    if (blobV2) {
+      fields.add(
+          new Field(
+              "media",
+              FieldType.nullable(ArrowType.List.INSTANCE),
+              Collections.singletonList(
+                  new Field(
+                      "item",
+                      FieldType.nullable(ArrowType.Struct.INSTANCE),
+                      Arrays.asList(
+                          blob,
+                          new Field(
+                              "format", FieldType.nullable(ArrowType.Utf8.INSTANCE), null))))));
+    }
+    BufferAllocator allocator = LanceRuntime.allocator();
+    try (VectorSchemaRoot root = VectorSchemaRoot.create(new Schema(fields), allocator)) {
+      root.allocateNew();
+      StructVector infoVector = (StructVector) root.getVector("info");
+      ListVector media = blobV2 ? (ListVector) root.getVector("media") : null;
+      StructVector mediaItems = blobV2 ? (StructVector) media.getDataVector() : null;
+      for (int r = 0; r < 3; r++) {
+        byte[] bytes = r == 1 ? null : ("blob" + r).getBytes(StandardCharsets.UTF_8);
+        ((IntVector) root.getVector("id")).setSafe(r, r);
+        infoVector.setIndexDefined(r);
+        ((VarCharVector) infoVector.getChild("name"))
+            .setSafe(r, ("n" + r).getBytes(StandardCharsets.UTF_8));
+        setBlob(infoVector.getChild("blob"), r, bytes);
+        if (blobV2) {
+          media.startNewValue(r);
+          mediaItems.setIndexDefined(r);
+          setBlob(mediaItems.getChild("blob"), r, bytes);
+          ((VarCharVector) mediaItems.getChild("format"))
+              .setSafe(r, "bin".getBytes(StandardCharsets.UTF_8));
+          media.endValue(r, 1);
+        }
       }
-      try (ArrowStreamReader reader =
-              new ArrowStreamReader(new ByteArrayInputStream(ipc.toByteArray()), allocator);
-          ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator)) {
-        Data.exportArrayStream(allocator, reader, stream);
-        org.lance.Dataset.write().stream(stream).uri(uri).execute().close();
+      root.setRowCount(3);
+      writeLanceDataset(root, uri, blobV2 ? "2.2" : "2.1");
+    }
+  }
+
+  /**
+   * Sets row {@code r} of a v1 ({@code LargeBinary}) or v2 (struct) blob vector to {@code bytes}.
+   */
+  private static void setBlob(FieldVector blob, int r, byte[] bytes) {
+    if (blob instanceof StructVector) {
+      StructVector struct = (StructVector) blob;
+      if (bytes == null) {
+        struct.setNull(r);
+      } else {
+        struct.setIndexDefined(r);
+        ((LargeVarBinaryVector) struct.getChild("data")).setSafe(r, bytes);
+      }
+    } else if (bytes == null) {
+      ((LargeVarBinaryVector) blob).setNull(r);
+    } else {
+      ((LargeVarBinaryVector) blob).setSafe(r, bytes);
+    }
+  }
+
+  /**
+   * Writes {@code root} as a Lance dataset at {@code uri}, in Lance's default file format if null.
+   */
+  private static void writeLanceDataset(
+      VectorSchemaRoot root, String uri, String dataStorageVersion) throws Exception {
+    BufferAllocator allocator = LanceRuntime.allocator();
+    ByteArrayOutputStream ipc = new ByteArrayOutputStream();
+    try (ArrowStreamWriter writer = new ArrowStreamWriter(root, null, ipc)) {
+      writer.start();
+      writer.writeBatch();
+      writer.end();
+    }
+    try (ArrowStreamReader reader =
+            new ArrowStreamReader(new ByteArrayInputStream(ipc.toByteArray()), allocator);
+        ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator)) {
+      Data.exportArrayStream(allocator, reader, stream);
+      org.lance.WriteDatasetBuilder write = org.lance.Dataset.write().stream(stream).uri(uri);
+      if (dataStorageVersion != null) {
+        write.dataStorageVersion(dataStorageVersion);
+      }
+      write.execute().close();
+    }
+  }
+
+  /**
+   * Lance reads a blob nested in a struct or a list as its descriptor, which has no Arrow batch
+   * form, so a scan of a column holding one reads as usual.
+   */
+  @Test
+  public void readsColumnsWithNestedBlobsAsUsual() throws Exception {
+    for (boolean blobV2 : new boolean[] {false, true}) {
+      String uri = tempDir.resolve("nested-blob-" + (blobV2 ? "v2" : "v1") + ".lance").toString();
+      writeNestedBlobDataset(uri, blobV2);
+      List<String> columns = blobV2 ? Arrays.asList("info", "media") : Arrays.asList("info");
+      read(uri, true).createOrReplaceTempView("t");
+      for (String column : columns) {
+        LanceScan scan = lanceScan(spark.sql("select id, " + column + " from t"));
+        assertFalse(scan.readOptions().isArrowBatchReadsEnabled(), column);
+        String reason = scan.arrowBatchUnsupportedReason().get();
+        assertTrue(reason.startsWith("column " + column + " holds blob " + column + "."), reason);
+        forEachBatch(
+            scan, batch -> assertNotEquals(ArrowColumnVector.class, batch.column(1).getClass()));
+      }
+      // Columns without blobs still read as Arrow batches.
+      LanceScan scan = lanceScan(spark.sql("select id from t"));
+      assertTrue(
+          scan.arrowBatchSchema().isPresent(), scan.arrowBatchUnsupportedReason().toString());
+      for (String column : columns) {
+        assertSameRows(uri, "select id, " + column + " from t order by id");
       }
     }
   }

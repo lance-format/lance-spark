@@ -159,6 +159,18 @@ public class BlobUtils {
     return LANCE_ENCODING_BLOB_VALUE.equalsIgnoreCase(value);
   }
 
+  /**
+   * Returns true when lance-core reads Arrow field {@code field} as a blob, v1 or v2, as its {@code
+   * Field::is_blob} does: {@link #LANCE_ENCODING_BLOB_KEY} with any value, or the {@link
+   * #ARROW_EXTENSION_BLOB_V2} extension. Lance does so at any depth, also inside a struct or list.
+   */
+  public static boolean isLanceBlobArrowField(org.apache.arrow.vector.types.pojo.Field field) {
+    Map<String, String> metadata = field == null ? null : field.getMetadata();
+    return metadata != null
+        && (metadata.containsKey(LANCE_ENCODING_BLOB_KEY)
+            || ARROW_EXTENSION_BLOB_V2.equals(metadata.get(ARROW_EXTENSION_NAME_KEY)));
+  }
+
   /** Returns true when a Spark field carries the lance-core blob v2 Arrow extension. */
   public static boolean isBlobV2SparkField(StructField field) {
     return field != null && isBlobV2SparkMetadata(field.metadata());

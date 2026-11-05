@@ -329,13 +329,6 @@ public class LanceScanBuilder
               ? ArrowBatchAdapter.Plan.unsupported("the scan has a pushed aggregation")
               : ArrowBatchAdapter.plan(schema, dataset.getSchema());
       LanceSparkReadOptions resolvedReadOptions = readOptions.withRef(scanPlan.getRef());
-      if (resolvedReadOptions.isArrowBatchReadsEnabled() && !arrowBatchPlan.isSupported()) {
-        LOG.info(
-            "Reading {} without Arrow batches: {}",
-            resolvedReadOptions.getDatasetUri(),
-            arrowBatchPlan.unsupportedReason());
-        resolvedReadOptions = resolvedReadOptions.withArrowBatchReads(false);
-      }
       Optional<String> whereCondition =
           FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);
       if (countFilter.isPresent()) {

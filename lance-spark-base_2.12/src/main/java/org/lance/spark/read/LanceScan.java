@@ -188,7 +188,23 @@ public class LanceScan
       java.util.Map<String, String> namespaceProperties,
       ArrowBatchAdapter.Plan arrowBatchPlan) {
     this.schema = schema;
-    this.readOptions = readOptions;
+    this.arrowBatchPlan =
+        arrowBatchPlan != null
+            ? arrowBatchPlan
+            : ArrowBatchAdapter.Plan.unsupported("the scan was built without an Arrow batch plan");
+    // The reader emits Arrow batches whenever the read option asks for them, so a scan that
+    // cannot emit them reads as usual whatever its read options say.
+    if (readOptions != null
+        && readOptions.isArrowBatchReadsEnabled()
+        && !this.arrowBatchPlan.isSupported()) {
+      LOG.info(
+          "Reading {} without Arrow batches: {}",
+          readOptions.getDatasetUri(),
+          this.arrowBatchPlan.unsupportedReason());
+      this.readOptions = readOptions.withArrowBatchReads(false);
+    } else {
+      this.readOptions = readOptions;
+    }
     this.whereConditions = whereConditions;
     this.limit = limit;
     this.offset = offset;
@@ -210,10 +226,6 @@ public class LanceScan
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
-    this.arrowBatchPlan =
-        arrowBatchPlan != null
-            ? arrowBatchPlan
-            : ArrowBatchAdapter.Plan.unsupported("the scan was built without an Arrow batch plan");
   }
 
   /**

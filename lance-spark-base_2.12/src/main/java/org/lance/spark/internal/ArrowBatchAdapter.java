@@ -68,13 +68,18 @@ public final class ArrowBatchAdapter {
    */
   public static Plan plan(StructType scanSchema, Schema datasetSchema) {
     try {
+      Map<String, Field> datasetFields = new HashMap<>();
+      for (Field datasetField : datasetSchema.getFields()) {
+        datasetFields.putIfAbsent(datasetField.getName(), datasetField);
+      }
       List<Field> fields = new ArrayList<>(scanSchema.size());
       for (StructField field : scanSchema.fields()) {
-        Optional<String> unsupported = unsupportedReason(field);
+        Field datasetField = datasetFields.get(field.name());
+        Optional<String> unsupported = unsupportedReason(field, datasetField);
         if (unsupported.isPresent()) {
           return Plan.unsupported(unsupported.get());
         }
-        Field arrowField = batchField(field, datasetSchema);
+        Field arrowField = batchField(field, datasetField);
         if (arrowField == null) {
           return Plan.unsupported(
               "column " + field.name() + " is not in the dataset schema " + datasetSchema);
@@ -155,14 +160,28 @@ public final class ArrowBatchAdapter {
     return columns;
   }
 
-  /** Why {@code field} has no Arrow batch form whatever its Arrow type, if it has none. */
-  private static Optional<String> unsupportedReason(StructField field) {
+  /**
+   * Why {@code field}, with dataset field {@code datasetField} (null if none), has no Arrow batch
+   * form whatever its Arrow type, if it has none.
+   */
+  private static Optional<String> unsupportedReason(StructField field, Field datasetField) {
     String name = field.name();
     if (name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)
         || name.endsWith(LanceConstant.BLOB_SIZE_SUFFIX)
         || BlobUtils.isBlobReadColumn(field)) {
       return Optional.of(
           "column " + name + " is a blob column, which the Spark reader builds on the JVM");
+    }
+    // Lance reads a blob at any depth as its descriptor, which the declared type does not show.
+    Optional<String> blob =
+        datasetField == null ? Optional.empty() : blobPath(datasetField, datasetField.getName());
+    if (blob.isPresent()) {
+      return Optional.of(
+          "column "
+              + name
+              + " holds blob "
+              + blob.get()
+              + ", which Lance reads as a blob descriptor");
     }
     if (JsonUtils.hasJsonMetadata(field.metadata())) {
       return Optional.of("column " + name + " is a JSON column, which the Spark reader decodes");
@@ -173,8 +192,11 @@ public final class ArrowBatchAdapter {
     return Optional.empty();
   }
 
-  /** The Arrow field of the batch column for {@code field}, or null if the dataset has none. */
-  private static Field batchField(StructField field, Schema datasetSchema) {
+  /**
+   * The Arrow field of the batch column for {@code field}, with dataset field {@code datasetField},
+   * or null if it has none.
+   */
+  private static Field batchField(StructField field, Field datasetField) {
     String name = field.name();
     if (name.equals(LanceConstant.FRAGMENT_ID)) {
       return fragmentIdField();
@@ -182,11 +204,6 @@ public final class ArrowBatchAdapter {
     if (isRowMetadataColumn(name)) {
       return signed64Field(name);
     }
-    Field datasetField =
-        datasetSchema.getFields().stream()
-            .filter(f -> f.getName().equals(name))
-            .findFirst()
-            .orElse(null);
     if (datasetField == null || !containsFixedSizeList(datasetField)) {
       return datasetField;
     }
@@ -194,6 +211,22 @@ public final class ArrowBatchAdapter {
     try (FieldVector vector = toListField(datasetField).createVector(LanceRuntime.allocator())) {
       return vector.getField();
     }
+  }
+
+  /**
+   * The path of the first blob in {@code field}, whose path is {@code path}, if it is or has one.
+   */
+  private static Optional<String> blobPath(Field field, String path) {
+    if (BlobUtils.isLanceBlobArrowField(field)) {
+      return Optional.of(path);
+    }
+    for (Field child : field.getChildren()) {
+      Optional<String> blob = blobPath(child, path + "." + child.getName());
+      if (blob.isPresent()) {
+        return blob;
+      }
+    }
+    return Optional.empty();
   }
 
   /**
