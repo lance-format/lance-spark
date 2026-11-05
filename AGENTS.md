@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Lance Spark is an Apache Spark connector for the Lance columnar data format, enabling Spark to read and write Lance datasets. It supports multiple Spark versions (3.4, 3.5, 4.0, 4.1) and Scala versions (2.12, 2.13).
+Lance Spark is an Apache Spark connector for the Lance columnar data format, enabling Spark to read and write Lance datasets. It supports multiple Spark versions (3.4, 3.5, 4.0, 4.1, 4.2, 4.3) and Scala versions (2.12, 2.13).
 
 ## Architecture
 
@@ -8,7 +8,7 @@ Multi-module Maven project with shared base code and version-specific modules:
 
 - `lance-spark-base_2.12/` - Shared source code (Scala 2.12 sources, cross-compiled for 2.13)
 - `lance-spark-{3.4,3.5}_2.{12,13}/` - Spark version-specific modules
-- `lance-spark-{4.0,4.1}_2.13/` - Spark 4.x modules (Scala 2.13 only)
+- `lance-spark-{4.0,4.1,4.2,4.3}_2.13/` - Spark 4.x modules (Scala 2.13 only)
 - `lance-spark-bundle-*/` - Shaded JARs for distribution
 - `integration-tests/` - PySpark integration tests
 - `docs/` - MkDocs documentation (hosted at lance.org/integrations/spark/)
