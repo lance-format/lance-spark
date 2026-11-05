@@ -432,7 +432,8 @@ public abstract class BaseLanceRuntimeFilteringTest {
         Collections.emptyMap(),
         null,
         Collections.emptyMap(),
-        true);
+        true,
+        null);
   }
 
   private static Map<String, List<ZoneStats>> defaultStats() {

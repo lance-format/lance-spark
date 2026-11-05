@@ -163,6 +163,13 @@ public class LanceScan
   private final boolean rowIdIsRowAddress;
 
   /**
+   * Largest stored value of each runtime filter column that Lance stores unsigned. Spark reads
+   * these columns as a wider signed type, so a join key can be negative or above this value. Such a
+   * key matches no row, and Lance rejects it as a literal for the column.
+   */
+  private final java.util.Map<String, Long> unsignedRuntimeKeyMax;
+
+  /**
    * The constructor from before runtime filtering, kept so existing callers still compile. The scan
    * advertises no runtime filter columns and treats {@code _rowid} as distinct from {@code
    * _rowaddr}.
@@ -209,7 +216,8 @@ public class LanceScan
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
-        false);
+        false,
+        null);
   }
 
   public LanceScan(
@@ -235,6 +243,7 @@ public class LanceScan
       String namespaceImpl,
       java.util.Map<String, String> namespaceProperties,
       boolean rowIdIsRowAddress,
+      java.util.Map<String, Long> unsignedRuntimeKeyMax,
       ArrowBatchAdapter.Plan arrowBatchPlan) {
     this.schema = schema;
     this.arrowBatchPlan =
@@ -284,6 +293,8 @@ public class LanceScan
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.rowIdIsRowAddress = rowIdIsRowAddress;
+    this.unsignedRuntimeKeyMax =
+        unsignedRuntimeKeyMax != null ? unsignedRuntimeKeyMax : Collections.emptyMap();
   }
 
   /**
@@ -724,6 +735,7 @@ public class LanceScan
       return null;
     }
 
+    Long unsignedMax = unsignedRuntimeKeyMax.get(column);
     List<Literal<?>> literals = new ArrayList<>();
     Set<String> literalFingerprints = new LinkedHashSet<>();
     int serializedBytes = column.getBytes(StandardCharsets.UTF_8).length;
@@ -737,6 +749,9 @@ public class LanceScan
       }
       if (!runtimeLiteralMatchesField(field.dataType(), literal.dataType())) {
         return null;
+      }
+      if (unsignedMax != null && !withinUnsignedRange(literal.value(), unsignedMax)) {
+        continue;
       }
       String literalFingerprint = runtimeLiteralFingerprint(literal);
       if (literalFingerprints.add(literalFingerprint)) {
@@ -767,6 +782,14 @@ public class LanceScan
 
   private static boolean runtimeLiteralMatchesField(DataType fieldType, DataType literalType) {
     return literalType == DataTypes.NullType || fieldType.sameType(literalType);
+  }
+
+  private static boolean withinUnsignedRange(Object value, long max) {
+    if (!(value instanceof Number)) {
+      return true;
+    }
+    long key = ((Number) value).longValue();
+    return key >= 0 && key <= max;
   }
 
   private static String runtimeLiteralFingerprint(Literal<?> literal) {

@@ -222,7 +222,8 @@ public class LanceScanTest {
             Collections.emptyMap(),
             null,
             Collections.emptyMap(),
-            true);
+            true,
+            null);
 
     // Plan partitions to set numPartitions
     scan.planInputPartitions();
@@ -311,7 +312,8 @@ public class LanceScanTest {
             Collections.emptyMap(),
             null,
             Collections.emptyMap(),
-            true);
+            true,
+            null);
 
     Partitioning partitioning = scan.outputPartitioning();
     assertInstanceOf(KeyGroupedPartitioning.class, partitioning);

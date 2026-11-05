@@ -396,6 +396,7 @@ public class LanceScanBuilder
           namespaceImpl,
           namespaceProperties,
           rowIdIsRowAddress,
+          unsignedRuntimeKeyMax(runtimeFilterColumns, dataset.getSchema()),
           arrowBatchPlan);
     } finally {
       closeLazyDataset();
@@ -1065,6 +1066,28 @@ public class LanceScanBuilder
               || (readOptions.isUseScalarIndex()
                   && exactEqualityIndexedColumns.contains(column)))) {
         result.add(column);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * The largest value Lance can store in each unsigned runtime filter column. {@code _rowid} and
+   * {@code _rowaddr} are UInt64, so only negative keys fall outside them.
+   */
+  private static Map<String, Long> unsignedRuntimeKeyMax(Set<String> columns, Schema arrowSchema) {
+    Map<String, Long> result = new HashMap<>();
+    for (String column : columns) {
+      if (LanceConstant.ROW_ADDRESS.equals(column) || LanceConstant.ROW_ID.equals(column)) {
+        result.put(column, Long.MAX_VALUE);
+        continue;
+      }
+      Field field = findField(arrowSchema.getFields(), column);
+      if (field != null && field.getType() instanceof ArrowType.Int) {
+        ArrowType.Int intType = (ArrowType.Int) field.getType();
+        if (!intType.getIsSigned() && intType.getBitWidth() < 64) {
+          result.put(column, (1L << intType.getBitWidth()) - 1);
+        }
       }
     }
     return result;
