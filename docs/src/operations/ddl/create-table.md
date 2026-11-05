@@ -69,6 +69,40 @@ Create new Lance tables with SQL DDL statements or DataFrames.
     df.writeTo("users").create();
     ```
 
+## Persistent Table Properties
+
+User properties supplied through `TBLPROPERTIES`, SQL `OPTIONS`, or
+`DataFrameWriterV2.tableProperty` are saved in the Lance manifest configuration and
+remain available after the table is reloaded. Spark's reserved properties, such as
+`provider` and `location`, are not copied into that configuration.
+
+```sql
+CREATE TABLE events USING lance
+TBLPROPERTIES ('app.owner' = 'analytics', 'app.retention' = 'weekly')
+AS SELECT 1 AS id;
+
+REPLACE TABLE events USING lance
+TBLPROPERTIES ('app.owner' = 'platform')
+AS SELECT 2 AS id;
+
+REFRESH TABLE events;
+SHOW TBLPROPERTIES events;
+-- app.owner = platform; app.retention = weekly
+```
+
+`REPLACE TABLE` and `CREATE OR REPLACE TABLE` update the supplied properties and
+retain existing properties that are not mentioned. CTAS does not copy properties
+from its source tables. Use `ALTER TABLE ... UNSET TBLPROPERTIES` to remove a property.
+Storing a property does not make it a supported reader or writer option; supported
+behavioral settings are documented in [Configuration](../../config.md).
+
+Staged creates and replacements commit the properties in the same Lance transaction
+as the data. An aborted staged replacement leaves the existing data and properties
+unchanged. Ordinary `CREATE TABLE` without `AS SELECT` currently creates the empty
+dataset and then saves nonempty properties in a separate version, because the Java
+create builder does not accept initial manifest configuration. Registering an
+existing dataset with `LOCATION` leaves its configuration unchanged.
+
 ## Complex Data Types
 
 === "SQL"
