@@ -606,6 +606,40 @@ class TestDDLAlterTableProperties:
             "arrow.fixed-size-list.size"
         ] == 756
 
+    def test_drop_column_removes_encoding_property(self, spark):
+        spark.sql("CREATE TABLE default.test_table (id INT)")
+        spark.sql("INSERT INTO default.test_table VALUES (1)")
+        spark.sql("""
+            ALTER TABLE default.test_table
+            SET TBLPROPERTIES ('name.lance.compression' = 'zstd', 'team' = 'search')
+        """)
+        spark.sql("""
+            CREATE TEMPORARY VIEW drop_column_backfill AS
+            SELECT _rowaddr, _fragid, 'alpha' AS name FROM default.test_table
+        """)
+        try:
+            spark.sql("""
+                ALTER TABLE default.test_table ADD COLUMNS name FROM drop_column_backfill
+            """)
+        finally:
+            spark.catalog.dropTempView("drop_column_backfill")
+        properties = {
+            row.key: row.value
+            for row in spark.sql("SHOW TBLPROPERTIES default.test_table").collect()
+        }
+        assert properties["name.lance.compression"] == "zstd"
+        spark.sql("ALTER TABLE default.test_table DROP COLUMN name")
+
+        rows = spark.sql("SELECT * FROM default.test_table").collect()
+        assert [row.id for row in rows] == [1]
+        assert "name" not in spark.table("default.test_table").columns
+        properties = {
+            row.key: row.value
+            for row in spark.sql("SHOW TBLPROPERTIES default.test_table").collect()
+        }
+        assert "name.lance.compression" not in properties
+        assert properties["team"] == "search"
+
     def test_set_tblproperties(self, spark):
         """SET TBLPROPERTIES stores properties visible via SHOW TBLPROPERTIES."""
         spark.sql("""

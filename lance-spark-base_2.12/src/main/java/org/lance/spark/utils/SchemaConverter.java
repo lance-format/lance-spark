@@ -56,6 +56,7 @@ public class SchemaConverter {
     suffixes.add(Float16Utils.createPropertyKey(""));
     suffixes.add(FixedSizeBinaryUtils.createPropertyKey(""));
     suffixes.add(LargeVarCharUtils.createPropertyKey(""));
+    suffixes.add(LargeVarBinaryUtils.createPropertyKey(""));
     suffixes.add(BlobUtils.BLOB_ENCODING_PROPERTY_SUFFIX);
     for (LanceEncodingUtils.EncodingPropertyRule rule :
         LanceEncodingUtils.getSupportedEncodingPropertyRules()) {
@@ -71,6 +72,9 @@ public class SchemaConverter {
    * @return the column prefix, or {@code null} when the key is not a schema or encoding property
    */
   public static String schemaPropertyColumn(String property) {
+    if (property == null) {
+      return null;
+    }
     String matchedSuffix = null;
     for (String suffix : SCHEMA_PROPERTY_SUFFIXES) {
       if (property.length() > suffix.length()
