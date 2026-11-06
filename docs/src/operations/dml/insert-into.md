@@ -23,7 +23,7 @@ binary, date, timestamp, and day-time interval elements support writeback. Every
 non-null array must contain exactly `N` elements; an empty array is not a null array.
 
 This writer supports fixed-width scalar elements only. String, variable-length
-binary, and struct elements remain unsupported; see [#931](https://github.com/lance-format/lance-spark/issues/931).
+binary, and struct elements remain unsupported.
 
 ## Basic Insert
 
