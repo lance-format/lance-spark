@@ -18,9 +18,12 @@ as `CREATE TABLE AS SELECT`, `REPLACE TABLE` and `saveAsTable` in overwrite mode
 do, uses the Spark types even when the query reads an unsigned column.
 
 Existing `fixed_size_list<T, N>` columns appear as Spark arrays and retain their
-fixed size in the write schema. Writing currently supports numeric element types;
-non-numeric elements require additional writer support. Every non-null array must
-contain exactly `N` elements; an empty array is not a null array.
+fixed size in the write schema. With lance-core 12.0.0, numeric, boolean, fixed-size
+binary, date, timestamp, and day-time interval elements support writeback. Every
+non-null array must contain exactly `N` elements; an empty array is not a null array.
+
+This writer supports fixed-width scalar elements only. String, variable-length
+binary, and struct elements remain unsupported; see [#931](https://github.com/lance-format/lance-spark/issues/931).
 
 ## Basic Insert
 

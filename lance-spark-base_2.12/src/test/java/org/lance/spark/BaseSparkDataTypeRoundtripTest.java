@@ -13,10 +13,14 @@
  */
 package org.lance.spark;
 
+import org.lance.spark.arrow.LanceArrowWriter;
 import org.lance.spark.utils.Float16Utils;
 import org.lance.spark.utils.Utils;
 
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.types.DateUnit;
 import org.apache.arrow.vector.types.FloatingPointPrecision;
+import org.apache.arrow.vector.types.TimeUnit;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
@@ -55,9 +59,11 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.Period;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -821,6 +827,212 @@ public abstract class BaseSparkDataTypeRoundtripTest {
         assertEquals(4L, dataset.countRows());
         assertEquals(original, dataset.getSchema());
       }
+    }
+  }
+
+  static Stream<Arguments> fixedSizeNonNumericTypes() {
+    Stream<Arguments> scalars =
+        Stream.of(
+            Arguments.of(
+                "bool",
+                new Field("item", FieldType.nullable(ArrowType.Bool.INSTANCE), null),
+                "BOOLEAN",
+                "false, NULL, true, false"),
+            Arguments.of(
+                "fixed_binary",
+                new Field("item", FieldType.nullable(new ArrowType.FixedSizeBinary(2)), null),
+                "BINARY",
+                "X'00FF', NULL, X'0000', X'0102'"),
+            Arguments.of(
+                "date_day",
+                new Field("item", FieldType.nullable(new ArrowType.Date(DateUnit.DAY)), null),
+                "DATE",
+                "DATE'1969-12-31', NULL, DATE'1970-01-01', DATE'2024-02-29'"),
+            Arguments.of(
+                "date_milli",
+                new Field(
+                    "item", FieldType.nullable(new ArrowType.Date(DateUnit.MILLISECOND)), null),
+                "DATE",
+                "DATE'1969-12-31', NULL, DATE'1970-01-01', DATE'2024-02-29'"),
+            Arguments.of(
+                "duration",
+                new Field(
+                    "item", FieldType.nullable(new ArrowType.Duration(TimeUnit.MICROSECOND)), null),
+                "INTERVAL DAY TO SECOND",
+                "INTERVAL '-1' SECOND, NULL, INTERVAL '0' SECOND, INTERVAL '1 02:03:04.123456' DAY TO SECOND"));
+    Stream<Arguments> timestamps =
+        Arrays.stream(TimeUnit.values())
+            .flatMap(
+                unit ->
+                    Stream.of(false, true)
+                        .map(
+                            withTimezone -> {
+                              String sqlType = withTimezone ? "TIMESTAMP" : "TIMESTAMP_NTZ";
+                              String fraction =
+                                  unit == TimeUnit.SECOND
+                                      ? ""
+                                      : unit == TimeUnit.MILLISECOND ? ".123" : ".123456";
+                              return Arguments.of(
+                                  "timestamp_" + unit.name() + "_" + withTimezone,
+                                  new Field(
+                                      "item",
+                                      FieldType.nullable(
+                                          new ArrowType.Timestamp(
+                                              unit, withTimezone ? "UTC" : null)),
+                                      null),
+                                  sqlType,
+                                  "CAST('1969-12-31 23:59:59"
+                                      + fraction
+                                      + "' AS "
+                                      + sqlType
+                                      + "), NULL, "
+                                      + "CAST('1970-01-01 00:00:00' AS "
+                                      + sqlType
+                                      + "), "
+                                      + "CAST('2024-01-02 03:04:05"
+                                      + fraction
+                                      + "' AS "
+                                      + sqlType
+                                      + ")");
+                            }));
+    return Stream.concat(scalars, timestamps);
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("fixedSizeNonNumericTypes")
+  public void testExistingFixedSizeNonNumericListWriteback(
+      String name, Field elementField, String sqlType, String elements) throws Exception {
+    String uri = outputPath("fixed_" + name);
+    Schema original =
+        new Schema(
+            Arrays.asList(
+                new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
+                new Field(
+                    "values",
+                    FieldType.nullable(new ArrowType.FixedSizeList(4)),
+                    Collections.singletonList(elementField))));
+    org.lance.Dataset.write()
+        .allocator(LanceRuntime.allocator())
+        .uri(uri)
+        .schema(original)
+        .execute()
+        .close();
+    spark
+        .conf()
+        .set("spark.sql.catalog.fixed_nonnumeric", "org.lance.spark.LanceNamespaceSparkCatalog");
+    String table = "fixed_nonnumeric.`" + uri + "`";
+    String input =
+        "SELECT id, CAST(values AS ARRAY<"
+            + sqlType
+            + ">) AS values FROM VALUES "
+            + "(0, NULL), (1, array("
+            + elements
+            + ")), (2, array(NULL, NULL, NULL, NULL)), "
+            + "(3, array("
+            + elements
+            + ")), (4, NULL) AS data(id, values)";
+    Dataset<Row> expected = spark.sql(input);
+    spark.sql("INSERT INTO " + table + " " + input);
+    Dataset<Row> actual = spark.table(table);
+    assertTrue(expected.exceptAll(actual).isEmpty(), "Missing or changed rows after insert");
+    assertTrue(actual.exceptAll(expected).isEmpty(), "Unexpected rows after insert");
+
+    // Small batches put null rows on either side of batch boundaries.
+    spark
+        .table(table)
+        .selectExpr("id + 5 AS id", "values")
+        .coalesce(1)
+        .writeTo(table)
+        .option("batch_size", "2")
+        .append();
+    Dataset<Row> copied = expected.union(expected.selectExpr("id + 5 AS id", "values"));
+    Dataset<Row> appended = spark.table(table);
+    assertTrue(copied.exceptAll(appended).isEmpty(), "Missing or changed rows after append");
+    assertTrue(appended.exceptAll(copied).isEmpty(), "Unexpected rows after append");
+    LanceSparkReadOptions options = LanceSparkReadOptions.builder().datasetUri(uri).build();
+    long version;
+    try (org.lance.Dataset dataset = Utils.openDatasetBuilder(options).build()) {
+      assertEquals(original, dataset.getSchema());
+      assertEquals(10L, dataset.countRows());
+      assertTrue(dataset.getFragments().size() >= 2);
+      version = dataset.version();
+    }
+    List<Map.Entry<String, String>> invalidArrays = new ArrayList<>();
+    for (String invalid :
+        Arrays.asList(
+            "slice(values, 1, 0)", "slice(values, 1, 3)", "concat(values, slice(values, 1, 1))")) {
+      invalidArrays.add(Map.entry(invalid, "does not match FixedSizeList size 4"));
+    }
+    if (elementField.getType() instanceof ArrowType.FixedSizeBinary) {
+      for (String bytes : Arrays.asList("", "00", "000102")) {
+        invalidArrays.add(
+            Map.entry(
+                "array(X'" + bytes + "', X'00FF', NULL, X'0000')",
+                "expects 2 bytes per row, got " + bytes.length() / 2));
+      }
+    }
+    for (Map.Entry<String, String> invalid : invalidArrays) {
+      Exception error =
+          assertThrows(
+              Exception.class,
+              () ->
+                  spark.sql(
+                      "INSERT INTO "
+                          + table
+                          + " SELECT 10, "
+                          + invalid.getKey()
+                          + " FROM (SELECT CAST(array("
+                          + elements
+                          + ") AS ARRAY<"
+                          + sqlType
+                          + ">) AS values)"));
+      Throwable cause = error;
+      while (cause.getCause() != null) {
+        cause = cause.getCause();
+      }
+      assertTrue(cause.getMessage().contains(invalid.getValue()), cause.toString());
+      try (org.lance.Dataset dataset = Utils.openDatasetBuilder(options).build()) {
+        assertEquals(version, dataset.version());
+        assertEquals(10L, dataset.countRows());
+        assertEquals(original, dataset.getSchema());
+      }
+    }
+  }
+
+  static Stream<Field> unsupportedFixedSizeListElements() {
+    return Stream.of(
+        new Field("item", FieldType.nullable(ArrowType.Utf8.INSTANCE), null),
+        new Field("item", FieldType.nullable(ArrowType.LargeUtf8.INSTANCE), null),
+        new Field("item", FieldType.nullable(ArrowType.Binary.INSTANCE), null),
+        new Field("item", FieldType.nullable(ArrowType.LargeBinary.INSTANCE), null),
+        new Field(
+            "item",
+            FieldType.nullable(ArrowType.Struct.INSTANCE),
+            Collections.singletonList(
+                new Field("flag", FieldType.nullable(ArrowType.Bool.INSTANCE), null))),
+        new Field(
+            "item",
+            FieldType.nullable(new ArrowType.FixedSizeList(2)),
+            Collections.singletonList(
+                new Field("flag", FieldType.nullable(ArrowType.Bool.INSTANCE), null))));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("unsupportedFixedSizeListElements")
+  public void testUnsupportedFixedSizeListElementsRejected(Field element) {
+    Schema schema =
+        new Schema(
+            Collections.singletonList(
+                new Field(
+                    "values",
+                    FieldType.nullable(new ArrowType.FixedSizeList(4)),
+                    Collections.singletonList(element))));
+    try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, LanceRuntime.allocator())) {
+      UnsupportedOperationException error =
+          assertThrows(
+              UnsupportedOperationException.class,
+              () -> LanceArrowWriter.create(root, LanceArrowUtils.fromArrowSchema(schema)));
+      assertTrue(error.getMessage().contains("Unsupported data type: ArrayType("));
     }
   }
 
