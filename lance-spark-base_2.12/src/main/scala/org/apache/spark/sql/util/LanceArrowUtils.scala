@@ -746,8 +746,10 @@ object LanceArrowUtils {
   private def shouldBeFixedSizeList(
       metadata: org.apache.spark.sql.types.Metadata,
       elementType: DataType): Boolean = {
-    // Create a temporary ArrayType to use VectorUtils.shouldBeFixedSizeList
-    VectorUtils.shouldBeFixedSizeList(ArrayType(elementType, true), metadata)
+    // Preserve existing int8 lists without treating them as floating-point vector columns.
+    if (elementType == ByteType)
+      metadata != null && metadata.contains(ARROW_FIXED_SIZE_LIST_SIZE_KEY)
+    else VectorUtils.shouldBeFixedSizeList(ArrayType(elementType, true), metadata)
   }
 
   /**

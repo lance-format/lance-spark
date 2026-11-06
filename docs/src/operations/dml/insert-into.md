@@ -17,6 +17,10 @@ with the same bits, so `-1` is stored as 2^64 - 1. Creating or replacing a table
 as `CREATE TABLE AS SELECT`, `REPLACE TABLE` and `saveAsTable` in overwrite mode
 do, uses the Spark types even when the query reads an unsigned column.
 
+Existing `fixed_size_list<int8, N>` columns appear as `ARRAY<TINYINT>` in Spark
+and retain their fixed size on writeback. Every non-null array must contain
+exactly `N` elements; an empty array is not a null array.
+
 ## Basic Insert
 
 === "SQL"

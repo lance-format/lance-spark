@@ -13,6 +13,12 @@
  */
 package org.lance.spark;
 
+import org.lance.spark.utils.Utils;
+
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.ml.linalg.DenseMatrix;
 import org.apache.spark.ml.linalg.DenseVector;
 import org.apache.spark.ml.linalg.Matrix;
@@ -27,6 +33,7 @@ import org.apache.spark.sql.SaveMode;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
@@ -49,6 +56,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -626,6 +634,104 @@ public abstract class BaseSparkDataTypeRoundtripTest {
   }
 
   // ---------------- fixed-size-list with null ----------------
+
+  @Test
+  public void testOrdinaryInt8ArrayRemainsVariableLength() {
+    assertEquals(
+        ArrowType.List.INSTANCE,
+        LanceArrowUtils.toArrowField(
+                "values", DataTypes.createArrayType(DataTypes.ByteType), true, "UTC", null, false)
+            .getType());
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("values", DataTypes.createArrayType(DataTypes.ByteType), true);
+    List<Row> input =
+        Arrays.asList(
+            RowFactory.create(0, Collections.emptyList()),
+            RowFactory.create(1, Arrays.asList((byte) 1, (byte) 2)),
+            RowFactory.create(2, null));
+    List<Row> rows = writeAndRead(schema, input, "variable_int8").orderBy("id").collectAsList();
+    assertEquals(Collections.emptyList(), rows.get(0).getList(1));
+    assertEquals(Arrays.asList((byte) 1, (byte) 2), rows.get(1).getList(1));
+    assertTrue(rows.get(2).isNullAt(1));
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder().datasetUri(outputPath("variable_int8")).build();
+    try (org.lance.Dataset dataset = Utils.openDatasetBuilder(options).build()) {
+      assertEquals(ArrowType.List.INSTANCE, dataset.getSchema().findField("values").getType());
+    }
+  }
+
+  @Test
+  public void testExistingFixedSizeInt8ListWriteback() throws Exception {
+    String uri = outputPath("fixed_int8");
+    Schema original =
+        new Schema(
+            Arrays.asList(
+                new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
+                new Field(
+                    "values",
+                    FieldType.nullable(new ArrowType.FixedSizeList(4)),
+                    Collections.singletonList(
+                        new Field("item", FieldType.nullable(new ArrowType.Int(8, true)), null)))));
+    org.lance.Dataset.write()
+        .allocator(LanceRuntime.allocator())
+        .uri(uri)
+        .schema(original)
+        .execute()
+        .close();
+    spark.conf().set("spark.sql.catalog.fixed_int8", "org.lance.spark.LanceNamespaceSparkCatalog");
+    String table = "fixed_int8.`" + uri + "`";
+
+    spark.sql(
+        "INSERT INTO "
+            + table
+            + " VALUES (0, CAST(NULL AS ARRAY<TINYINT>)),"
+            + " (1, array(CAST(-128 AS TINYINT), CAST(NULL AS TINYINT),"
+            + " CAST(0 AS TINYINT), CAST(127 AS TINYINT)))");
+    List<Row> rows = spark.table(table).orderBy("id").collectAsList();
+    assertEquals(2, rows.size());
+    assertTrue(rows.get(0).isNullAt(1));
+    assertEquals(Arrays.asList((byte) -128, null, (byte) 0, (byte) 127), rows.get(1).getList(1));
+
+    spark.table(table).selectExpr("id + 2 AS id", "values").writeTo(table).append();
+    List<Row> copied = spark.table(table).orderBy("id").collectAsList();
+    assertEquals(4, copied.size());
+    assertTrue(copied.get(2).isNullAt(1));
+    assertEquals(rows.get(1).getList(1), copied.get(3).getList(1));
+
+    LanceSparkReadOptions options = LanceSparkReadOptions.builder().datasetUri(uri).build();
+    long version;
+    try (org.lance.Dataset dataset = Utils.openDatasetBuilder(options).build()) {
+      assertEquals(original, dataset.getSchema());
+      assertEquals(4L, dataset.countRows());
+      assertTrue(dataset.getFragments().size() >= 2);
+      version = dataset.version();
+    }
+    for (String invalid : Arrays.asList("array()", "array(1, 2, 3)", "array(1, 2, 3, 4, 5)")) {
+      Exception error =
+          assertThrows(
+              Exception.class,
+              () ->
+                  spark.sql(
+                      "INSERT INTO "
+                          + table
+                          + " SELECT 4, CAST("
+                          + invalid
+                          + " AS ARRAY<TINYINT>)"));
+      Throwable cause = error;
+      while (cause.getCause() != null) {
+        cause = cause.getCause();
+      }
+      assertTrue(
+          cause.getMessage().contains("does not match FixedSizeList size 4"), cause.toString());
+      try (org.lance.Dataset dataset = Utils.openDatasetBuilder(options).build()) {
+        assertEquals(version, dataset.version());
+        assertEquals(4L, dataset.countRows());
+        assertEquals(original, dataset.getSchema());
+      }
+    }
+  }
 
   @Test
   public void testFixedSizeListNullMixed() {
