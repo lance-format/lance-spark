@@ -22,9 +22,6 @@ fixed size when written. Supported element types include numeric, boolean,
 fixed-size binary, date, timestamp, and day-time interval types. Every non-null
 array must contain exactly `N` elements; an empty array is not a null array.
 
-String, variable-length binary, struct, and nested fixed-size list elements remain
-unsupported in fixed-size list columns.
-
 ## Basic Insert
 
 === "SQL"
