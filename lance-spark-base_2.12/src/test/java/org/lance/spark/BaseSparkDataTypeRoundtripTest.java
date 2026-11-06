@@ -13,8 +13,10 @@
  */
 package org.lance.spark;
 
+import org.lance.spark.utils.Float16Utils;
 import org.lance.spark.utils.Utils;
 
+import org.apache.arrow.vector.types.FloatingPointPrecision;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
@@ -40,6 +42,11 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import scala.collection.JavaConverters;
+import scala.collection.Seq;
 
 import java.math.BigDecimal;
 import java.nio.file.Path;
@@ -51,11 +58,14 @@ import java.time.Period;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -662,9 +672,80 @@ public abstract class BaseSparkDataTypeRoundtripTest {
     }
   }
 
-  @Test
-  public void testExistingFixedSizeInt8ListWriteback() throws Exception {
-    String uri = outputPath("fixed_int8");
+  static Stream<Arguments> fixedSizeNumericTypes() {
+    return Stream.of(
+        Arguments.of(
+            "int8",
+            new ArrowType.Int(8, true),
+            "TINYINT",
+            Arrays.asList(Byte.MIN_VALUE, null, (byte) 0, Byte.MAX_VALUE)),
+        Arguments.of(
+            "uint8",
+            new ArrowType.Int(8, false),
+            "SMALLINT",
+            Arrays.asList((short) 0, null, (short) 128, (short) 255)),
+        Arguments.of(
+            "int16",
+            new ArrowType.Int(16, true),
+            "SMALLINT",
+            Arrays.asList(Short.MIN_VALUE, null, (short) 0, Short.MAX_VALUE)),
+        Arguments.of(
+            "uint16", new ArrowType.Int(16, false), "INT", Arrays.asList(0, null, 32768, 65535)),
+        Arguments.of(
+            "int32",
+            new ArrowType.Int(32, true),
+            "INT",
+            Arrays.asList(Integer.MIN_VALUE, null, 0, Integer.MAX_VALUE)),
+        Arguments.of(
+            "uint32",
+            new ArrowType.Int(32, false),
+            "BIGINT",
+            Arrays.asList(0L, null, 2147483648L, 4294967295L)),
+        Arguments.of(
+            "int64",
+            new ArrowType.Int(64, true),
+            "BIGINT",
+            Arrays.asList(Long.MIN_VALUE, null, 0L, Long.MAX_VALUE)),
+        Arguments.of(
+            "uint64",
+            new ArrowType.Int(64, false),
+            "BIGINT",
+            Arrays.asList(0L, null, Long.MIN_VALUE, -1L)),
+        Arguments.of(
+            "float16",
+            new ArrowType.FloatingPoint(FloatingPointPrecision.HALF),
+            "FLOAT",
+            Arrays.asList(-1.5f, null, 0.0f, 1.5f)),
+        Arguments.of(
+            "float32",
+            new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE),
+            "FLOAT",
+            Arrays.asList(-1.5f, null, 0.0f, 1.5f)),
+        Arguments.of(
+            "float64",
+            new ArrowType.FloatingPoint(FloatingPointPrecision.DOUBLE),
+            "DOUBLE",
+            Arrays.asList(-1.5d, null, 0.0d, 1.5d)),
+        Arguments.of(
+            "decimal128",
+            new ArrowType.Decimal(10, 2, 128),
+            "DECIMAL(10,2)",
+            Arrays.asList(
+                new BigDecimal("-99999999.99"),
+                null,
+                new BigDecimal("0.00"),
+                new BigDecimal("99999999.99"))));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("fixedSizeNumericTypes")
+  public void testExistingFixedSizeNumericListWriteback(
+      String name, ArrowType elementType, String sqlType, List<?> expected) throws Exception {
+    if (name.equals("float16")) {
+      Assumptions.assumeTrue(
+          Float16Utils.isFloat2VectorAvailable(), "Float16 requires Arrow 18+ (Spark 4.0+)");
+    }
+    String uri = outputPath("fixed_" + name);
     Schema original =
         new Schema(
             Arrays.asList(
@@ -673,26 +754,34 @@ public abstract class BaseSparkDataTypeRoundtripTest {
                     "values",
                     FieldType.nullable(new ArrowType.FixedSizeList(4)),
                     Collections.singletonList(
-                        new Field("item", FieldType.nullable(new ArrowType.Int(8, true)), null)))));
+                        new Field("item", FieldType.nullable(elementType), null)))));
     org.lance.Dataset.write()
         .allocator(LanceRuntime.allocator())
         .uri(uri)
         .schema(original)
         .execute()
         .close();
-    spark.conf().set("spark.sql.catalog.fixed_int8", "org.lance.spark.LanceNamespaceSparkCatalog");
-    String table = "fixed_int8.`" + uri + "`";
+    spark
+        .conf()
+        .set("spark.sql.catalog.fixed_numeric", "org.lance.spark.LanceNamespaceSparkCatalog");
+    String table = "fixed_numeric.`" + uri + "`";
 
+    String elements =
+        expected.stream()
+            .map(value -> "CAST(" + (value == null ? "NULL" : value) + " AS " + sqlType + ")")
+            .collect(Collectors.joining(", "));
     spark.sql(
         "INSERT INTO "
             + table
-            + " VALUES (0, CAST(NULL AS ARRAY<TINYINT>)),"
-            + " (1, array(CAST(-128 AS TINYINT), CAST(NULL AS TINYINT),"
-            + " CAST(0 AS TINYINT), CAST(127 AS TINYINT)))");
+            + " VALUES (0, CAST(NULL AS ARRAY<"
+            + sqlType
+            + ">)), (1, array("
+            + elements
+            + "))");
     List<Row> rows = spark.table(table).orderBy("id").collectAsList();
     assertEquals(2, rows.size());
     assertTrue(rows.get(0).isNullAt(1));
-    assertEquals(Arrays.asList((byte) -128, null, (byte) 0, (byte) 127), rows.get(1).getList(1));
+    assertEquals(expected, rows.get(1).getList(1));
 
     spark.table(table).selectExpr("id + 2 AS id", "values").writeTo(table).append();
     List<Row> copied = spark.table(table).orderBy("id").collectAsList();
@@ -718,7 +807,9 @@ public abstract class BaseSparkDataTypeRoundtripTest {
                           + table
                           + " SELECT 4, CAST("
                           + invalid
-                          + " AS ARRAY<TINYINT>)"));
+                          + " AS ARRAY<"
+                          + sqlType
+                          + ">)"));
       Throwable cause = error;
       while (cause.getCause() != null) {
         cause = cause.getCause();
@@ -853,7 +944,9 @@ public abstract class BaseSparkDataTypeRoundtripTest {
                     DataTypes.createArrayType(
                         DataTypes.createArrayType(DataTypes.FloatType, false), true),
                     true,
-                    fslMeta));
+                    new org.apache.spark.sql.types.MetadataBuilder()
+                        .putString(LanceArrowUtils.LANCE_ELEMENT_METADATA_KEY(), fslMeta.json())
+                        .build()));
     List<Row> data =
         Arrays.asList(
             RowFactory.create(
@@ -862,11 +955,22 @@ public abstract class BaseSparkDataTypeRoundtripTest {
     List<Row> out = writeAndRead(schema, data, "array_fsl_null_elem").orderBy("id").collectAsList();
     assertEquals(2, out.size());
     // Row 0: [vec, null, vec]
-    List<Object> row0list = out.get(0).getList(1);
+    List<Seq<Float>> row0list = out.get(0).getList(1);
     assertEquals(3, row0list.size());
+    assertEquals(Arrays.asList(1.0f, 2.0f), JavaConverters.seqAsJavaList(row0list.get(0)));
+    assertNull(row0list.get(1));
+    assertEquals(Arrays.asList(3.0f, 4.0f), JavaConverters.seqAsJavaList(row0list.get(2)));
     // Row 1: single element
-    List<Object> row1list = out.get(1).getList(1);
+    List<Seq<Float>> row1list = out.get(1).getList(1);
     assertEquals(1, row1list.size());
+    assertEquals(Arrays.asList(5.0f, 6.0f), JavaConverters.seqAsJavaList(row1list.get(0)));
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder().datasetUri(outputPath("array_fsl_null_elem")).build();
+    try (org.lance.Dataset dataset = Utils.openDatasetBuilder(options).build()) {
+      Field field = dataset.getSchema().findField("vecs");
+      assertEquals(ArrowType.List.INSTANCE, field.getType());
+      assertEquals(new ArrowType.FixedSizeList(2), field.getChildren().get(0).getType());
+    }
   }
 
   @Test

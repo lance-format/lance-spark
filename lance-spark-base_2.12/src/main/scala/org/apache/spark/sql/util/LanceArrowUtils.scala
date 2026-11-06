@@ -490,7 +490,7 @@ object LanceArrowUtils {
       case ArrayType(elementType, containsNull) =>
         val elementMetadata = parseEmbeddedMetadata(metadata, LANCE_ELEMENT_METADATA_KEY)
         val elementName = ListChildUtils.listChildName(metadata)
-        if (shouldBeFixedSizeList(metadata, elementType)) {
+        if (metadata != null && metadata.contains(ARROW_FIXED_SIZE_LIST_SIZE_KEY)) {
           val listSize = metadata.getLong(ARROW_FIXED_SIZE_LIST_SIZE_KEY).toInt
           val fieldType =
             new FieldType(nullable, new ArrowType.FixedSizeList(listSize), null, meta.asJava)
@@ -741,15 +741,6 @@ object LanceArrowUtils {
         deduplicateFieldNames(valueType, errorOnDuplicatedFieldNames),
         valueContainsNull)
     case _ => dt
-  }
-
-  private def shouldBeFixedSizeList(
-      metadata: org.apache.spark.sql.types.Metadata,
-      elementType: DataType): Boolean = {
-    // Preserve existing int8 lists without treating them as floating-point vector columns.
-    if (elementType == ByteType)
-      metadata != null && metadata.contains(ARROW_FIXED_SIZE_LIST_SIZE_KEY)
-    else VectorUtils.shouldBeFixedSizeList(ArrayType(elementType, true), metadata)
   }
 
   /**
