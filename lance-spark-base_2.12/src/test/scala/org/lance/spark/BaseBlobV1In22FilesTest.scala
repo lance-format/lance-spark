@@ -35,7 +35,7 @@ import java.util.Collections
 import scala.collection.JavaConverters._
 
 /** Released fixtures must remain readable after every operation that publishes a new manifest. */
-abstract class BaseLance12BlobCompatibilityTest extends Lance12BlobFixtureTest {
+abstract class BaseBlobV1In22FilesTest extends BlobV1In22FilesFixtureTest {
 
   @ParameterizedTest(name = "{0}: {1}")
   @CsvSource(Array(
@@ -64,7 +64,7 @@ abstract class BaseLance12BlobCompatibilityTest extends Lance12BlobFixtureTest {
     "nested, createIndex",
     "nested, properties",
     "nested, compact"))
-  def preservesLegacyPayloads(fixture: String, operation: String): Unit = {
+  def preservesBlobV1Payloads(fixture: String, operation: String): Unit = {
     val uri = copyFixture(fixture)
     val table = tableAt(uri)
     val original = fixtureRows(fixture)
@@ -126,14 +126,14 @@ abstract class BaseLance12BlobCompatibilityTest extends Lance12BlobFixtureTest {
           assertEquals("1", id.getMetadata.get("lance-schema:unenforced-primary-key:position"))
         }
       case "addColumns" =>
-        spark.sql(s"CREATE OR REPLACE TEMP VIEW legacy_columns AS SELECT _rowaddr, _fragid, id * 2 AS id2 FROM $table")
-        spark.sql(s"ALTER TABLE $table ADD COLUMNS id2 FROM legacy_columns")
+        spark.sql(s"CREATE OR REPLACE TEMP VIEW column_values AS SELECT _rowaddr, _fragid, id * 2 AS id2 FROM $table")
+        spark.sql(s"ALTER TABLE $table ADD COLUMNS id2 FROM column_values")
         assertEquals(
           original.map(_._1 * 2),
           spark.sql(s"SELECT id2 FROM $table ORDER BY id").collect().map(_.getInt(0)).toVector)
       case "updateColumns" =>
-        spark.sql(s"CREATE OR REPLACE TEMP VIEW legacy_columns AS SELECT _rowaddr, _fragid, id + 10 AS id FROM $table")
-        spark.sql(s"ALTER TABLE $table UPDATE COLUMNS id FROM legacy_columns")
+        spark.sql(s"CREATE OR REPLACE TEMP VIEW column_values AS SELECT _rowaddr, _fragid, id + 10 AS id FROM $table")
+        spark.sql(s"ALTER TABLE $table UPDATE COLUMNS id FROM column_values")
         expected = original.map { case (id, data) => (id + 10, data) }
       case "compact" =>
         // An existing index can split compaction groups. Remove it before measuring actual work.
@@ -187,8 +187,8 @@ abstract class BaseLance12BlobCompatibilityTest extends Lance12BlobFixtureTest {
     val uri = copyFixture("top_level")
     val table = tableAt(uri)
     val before = version(uri)
-    spark.sql(s"ALTER TABLE $table CREATE TAG legacy_snapshot")
-    spark.sql(s"ALTER TABLE $table CREATE BRANCH legacy_branch")
+    spark.sql(s"ALTER TABLE $table CREATE TAG fixture_tag")
+    spark.sql(s"ALTER TABLE $table CREATE BRANCH fixture_branch")
     spark.sql(s"VACUUM $table")
     assertEquals(before, version(uri))
     assertPayloads(uri, fixtureRows("top_level"))
@@ -328,15 +328,15 @@ abstract class BaseLance12BlobCompatibilityTest extends Lance12BlobFixtureTest {
 }
 
 /** Shared by the all-version suite and the Spark 3.5+ row-level suite. */
-abstract class Lance12BlobFixtureTest {
+abstract class BlobV1In22FilesFixtureTest {
   protected var spark: SparkSession = _
   @TempDir var tempDir: Path = _
-  private val catalogName = "lance_legacy"
+  private val catalogName = "blob_v1"
 
   @BeforeEach
   def setup(): Unit = {
     spark = SparkSession.builder()
-      .appName("lance12-blob-compatibility")
+      .appName("blob-v1-in-22-files")
       .master("local[2]")
       .config("spark.sql.extensions", "org.lance.spark.extensions.LanceSparkSessionExtensions")
       .config(s"spark.sql.catalog.$catalogName", "org.lance.spark.LanceNamespaceSparkCatalog")
@@ -358,7 +358,7 @@ abstract class Lance12BlobFixtureTest {
   }
 
   protected def copyFixture(name: String): String = {
-    val source = Paths.get(getClass.getResource(s"/lance12_blob_v1/$name.lance").toURI)
+    val source = Paths.get(getClass.getResource(s"/blob_v1_in_22_files/$name.lance").toURI)
     val target = tempDir.resolve(s"$name.lance")
     val paths = Files.walk(source)
     try paths.iterator().asScala.foreach(path =>

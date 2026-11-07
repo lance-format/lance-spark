@@ -1,11 +1,12 @@
 """
-Writes the Python-produced fixtures read by Lance12BlobCompatibilityTest.
+Writes the Python-produced fixtures read by BlobV1In22FilesTest.
 
-Lance 12's fragment writer stored legacy (v1) blob fields in 2.2 files without converting them, so
-each table holds the v1 layout in a 2.2 data file next to a 2.1 one. An upgrade must preserve
-these payloads when a later commit promotes the schema to blob v2.
+LanceFragment.create stamps the file 2.2 and encodes the existing v1 schema as is, skipping
+validate_blob_v2_write_schema, so each table holds the v1 layout in a 2.2 data file next to a 2.1
+one. An upgrade must preserve these payloads when a later commit promotes the schema to blob v2.
 
-Run with pylance 12.0.0; it rewrites both tables next to this script.
+Run with pylance 12.0.0: since lance#9459 (Lance 13), the commit promotes the field to blob v2, so
+the manifests would no longer describe it as blob v1. It rewrites both tables next to this script.
 
 spark_append_22.lance is not written here: lance-spark 0.9.0-beta.2, on Lance 12, created it at
 2.1 with a v1 blob column and appended two rows to it with file_format_version 2.2, so the table

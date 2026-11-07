@@ -91,9 +91,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class SparkPositionDeltaWriteTest {
   @TempDir static Path tempDir;
 
-  /** The delta commit must also accept legacy blob fields written directly as 2.2 fragments. */
+  /** The delta commit must also accept blob v1 fields written directly into 2.2 files. */
   @Test
-  public void commitPreservesBlobV1FieldsWrittenAtTwoTwo(TestInfo testInfo) throws Exception {
+  public void commitPreservesBlobV1FieldsIn22Files(TestInfo testInfo) throws Exception {
     String uri =
         TestUtils.getDatasetUri(tempDir.toString(), testInfo.getTestMethod().get().getName());
     Field data =

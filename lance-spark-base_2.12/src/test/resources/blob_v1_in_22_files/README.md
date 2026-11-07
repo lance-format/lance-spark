@@ -1,9 +1,14 @@
-# Lance 12 blob compatibility fixtures
+# Blob v1 in 2.2 files
+
+Lance's fragment writer (pylance `LanceFragment.create`, Java `Fragment.create`, which
+lance-spark's executors use) stamps the requested 2.2 version and encodes an existing blob v1
+schema as is, skipping `validate_blob_v2_write_schema`, until
+[lance#10586](https://github.com/lance-format/lance/pull/10586) promotes such input to blob v2.
 
 These immutable datasets were produced with Lance **12.0.0**, originally for
-[PR #885](https://github.com/lance-format/lance-spark/pull/885).
-Do not regenerate them using the dependency version under test: that would remove
-the legacy encoding that these tests must exercise.
+[PR #885](https://github.com/lance-format/lance-spark/pull/885). Regenerate them only with
+12.0.0: since [lance#9459](https://github.com/lance-format/lance/pull/9459) (Lance 13), committing
+a 2.2 file promotes the field to blob v2, so the manifests would no longer describe it as blob v1.
 
 | Dataset | Producer | Contents |
 | --- | --- | --- |
@@ -18,7 +23,7 @@ The third can be generated with PySpark and a Lance 12 connector bundle:
 from pathlib import Path
 from pyspark.sql import SparkSession
 
-root = Path("/tmp/lance12-fixtures").resolve()
+root = Path("/tmp/blob-v1-fixtures").resolve()
 uri = root / "spark_append_22.lance"
 spark = (SparkSession.builder.master("local[2]")
     .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
@@ -51,7 +56,7 @@ Run with the repository's JDK 17 toolchain:
 
 ```sh
 ./mvnw -pl lance-spark-3.5_2.13 -am test \
-  -Dtest=Lance12BlobCompatibilityTest,Lance12BlobRowLevelTest \
+  -Dtest=BlobV1In22FilesTest,BlobV1In22FilesRowLevelTest \
   -Dsurefire.failIfNoSpecifiedTests=false
 ```
 

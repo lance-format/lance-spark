@@ -18,14 +18,14 @@ import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.CsvSource
 
 /** UPDATE/MERGE are only wired into the Spark 3.5+ modules. */
-abstract class BaseLance12BlobRowLevelTest extends Lance12BlobFixtureTest {
+abstract class BaseBlobV1In22FilesRowLevelTest extends BlobV1In22FilesFixtureTest {
   @ParameterizedTest(name = "{0}: {1}")
   @CsvSource(Array(
     "top_level, update",
     "top_level, merge",
     "spark_append_22, update",
     "spark_append_22, merge"))
-  def rowLevelWritesPreserveLegacyPayloads(fixture: String, operation: String): Unit = {
+  def rowLevelWritesPreserveBlobV1Payloads(fixture: String, operation: String): Unit = {
     val uri = copyFixture(fixture)
     val table = tableAt(uri)
     val original = fixtureRows(fixture)

@@ -14,4 +14,4 @@
 package org.lance.spark;
 
 /** Runs the shared fixture checks with this module's Spark implementation. */
-public class Lance12BlobCompatibilityTest extends BaseLance12BlobCompatibilityTest {}
+public class BlobV1In22FilesTest extends BaseBlobV1In22FilesTest {}

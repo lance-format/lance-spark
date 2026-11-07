@@ -14,4 +14,4 @@
 package org.lance.spark;
 
 /** Shared with Spark 4.x by the module's test-source configuration. */
-public class Lance12BlobRowLevelTest extends BaseLance12BlobRowLevelTest {}
+public class BlobV1In22FilesRowLevelTest extends BaseBlobV1In22FilesRowLevelTest {}
