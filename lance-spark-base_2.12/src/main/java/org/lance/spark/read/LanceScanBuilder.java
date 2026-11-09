@@ -140,6 +140,12 @@ public class LanceScanBuilder
       ShardingSpec shardingSpec) {
     this.fullSchema = BlobUtils.applyBlobV2DescriptorSchema(schema);
     this.residualFilterColumns = new HashSet<>(BlobUtils.blobV2ColumnNames(this.fullSchema));
+    // Blob v1 virtual columns are computed by the connector and do not exist in the Lance
+    // dataset, so predicates on them must be evaluated by Spark.
+    for (String blobColumn : BlobUtils.blobV1ColumnNames(this.fullSchema)) {
+      this.residualFilterColumns.add(blobColumn + LanceConstant.BLOB_POSITION_SUFFIX);
+      this.residualFilterColumns.add(blobColumn + LanceConstant.BLOB_SIZE_SUFFIX);
+    }
     if (readOptions.getFullTextQuery() != null) {
       Utils.validateFullTextSearchSchema(this.fullSchema);
     }

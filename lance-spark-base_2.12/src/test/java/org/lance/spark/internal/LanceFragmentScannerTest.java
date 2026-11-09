@@ -197,6 +197,24 @@ public class LanceFragmentScannerTest {
   }
 
   @Test
+  public void testGetColumnNamesAddsBaseColumnForBlobV1VirtualColumns() throws Exception {
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.LongType, true),
+              DataTypes.createStructField(
+                  "data" + LanceConstant.BLOB_POSITION_SUFFIX, DataTypes.LongType, true),
+              DataTypes.createStructField(
+                  "data" + LanceConstant.BLOB_SIZE_SUFFIX, DataTypes.LongType, true),
+              DataTypes.createStructField(
+                  "other" + LanceConstant.BLOB_SIZE_SUFFIX, DataTypes.LongType, true)
+            });
+
+    // The base blob columns are scanned once each, even when only virtual columns are projected
+    assertEquals(Arrays.asList("id", "data", "other"), callGetColumnNames(schema));
+  }
+
+  @Test
   public void testGetColumnNamesOrderingWithMixedColumns() throws Exception {
     // Test that regular columns come first, then metadata columns in the correct order
     StructType schema =
