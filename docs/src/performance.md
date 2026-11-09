@@ -157,6 +157,36 @@ For large scans, increasing this to match your CPU core count enables more concu
 export LANCE_IO_THREADS=128
 ```
 
+### Dynamic Partition Pruning
+
+A scan skips fragments by join keys that Spark collects at runtime (dynamic partition pruning). When
+a Lance table is joined with a filtered table that Spark broadcasts, such as a date dimension, Spark
+passes the matching keys to the Lance scan, which skips the fragments whose zonemap zones cannot
+contain them. Fragments the index does not describe yet are still read. This needs a
+[zonemap index](operations/ddl/create-index.md) on the join key, and helps most when the key is
+clustered across fragments, for example data written in key order.
+
+```sql
+ALTER TABLE lance.db.sales CREATE INDEX sales_date_zm USING zonemap (date_key);
+
+SELECT d.month, sum(s.amount)
+FROM lance.db.sales s JOIN lance.db.dates d ON s.date_key = d.date_key
+WHERE d.month = 10
+GROUP BY d.month;
+```
+
+A filter on a Lance table is pushed into its scan, which leaves Spark no filter to prune the other
+side by. With the Lance session extensions
+(`spark.sql.extensions=org.lance.spark.extensions.LanceSparkSessionExtensions`), a filtered Lance
+table joined with a Lance table that has a zonemap index on the join key keeps its filter for Spark
+to find, and Spark evaluates it again on the rows the scan returns.
+
+Spark adds the runtime filter only when it can reuse the broadcast of the filtered side
+(`spark.sql.optimizer.dynamicPartitionPruning.reuseBroadcastOnly`, default `true`). A key filtered
+by an `IN (SELECT ...)` subquery over a Lance table is not pruned: write it as a join instead. To
+turn this off for a table, set the [`runtime_filtering`](config.md#runtime-filtering) read option to
+`false`.
+
 ### Custom Read Metrics
 
 Lance Spark reports per-task custom metrics on the Spark UI Scan node, viewable in the SQL tab's

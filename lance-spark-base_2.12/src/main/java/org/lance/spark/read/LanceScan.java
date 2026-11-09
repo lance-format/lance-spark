@@ -13,7 +13,11 @@
  */
 package org.lance.spark.read;
 
+import org.lance.Dataset;
+import org.lance.index.Index;
+import org.lance.index.IndexType;
 import org.lance.ipc.ColumnOrdering;
+import org.lance.schema.LanceField;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.internal.ArrowBatchAdapter;
@@ -21,11 +25,14 @@ import org.lance.spark.read.metric.LanceCustomMetrics;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
 import org.lance.spark.utils.FullTextQueryUtils;
 import org.lance.spark.utils.Optional;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.util.Preconditions;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.expressions.Expression;
+import org.apache.spark.sql.connector.expressions.Expressions;
+import org.apache.spark.sql.connector.expressions.NamedReference;
 import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
 import org.apache.spark.sql.connector.expressions.aggregate.CountStar;
@@ -39,6 +46,7 @@ import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.read.Statistics;
 import org.apache.spark.sql.connector.read.SupportsReportPartitioning;
 import org.apache.spark.sql.connector.read.SupportsReportStatistics;
+import org.apache.spark.sql.connector.read.SupportsRuntimeV2Filtering;
 import org.apache.spark.sql.connector.read.partitioning.KeyGroupedPartitioning;
 import org.apache.spark.sql.connector.read.partitioning.Partitioning;
 import org.apache.spark.sql.connector.read.partitioning.UnknownPartitioning;
@@ -50,8 +58,10 @@ import org.slf4j.LoggerFactory;
 import scala.collection.immutable.Map;
 
 import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -65,6 +75,7 @@ public class LanceScan
         SupportsMetadata,
         SupportsReportStatistics,
         SupportsReportPartitioning,
+        SupportsRuntimeV2Filtering,
         Serializable {
   private static final long serialVersionUID = 947284762748623947L;
   private static final Logger LOG = LoggerFactory.getLogger(LanceScan.class);
@@ -104,6 +115,15 @@ public class LanceScan
 
   /** Number of partitions after pruning, set during {@link #planInputPartitions()}. */
   private transient int numPartitions = -1;
+
+  /** The columns {@link #filter} can prune fragments on; computed when Spark first asks. */
+  private transient NamedReference[] runtimeFilterAttributes;
+
+  /**
+   * Fragments that runtime filters ({@link #filter}) keep, or null if none pruned any. Not part of
+   * {@link #equals}: Spark compares a scan's runtime filters itself.
+   */
+  private Set<Integer> runtimeSurvivingFragmentIds;
 
   /** Active Spark partition expression detected from sharding zonemap stats. */
   private final Expression activeShardingExpression;
@@ -295,6 +315,7 @@ public class LanceScan
             arrowBatchPlan);
     // Planned partitions are the same, so the copy reports the same partitioning.
     copy.numPartitions = numPartitions;
+    copy.runtimeSurvivingFragmentIds = runtimeSurvivingFragmentIds;
     return copy;
   }
 
@@ -310,6 +331,7 @@ public class LanceScan
     // schema / zonemap stats. This avoids a second Dataset.open() at plan time.
     List<LanceSplit> prunedSplits =
         pruneForPlanning(precomputedSplits, pushedPredicates, cachedSurvivingFragmentIds);
+    prunedSplits = pruneByZonemapStats(prunedSplits, runtimeSurvivingFragmentIds);
 
     // Limit-based split pruning: when a LIMIT is pushed down without filters or TopN sort,
     // use per-fragment row counts to plan only enough splits to satisfy the limit.
@@ -355,6 +377,104 @@ public class LanceScan
 
     this.numPartitions = result.length;
     return result;
+  }
+
+  /**
+   * The read schema's top-level columns with a zonemap index: {@link #filter} prunes fragments
+   * whose zones cannot match a runtime filter on them. Spark asks while planning a join that this
+   * scan could be filtered by, so scans that are not joined do not load the index metadata.
+   */
+  @Override
+  public NamedReference[] filterAttributes() {
+    if (runtimeFilterAttributes == null) {
+      runtimeFilterAttributes = zonemapColumns();
+    }
+    return runtimeFilterAttributes;
+  }
+
+  /** Opens the dataset this scan reads, at its pinned version, as {@code LanceDataset} does. */
+  private Dataset openDataset() {
+    return Utils.openDatasetBuilder(readOptions)
+        .initialStorageOptions(initialStorageOptions)
+        .runtimeNamespace(namespaceImpl, namespaceProperties, readOptions.getTableId())
+        .build();
+  }
+
+  private NamedReference[] zonemapColumns() {
+    if (!readOptions.isRuntimeFilteringEnabled() || pushedAggregation.isPresent()) {
+      return new NamedReference[0];
+    }
+    try (Dataset dataset = openDataset()) {
+      Set<Integer> fieldIds = new HashSet<>();
+      for (Index index : dataset.getIndexes()) {
+        if (index.indexType() == IndexType.ZONEMAP) {
+          fieldIds.addAll(index.fields());
+        }
+      }
+      if (fieldIds.isEmpty()) {
+        return new NamedReference[0];
+      }
+      Set<String> readColumns = new HashSet<>(Arrays.asList(schema.fieldNames()));
+      List<NamedReference> columns = new ArrayList<>();
+      for (LanceField field : dataset.getLanceSchema().fields()) {
+        if (fieldIds.contains(field.getId()) && readColumns.contains(field.getName())) {
+          columns.add(Expressions.column(field.getName()));
+        }
+      }
+      return columns.toArray(new NamedReference[0]);
+    } catch (RuntimeException e) {
+      LOG.debug("No runtime filtering for {}: {}", readOptions.getDatasetUri(), e.toString());
+      return new NamedReference[0];
+    }
+  }
+
+  /**
+   * Prunes the fragments whose zonemap zones cannot match {@code predicates}, typically an {@code
+   * IN} of the join keys a dynamic partition pruning filter collects. Fragments the stats do not
+   * describe are kept, and so is every fragment when no predicate prunes.
+   */
+  @Override
+  public void filter(Predicate[] predicates) {
+    if (predicates == null || predicates.length == 0) {
+      return;
+    }
+    Set<String> columns = new HashSet<>();
+    for (Predicate predicate : predicates) {
+      for (NamedReference reference : predicate.references()) {
+        if (reference.fieldNames().length == 1) {
+          columns.add(reference.fieldNames()[0]);
+        }
+      }
+    }
+    if (columns.isEmpty()) {
+      return;
+    }
+    long start = System.nanoTime();
+    Set<Integer> survivors;
+    // readOptions is pinned to the scan's version, so the stats describe the fragments it reads.
+    try (Dataset dataset = openDataset()) {
+      LanceScanBuilder.ZonemapLoadResult load = LanceScanBuilder.loadZonemapStats(dataset, columns);
+      Set<Integer> pruned =
+          ZonemapFragmentPruner.pruneFragments(predicates, load.stats, load.uncoveredByColumn)
+              .orElse(null);
+      survivors = pruned == null ? null : new HashSet<>(pruned);
+    } catch (RuntimeException e) {
+      LOG.warn("Runtime filtering of {} failed: {}", readOptions.getDatasetUri(), e.toString());
+      return;
+    }
+    if (survivors == null) {
+      return;
+    }
+    if (runtimeSurvivingFragmentIds != null) {
+      survivors.retainAll(runtimeSurvivingFragmentIds);
+    }
+    runtimeSurvivingFragmentIds = survivors;
+    LOG.info(
+        "Runtime filters on {} keep {} fragments of {} in {} ms",
+        columns,
+        survivors.size(),
+        precomputedFragmentRowCounts.size(),
+        (System.nanoTime() - start) / 1_000_000);
   }
 
   /**

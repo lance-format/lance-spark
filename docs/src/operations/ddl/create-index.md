@@ -134,7 +134,8 @@ need to accelerate filters on multiple columns.
 
 ### Lightweight Fragment Pruning
 
-Create a zonemap index when you want lightweight min/max-based fragment pruning:
+Create a zonemap index when you want lightweight min/max-based fragment pruning, by filters and by
+the join keys of [dynamic partition pruning](../../performance.md#dynamic-partition-pruning):
 
 === "SQL"
     ```sql

@@ -101,6 +101,12 @@ public class LanceSparkReadOptions implements Serializable {
   /** Enable Arrow batches when supported, otherwise use the regular reader. Default: false. */
   public static final String CONFIG_ARROW_BATCH_READS = "arrow_batch_reads";
 
+  /**
+   * Let Spark's dynamic partition pruning skip fragments by zonemap with the keys of a join.
+   * Default: true.
+   */
+  public static final String CONFIG_RUNTIME_FILTERING = "runtime_filtering";
+
   public static final String LANCE_FILE_SUFFIX = ".lance";
 
   private static final boolean DEFAULT_PUSH_DOWN_FILTERS = true;
@@ -110,6 +116,7 @@ public class LanceSparkReadOptions implements Serializable {
   private static final boolean DEFAULT_TOP_N_PUSH_DOWN = true;
   private static final boolean DEFAULT_EXECUTOR_CREDENTIAL_REFRESH = true;
   private static final boolean DEFAULT_ARROW_BATCH_READS = false;
+  private static final boolean DEFAULT_RUNTIME_FILTERING = true;
 
   private final String datasetUri;
   private final String datasetName;
@@ -146,6 +153,8 @@ public class LanceSparkReadOptions implements Serializable {
 
   private final boolean arrowBatchReads;
 
+  private final boolean runtimeFiltering;
+
   private LanceSparkReadOptions(Builder builder) {
     this.datasetUri = builder.datasetUri;
     this.datasetName = extractDatasetName(datasetUri);
@@ -166,6 +175,7 @@ public class LanceSparkReadOptions implements Serializable {
     this.metadataCacheBackend = builder.metadataCacheBackend;
     this.executorCredentialRefresh = builder.executorCredentialRefresh;
     this.arrowBatchReads = builder.arrowBatchReads;
+    this.runtimeFiltering = builder.runtimeFiltering;
   }
 
   /** Creates a new builder for LanceSparkReadOptions. */
@@ -337,6 +347,11 @@ public class LanceSparkReadOptions implements Serializable {
     return toBuilder().ref(newRef).build();
   }
 
+  /** Returns whether runtime filtering is enabled. See {@link #CONFIG_RUNTIME_FILTERING}. */
+  public boolean isRuntimeFilteringEnabled() {
+    return runtimeFiltering;
+  }
+
   /** Creates a copy of these options with {@link #CONFIG_ARROW_BATCH_READS} set as given. */
   public LanceSparkReadOptions withArrowBatchReads(boolean arrowBatchReads) {
     return toBuilder().arrowBatchReads(arrowBatchReads).build();
@@ -362,7 +377,8 @@ public class LanceSparkReadOptions implements Serializable {
         .indexCacheBackend(this.indexCacheBackend)
         .metadataCacheBackend(this.metadataCacheBackend)
         .executorCredentialRefresh(this.executorCredentialRefresh)
-        .arrowBatchReads(this.arrowBatchReads);
+        .arrowBatchReads(this.arrowBatchReads)
+        .runtimeFiltering(this.runtimeFiltering);
   }
 
   /**
@@ -414,6 +430,7 @@ public class LanceSparkReadOptions implements Serializable {
         && topNPushDown == that.topNPushDown
         && executorCredentialRefresh == that.executorCredentialRefresh
         && arrowBatchReads == that.arrowBatchReads
+        && runtimeFiltering == that.runtimeFiltering
         && FullTextQueryUtils.equals(fullTextQuery, that.fullTextQuery)
         && Objects.equals(datasetUri, that.datasetUri)
         && Objects.equals(blockSize, that.blockSize)
@@ -446,7 +463,8 @@ public class LanceSparkReadOptions implements Serializable {
         indexCacheBackend,
         metadataCacheBackend,
         executorCredentialRefresh,
-        arrowBatchReads);
+        arrowBatchReads,
+        runtimeFiltering);
   }
 
   /** Builder for creating LanceSparkReadOptions instances. */
@@ -469,6 +487,7 @@ public class LanceSparkReadOptions implements Serializable {
     private String metadataCacheBackend;
     private boolean executorCredentialRefresh = DEFAULT_EXECUTOR_CREDENTIAL_REFRESH;
     private boolean arrowBatchReads = DEFAULT_ARROW_BATCH_READS;
+    private boolean runtimeFiltering = DEFAULT_RUNTIME_FILTERING;
 
     private Builder() {}
 
@@ -562,6 +581,11 @@ public class LanceSparkReadOptions implements Serializable {
       return this;
     }
 
+    public Builder runtimeFiltering(boolean runtimeFiltering) {
+      this.runtimeFiltering = runtimeFiltering;
+      return this;
+    }
+
     /**
      * Parses options from a map, extracting read-specific settings.
      *
@@ -650,6 +674,9 @@ public class LanceSparkReadOptions implements Serializable {
       }
       if (opts.containsKey(CONFIG_ARROW_BATCH_READS)) {
         this.arrowBatchReads = Boolean.parseBoolean(opts.get(CONFIG_ARROW_BATCH_READS));
+      }
+      if (opts.containsKey(CONFIG_RUNTIME_FILTERING)) {
+        this.runtimeFiltering = Boolean.parseBoolean(opts.get(CONFIG_RUNTIME_FILTERING));
       }
     }
 

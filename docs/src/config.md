@@ -58,6 +58,7 @@ The following features require the Lance Spark SQL extension to be enabled:
 - [OPTIMIZE](operations/ddl/optimize.md) - Compact table fragments for improved query performance
 - [OPTIMIZE INDEX](operations/ddl/optimize-index.md) - Incrementally maintain a named index
 - [VACUUM](operations/ddl/vacuum.md) - Remove old versions and reclaim storage space
+- [Dynamic partition pruning](performance.md#dynamic-partition-pruning) by a filtered Lance table - Skip fragments of a Lance table joined with a filtered Lance table
 
 ## Basic Setup
 
@@ -655,6 +656,21 @@ version columns are exposed as signed 64-bit integers.
 
 Native vectors may be reused on `next()`, while converted vectors are released. Consumers must
 copy or transfer data they need to keep before advancing.
+
+## Runtime Filtering
+
+Lance scans accept the runtime filters of Spark's dynamic partition pruning and skip the fragments
+whose zonemap zones cannot contain the join keys (see
+[Dynamic Partition Pruning](performance.md#dynamic-partition-pruning)). Set `runtime_filtering` to
+`false` to read every fragment instead, for example for a join key whose values are spread over all
+fragments, where pruning finds nothing to skip. This is enabled by default.
+
+```python
+df = spark.read \
+    .format("lance") \
+    .option("runtime_filtering", "false") \
+    .load("/path/to/dataset.lance")
+```
 
 ## Memory Configuration
 

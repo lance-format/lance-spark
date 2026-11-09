@@ -99,6 +99,13 @@ public class LanceScanBuilder
   // Set when pushPredicates leaves filters for Spark. pushLimit and friends read this after
   // pushPredicates because Spark pushes filters before those operators.
   private boolean hasResidualPredicates = false;
+
+  /**
+   * Whether {@link #pushPredicates} also returns the predicates it pushes, so Spark keeps them in a
+   * Filter above the scan, for dynamic partition pruning to find on a filtered join side.
+   */
+  private boolean keepPushedFilters = false;
+
   private Optional<Integer> limit = Optional.empty();
   private Optional<Integer> offset = Optional.empty();
   private Optional<List<ColumnOrdering>> topNSortOrders = Optional.empty();
@@ -646,7 +653,13 @@ public class LanceScanBuilder
     }
     this.pushedPredicates = pushed;
     this.hasResidualPredicates = residual.length > 0;
-    return residual;
+    return keepPushedFilters ? predicates : residual;
+  }
+
+  /** See {@link #keepPushedFilters}. */
+  public LanceScanBuilder keepPushedFilters(boolean keep) {
+    this.keepPushedFilters = keep;
+    return this;
   }
 
   @Override
@@ -850,7 +863,8 @@ public class LanceScanBuilder
   }
 
   /** Loads zone stats for every requested column, without consulting index coverage. */
-  private Map<String, List<ZoneStats>> loadStatsForColumns(Dataset dataset, Set<String> columns) {
+  private static Map<String, List<ZoneStats>> loadStatsForColumns(
+      Dataset dataset, Set<String> columns) {
     Map<String, List<ZoneStats>> result = new HashMap<>();
     for (String col : columns) {
       try {
@@ -866,7 +880,7 @@ public class LanceScanBuilder
   }
 
   /** Zone stats plus, per column, the dataset fragments those stats do not describe. */
-  private static final class ZonemapLoadResult {
+  static final class ZonemapLoadResult {
     final Map<String, List<ZoneStats>> stats;
     final Map<String, Set<Integer>> uncoveredByColumn;
 
@@ -884,7 +898,7 @@ public class LanceScanBuilder
    * {@code getZonemapStats} returns the zones of only one, so index metadata would claim coverage
    * for fragments those zones never saw.
    */
-  private ZonemapLoadResult loadZonemapStats(Dataset dataset, Set<String> columns) {
+  static ZonemapLoadResult loadZonemapStats(Dataset dataset, Set<String> columns) {
     if (columns.isEmpty()) {
       return new ZonemapLoadResult(Collections.emptyMap(), Collections.emptyMap());
     }

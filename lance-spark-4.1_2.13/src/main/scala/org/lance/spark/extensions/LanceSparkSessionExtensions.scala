@@ -16,7 +16,7 @@ package org.lance.spark.extensions
 import org.apache.spark.sql.SparkSessionExtensions
 import org.apache.spark.sql.catalyst.FunctionIdentifier
 import org.apache.spark.sql.catalyst.expressions.ExpressionInfo
-import org.apache.spark.sql.catalyst.optimizer.{LanceBlobSourceContextRule, LanceBlobV2CopyThroughRule, LanceBlobV2RowLevelCopyRule, LanceBlobV2RowLevelResolutionRule, LanceFragmentAwareJoinRule, LanceFtsPredicateRule}
+import org.apache.spark.sql.catalyst.optimizer.{LanceBlobSourceContextRule, LanceBlobV2CopyThroughRule, LanceBlobV2RowLevelCopyRule, LanceBlobV2RowLevelResolutionRule, LanceDynamicPruningRule, LanceFragmentAwareJoinRule, LanceFtsPredicateRule}
 import org.apache.spark.sql.catalyst.parser.extensions.LanceSparkSqlExtensionsParser
 import org.apache.spark.sql.execution.datasources.v2.LanceDataSourceV2Strategy
 import org.lance.spark.search.LanceSearchTableFunctions
@@ -36,6 +36,9 @@ class LanceSparkSessionExtensions extends (SparkSessionExtensions => Unit) {
 
     // optimizer rules for fragment-aware joins
     extensions.injectOptimizerRule(_ => LanceFragmentAwareJoinRule())
+
+    // Before scan push-down: keep a filtered Lance join side's filters for dynamic partition pruning.
+    extensions.injectPreCBORule(_ => LanceDynamicPruningRule())
 
     // optimizer rule for FTS predicate pushdown
     extensions.injectOptimizerRule(_ => new LanceFtsPredicateRule())
