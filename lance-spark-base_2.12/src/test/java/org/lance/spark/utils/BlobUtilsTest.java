@@ -13,6 +13,9 @@
  */
 package org.lance.spark.utils;
 
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
@@ -43,6 +46,24 @@ public class BlobUtilsTest {
   @Test
   public void testV1Field() {
     assertTrue(BlobUtils.isBlobSparkField(blobV1Field()));
+  }
+
+  /** Like lance-core, a v1 blob marker of any value or the blob v2 extension marks a blob. */
+  @Test
+  public void testIsLanceBlobArrowField() {
+    assertTrue(
+        BlobUtils.isLanceBlobArrowField(
+            arrowField(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)));
+    assertTrue(
+        BlobUtils.isLanceBlobArrowField(arrowField(BlobUtils.LANCE_ENCODING_BLOB_KEY, "false")));
+    assertTrue(
+        BlobUtils.isLanceBlobArrowField(
+            arrowField(BlobUtils.ARROW_EXTENSION_NAME_KEY, BlobUtils.ARROW_EXTENSION_BLOB_V2)));
+    assertFalse(
+        BlobUtils.isLanceBlobArrowField(
+            arrowField(BlobUtils.ARROW_EXTENSION_NAME_KEY, "arrow.uuid")));
+    assertFalse(BlobUtils.isLanceBlobArrowField(arrowField(null, null)));
+    assertFalse(BlobUtils.isLanceBlobArrowField(null));
   }
 
   @Test
@@ -210,6 +231,17 @@ public class BlobUtilsTest {
             .putString(BlobUtils.ARROW_EXTENSION_NAME_KEY, BlobUtils.ARROW_EXTENSION_BLOB_V2)
             .build();
     return new StructField("payload", DataTypes.BinaryType, true, md);
+  }
+
+  private static Field arrowField(String metadataKey, String metadataValue) {
+    return new Field(
+        "payload",
+        new FieldType(
+            true,
+            ArrowType.LargeBinary.INSTANCE,
+            null,
+            metadataKey == null ? null : Collections.singletonMap(metadataKey, metadataValue)),
+        null);
   }
 
   private static StructField blobV1Field() {
