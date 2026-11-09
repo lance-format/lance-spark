@@ -417,7 +417,9 @@ public class LanceScan
       Set<String> readColumns = new HashSet<>(Arrays.asList(schema.fieldNames()));
       List<NamedReference> columns = new ArrayList<>();
       for (LanceField field : dataset.getLanceSchema().fields()) {
-        if (fieldIds.contains(field.getId()) && readColumns.contains(field.getName())) {
+        if (fieldIds.contains(field.getId())
+            && readColumns.contains(field.getName())
+            && ZonemapFragmentPruner.prunesRuntimeFilters(field.getType())) {
           columns.add(Expressions.column(field.getName()));
         }
       }

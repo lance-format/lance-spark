@@ -15,6 +15,10 @@ package org.lance.spark.read;
 
 import org.lance.index.scalar.ZoneStats;
 
+import org.apache.arrow.vector.types.DateUnit;
+import org.apache.arrow.vector.types.FloatingPointPrecision;
+import org.apache.arrow.vector.types.TimeUnit;
+import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.FieldReference;
 import org.apache.spark.sql.connector.expressions.filter.Predicate;
@@ -651,5 +655,34 @@ public class ZonemapFragmentPrunerTest {
         Set.of(2),
         result.get(),
         "fragment 2 is outside column x's index, so x's predicate cannot rule it out");
+  }
+
+  @Test
+  public void comparesStringsByCodePoint() {
+    // UTF-16 puts the surrogates of U+1F600 below U+FFFD; Lance orders bounds by code point.
+    assertTrue(ZonemapFragmentPruner.compareCodePoints("\uFFFD", "\uD83D\uDE00") < 0);
+    assertTrue("\uFFFD".compareTo("\uD83D\uDE00") > 0);
+    assertEquals(0, ZonemapFragmentPruner.compareCodePoints("ab", "ab"));
+    assertTrue(ZonemapFragmentPruner.compareCodePoints("ab", "abc") < 0);
+  }
+
+  @Test
+  public void prunesRuntimeFiltersOnlyByTypesComparedLikeSpark() {
+    assertTrue(ZonemapFragmentPruner.prunesRuntimeFilters(new ArrowType.Int(32, true)));
+    assertTrue(ZonemapFragmentPruner.prunesRuntimeFilters(ArrowType.Utf8.INSTANCE));
+    assertTrue(
+        ZonemapFragmentPruner.prunesRuntimeFilters(
+            new ArrowType.Timestamp(TimeUnit.MICROSECOND, "UTC")));
+    assertTrue(ZonemapFragmentPruner.prunesRuntimeFilters(new ArrowType.Date(DateUnit.DAY)));
+    assertFalse(ZonemapFragmentPruner.prunesRuntimeFilters(new ArrowType.Int(64, false)));
+    assertFalse(
+        ZonemapFragmentPruner.prunesRuntimeFilters(
+            new ArrowType.Timestamp(TimeUnit.MILLISECOND, "UTC")));
+    assertFalse(
+        ZonemapFragmentPruner.prunesRuntimeFilters(new ArrowType.Date(DateUnit.MILLISECOND)));
+    assertFalse(ZonemapFragmentPruner.prunesRuntimeFilters(new ArrowType.Decimal(10, 2, 128)));
+    assertFalse(
+        ZonemapFragmentPruner.prunesRuntimeFilters(
+            new ArrowType.FloatingPoint(FloatingPointPrecision.DOUBLE)));
   }
 }

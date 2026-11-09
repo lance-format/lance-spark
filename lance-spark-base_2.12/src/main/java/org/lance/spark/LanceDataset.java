@@ -18,6 +18,7 @@ import org.lance.index.IndexCriteria;
 import org.lance.index.IndexDescription;
 import org.lance.memwal.ShardingSpec;
 import org.lance.spark.read.LanceScanBuilder;
+import org.lance.spark.read.ZonemapFragmentPruner;
 import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Utils;
@@ -30,6 +31,7 @@ import org.lance.spark.write.UpdateColumnsBackfillWrite;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
+import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.spark.sql.connector.catalog.MetadataColumn;
 import org.apache.spark.sql.connector.catalog.StagedTable;
 import org.apache.spark.sql.connector.catalog.SupportsMetadataColumns;
@@ -360,8 +362,9 @@ public class LanceDataset
   private final Map<String, Boolean> zonemapIndexed = new ConcurrentHashMap<>();
 
   /**
-   * Whether {@code column} has a zonemap index, which lets a scan of this table prune fragments by
-   * a runtime filter on it. Looked up once per column of this table object.
+   * Whether {@code column} has a zonemap index and a type whose zone bounds runtime filters can
+   * prune by ({@link ZonemapFragmentPruner#prunesRuntimeFilters}), so a scan of this table can
+   * prune fragments by a runtime filter on it. Looked up once per column of this table object.
    */
   public boolean hasZonemapIndex(String column) {
     return zonemapIndexed.computeIfAbsent(column, this::loadHasZonemapIndex);
@@ -373,6 +376,10 @@ public class LanceDataset
             .initialStorageOptions(initialStorageOptions)
             .runtimeNamespace(namespaceImpl, namespaceProperties, readOptions.getTableId())
             .build()) {
+      Field field = dataset.getSchema().findField(column);
+      if (field == null || !ZonemapFragmentPruner.prunesRuntimeFilters(field.getType())) {
+        return false;
+      }
       for (IndexDescription index :
           dataset.describeIndices(new IndexCriteria.Builder().forColumn(column).build())) {
         String type = index.getIndexType();

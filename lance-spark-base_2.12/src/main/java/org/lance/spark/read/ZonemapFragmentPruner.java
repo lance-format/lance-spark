@@ -15,6 +15,9 @@ package org.lance.spark.read;
 
 import org.lance.index.scalar.ZoneStats;
 
+import org.apache.arrow.vector.types.DateUnit;
+import org.apache.arrow.vector.types.TimeUnit;
+import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.Literal;
 import org.apache.spark.sql.connector.expressions.NamedReference;
@@ -206,6 +209,54 @@ public final class ZonemapFragmentPruner {
   }
 
   @SuppressWarnings("unchecked")
+  /**
+   * Whether zonemap bounds of a column of Arrow {@code type} compare with the values Spark joins on
+   * the way this pruner compares them, so that runtime filters, which carry Spark's join keys, can
+   * prune by them: signed integers, booleans, strings, days and microsecond timestamps. Other
+   * temporal units, decimals, unsigned integers and floating point values are not pruned.
+   */
+  public static boolean prunesRuntimeFilters(ArrowType type) {
+    if (type instanceof ArrowType.Int) {
+      return ((ArrowType.Int) type).getIsSigned();
+    }
+    if (type instanceof ArrowType.Date) {
+      return ((ArrowType.Date) type).getUnit() == DateUnit.DAY;
+    }
+    if (type instanceof ArrowType.Timestamp) {
+      return ((ArrowType.Timestamp) type).getUnit() == TimeUnit.MICROSECOND;
+    }
+    return type instanceof ArrowType.Bool
+        || type instanceof ArrowType.Utf8
+        || type instanceof ArrowType.LargeUtf8;
+  }
+
+  /**
+   * Compares {@code a} with {@code b}, strings by code point as Lance orders zone bounds, which
+   * Java's UTF-16 order does not for supplementary characters.
+   */
+  @SuppressWarnings("unchecked")
+  private static int compare(Object a, Object b) {
+    if (a instanceof String && b instanceof String) {
+      return compareCodePoints((String) a, (String) b);
+    }
+    return ((Comparable<Object>) a).compareTo(b);
+  }
+
+  static int compareCodePoints(String a, String b) {
+    int i = 0;
+    int j = 0;
+    while (i < a.length() && j < b.length()) {
+      int x = a.codePointAt(i);
+      int y = b.codePointAt(j);
+      if (x != y) {
+        return Integer.compare(x, y);
+      }
+      i += Character.charCount(x);
+      j += Character.charCount(y);
+    }
+    return Integer.compare(a.length() - i, b.length() - j);
+  }
+
   private static boolean zoneMatchesComparison(
       ZoneStats zone, Comparable<Object> target, ComparisonType type) {
 
@@ -221,15 +272,15 @@ public final class ZonemapFragmentPruner {
     try {
       switch (type) {
         case EQUALS:
-          return target.compareTo(min) >= 0 && target.compareTo(max) <= 0;
+          return compare(target, min) >= 0 && compare(target, max) <= 0;
         case LESS_THAN:
-          return min.compareTo(target) < 0;
+          return compare(min, target) < 0;
         case LESS_THAN_OR_EQUAL:
-          return min.compareTo(target) <= 0;
+          return compare(min, target) <= 0;
         case GREATER_THAN:
-          return max.compareTo(target) > 0;
+          return compare(max, target) > 0;
         case GREATER_THAN_OR_EQUAL:
-          return max.compareTo(target) >= 0;
+          return compare(max, target) >= 0;
         default:
           return true;
       }

@@ -13,8 +13,34 @@
  */
 package org.lance.spark.read;
 
+import org.lance.index.IndexParams;
+import org.lance.index.IndexType;
+import org.lance.index.scalar.ScalarIndexParams;
+import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.utils.Utils;
 
+import org.apache.arrow.c.ArrowArrayStream;
+import org.apache.arrow.c.Data;
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.vector.DateMilliVector;
+import org.apache.arrow.vector.FieldVector;
+import org.apache.arrow.vector.Float8Vector;
+import org.apache.arrow.vector.TimeStampMilliTZVector;
+import org.apache.arrow.vector.TimeStampNanoTZVector;
+import org.apache.arrow.vector.TimeStampSecTZVector;
+import org.apache.arrow.vector.UInt8Vector;
+import org.apache.arrow.vector.VarCharVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.ipc.ArrowStreamReader;
+import org.apache.arrow.vector.ipc.ArrowStreamWriter;
+import org.apache.arrow.vector.types.DateUnit;
+import org.apache.arrow.vector.types.FloatingPointPrecision;
+import org.apache.arrow.vector.types.TimeUnit;
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
@@ -32,12 +58,17 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -462,5 +493,171 @@ public abstract class BaseRuntimeFilteringTest {
         assertFalse(hasFilterAbove(df, lanceDim));
       }
     }
+  }
+
+  /**
+   * Writes the values {@code fill} sets in a {@code k} column of {@code field}'s type as one
+   * fragment through lance-core, with a zonemap index on {@code k}, as a temp view {@code view}.
+   */
+  private void createArrowFact(String view, Field field, int rows, Consumer<FieldVector> fill)
+      throws Exception {
+    String uri = tempDir.resolve(view + "_" + UUID.randomUUID() + ".lance").toString();
+    BufferAllocator allocator = LanceRuntime.allocator();
+    try (VectorSchemaRoot root =
+        VectorSchemaRoot.create(new Schema(Collections.singletonList(field)), allocator)) {
+      root.allocateNew();
+      fill.accept(root.getVector(0));
+      root.setRowCount(rows);
+      ByteArrayOutputStream ipc = new ByteArrayOutputStream();
+      try (ArrowStreamWriter writer = new ArrowStreamWriter(root, null, ipc)) {
+        writer.start();
+        writer.writeBatch();
+        writer.end();
+      }
+      try (ArrowStreamReader reader =
+              new ArrowStreamReader(new ByteArrayInputStream(ipc.toByteArray()), allocator);
+          ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator)) {
+        Data.exportArrayStream(allocator, reader, stream);
+        org.lance.Dataset.write().stream(stream).uri(uri).execute().close();
+      }
+    }
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.builder().datasetUri(uri).build()).build()) {
+      dataset.createIndex(
+          Collections.singletonList("k"),
+          IndexType.ZONEMAP,
+          java.util.Optional.of("k_zm"),
+          IndexParams.builder()
+              .setScalarIndexParams(ScalarIndexParams.create("zonemap", "{}"))
+              .build(),
+          true);
+    }
+    spark.read().format("lance").load(uri).createOrReplaceTempView(view);
+  }
+
+  /**
+   * Asserts that a join of {@code fact}'s {@code k} with the one dimension key {@code key} returns
+   * {@code expected} rows, also when runtime filters prune {@code fact} by zonemap.
+   */
+  private void assertJoinKeepsRows(String fact, String key, int expected) {
+    spark.conf().set("spark.sql.adaptive.enabled", "false");
+    String query =
+        String.format(
+            "SELECT /*+ BROADCAST(d) */ f.k FROM %s f JOIN (SELECT %s AS k,"
+                + " CASE WHEN id = 0 THEN 'x' ELSE 'y' END AS attr FROM range(100)) d"
+                + " ON f.k = d.k WHERE d.attr = 'x'",
+            fact, key);
+    assertEquals(expected, runWithAndWithoutPruning(query).count(), query);
+  }
+
+  private static Field kField(ArrowType type) {
+    return new Field("k", FieldType.nullable(type), null);
+  }
+
+  /**
+   * Zonemap bounds of temporal columns stored in other units than Spark's (seconds, milliseconds
+   * and nanoseconds for timestamps, milliseconds for Date64) must not prune matching rows.
+   */
+  @Test
+  public void keepsRowsOfTemporalColumnsInOtherUnits() throws Exception {
+    createArrowFact(
+        "ts_s",
+        kField(new ArrowType.Timestamp(TimeUnit.SECOND, "UTC")),
+        2,
+        v -> {
+          ((TimeStampSecTZVector) v).setSafe(0, 1718451000L);
+          ((TimeStampSecTZVector) v).setSafe(1, 1718452000L);
+        });
+    assertJoinKeepsRows("ts_s", "timestamp_seconds(id + 1718451000)", 1);
+    createArrowFact(
+        "ts_ms",
+        kField(new ArrowType.Timestamp(TimeUnit.MILLISECOND, "UTC")),
+        2,
+        v -> {
+          ((TimeStampMilliTZVector) v).setSafe(0, 1718451000000L);
+          ((TimeStampMilliTZVector) v).setSafe(1, 1718452000000L);
+        });
+    assertJoinKeepsRows("ts_ms", "timestamp_seconds(id + 1718451000)", 1);
+    createArrowFact(
+        "ts_ns",
+        kField(new ArrowType.Timestamp(TimeUnit.NANOSECOND, "UTC")),
+        2,
+        v -> {
+          ((TimeStampNanoTZVector) v).setSafe(0, 1718451000000000000L);
+          ((TimeStampNanoTZVector) v).setSafe(1, 1718452000000000000L);
+        });
+    assertJoinKeepsRows("ts_ns", "timestamp_seconds(id + 1718451000)", 1);
+    createArrowFact(
+        "date_ms",
+        kField(new ArrowType.Date(DateUnit.MILLISECOND)),
+        2,
+        v -> {
+          ((DateMilliVector) v).setSafe(0, 19889L * 86_400_000L);
+          ((DateMilliVector) v).setSafe(1, 19890L * 86_400_000L);
+        });
+    assertJoinKeepsRows("date_ms", "date_add(DATE'2024-06-15', CAST(id AS INT))", 1);
+  }
+
+  /** Decimal zones that report no bounds must not prune matching rows. */
+  @Test
+  public void keepsRowsOfDecimalColumns() {
+    String fact = uniqueName("decimal");
+    spark.sql("CREATE TABLE " + fact + " (k DECIMAL(10,2)) USING lance");
+    spark.sql("INSERT INTO " + fact + " SELECT CAST(id + 1.23 AS DECIMAL(10,2)) FROM range(2)");
+    spark.sql("ALTER TABLE " + fact + " CREATE INDEX k_zm USING zonemap (k)");
+    assertJoinKeepsRows(fact, "CAST(id + 1.23 AS DECIMAL(10,2))", 1);
+  }
+
+  /** UInt64 bounds above Long.MAX_VALUE must not prune matching rows. */
+  @Test
+  public void keepsRowsOfUnsignedColumns() throws Exception {
+    createArrowFact(
+        "u64",
+        kField(new ArrowType.Int(64, false)),
+        2,
+        v -> {
+          ((UInt8Vector) v).setSafe(0, 1L);
+          ((UInt8Vector) v).setSafe(1, -1L);
+        });
+    assertJoinKeepsRows("u64", "id + 1", 1);
+  }
+
+  /**
+   * Strings compare in UTF-8 byte order, which differs from Java's UTF-16 order for supplementary
+   * characters: a zone of U+FFFD and U+1F600 must not prune U+FFFD.
+   */
+  @Test
+  public void keepsRowsOfSupplementaryCharacterStrings() throws Exception {
+    createArrowFact(
+        "str",
+        kField(ArrowType.Utf8.INSTANCE),
+        2,
+        v -> {
+          ((VarCharVector) v).setSafe(0, "\uFFFD".getBytes(StandardCharsets.UTF_8));
+          ((VarCharVector) v).setSafe(1, "\uD83D\uDE00".getBytes(StandardCharsets.UTF_8));
+        });
+    assertJoinKeepsRows("str", "CASE WHEN id = 0 THEN '\uFFFD' ELSE 'zz' END", 1);
+    // The same bounds prune a pushed filter.
+    assertEquals(1, spark.sql("SELECT k FROM str WHERE k = '\uFFFD'").count());
+  }
+
+  /** Spark joins -0.0 with 0.0 and NaN with NaN, which zone bounds must not prune. */
+  @Test
+  public void keepsRowsOfSignedZeroAndNaN() throws Exception {
+    createArrowFact(
+        "neg_zero",
+        kField(new ArrowType.FloatingPoint(FloatingPointPrecision.DOUBLE)),
+        1,
+        v -> ((Float8Vector) v).setSafe(0, -0.0));
+    assertJoinKeepsRows("neg_zero", "CAST(id AS DOUBLE)", 1);
+    createArrowFact(
+        "nan",
+        kField(new ArrowType.FloatingPoint(FloatingPointPrecision.DOUBLE)),
+        2,
+        v -> {
+          ((Float8Vector) v).setSafe(0, Double.NaN);
+          ((Float8Vector) v).setSafe(1, 5.0);
+        });
+    assertJoinKeepsRows("nan", "CASE WHEN id = 0 THEN CAST('NaN' AS DOUBLE) ELSE 9.0 END", 1);
   }
 }
