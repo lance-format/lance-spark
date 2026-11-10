@@ -40,10 +40,13 @@ public class CdfTestHelper {
   }
 
   public void create() {
+    // Empty CTAS commits schema and properties together, keeping the CDF fixture at version 1.
     spark.sql(
         String.format(
-            "CREATE TABLE %s.default.%s (id INT NOT NULL, name STRING, value INT) "
-                + "TBLPROPERTIES ('enable_stable_row_ids' = 'true')",
+            "CREATE TABLE %s.default.%s USING lance "
+                + "TBLPROPERTIES ('enable_stable_row_ids' = 'true') "
+                + "AS SELECT 0 AS id, CAST(NULL AS STRING) AS name, CAST(NULL AS INT) AS value "
+                + "WHERE false",
             catalogName, tableName));
   }
 

@@ -15,11 +15,16 @@ package org.lance.spark.internal;
 
 import org.lance.ipc.ScanStats;
 import org.lance.spark.LanceConstant;
+import org.lance.spark.LanceRuntime;
 import org.lance.spark.read.LanceInputPartition;
+import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Utils;
 import org.lance.spark.vectorized.BlobStructAccessor;
 import org.lance.spark.vectorized.LanceArrowColumnVector;
 
+import org.apache.arrow.c.ArrowArrayStream;
+import org.apache.arrow.c.Data;
+import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.UInt8Vector;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -35,6 +40,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.apache.spark.sql.vectorized.ColumnarMap;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -45,32 +51,91 @@ import java.util.Set;
 public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
   private final LanceFragmentScanner fragmentScanner;
   private final ArrowReader arrowReader;
+
+  private final boolean arrowBatchReadsEnabled;
+
+  /** Vectors this scanner built for the current Arrow batch; the reader owns the others. */
+  private final List<FieldVector> ownedVectors = new ArrayList<>();
+
   private ColumnarBatch currentColumnarBatch;
   private long lastBatchLoadTimeNs;
 
   public LanceFragmentColumnarBatchScanner(
       LanceFragmentScanner fragmentScanner, ArrowReader arrowReader) {
+    this(fragmentScanner, arrowReader, false);
+  }
+
+  private LanceFragmentColumnarBatchScanner(
+      LanceFragmentScanner fragmentScanner,
+      ArrowReader arrowReader,
+      boolean arrowBatchReadsEnabled) {
     this.fragmentScanner = fragmentScanner;
     this.arrowReader = arrowReader;
+    this.arrowBatchReadsEnabled = arrowBatchReadsEnabled;
   }
 
   public static LanceFragmentColumnarBatchScanner create(
       int fragmentId, LanceInputPartition inputPartition) {
     LanceFragmentScanner fragmentScanner = LanceFragmentScanner.create(fragmentId, inputPartition);
-    return new LanceFragmentColumnarBatchScanner(fragmentScanner, fragmentScanner.getArrowReader());
+    if (!inputPartition.getReadOptions().isArrowBatchReadsEnabled()) {
+      return new LanceFragmentColumnarBatchScanner(
+          fragmentScanner, fragmentScanner.getArrowReader());
+    }
+    try {
+      return new LanceFragmentColumnarBatchScanner(
+          fragmentScanner, importArrowStream(fragmentScanner), true);
+    } catch (RuntimeException | Error e) {
+      try {
+        fragmentScanner.close();
+      } catch (Throwable closeError) {
+        e.addSuppressed(closeError);
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Reads the scan for Arrow batches through its Arrow C stream, imported here rather than by
+   * lance-core. Only the C-struct address crosses from lance-core, so the vectors of the batches
+   * are built with the Arrow classes lance-spark runs with, which a consumer of the batches shares.
+   *
+   * <p>The batches are allocated from {@link LanceRuntime#arrowBatchAllocator()}, under Spark's
+   * root allocator, which outlives the reader: a consumer that transfers their vectors into an
+   * allocator under that root moves them without copying and can keep them after the reader closes.
+   * Their memory, including the imported C structs, is released with the last reference to it.
+   */
+  private static ArrowReader importArrowStream(LanceFragmentScanner fragmentScanner) {
+    BufferAllocator allocator = LanceRuntime.arrowBatchAllocator();
+    try (ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator)) {
+      fragmentScanner.exportArrowStream(stream.memoryAddress());
+      return Data.importArrayStream(allocator, stream);
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
   }
 
   public boolean loadNextBatch() throws IOException {
     long start = System.nanoTime();
     try {
+      if (arrowBatchReadsEnabled) {
+        // An Arrow batch is valid until the next one is requested.
+        releaseOwnedVectors();
+      }
       if (!arrowReader.loadNextBatch()) {
         return false;
       }
       VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
-      List<ColumnVector> fieldVectors =
-          buildSparkOrderedVectors(root, fragmentScanner.getInputPartition());
-      currentColumnarBatch =
-          new ColumnarBatch(fieldVectors.toArray(new ColumnVector[] {}), root.getRowCount());
+      LanceInputPartition inputPartition = fragmentScanner.getInputPartition();
+      ColumnVector[] columns =
+          arrowBatchReadsEnabled
+              ? ArrowBatchAdapter.buildColumns(
+                  root,
+                  inputPartition.getSchema(),
+                  fragmentScanner.fragmentId(),
+                  LanceRuntime.arrowBatchAllocator(),
+                  ownedVectors)
+              : buildSparkOrderedVectors(root, inputPartition).toArray(new ColumnVector[] {});
+      currentColumnarBatch = new ColumnarBatch(columns, root.getRowCount());
       return true;
     } finally {
       lastBatchLoadTimeNs = System.nanoTime() - start;
@@ -108,10 +173,24 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
       }
     } finally {
       try {
-        arrowReader.close();
+        // Closing the batch closes the vectors it holds; this also covers vectors of a batch that
+        // failed to build.
+        releaseOwnedVectors();
       } finally {
-        fragmentScanner.close();
+        try {
+          arrowReader.close();
+        } finally {
+          fragmentScanner.close();
+        }
       }
+    }
+  }
+
+  private void releaseOwnedVectors() {
+    try {
+      ownedVectors.forEach(FieldVector::close);
+    } finally {
+      ownedVectors.clear();
     }
   }
 
@@ -138,23 +217,11 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
         fragmentVector.setInt(fragmentScanner.fragmentId());
         fieldVectors.add(fragmentVector);
       } else if (fieldName.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)) {
-        String baseName =
-            fieldName.substring(
-                0, fieldName.length() - LanceConstant.BLOB_POSITION_SUFFIX.length());
-        FieldVector blobVector = actualFields.get(baseName);
-        if (blobVector instanceof StructVector) {
-          BlobPositionColumnVector posVector =
-              new BlobPositionColumnVector((StructVector) blobVector);
-          fieldVectors.add(posVector);
-        }
+        StructVector blobVector = blobV1DescriptorVector(actualFields, fieldName);
+        fieldVectors.add(new BlobPositionColumnVector(blobVector));
       } else if (fieldName.endsWith(LanceConstant.BLOB_SIZE_SUFFIX)) {
-        String baseName =
-            fieldName.substring(0, fieldName.length() - LanceConstant.BLOB_SIZE_SUFFIX.length());
-        FieldVector blobVector = actualFields.get(baseName);
-        if (blobVector instanceof StructVector) {
-          BlobSizeColumnVector sizeVector = new BlobSizeColumnVector((StructVector) blobVector);
-          fieldVectors.add(sizeVector);
-        }
+        StructVector blobVector = blobV1DescriptorVector(actualFields, fieldName);
+        fieldVectors.add(new BlobSizeColumnVector(blobVector));
       } else if (Utils.isScoreMetadataColumn(field)) {
         FieldVector vector = actualFields.get(fieldName);
         if (vector == null) {
@@ -185,6 +252,27 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
       }
     }
     return fieldVectors;
+  }
+
+  /**
+   * Returns the blob v1 descriptor struct backing a {@code __blob_pos} / {@code __blob_size}
+   * virtual column. {@link LanceFragmentScanner} always scans the base blob column for these
+   * virtual columns, so this check only guards against unexpected scan results.
+   */
+  private static StructVector blobV1DescriptorVector(
+      Map<String, FieldVector> actualFields, String virtualColumnName) {
+    String baseName = BlobUtils.blobV1VirtualColumnBaseName(virtualColumnName);
+    FieldVector blobVector = actualFields.get(baseName);
+    if (!(blobVector instanceof StructVector)) {
+      throw new IllegalStateException(
+          "Lance scan did not return blob v1 descriptor column '"
+              + baseName
+              + "' required by blob v1 virtual column '"
+              + virtualColumnName
+              + "', actual: "
+              + (blobVector == null ? "missing" : blobVector.getField().getType()));
+    }
+    return (StructVector) blobVector;
   }
 
   /**

@@ -57,7 +57,7 @@ jobs:
           github.event_name == 'pull_request' ||
           inputs.mode == 'dry_run'
         run: |
-          mvn --batch-mode -DskipTests package
+          ./mvnw --batch-mode -DskipTests package
       - name: Publish to Maven Central
         if: |
           github.event_name == 'release' ||
@@ -69,7 +69,7 @@ jobs:
           chmod 700 "$gpg_home"
           printf '%s\n' "use-agent" "pinentry-mode loopback" >> "$gpg_home/gpg.conf"
           export GPG_TTY=$(tty)
-          mvn --batch-mode -DskipTests -DpushChanges=false -Dgpg.passphrase=${{ secrets.GPG_PASSPHRASE }} deploy -P deploy-to-ossrh
+          ./mvnw --batch-mode -DskipTests -DpushChanges=false -Dgpg.passphrase=${{ secrets.GPG_PASSPHRASE }} deploy -P deploy-to-ossrh
         env:
           SONATYPE_USER: ${{ secrets.SONATYPE_USER }}
           SONATYPE_TOKEN: ${{ secrets.SONATYPE_TOKEN }}
@@ -80,7 +80,7 @@ jobs:
           inputs.mode == 'release'
         id: get_version
         run: |
-          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          VERSION=$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Published version: $VERSION"
       

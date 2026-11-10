@@ -23,6 +23,7 @@ import io.opentelemetry.api.metrics.MeterProvider;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.spark.SparkEnv;
+import org.apache.spark.sql.util.ArrowUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -89,6 +90,9 @@ public final class LanceRuntime {
 
   /** Global allocator (lazy initialized based on env var). */
   private static volatile BufferAllocator GLOBAL_ALLOCATOR;
+
+  /** Allocator of Arrow batch reads (lazy initialized based on env var). */
+  private static volatile BufferAllocator ARROW_BATCH_ALLOCATOR;
 
   /** Per-catalog sessions for cache isolation (lazy initialized). */
   private static final Map<String, CatalogSession> CATALOG_SESSIONS = new ConcurrentHashMap<>();
@@ -200,6 +204,28 @@ public final class LanceRuntime {
       }
     }
     return GLOBAL_ALLOCATOR;
+  }
+
+  /**
+   * Returns the allocator of the batches of Arrow batch reads ({@link
+   * LanceSparkReadOptions#CONFIG_ARROW_BATCH_READS}): a child of Spark's root allocator, so that a
+   * consumer that transfers their vectors into an allocator under that root moves them without
+   * copying. Like {@link #allocator()}, it is capped at {@link #ENV_ALLOCATOR_SIZE}, with a budget
+   * of its own. It is never closed, so transferred vectors can outlive the reader that built them.
+   *
+   * @return the allocator of Arrow batch reads
+   */
+  public static BufferAllocator arrowBatchAllocator() {
+    if (ARROW_BATCH_ALLOCATOR == null) {
+      synchronized (LanceRuntime.class) {
+        if (ARROW_BATCH_ALLOCATOR == null) {
+          ARROW_BATCH_ALLOCATOR =
+              ArrowUtils.rootAllocator()
+                  .newChildAllocator("lance-arrow-batch-reads", 0, getAllocatorSize());
+        }
+      }
+    }
+    return ARROW_BATCH_ALLOCATOR;
   }
 
   /**

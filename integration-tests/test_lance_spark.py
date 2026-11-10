@@ -201,6 +201,47 @@ class TestDDLTable:
         assert "name" in col_names
         assert "value" in col_names
 
+    def test_describe_extended_vector_dimensions(self, spark):
+        """DESCRIBE EXTENDED exposes fixed-size-list dimensions as table properties."""
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                embedding ARRAY<FLOAT>,
+                embedding_double ARRAY<DOUBLE>,
+                values ARRAY<FLOAT>
+            ) USING lance
+            TBLPROPERTIES (
+                'embedding.arrow.fixed-size-list.size' = '756',
+                'embedding_double.arrow.fixed-size-list.size' = '64'
+            )
+        """)
+        spark.sql("REFRESH TABLE default.test_table")
+
+        rows = spark.sql("DESCRIBE EXTENDED default.test_table").collect()
+        description = {row.col_name: row.data_type for row in rows}
+        assert description["embedding"] == "array<float>"
+        properties = description["Table Properties"]
+        assert "embedding.arrow.fixed-size-list.size=756" in properties
+        assert "embedding_double.arrow.fixed-size-list.size=64" in properties
+        assert "values.arrow.fixed-size-list.size" not in properties
+
+        dimension = spark.sql("""
+            SHOW TBLPROPERTIES default.test_table ('embedding.arrow.fixed-size-list.size')
+        """).collect()
+        assert dimension[0].value == "756"
+
+        spark.sql("""
+            ALTER TABLE default.test_table
+            UNSET TBLPROPERTIES ('embedding.arrow.fixed-size-list.size')
+        """)
+        spark.sql("REFRESH TABLE default.test_table")
+        dimension = spark.sql("""
+            SHOW TBLPROPERTIES default.test_table ('embedding.arrow.fixed-size-list.size')
+        """).collect()
+        assert dimension[0].value == "756"
+        assert spark.table("default.test_table").schema["embedding"].metadata[
+            "arrow.fixed-size-list.size"
+        ] == 756
+
     def test_drop_table(self, spark):
         """Test DROP TABLE."""
         spark.sql("""
@@ -521,6 +562,75 @@ class TestDDLStagingTable:
 
 class TestDDLAlterTableProperties:
     """Test ALTER TABLE SET/UNSET TBLPROPERTIES operations."""
+
+    @pytest.mark.parametrize("property_key", [
+        "embedding.arrow.fixed-size-list.size", "embedding.arrow.float16",
+        "payload.arrow.fixed-size-binary.byte-width", "text.arrow.large_var_char",
+        "payload.lance.encoding", "text.lance.compression", "text.lance.compression-level",
+        "text.lance.structural-encoding", "text.lance.rle-threshold", "text.lance.bss",
+    ])
+    def test_schema_property_set_rejected_atomically(self, spark, property_key):
+        spark.sql("CREATE TABLE default.test_table (embedding ARRAY<FLOAT>, payload BINARY, text STRING)")
+        spark.sql("ALTER TABLE default.test_table SET TBLPROPERTIES ('team' = 'search')")
+        with pytest.raises(Exception, match="Cannot set property .* because column .* already exists"):
+            spark.sql(f"""
+                ALTER TABLE default.test_table
+                SET TBLPROPERTIES ('team' = 'changed', '{property_key}' = '1')
+            """)
+        properties = {
+            row.key: row.value
+            for row in spark.sql("SHOW TBLPROPERTIES default.test_table").collect()
+        }
+        assert properties["team"] == "search"
+        assert property_key not in properties
+
+    def test_future_column_schema_property_can_be_set(self, spark):
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("""
+            ALTER TABLE default.test_table
+            SET TBLPROPERTIES ('content.lance.encoding' = 'blob', 'team' = 'search')
+        """)
+        properties = {
+            row.key: row.value
+            for row in spark.sql("SHOW TBLPROPERTIES default.test_table").collect()
+        }
+        assert properties["content.lance.encoding"] == "blob"
+        assert properties["team"] == "search"
+
+    def test_existing_and_future_schema_properties_rejected_together(self, spark):
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("ALTER TABLE default.test_table SET TBLPROPERTIES ('team' = 'search')")
+        with pytest.raises(Exception, match="Cannot set property .* because column .* already exists"):
+            spark.sql("""
+                ALTER TABLE default.test_table
+                SET TBLPROPERTIES (
+                    'name.lance.compression' = 'zstd',
+                    'content.lance.encoding' = 'blob',
+                    'team' = 'changed'
+                )
+            """)
+        properties = {
+            row.key: row.value
+            for row in spark.sql("SHOW TBLPROPERTIES default.test_table").collect()
+        }
+        assert properties["team"] == "search"
+        assert "content.lance.encoding" not in properties
+        assert "name.lance.compression" not in properties
+
+    @pytest.mark.parametrize("size", [128, 756])
+    def test_vector_dimension_set_rejected(self, spark, size):
+        spark.sql("""
+            CREATE TABLE default.test_table (embedding ARRAY<FLOAT>) USING lance
+            TBLPROPERTIES ('embedding.arrow.fixed-size-list.size' = '756')
+        """)
+        with pytest.raises(Exception, match="Cannot set property .* because column .* already exists"):
+            spark.sql(f"""
+                ALTER TABLE default.test_table
+                SET TBLPROPERTIES ('embedding.arrow.fixed-size-list.size' = '{size}')
+            """)
+        assert spark.table("default.test_table").schema["embedding"].metadata[
+            "arrow.fixed-size-list.size"
+        ] == 756
 
     def test_set_tblproperties(self, spark):
         """SET TBLPROPERTIES stores properties visible via SHOW TBLPROPERTIES."""
@@ -2251,6 +2361,58 @@ class TestDMLUpdate:
 class TestDMLDelete:
     """Test DML DELETE FROM operations."""
 
+    @pytest.mark.skipif(
+        SPARK_VERSION < Version("3.5"),
+        reason="Executor-side DELETE is implemented for Spark 3.5+",
+    )
+    @pytest.mark.rest_dir_compatible
+    @pytest.mark.parametrize("stable_row_ids", [False, True])
+    def test_delete_across_fragments_preserves_snapshot(self, spark, stable_row_ids):
+        spark.sql(f"""
+            CREATE TABLE default.test_table (id INT)
+            TBLPROPERTIES ('enable_stable_row_ids' = '{str(stable_row_ids).lower()}')
+        """)
+        # Separate single-partition appends give DELETE both whole and partial fragments.
+        for start in range(0, 24, 6):
+            (spark.range(start, start + 6, numPartitions=1)
+             .selectExpr("CAST(id AS INT) AS id")
+             .writeTo("default.test_table").append())
+
+        before = spark.sql("""
+            SELECT id, _rowid, _rowaddr, _fragid FROM default.test_table
+        """).collect()
+        assert len({row._fragid for row in before}) == 4
+        spark.sql("ALTER TABLE default.test_table CREATE TAG before_delete")
+        expected = {
+            row.id: (row._rowid, row._rowaddr)
+            for row in before if row.id >= 6 and row.id % 2 == 1
+        }
+
+        settings = {
+            "spark.sql.shuffle.partitions": "4",
+            "spark.sql.adaptive.enabled": "false",
+        }
+        previous = {key: spark.conf.get(key) for key in settings}
+        try:
+            for key, value in settings.items():
+                spark.conf.set(key, value)
+            for condition in ["id < 6 OR id % 2 = 0", "id < 6 OR id % 2 = 0", "id < 0"]:
+                spark.sql(f"DELETE FROM default.test_table WHERE {condition}")
+                after = spark.sql("""
+                    SELECT id, _rowid, _rowaddr FROM default.test_table
+                """).collect()
+                assert {row.id: (row._rowid, row._rowaddr) for row in after} == expected
+
+            spark.sql("DELETE FROM default.test_table")
+            assert spark.table("default.test_table").count() == 0
+            historical = spark.sql("""
+                SELECT id FROM default.test_table VERSION AS OF 'before_delete' ORDER BY id
+            """).collect()
+            assert [row.id for row in historical] == list(range(24))
+        finally:
+            for key, value in previous.items():
+                spark.conf.set(key, value)
+
     def test_delete_with_condition(self, spark):
         """Test DELETE FROM with WHERE clause."""
         spark.sql("""
@@ -2446,7 +2608,11 @@ class TestDMLAddColumn:
         assert "invalid_content" not in field_names
 
     def test_add_blob_column_without_encoding_property_stays_binary(self, spark, test_table):
-        """Test that a blob column added without its encoding property stays BINARY."""
+        """A column added without its encoding property stays BINARY.
+
+        Setting the encoding property after the column exists is rejected, so the
+        stored type cannot be converted afterward.
+        """
         spark.sql(f"""
             CREATE TABLE {test_table} (
                 id INT,
@@ -2480,10 +2646,11 @@ class TestDMLAddColumn:
         )
         assert content_type == "binary"
 
-        spark.sql(f"""
-            ALTER TABLE {test_table}
-            SET TBLPROPERTIES ('content.lance.encoding' = 'blob')
-        """)
+        with pytest.raises(Exception, match="Cannot set property .* because column .* already exists"):
+            spark.sql(f"""
+                ALTER TABLE {test_table}
+                SET TBLPROPERTIES ('content.lance.encoding' = 'blob')
+            """)
 
         content_type_after_property = next(
             row.data_type
@@ -2491,6 +2658,11 @@ class TestDMLAddColumn:
             if row.col_name == "content"
         )
         assert content_type_after_property == "binary"
+        properties = {
+            row.key: row.value
+            for row in spark.sql(f"SHOW TBLPROPERTIES {test_table}").collect()
+        }
+        assert "content.lance.encoding" not in properties
 
     def test_add_blob_column_with_mismatched_encoding_property_stays_binary(
         self, spark, test_table
@@ -3577,12 +3749,12 @@ class TestStableRowIds:
         Simulates a CDC pipeline that tracks the last processed version and
         incrementally processes changes using version tracking columns.
         """
+        # Empty CTAS establishes a single-version baseline for the CDC checkpoints below.
         spark.sql("""
-            CREATE TABLE default.test_table (
-                id INT,
-                name STRING,
-                value INT
-            ) TBLPROPERTIES ('enable_stable_row_ids' = 'true')
+            CREATE TABLE default.test_table USING lance
+            TBLPROPERTIES ('enable_stable_row_ids' = 'true')
+            AS SELECT 0 AS id, CAST(NULL AS STRING) AS name, CAST(NULL AS INT) AS value
+            WHERE false
         """)
 
         # v2: Initial data load
