@@ -433,6 +433,7 @@ public abstract class BaseLanceRuntimeFilteringTest {
         null,
         Collections.emptyMap(),
         true,
+        null,
         null);
   }
 

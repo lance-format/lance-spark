@@ -223,6 +223,7 @@ public class LanceScanTest {
             null,
             Collections.emptyMap(),
             true,
+            null,
             null);
 
     // Plan partitions to set numPartitions
@@ -313,6 +314,7 @@ public class LanceScanTest {
             null,
             Collections.emptyMap(),
             true,
+            null,
             null);
 
     Partitioning partitioning = scan.outputPartitioning();

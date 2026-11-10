@@ -203,6 +203,53 @@ public class LanceScan
         pushedPredicates,
         statistics,
         survivingFragmentIds,
+        precomputedSplits,
+        precomputedFragmentRowCounts,
+        activeShardingExpression,
+        fragmentShardingKeys,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        null);
+  }
+
+  /**
+   * The constructor from before runtime filtering, with an Arrow batch plan. The scan advertises no
+   * runtime filter columns and treats {@code _rowid} as distinct from {@code _rowaddr}.
+   *
+   * @param arrowBatchPlan the Arrow batches the scan can emit (see {@link #arrowBatchSchema()}), or
+   *     null if it has none
+   */
+  public LanceScan(
+      StructType schema,
+      LanceSparkReadOptions readOptions,
+      Optional<String> whereConditions,
+      Optional<Integer> limit,
+      Optional<Integer> offset,
+      Optional<List<ColumnOrdering>> topNSortOrders,
+      Optional<Aggregation> pushedAggregation,
+      Predicate[] pushedPredicates,
+      LanceStatistics statistics,
+      Set<Integer> survivingFragmentIds,
+      List<LanceSplit> precomputedSplits,
+      java.util.Map<Integer, Long> precomputedFragmentRowCounts,
+      Expression activeShardingExpression,
+      java.util.Map<Integer, Object> fragmentShardingKeys,
+      java.util.Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      java.util.Map<String, String> namespaceProperties,
+      ArrowBatchAdapter.Plan arrowBatchPlan) {
+    this(
+        schema,
+        readOptions,
+        whereConditions,
+        limit,
+        offset,
+        topNSortOrders,
+        pushedAggregation,
+        pushedPredicates,
+        statistics,
+        survivingFragmentIds,
         null,
         null,
         null,
@@ -217,9 +264,14 @@ public class LanceScan
         namespaceImpl,
         namespaceProperties,
         false,
-        null);
+        null,
+        arrowBatchPlan);
   }
 
+  /**
+   * @param arrowBatchPlan the Arrow batches the scan can emit (see {@link #arrowBatchSchema()}), or
+   *     null if it has none
+   */
   public LanceScan(
       StructType schema,
       LanceSparkReadOptions readOptions,
@@ -354,16 +406,30 @@ public class LanceScan
             pushedPredicates,
             statistics,
             cachedSurvivingFragmentIds,
+            zonemapStats,
+            uncoveredFragmentsByColumn,
+            runtimeFilterAttributes,
             precomputedSplits,
             precomputedFragmentRowCounts,
             activeShardingExpression,
+            activeShardingColumn,
             fragmentShardingKeys,
             initialStorageOptions,
             namespaceImpl,
             namespaceProperties,
+            rowIdIsRowAddress,
+            unsignedRuntimeKeyMax,
             arrowBatchPlan);
+    synchronized (runtimeFilterLock) {
+      copy.runtimePredicates.addAll(runtimePredicates);
+      copy.runtimePredicateFingerprints.addAll(runtimePredicateFingerprints);
+      copy.runtimeFilterKeyCount = runtimeFilterKeyCount;
+      copy.runtimeFilterSerializedBytes = runtimeFilterSerializedBytes;
+      copy.rejectedRuntimeFilterCount = rejectedRuntimeFilterCount;
+    }
     // Planned partitions are the same, so the copy reports the same partitioning.
     copy.numPartitions = numPartitions;
+    copy.survivingFragmentCount = survivingFragmentCount;
     return copy;
   }
 
