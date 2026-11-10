@@ -366,8 +366,6 @@ public abstract class BaseTimestampUnitReadTest {
   }
 
   // ---- Zonemap pruning on non-microsecond units ----
-  // Lance reports zone bounds in the column's storage unit; Spark literals are microseconds or
-  // days. Pruning must rescale the bounds, or it drops fragments that match.
 
   @Test
   public void testZonemapPruningTimestampSecond() throws Exception {

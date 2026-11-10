@@ -120,19 +120,12 @@ public final class ZonemapFragmentPruner {
   }
 
   /**
-   * Rescales zone bounds from the column's Lance storage unit to the unit Spark uses for its
-   * literals: microseconds for timestamps and days for dates.
+   * Rescales Lance zonemap bounds to Spark's units (microseconds for timestamps, days for dates).
+   * Uses floor division to match the reader's rounding and avoid pruning matching fragments.
    *
-   * <p>Lance reports timestamp bounds in the column's own unit (s/ms/us/ns) and {@code
-   * Date(MILLISECOND)} bounds in milliseconds, while Spark's literals for the {@code TimestampType}
-   * and {@code DateType} these columns map to are in microseconds and days. Comparing them unscaled
-   * prunes fragments that do match. Bounds are rescaled with {@code floorDiv}, as the reader does,
-   * so pruning sees the same values a query does.
+   * <p>UInt64 bounds are skipped because signed long comparisons can break their ordering.
    *
-   * <p>{@code UInt64} bounds are rejected: Spark reads the column as signed longs, so values of
-   * 2^63 or more wrap negative and the bounds no longer order the zone's values.
-   *
-   * @return the rescaled zones, or null if a bound cannot be represented in Spark's unit
+   * @return rescaled zones, or null if the bounds cannot be safely converted or compared
    */
   public static List<ZoneStats> toSparkUnits(List<ZoneStats> zones, ArrowType type) {
     long multiplier = 1;
