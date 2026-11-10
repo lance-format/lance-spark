@@ -713,9 +713,14 @@ public class LanceScan
         .collect(Collectors.toList());
   }
 
+  /** Whether scans read with these options take runtime filters from Spark. */
+  static boolean supportsRuntimeFiltering(LanceSparkReadOptions readOptions) {
+    return isSpark41OrLater() && readOptions.isPushDownFilters();
+  }
+
   @Override
   public NamedReference[] filterAttributes() {
-    if (!isSpark41OrLater() || !readOptions.isPushDownFilters()) {
+    if (!supportsRuntimeFiltering(readOptions)) {
       return new NamedReference[0];
     }
     return Arrays.copyOf(runtimeFilterAttributes, runtimeFilterAttributes.length);
@@ -723,10 +728,7 @@ public class LanceScan
 
   @Override
   public void filter(Predicate[] predicates) {
-    if (!isSpark41OrLater()
-        || !readOptions.isPushDownFilters()
-        || predicates == null
-        || predicates.length == 0) {
+    if (!supportsRuntimeFiltering(readOptions) || predicates == null || predicates.length == 0) {
       return;
     }
 

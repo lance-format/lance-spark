@@ -229,8 +229,10 @@ public class LanceScanBuilder
       Set<String> columnsToLoad = extractReferencedColumns(pushedPredicates);
       Dataset dataset = getOrOpenDataset();
       LanceSchema lanceSchema = dataset.getLanceSchema();
+      boolean advertiseRuntimeFilters =
+          !pushedAggregation.isPresent() && LanceScan.supportsRuntimeFiltering(readOptions);
       Set<String> exactEqualityIndexedColumns =
-          readOptions.isPushDownFilters()
+          advertiseRuntimeFilters
               ? exactEqualityIndexedColumns(dataset, lanceSchema, schema)
               : Collections.emptySet();
       columnsToLoad.addAll(exactEqualityIndexedColumns);
@@ -290,15 +292,15 @@ public class LanceScanBuilder
       }
 
       Set<String> runtimeFilterColumns =
-          pushedAggregation.isPresent()
-              ? Collections.emptySet()
-              : runtimeFilterColumns(
+          advertiseRuntimeFilters
+              ? runtimeFilterColumns(
                   schema,
                   dataset.getSchema(),
                   readOptions,
                   exactEqualityIndexedColumns,
                   zonemapStats.keySet(),
-                  activeShardingColumn);
+                  activeShardingColumn)
+              : Collections.emptySet();
 
       // Pre-compute fragment pruning so we can (a) estimate post-pruning statistics for
       // JoinSelection (BroadcastHashJoin vs SortMergeJoin) and (b) pass the cached result
@@ -1050,10 +1052,6 @@ public class LanceScanBuilder
       Set<String> exactEqualityIndexedColumns,
       Set<String> zonemapColumns,
       String activeShardingColumn) {
-    if (!readOptions.isPushDownFilters()) {
-      return Collections.emptySet();
-    }
-
     Set<String> result = new HashSet<>();
     for (StructField field : projectedSchema.fields()) {
       String column = field.name();
