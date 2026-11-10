@@ -400,6 +400,11 @@ public class LanceSparkReadOptions implements Serializable {
     return toBuilder().arrowBatchReads(arrowBatchReads).build();
   }
 
+  /** Creates a copy of these options with {@link #CONFIG_COALESCE_COLUMNS} set as given. */
+  public LanceSparkReadOptions withCoalesceColumns(Map<String, String> coalesceColumns) {
+    return toBuilder().coalesceColumns(coalesceColumns).build();
+  }
+
   /** Creates a builder holding these options. */
   public Builder toBuilder() {
     return builder()

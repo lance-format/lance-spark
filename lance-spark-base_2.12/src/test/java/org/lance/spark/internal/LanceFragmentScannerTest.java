@@ -335,6 +335,16 @@ public class LanceFragmentScannerTest {
     assertEquals(Collections.singletonMap("y", "b"), active);
     assertEquals(
         Arrays.asList("x", "y", "c"), CoalesceArrowReader.computeInitialColumns(projected, active));
+
+    Map<String, String> sharedFallback = LanceSparkReadOptions.parseCoalesceColumns("x:b,y:b");
+    Map<String, String> activeShared =
+        CoalesceArrowReader.resolveActiveCoalesce(projected, sharedFallback);
+    assertEquals(2, activeShared.size());
+    assertEquals("b", activeShared.get("x"));
+    assertEquals("b", activeShared.get("y"));
+    assertEquals(
+        Arrays.asList("x", "y", "c"),
+        CoalesceArrowReader.computeInitialColumns(projected, activeShared));
   }
 
   @Test

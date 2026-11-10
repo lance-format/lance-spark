@@ -52,6 +52,7 @@ import scala.collection.immutable.Map;
 import java.io.Serializable;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -124,6 +125,13 @@ public class LanceScan
 
   /** The Arrow batches the scan can emit; see {@link #arrowBatchSchema()}. */
   private final ArrowBatchAdapter.Plan arrowBatchPlan;
+
+  /**
+   * Subset of {@link LanceSparkReadOptions#getCoalesceColumns()} verified by {@code
+   * LanceCoalescePlanCheck} against the Catalyst logical plan. Defaults to empty so unverified
+   * scans read fallback columns eagerly.
+   */
+  private java.util.Map<String, String> verifiedCoalesceColumns = Collections.emptyMap();
 
   public LanceScan(
       StructType schema,
@@ -295,7 +303,19 @@ public class LanceScan
             arrowBatchPlan);
     // Planned partitions are the same, so the copy reports the same partitioning.
     copy.numPartitions = numPartitions;
+    copy.verifiedCoalesceColumns = verifiedCoalesceColumns;
     return copy;
+  }
+
+  /**
+   * Sets the subset of {@link LanceSparkReadOptions#getCoalesceColumns()} verified safe by the
+   * Catalyst logical plan check.
+   */
+  public void setVerifiedCoalesceColumns(java.util.Map<String, String> verifiedCoalesceColumns) {
+    this.verifiedCoalesceColumns =
+        verifiedCoalesceColumns != null
+            ? Collections.unmodifiableMap(new LinkedHashMap<>(verifiedCoalesceColumns))
+            : Collections.emptyMap();
   }
 
   @Override
@@ -321,7 +341,13 @@ public class LanceScan
     final List<LanceSplit> finalSplits = prunedSplits;
 
     // readOptions is already pinned to the resolved version by LanceScanBuilder for
-    // snapshot isolation across all workers.
+    // snapshot isolation across all workers. Only pass plan-verified coalesce_columns to
+    // partitions so fallback columns referenced outside COALESCE(primary, fallback) are
+    // read eagerly.
+    final LanceSparkReadOptions partitionReadOptions =
+        readOptions.getCoalesceColumns().equals(verifiedCoalesceColumns)
+            ? readOptions
+            : readOptions.withCoalesceColumns(verifiedCoalesceColumns);
     InputPartition[] result =
         IntStream.range(0, finalSplits.size())
             .mapToObj(
@@ -339,7 +365,7 @@ public class LanceScan
                       schema,
                       i,
                       split,
-                      readOptions,
+                      partitionReadOptions,
                       whereConditions,
                       limit,
                       offset,
@@ -596,6 +622,7 @@ public class LanceScan
     LanceScan that = (LanceScan) o;
     return Objects.equals(schema, that.schema)
         && Objects.equals(readOptions, that.readOptions)
+        && Objects.equals(verifiedCoalesceColumns, that.verifiedCoalesceColumns)
         && Objects.equals(whereConditions, that.whereConditions)
         && Objects.equals(limit, that.limit)
         && Objects.equals(offset, that.offset)
@@ -608,7 +635,13 @@ public class LanceScan
   public int hashCode() {
     int result =
         Objects.hash(
-            schema, readOptions, whereConditions, limit, offset, topNSortOrders.toString());
+            schema,
+            readOptions,
+            verifiedCoalesceColumns,
+            whereConditions,
+            limit,
+            offset,
+            topNSortOrders.toString());
     result = 31 * result + Arrays.hashCode(sortedByHash(pushedPredicates));
     result = 31 * result + aggregationHashCode(pushedAggregation);
     return result;

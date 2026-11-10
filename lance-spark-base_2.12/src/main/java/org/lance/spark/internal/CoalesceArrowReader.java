@@ -41,7 +41,7 @@ import java.util.stream.Collectors;
  * scan and populates {@code COALESCE(primary, fallback)} fallback columns on demand via {@code
  * dataset.takeRows} only when the corresponding primary column contains {@code NULL}s.
  */
-final class CoalesceArrowReader extends ArrowReader {
+public final class CoalesceArrowReader extends ArrowReader {
   private final Dataset dataset;
   private final ArrowReader delegate;
   private final List<String> columns;
@@ -61,7 +61,7 @@ final class CoalesceArrowReader extends ArrowReader {
     this.initialColumns = computeInitialColumns(this.columns, this.activeCoalesce);
   }
 
-  static Map<String, String> resolveActiveCoalesce(
+  public static Map<String, String> resolveActiveCoalesce(
       List<String> columns, Map<String, String> coalesceColumns) {
     Map<String, String> validCoalesce = new LinkedHashMap<>();
     Set<String> columnSet = new HashSet<>(columns);
@@ -136,32 +136,94 @@ final class CoalesceArrowReader extends ArrowReader {
       UInt8Vector rowIdVec,
       int rowCount)
       throws IOException {
-    List<String> fullNullFallbacks = null;
+    Map<String, List<FieldVector>> fallbackToPrimaryVecs = new LinkedHashMap<>();
     for (Map.Entry<String, String> entry : activeCoalesce.entrySet()) {
-      String primaryCol = entry.getKey();
-      String fallbackCol = entry.getValue();
-      FieldVector primaryVec = outRoot.getVector(primaryCol);
+      FieldVector primaryVec = outRoot.getVector(entry.getKey());
+      fallbackToPrimaryVecs
+          .computeIfAbsent(entry.getValue(), k -> new ArrayList<>())
+          .add(primaryVec);
+    }
+
+    List<String> fullNullFallbacks = null;
+    for (Map.Entry<String, List<FieldVector>> entry : fallbackToPrimaryVecs.entrySet()) {
+      String fallbackCol = entry.getKey();
+      List<FieldVector> primaryVecs = entry.getValue();
       FieldVector fallbackVec = outRoot.getVector(fallbackCol);
-      int nullCount = primaryVec.getNullCount();
-      if (nullCount == 0) {
-        fallbackVec.reset();
-        fallbackVec.setValueCount(rowCount);
-      } else if (nullCount == rowCount && rowCount > 0) {
-        if (fullNullFallbacks == null) {
-          fullNullFallbacks = new ArrayList<>(activeCoalesce.size());
+      if (primaryVecs.size() == 1) {
+        FieldVector primaryVec = primaryVecs.get(0);
+        int nullCount = primaryVec.getNullCount();
+        if (nullCount == 0) {
+          fallbackVec.reset();
+          fallbackVec.setValueCount(rowCount);
+        } else if (nullCount == rowCount && rowCount > 0) {
+          if (fullNullFallbacks == null) {
+            fullNullFallbacks = new ArrayList<>(fallbackToPrimaryVecs.size());
+          }
+          fullNullFallbacks.add(fallbackCol);
+        } else {
+          List<Long> nullRowIds = new ArrayList<>(nullCount);
+          int[] nullIndices = new int[nullCount];
+          int k = 0;
+          for (int i = 0; i < rowCount; i++) {
+            if (primaryVec.isNull(i)) {
+              nullRowIds.add(rowIdVec.get(i));
+              nullIndices[k++] = i;
+            }
+          }
+          fetchPartialFallback(
+              dataset, fallbackCol, fallbackVec, nullRowIds, nullIndices, rowCount);
         }
-        fullNullFallbacks.add(fallbackCol);
       } else {
-        List<Long> nullRowIds = new ArrayList<>(nullCount);
-        int[] nullIndices = new int[nullCount];
-        int k = 0;
-        for (int i = 0; i < rowCount; i++) {
-          if (primaryVec.isNull(i)) {
-            nullRowIds.add(rowIdVec.get(i));
-            nullIndices[k++] = i;
+        boolean allNonNull = true;
+        boolean anyFullNull = false;
+        for (FieldVector primaryVec : primaryVecs) {
+          int nullCount = primaryVec.getNullCount();
+          if (nullCount > 0) {
+            allNonNull = false;
+          }
+          if (nullCount == rowCount && rowCount > 0) {
+            anyFullNull = true;
+            break;
           }
         }
-        fetchPartialFallback(dataset, fallbackCol, fallbackVec, nullRowIds, nullIndices, rowCount);
+        if (allNonNull) {
+          fallbackVec.reset();
+          fallbackVec.setValueCount(rowCount);
+        } else if (anyFullNull) {
+          if (fullNullFallbacks == null) {
+            fullNullFallbacks = new ArrayList<>(fallbackToPrimaryVecs.size());
+          }
+          fullNullFallbacks.add(fallbackCol);
+        } else {
+          List<Long> nullRowIds = new ArrayList<>(rowCount);
+          int[] nullIndices = new int[rowCount];
+          int k = 0;
+          for (int i = 0; i < rowCount; i++) {
+            boolean rowNeedsFallback = false;
+            for (FieldVector primaryVec : primaryVecs) {
+              if (primaryVec.isNull(i)) {
+                rowNeedsFallback = true;
+                break;
+              }
+            }
+            if (rowNeedsFallback) {
+              nullRowIds.add(rowIdVec.get(i));
+              nullIndices[k++] = i;
+            }
+          }
+          if (k == 0) {
+            fallbackVec.reset();
+            fallbackVec.setValueCount(rowCount);
+          } else if (k == rowCount) {
+            if (fullNullFallbacks == null) {
+              fullNullFallbacks = new ArrayList<>(fallbackToPrimaryVecs.size());
+            }
+            fullNullFallbacks.add(fallbackCol);
+          } else {
+            fetchPartialFallback(
+                dataset, fallbackCol, fallbackVec, nullRowIds, nullIndices, rowCount);
+          }
+        }
       }
     }
     if (fullNullFallbacks != null && !fullNullFallbacks.isEmpty()) {

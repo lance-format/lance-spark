@@ -60,6 +60,7 @@ import org.apache.spark.sql.connector.read.SupportsPushDownOffset;
 import org.apache.spark.sql.connector.read.SupportsPushDownRequiredColumns;
 import org.apache.spark.sql.connector.read.SupportsPushDownTopN;
 import org.apache.spark.sql.connector.read.SupportsPushDownV2Filters;
+import org.apache.spark.sql.execution.datasources.v2.LanceCoalescePlanCheck;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
@@ -334,6 +335,7 @@ public class LanceScanBuilder
       if (pushedAggregation.isPresent()) {
         arrowBatchPlan = ArrowBatchAdapter.Plan.unsupported("the scan has a pushed aggregation");
       } else if (!readOptions.getCoalesceColumns().isEmpty()) {
+        LanceCoalescePlanCheck.registerIfNeeded();
         arrowBatchPlan = ArrowBatchAdapter.Plan.unsupported("the scan uses coalesce_columns");
       } else {
         arrowBatchPlan = ArrowBatchAdapter.plan(schema, dataset.getSchema());

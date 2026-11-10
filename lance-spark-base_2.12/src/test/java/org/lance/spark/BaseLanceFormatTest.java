@@ -556,4 +556,82 @@ public abstract class BaseLanceFormatTest {
     assertEquals("fb4", actual.get(4).getString(1));
     assertTrue(actual.get(5).isNullAt(1));
   }
+
+  @Test
+  public void testCoalescePreservesResidualFilter() {
+    String path = tempDir.resolve("residual.lance").toString();
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("a", DataTypes.StringType, true)
+            .add("c", DataTypes.StringType, true);
+    spark
+        .createDataFrame(Arrays.asList(RowFactory.create(0, "a0", "c0")), schema)
+        .coalesce(1)
+        .write()
+        .format("lance")
+        .save(path);
+
+    List<Row> actual =
+        spark
+            .read()
+            .format("lance")
+            .option(LanceSparkReadOptions.CONFIG_COALESCE_COLUMNS, "a:c")
+            .load(path)
+            .filter("length(c) > 0")
+            .selectExpr("id", "coalesce(a,c) as resolved")
+            .collectAsList();
+    assertEquals(Arrays.asList(RowFactory.create(0, "a0")), actual);
+
+    List<Row> directSelect =
+        spark
+            .read()
+            .format("lance")
+            .option(LanceSparkReadOptions.CONFIG_COALESCE_COLUMNS, "a:c")
+            .load(path)
+            .selectExpr("id", "coalesce(a,c) as resolved", "c")
+            .collectAsList();
+    assertEquals(Arrays.asList(RowFactory.create(0, "a0", "c0")), directSelect);
+  }
+
+  @Test
+  public void testCoalesceSharedFallback() {
+    String path = tempDir.resolve("shared.lance").toString();
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("a", DataTypes.StringType, true)
+            .add("b", DataTypes.StringType, true)
+            .add("c", DataTypes.StringType, true);
+    spark
+        .createDataFrame(
+            Arrays.asList(
+                RowFactory.create(0, null, "b0", "c0"),
+                RowFactory.create(1, "a1", null, "c1"),
+                RowFactory.create(2, "a2", "b2", "c2"),
+                RowFactory.create(3, "a3", null, "c3")),
+            schema)
+        .coalesce(1)
+        .write()
+        .format("lance")
+        .save(path);
+
+    List<Row> actual =
+        spark
+            .read()
+            .format("lance")
+            .option(LanceSparkReadOptions.CONFIG_COALESCE_COLUMNS, "a:c,b:c")
+            .option(LanceSparkReadOptions.CONFIG_BATCH_SIZE, "2")
+            .load(path)
+            .selectExpr("id", "coalesce(a,c) as ac", "coalesce(b,c) as bc")
+            .sort("id")
+            .collectAsList();
+    assertEquals(
+        Arrays.asList(
+            RowFactory.create(0, "c0", "b0"),
+            RowFactory.create(1, "a1", "c1"),
+            RowFactory.create(2, "a2", "b2"),
+            RowFactory.create(3, "a3", "c3")),
+        actual);
+  }
 }
