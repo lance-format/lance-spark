@@ -13,6 +13,8 @@
  */
 package org.lance.spark.utils;
 
+import org.lance.spark.LanceConstant;
+
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
@@ -159,6 +161,18 @@ public class BlobUtils {
     return LANCE_ENCODING_BLOB_VALUE.equalsIgnoreCase(value);
   }
 
+  /**
+   * Returns true when lance-core reads Arrow field {@code field} as a blob, v1 or v2, as its {@code
+   * Field::is_blob} does: {@link #LANCE_ENCODING_BLOB_KEY} with any value, or the {@link
+   * #ARROW_EXTENSION_BLOB_V2} extension. Lance does so at any depth, also inside a struct or list.
+   */
+  public static boolean isLanceBlobArrowField(org.apache.arrow.vector.types.pojo.Field field) {
+    Map<String, String> metadata = field == null ? null : field.getMetadata();
+    return metadata != null
+        && (metadata.containsKey(LANCE_ENCODING_BLOB_KEY)
+            || ARROW_EXTENSION_BLOB_V2.equals(metadata.get(ARROW_EXTENSION_NAME_KEY)));
+  }
+
   /** Returns true when a Spark field carries the lance-core blob v2 Arrow extension. */
   public static boolean isBlobV2SparkField(StructField field) {
     return field != null && isBlobV2SparkMetadata(field.metadata());
@@ -206,6 +220,20 @@ public class BlobUtils {
   /** Returns true if any field in {@code schema} carries legacy (v1) blob metadata. */
   public static boolean hasBlobV1Fields(StructType schema) {
     return !blobV1ColumnNames(schema).isEmpty();
+  }
+
+  /**
+   * Returns the base column name of a blob v1 {@code <column>__blob_pos} or {@code
+   * <column>__blob_size} virtual column, or null if {@code name} is not such a virtual column.
+   */
+  public static String blobV1VirtualColumnBaseName(String name) {
+    if (name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)) {
+      return name.substring(0, name.length() - LanceConstant.BLOB_POSITION_SUFFIX.length());
+    }
+    if (name.endsWith(LanceConstant.BLOB_SIZE_SUFFIX)) {
+      return name.substring(0, name.length() - LanceConstant.BLOB_SIZE_SUFFIX.length());
+    }
+    return null;
   }
 
   /**

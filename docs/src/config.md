@@ -59,14 +59,6 @@ The following features require the Lance Spark SQL extension to be enabled:
 - [OPTIMIZE INDEX](operations/ddl/optimize-index.md) - Incrementally maintain a named index
 - [VACUUM](operations/ddl/vacuum.md) - Remove old versions and reclaim storage space
 
-## Distributed index statistics
-
-`spark.lance.indexStatistics.distributed.enabled` controls whether
-[SHOW INDEXES](operations/ddl/show-indexes.md#distributed-statistics) collects physical
-segment statistics on executors. It defaults to `false`. When enabled, work is distributed
-both across logical indexes and within multi-segment indexes, using at most
-`SparkContext.defaultParallelism` tasks. Result columns are unchanged.
-
 ## Basic Setup
 
 Configure Spark with the `LanceNamespaceSparkCatalog` by setting the appropriate Spark catalog implementation
@@ -82,6 +74,30 @@ and namespace-specific options:
 | `spark.sql.catalog.{name}.single_level_ns`  | Boolean | ✗       | Enable single-level mode with virtual "default" namespace. Default: `false`. See [Note on Namespace Levels](#note-on-namespace-levels). |
 | `spark.sql.catalog.{name}.parent`           | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                             |
 | `spark.sql.catalog.{name}.parent_delimiter` | String | ✗        | Delimiter for parent prefix (default: `.`). See [Note on Namespace Levels](#note-on-namespace-levels).                           |
+
+## Distributed Vector Search
+
+Set `spark.sql.lance.search.distributed.enabled=true` to execute `VECTOR_SEARCH` with Spark tasks
+instead of through the namespace server's `queryTable` endpoint. The default is `false`.
+
+Distributed search opens the Lance dataset from executors, so each executor must have network
+access to the backing object store. Storage credentials may come from the configured namespace;
+the `executor_credential_refresh` catalog option controls whether executors reconstruct the
+namespace client and refresh credentials when opening the dataset.
+
+The planner creates one task for every selected vector-index segment and one flat-search task for
+each unindexed fragment. `bypass_vector_index=true` uses only flat-search tasks, while
+`fast_search=true` searches only indexed fragments.
+
+A fragment-restricted scan can only prefilter, so a distributed plan cannot reproduce namespace
+execution's default `prefilter=false`, which applies the filter *after* the top k is chosen and
+therefore usually returns fewer rows. A filtered distributed search must say `prefilter=true`
+explicitly; omitting `prefilter` or setting it to `false` fails during planning rather than
+silently changing what the filter means.
+
+`lower_bound` and `upper_bound` are not supported either, because lance-core's Java scanner cannot
+apply them yet. Disable `spark.sql.lance.search.distributed.enabled` to run any of these through
+the namespace.
 
 ## Cache Backends
 
@@ -588,9 +604,11 @@ The parent configuration effectively "anchors" your Spark catalog at a specific 
 hierarchy, making the extra levels transparent to Spark users while maintaining compatibility with the underlying
 namespace implementation.
 
-## Branch Read Option
+## Branch and Tag Read Options
 
-Set `branch` to read the current head of a named branch. Do not set `version` on the same read.
+Set `branch` to read the current head of a named branch, or `tag` to read a tagged
+snapshot. Specify only one of `branch`, `tag`, or `version`. Branch and tag options
+are read-only.
 
 ```python
 df = spark.read \
@@ -598,6 +616,45 @@ df = spark.read \
     .option("branch", "audit") \
     .load("/path/to/dataset.lance")
 ```
+
+```python
+df = spark.read \
+    .format("lance") \
+    .option("tag", "release_candidate") \
+    .load("/path/to/dataset.lance")
+
+tagged = spark.read.option("tag", "release_candidate").table("lance.db.users")
+```
+
+Spark analyzes the current table schema before applying the `version` or `tag` read option.
+Select columns compatible with the snapshot; missing columns or incompatible types,
+including nested fields, fail during planning. Use SQL `VERSION AS OF 'release_candidate'`
+to analyze the query against the historical schema instead.
+
+## Arrow Batch Reads
+
+Set `arrow_batch_reads` to `true` to expose supported scans as Spark `ArrowColumnVector`
+batches, so an engine that processes Arrow data, such as Apache Gluten, can take them as Arrow.
+This is disabled by default.
+
+```python
+df = spark.read \
+    .format("lance") \
+    .option("arrow_batch_reads", "true") \
+    .load("/path/to/dataset.lance")
+```
+
+If any selected column is unsupported, the whole scan uses the regular reader. This includes
+blob columns and columns holding a blob in a struct or list, JSON columns, `_score`, and Arrow
+types Spark cannot read directly, such as unsigned integers or nanosecond timestamps.
+`LanceScan.arrowBatchSchema()` reports whether a scan supports Arrow batches;
+`LanceScan.withArrowBatches()` turns them on for a planned scan and throws if it does not.
+
+`FixedSizeList` (vector) columns become Arrow `List`s, and `_rowid`, `_rowaddr`, and the row
+version columns are exposed as signed 64-bit integers.
+
+Native vectors may be reused on `next()`, while converted vectors are released. Consumers must
+copy or transfer data they need to keep before advancing.
 
 ## Memory Configuration
 
@@ -608,6 +665,9 @@ Lance Spark uses Arrow for data transfer between native code and Spark, and main
 Set via environment variable `LANCE_ALLOCATOR_SIZE` (default: unlimited).
 
 Controls the maximum memory allocation for Arrow buffers used in data transfer between Lance native code and Spark.
+[Arrow batch reads](#arrow-batch-reads) allocate their buffers from a child of Spark's root allocator instead, so
+that a consumer under that root can take them without copying. `LANCE_ALLOCATOR_SIZE` caps that allocator too, as a
+separate budget.
 
 | Environment Variable   | Default          | Description                              |
 |------------------------|------------------|------------------------------------------|

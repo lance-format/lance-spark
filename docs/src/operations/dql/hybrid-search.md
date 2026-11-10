@@ -15,6 +15,8 @@ Run vector search and full-text search together from Spark SQL, then rerank the 
 
 `HYBRID_SEARCH` returns the selected table columns plus `_distance`, `_score`, and `_relevance_score`. Rows that only match one side have null for the other side's metric.
 
+Tables with a stored `_score` column must rename it before using full-text search. See [relevance scores](fts.md#relevance-score-_score).
+
 === "SQL"
     ```sql
     SELECT id, body, _distance, _score, _relevance_score
@@ -49,19 +51,23 @@ Use positional arguments for simple calls and Spark 3.4 compatibility.
 | `table` | String | Yes | Catalog table name to search. |
 | `query_vector` | Array numeric literal | Yes | Query vector. |
 | `query` or `search_query` | String | Yes | Full-text query string. |
-| `vector_column` | String | No | Vector column name. Lance defaults to `vector` when omitted. |
+| `vector_column` | String | No | Vector column name, or a path such as `payload.vec` for a nested column. Lance defaults to `vector` when omitted. |
 | `search_columns` | Array string literal | No | Text columns to search. When omitted, Lance uses the indexed columns configured for the FTS index. |
 | `num_results`, `limit`, or `k` | Integer | No | Number of final reranked results. Defaults to `10`. |
 | `candidates`, `num_candidates`, or `candidate_count` | Integer | No | Number of rows to fetch from each side before reranking. Defaults to `num_results + offset`. Values below `num_results + offset` are raised to that minimum. |
 | `rrf_k` | Float | No | Reciprocal rank fusion constant. Defaults to `60.0`. |
 | `columns` | Array string literal | No | Output table columns. `_distance`, `_score`, and `_relevance_score` are always included. Use `array('*')` or omit this argument for all table columns. |
 | `filter` | String | No | SQL filter expression evaluated by Lance on both side queries. |
+| `prefilter` | Boolean | No | Apply `filter` before candidate selection on both the vector and full-text sides when `true`, or after selection when `false`. If omitted, Lance uses its default. |
 | `offset` | Integer | No | Number of reranked results to skip after fusion. Defaults to `0`. |
 | `version` | Long | No | Lance table version to search. |
-| `distance_type` | String | No | Distance metric such as `l2`, `cosine`, or `dot`. |
+| `distance_type` | String | No | Distance metric: `l2` (`euclidean`), `cosine`, `dot` (`ip`, `inner_product`), or `hamming`. Aliases are normalized to the canonical name. |
 | `nprobes`, `ef`, `refine_factor` | Integer | No | Vector index search tuning parameters. |
 | `lower_bound`, `upper_bound` | Float | No | Distance bounds. |
-| `bypass_vector_index`, `fast_search`, `prefilter`, `with_row_id` | Boolean | No | Lance query options. `with_row_id` adds `_rowid` to the output. |
+| `bypass_vector_index`, `fast_search`, `with_row_id` | Boolean | No | Lance query options. `with_row_id` adds `_rowid` to the output. `bypass_vector_index` and `fast_search` cannot both be true. |
+
+`spark.sql.lance.search.distributed.enabled` has no effect on `HYBRID_SEARCH`: its vector side
+always runs through the namespace `queryTable` API.
 
 ## Reranking
 

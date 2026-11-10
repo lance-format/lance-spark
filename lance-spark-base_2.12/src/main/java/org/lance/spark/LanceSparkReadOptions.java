@@ -19,6 +19,7 @@ import org.lance.namespace.LanceNamespace;
 import org.lance.spark.utils.FullTextQueryUtils;
 
 import com.google.common.base.Preconditions;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
@@ -54,6 +55,7 @@ public class LanceSparkReadOptions implements Serializable {
   public static final String CONFIG_BLOCK_SIZE = "block_size";
   public static final String CONFIG_VERSION = "version";
   public static final String CONFIG_BRANCH = "branch";
+  public static final String CONFIG_TAG = "tag";
   public static final String CONFIG_INDEX_CACHE_SIZE = "index_cache_size";
   public static final String CONFIG_METADATA_CACHE_SIZE = "metadata_cache_size";
   public static final String CONFIG_BATCH_SIZE = "batch_size";
@@ -96,6 +98,9 @@ public class LanceSparkReadOptions implements Serializable {
    */
   public static final String CONFIG_EXECUTOR_CREDENTIAL_REFRESH = "executor_credential_refresh";
 
+  /** Enable Arrow batches when supported, otherwise use the regular reader. Default: false. */
+  public static final String CONFIG_ARROW_BATCH_READS = "arrow_batch_reads";
+
   public static final String LANCE_FILE_SUFFIX = ".lance";
 
   private static final boolean DEFAULT_PUSH_DOWN_FILTERS = true;
@@ -104,9 +109,9 @@ public class LanceSparkReadOptions implements Serializable {
   private static final boolean DEFAULT_USE_SCALAR_INDEX = true;
   private static final boolean DEFAULT_TOP_N_PUSH_DOWN = true;
   private static final boolean DEFAULT_EXECUTOR_CREDENTIAL_REFRESH = true;
+  private static final boolean DEFAULT_ARROW_BATCH_READS = false;
 
   private final String datasetUri;
-  private final String dbPath;
   private final String datasetName;
   private final boolean pushDownFilters;
   private final Integer blockSize;
@@ -139,11 +144,11 @@ public class LanceSparkReadOptions implements Serializable {
    */
   private final boolean executorCredentialRefresh;
 
+  private final boolean arrowBatchReads;
+
   private LanceSparkReadOptions(Builder builder) {
     this.datasetUri = builder.datasetUri;
-    String[] paths = extractDbPathAndDatasetName(datasetUri);
-    this.dbPath = paths[0];
-    this.datasetName = paths[1];
+    this.datasetName = extractDatasetName(datasetUri);
     this.pushDownFilters = builder.pushDownFilters;
     this.blockSize = builder.blockSize;
     this.ref = builder.ref;
@@ -160,6 +165,7 @@ public class LanceSparkReadOptions implements Serializable {
     this.indexCacheBackend = builder.indexCacheBackend;
     this.metadataCacheBackend = builder.metadataCacheBackend;
     this.executorCredentialRefresh = builder.executorCredentialRefresh;
+    this.arrowBatchReads = builder.arrowBatchReads;
   }
 
   /** Creates a new builder for LanceSparkReadOptions. */
@@ -204,7 +210,7 @@ public class LanceSparkReadOptions implements Serializable {
 
   // ========== Helper methods ==========
 
-  private static String[] extractDbPathAndDatasetName(String datasetUri) {
+  private static String extractDatasetName(String datasetUri) {
     if (datasetUri == null) {
       throw new IllegalArgumentException("The dataset uri should not be null");
     }
@@ -214,28 +220,18 @@ public class LanceSparkReadOptions implements Serializable {
       throw new IllegalArgumentException("Invalid dataset uri: " + datasetUri);
     }
 
-    String dbPath = datasetUri.substring(0, lastSlashIndex + 1);
     String datasetNameWithSuffix = datasetUri.substring(lastSlashIndex + 1);
-    String datasetName;
     if (datasetUri.endsWith(LANCE_FILE_SUFFIX)) {
-      datasetName =
-          datasetNameWithSuffix.substring(
-              0, datasetNameWithSuffix.length() - LANCE_FILE_SUFFIX.length());
-    } else {
-      datasetName = datasetNameWithSuffix;
+      return datasetNameWithSuffix.substring(
+          0, datasetNameWithSuffix.length() - LANCE_FILE_SUFFIX.length());
     }
-
-    return new String[] {dbPath, datasetName};
+    return datasetNameWithSuffix;
   }
 
   // ========== Getters ==========
 
   public String getDatasetUri() {
     return datasetUri;
-  }
-
-  public String getDbPath() {
-    return dbPath;
   }
 
   public String getDatasetName() {
@@ -311,6 +307,11 @@ public class LanceSparkReadOptions implements Serializable {
     return executorCredentialRefresh;
   }
 
+  /** Returns whether Arrow batch reads are enabled. See {@link #CONFIG_ARROW_BATCH_READS}. */
+  public boolean isArrowBatchReadsEnabled() {
+    return arrowBatchReads;
+  }
+
   public boolean hasNamespace() {
     return namespace != null && tableId != null;
   }
@@ -333,11 +334,21 @@ public class LanceSparkReadOptions implements Serializable {
    * @return new read options with the specified reference
    */
   public LanceSparkReadOptions withRef(LanceRef newRef) {
+    return toBuilder().ref(newRef).build();
+  }
+
+  /** Creates a copy of these options with {@link #CONFIG_ARROW_BATCH_READS} set as given. */
+  public LanceSparkReadOptions withArrowBatchReads(boolean arrowBatchReads) {
+    return toBuilder().arrowBatchReads(arrowBatchReads).build();
+  }
+
+  /** Creates a builder holding these options. */
+  public Builder toBuilder() {
     return builder()
         .datasetUri(this.datasetUri)
         .pushDownFilters(this.pushDownFilters)
         .blockSize(this.blockSize)
-        .ref(newRef)
+        .ref(this.ref)
         .indexCacheSize(this.indexCacheSize)
         .metadataCacheSize(this.metadataCacheSize)
         .batchSize(this.batchSize)
@@ -351,7 +362,7 @@ public class LanceSparkReadOptions implements Serializable {
         .indexCacheBackend(this.indexCacheBackend)
         .metadataCacheBackend(this.metadataCacheBackend)
         .executorCredentialRefresh(this.executorCredentialRefresh)
-        .build();
+        .arrowBatchReads(this.arrowBatchReads);
   }
 
   /**
@@ -402,6 +413,7 @@ public class LanceSparkReadOptions implements Serializable {
         && useScalarIndex == that.useScalarIndex
         && topNPushDown == that.topNPushDown
         && executorCredentialRefresh == that.executorCredentialRefresh
+        && arrowBatchReads == that.arrowBatchReads
         && FullTextQueryUtils.equals(fullTextQuery, that.fullTextQuery)
         && Objects.equals(datasetUri, that.datasetUri)
         && Objects.equals(blockSize, that.blockSize)
@@ -433,7 +445,8 @@ public class LanceSparkReadOptions implements Serializable {
         catalogName,
         indexCacheBackend,
         metadataCacheBackend,
-        executorCredentialRefresh);
+        executorCredentialRefresh,
+        arrowBatchReads);
   }
 
   /** Builder for creating LanceSparkReadOptions instances. */
@@ -455,6 +468,7 @@ public class LanceSparkReadOptions implements Serializable {
     private String indexCacheBackend;
     private String metadataCacheBackend;
     private boolean executorCredentialRefresh = DEFAULT_EXECUTOR_CREDENTIAL_REFRESH;
+    private boolean arrowBatchReads = DEFAULT_ARROW_BATCH_READS;
 
     private Builder() {}
 
@@ -543,6 +557,11 @@ public class LanceSparkReadOptions implements Serializable {
       return this;
     }
 
+    public Builder arrowBatchReads(boolean arrowBatchReads) {
+      this.arrowBatchReads = arrowBatchReads;
+      return this;
+    }
+
     /**
      * Parses options from a map, extracting read-specific settings.
      *
@@ -581,22 +600,28 @@ public class LanceSparkReadOptions implements Serializable {
      * both call sites stay in sync and catalog-level configs reach the typed fields.
      */
     private void parseTypedFlags(Map<String, String> opts) {
+      CaseInsensitiveStringMap references = new CaseInsensitiveStringMap(opts);
       Preconditions.checkArgument(
           !opts.containsKey(CONFIG_NEAREST),
           "The nearest read option is no longer supported; use VECTOR_SEARCH table function");
       Preconditions.checkArgument(
-          !(opts.containsKey(CONFIG_VERSION) && opts.containsKey(CONFIG_BRANCH)),
-          "Specify only one of branch or version");
+          (references.containsKey(CONFIG_VERSION) ? 1 : 0)
+                  + (references.containsKey(CONFIG_BRANCH) ? 1 : 0)
+                  + (references.containsKey(CONFIG_TAG) ? 1 : 0)
+              <= 1,
+          "Specify only one of branch, tag, or version");
       if (opts.containsKey(CONFIG_PUSH_DOWN_FILTERS)) {
         this.pushDownFilters = Boolean.parseBoolean(opts.get(CONFIG_PUSH_DOWN_FILTERS));
       }
       if (opts.containsKey(CONFIG_BLOCK_SIZE)) {
         this.blockSize = Integer.parseInt(opts.get(CONFIG_BLOCK_SIZE));
       }
-      if (opts.containsKey(CONFIG_VERSION)) {
-        this.ref = LanceRef.ofMain(Long.parseLong(opts.get(CONFIG_VERSION)));
-      } else if (opts.containsKey(CONFIG_BRANCH)) {
-        this.ref = LanceRef.ofBranch(opts.get(CONFIG_BRANCH));
+      if (references.containsKey(CONFIG_VERSION)) {
+        this.ref = LanceRef.ofMain(Long.parseLong(references.get(CONFIG_VERSION)));
+      } else if (references.containsKey(CONFIG_BRANCH)) {
+        this.ref = LanceRef.ofBranch(references.get(CONFIG_BRANCH));
+      } else if (references.containsKey(CONFIG_TAG)) {
+        this.ref = LanceRef.ofTag(references.get(CONFIG_TAG));
       }
       if (opts.containsKey(CONFIG_INDEX_CACHE_SIZE)) {
         this.indexCacheSize = Integer.parseInt(opts.get(CONFIG_INDEX_CACHE_SIZE));
@@ -622,6 +647,9 @@ public class LanceSparkReadOptions implements Serializable {
       if (opts.containsKey(CONFIG_EXECUTOR_CREDENTIAL_REFRESH)) {
         this.executorCredentialRefresh =
             Boolean.parseBoolean(opts.get(CONFIG_EXECUTOR_CREDENTIAL_REFRESH));
+      }
+      if (opts.containsKey(CONFIG_ARROW_BATCH_READS)) {
+        this.arrowBatchReads = Boolean.parseBoolean(opts.get(CONFIG_ARROW_BATCH_READS));
       }
     }
 

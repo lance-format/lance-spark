@@ -35,6 +35,7 @@ import org.apache.spark.sql.connector.write.DataWriterFactory;
 import org.apache.spark.sql.connector.write.PhysicalWriteInfo;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -86,8 +87,8 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
       Map<String, String> namespaceProperties,
       List<String> tableId,
       boolean managedVersioning) {
-    this.schema = schema;
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
+      this.schema = LanceArrowUtils.markUnsignedForWrite(schema, ds.getSchema());
       this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
       logger.debug("Resolved dataset ref for UPDATE COLUMNS: {}", this.writeOptions.getRef());
     }

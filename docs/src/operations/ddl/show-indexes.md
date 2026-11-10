@@ -7,7 +7,7 @@ List all indexes defined on a Lance table.
 
 ## Overview
 
-The `SHOW INDEXES` command returns one row for each logical index on a Lance table. Lance's native index statistics supply the coverage counts; index metadata supplies the fields and file sizes. Per-segment metadata is not listed individually; `num_segments` and `size_bytes` summarise it.
+The `SHOW INDEXES` command returns one row for each index on a Lance table. It uses dataset metadata when index type and coverage are known, avoiding per-segment index-statistics reads. Legacy or unsupported metadata falls back to native index statistics, which may repair outdated metadata according to Lance's automatic migration policy. Per-segment metadata is not listed individually; `num_segments` and `size_bytes` summarise it.
 
 This command is useful for inspecting existing indexes, verifying index creation, and understanding the high-level properties of each index.
 
@@ -40,43 +40,6 @@ You can also use the `IN` keyword or the singular `INDEX` spelling:
     ```sql
     SHOW INDEX IN lance.db.users;
     ```
-
-## Distributed statistics
-
-Statistics run on the driver by default. To collect physical segment statistics on Spark
-executors, enable:
-
-```sql
-SET spark.lance.indexStatistics.distributed.enabled=true;
-SHOW INDEXES FROM lance.db.users;
-```
-
-Work is distributed across segments, including segments of the same logical index. The
-number of tasks is bounded by `SparkContext.defaultParallelism`; each task opens one dataset
-and processes its assigned segments. An index with only one segment cannot gain
-within-index parallelism from this option.
-
-All tasks read the snapshot opened by the command, even if the table changes while the job
-runs. Executors use the catalog's existing storage options and credential-refresh policy.
-Native aggregation verifies that every segment has exactly one result from the pinned
-snapshot, restores manifest ordering, and computes coverage from dataset metadata rather
-than adding per-segment row counts. The output schema and row ordering are unchanged.
-
-An empty index listing starts no segment job. Task failures fail the command; there is no
-silent fallback to driver execution. Distributed aggregation does not perform Lance's
-legacy fragment-metadata migration: migrate an affected table before enabling this option.
-
-To migrate an affected table, collect statistics once on the driver before retrying:
-
-```sql
-SET spark.lance.indexStatistics.distributed.enabled=false;
-SHOW INDEXES FROM lance.db.users;
-SET spark.lance.indexStatistics.distributed.enabled=true;
-```
-
-Use this mode when collecting statistics across many segments is expensive enough to
-justify Spark scheduling and dataset-open overhead. It does not distribute the internal
-work of a single physical segment or the final coverage calculation.
 
 ## Output
 

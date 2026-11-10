@@ -28,6 +28,9 @@ import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.c.ArrowArrayStream;
+import org.apache.arrow.vector.ipc.ReadChannel;
+import org.apache.arrow.vector.ipc.WriteChannel;
+import org.apache.arrow.vector.ipc.message.MessageSerializer;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.write.BatchWrite;
@@ -36,10 +39,13 @@ import org.apache.spark.sql.connector.write.DataWriterFactory;
 import org.apache.spark.sql.connector.write.PhysicalWriteInfo;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
 import org.apache.spark.sql.types.StructType;
-import org.apache.spark.sql.util.LanceArrowUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.nio.channels.Channels;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -121,7 +127,9 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
       return;
     }
 
-    StructType sparkSchema =
+    // Commit the schema Lance merged as it is. Converting it to Spark types and back would turn
+    // the table's unsigned integer columns into signed ones, which the commit rejects.
+    Schema arrowSchema =
         Arrays.stream(messages)
             .map(m -> (TaskCommit) m)
             .map(TaskCommit::getSchema)
@@ -129,7 +137,7 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
             .findFirst()
             .orElse(null);
 
-    if (sparkSchema == null) {
+    if (arrowSchema == null) {
       throw new RuntimeException("No merged schema found in commit messages.");
     }
 
@@ -139,7 +147,6 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
     Set<Integer> mergedFragmentIds =
         fragments.stream().map(FragmentMetadata::getId).collect(Collectors.toSet());
 
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false);
     long version =
         Objects.requireNonNull(
                 writeOptions.getRef(),
@@ -216,8 +223,7 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
 
     @Override
     protected WriterCommitMessage buildCommitMessage() {
-      return new TaskCommit(
-          fragments, mergedSchema == null ? null : LanceArrowUtils.fromArrowSchema(mergedSchema));
+      return new TaskCommit(fragments, mergedSchema);
     }
   }
 
@@ -283,19 +289,40 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
 
   public static class TaskCommit implements WriterCommitMessage {
     private final List<FragmentMetadata> fragments;
-    private final StructType schema;
+    // Arrow's Schema is not Serializable, so the merged schema travels in Arrow IPC form.
+    private final byte[] schema;
 
-    TaskCommit(List<FragmentMetadata> fragments, StructType schema) {
+    TaskCommit(List<FragmentMetadata> fragments, Schema schema) {
       this.fragments = fragments;
-      this.schema = schema;
+      this.schema = schema == null ? null : serialize(schema);
     }
 
     List<FragmentMetadata> getFragments() {
       return fragments;
     }
 
-    StructType getSchema() {
-      return schema;
+    Schema getSchema() {
+      return schema == null ? null : deserialize(schema);
+    }
+
+    // Not Schema.serializeAsMessage(): Spark 3.4 and 3.5 run on Arrow 11 and 12, which lack it.
+    private static byte[] serialize(Schema schema) {
+      ByteArrayOutputStream out = new ByteArrayOutputStream();
+      try (WriteChannel channel = new WriteChannel(Channels.newChannel(out))) {
+        MessageSerializer.serialize(channel, schema);
+      } catch (IOException e) {
+        throw new RuntimeException("Failed to serialize the merged schema", e);
+      }
+      return out.toByteArray();
+    }
+
+    private static Schema deserialize(byte[] bytes) {
+      try (ReadChannel channel =
+          new ReadChannel(Channels.newChannel(new ByteArrayInputStream(bytes)))) {
+        return MessageSerializer.deserializeSchema(channel);
+      } catch (IOException e) {
+        throw new RuntimeException("Failed to deserialize the merged schema", e);
+      }
     }
   }
 }

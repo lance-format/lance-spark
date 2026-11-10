@@ -55,6 +55,21 @@ Query data from Lance tables using SQL or DataFrames.
 
 ## Aggregate Queries
 
+An ungrouped query with a single `COUNT(*)` or non-distinct `COUNT(column)` can
+be pushed down to Lance. `COUNT(column)` excludes nulls using `IS NOT NULL`
+and returns partial counts for Spark to combine, without transferring column
+values to Spark.
+
+=== "SQL"
+    ```sql
+    SELECT COUNT(email) FROM users WHERE age > 25;
+    ```
+
+Column counts currently require a top-level column and enabled filter pushdown.
+Nested fields, expressions, distinct counts, multiple aggregates,
+grouping, and queries with filters that Lance cannot evaluate remain in Spark.
+Column names containing backticks also remain in Spark.
+
 === "SQL"
     ```sql
     SELECT department, COUNT(*) as employee_count
@@ -199,6 +214,10 @@ Use `VERSION AS OF` to query a specific version of the table:
     df.show();
     ```
 
+The `version` read option applies after Spark analyzes the current table schema.
+Select compatible columns, or use SQL `VERSION AS OF` to analyze the historical schema.
+Missing columns or incompatible types fail during planning.
+
 ### Query by Tag
 
 Use `VERSION AS OF` with a quoted tag name to query the snapshot referenced by a tag:
@@ -214,27 +233,37 @@ Use `VERSION AS OF` with a quoted tag name to query the snapshot referenced by a
 
 === "Python"
     ```python
-    # Query a tag using SQL
-    spark.sql("SELECT * FROM users VERSION AS OF 'release_candidate'").show()
+    tagged = spark.read.option("tag", "release_candidate").table("users")
+
+    tagged_path = spark.read \
+        .format("lance") \
+        .option("tag", "release_candidate") \
+        .load("/path/to/dataset.lance")
     ```
 
 === "Scala"
     ```scala
-    // Query a tag using SQL
-    spark.sql("SELECT * FROM users VERSION AS OF 'release_candidate'").show()
+    val tagged = spark.read.option("tag", "release_candidate").table("users")
     ```
 
 === "Java"
     ```java
-    // Query a tag using SQL
-    spark.sql("SELECT * FROM users VERSION AS OF 'release_candidate'").show();
+    Dataset<Row> tagged = spark.read()
+        .option("tag", "release_candidate")
+        .table("users");
     ```
 
 !!! note
-    Tags whose names consist entirely of integer digits cannot be queried. Numeric values are
-    interpreted as table versions, even when quoted. For example, both `VERSION AS OF 123` and
-    `VERSION AS OF '123'` query table version 123 rather than a tag named `123`. Use a tag name that
-    contains at least one non-digit character.
+    SQL `VERSION AS OF` cannot query tags whose names consist entirely of integer digits.
+    Numeric values are interpreted as table versions, even when quoted. For example, both
+    `VERSION AS OF 123` and `VERSION AS OF '123'` query table version 123 rather than a tag named
+    `123`. Use a tag name containing a non-digit character, or the explicit `tag` read option.
+
+The explicit `tag` read option also accepts numeric tag names. Do not combine it
+with `branch` or `version`. Read options apply at scan time, after Spark analyzes the
+current table schema. You can select columns compatible with the tagged snapshot;
+missing columns or incompatible types (including nested fields) fail during planning.
+Use SQL `VERSION AS OF` to analyze the historical schema instead.
 
 Tag queries are read-only; mutating commands are rejected. Besides DML and schema changes, this
 covers `CREATE INDEX`, `DROP INDEX`, `OPTIMIZE`, `VACUUM`, `SET UNENFORCED PRIMARY KEY`, and
@@ -242,7 +271,7 @@ branch and tag DDL. Branch identifiers behave the same way.
 
 ### Query by Branch
 
-Read the current head of a named branch. Do not set `branch` and `version` on the same read.
+Read the current head of a named branch. Do not combine `branch` with `tag` or `version`.
 
 === "SQL"
     ```sql
@@ -328,7 +357,8 @@ These options control how data is read from Lance datasets. They can be set usin
 | `batch_size`          | Integer | `8192`  | Number of rows to read per batch during scanning. Larger values may improve throughput but increase memory usage. |
 | `use_scalar_index`    | Boolean | `true`  | Whether to use scalar indices (e.g. btree) for filter acceleration during scanning.                               |
 | `version`             | Integer | Latest  | Specific dataset version to read. If not specified, reads the latest version.                                     |
-| `branch`              | String  | Main    | Named branch to read. Reads the current head. Do not set with `version`.                                          |
+| `branch`              | String  | Main    | Named branch to read. Reads the current head. Do not set with `tag` or `version`.                                 |
+| `tag`                 | String  | -       | Tagged snapshot to read. Read-only; do not set with `branch` or `version`.                                        |
 | `block_size`          | Integer | -       | Block size in bytes for reading data.                                                                             |
 | `index_cache_size`    | Integer | -       | Size of the index cache in number of entries.                                                                     |
 | `metadata_cache_size` | Integer | -       | Size of the metadata cache in number of entries.                                                                  |

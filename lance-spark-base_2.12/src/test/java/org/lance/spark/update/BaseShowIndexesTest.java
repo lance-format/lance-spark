@@ -13,17 +13,17 @@
  */
 package org.lance.spark.update;
 
+import org.lance.Fragment;
+import org.lance.index.DistanceType;
 import org.lance.index.Index;
 import org.lance.index.IndexOptions;
 import org.lance.index.IndexParams;
 import org.lance.index.IndexType;
 import org.lance.index.scalar.ScalarIndexParams;
+import org.lance.index.vector.VectorIndexParams;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Utils;
 
-import org.apache.spark.SparkException;
-import org.apache.spark.scheduler.SparkListener;
-import org.apache.spark.scheduler.SparkListenerJobStart;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
@@ -37,17 +37,17 @@ import java.io.IOException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
+/** Base test for SHOW INDEXES command. */
 public abstract class BaseShowIndexesTest {
-  private static final String DISTRIBUTED_STATISTICS_ENABLED =
-      "spark.lance.indexStatistics.distributed.enabled";
   protected String catalogName = "lance_test";
   protected String tableName = "show_indexes_test";
   protected String fullTable = catalogName + ".default." + tableName;
@@ -90,6 +90,7 @@ public abstract class BaseShowIndexesTest {
 
   private void prepareDataset() {
     spark.sql(String.format("create table %s (id int, text string) using lance;", fullTable));
+    // First insert to create initial fragments
     spark.sql(
         String.format(
             "insert into %s (id, text) values %s ;",
@@ -98,6 +99,7 @@ public abstract class BaseShowIndexesTest {
                 .boxed()
                 .map(i -> String.format("(%d, 'text_%d')", i, i))
                 .collect(Collectors.joining(","))));
+    // Second insert to ensure multiple fragments
     spark.sql(
         String.format(
             "insert into %s (id, text) values %s ;",
@@ -109,142 +111,177 @@ public abstract class BaseShowIndexesTest {
   }
 
   @Test
-  public void testDistributedStatisticsWithinOneIndex() throws InterruptedException {
-    assertDistributedStatistics(true, 1);
-  }
-
-  @Test
-  public void testDistributedStatisticsAcrossIndexesWithoutCredentialRefresh()
-      throws InterruptedException {
-    assertDistributedStatistics(false, 2);
-  }
-
-  @Test
-  public void testDistributedStatisticsBatchesSegmentsWithBoundedParallelism()
-      throws InterruptedException {
-    assertDistributedStatistics(true, 6);
-  }
-
-  private void assertDistributedStatistics(boolean credentialRefresh, int indexCount)
-      throws InterruptedException {
-    spark
-        .conf()
-        .set(
-            "spark.sql.catalog."
-                + catalogName
-                + "."
-                + LanceSparkReadOptions.CONFIG_EXECUTOR_CREDENTIAL_REFRESH,
-            Boolean.toString(credentialRefresh));
+  public void testShowIndexesUsesMetadataWithoutOpeningScalarIndexFiles() throws IOException {
     prepareDataset();
-    for (int indexNumber = 0; indexNumber < indexCount; indexNumber++) {
-      spark.sql(
-          String.format(
-              "alter table %s create index test_index_%d using btree (id) with (num_segments = 2)",
-              fullTable, indexNumber));
-    }
-    spark.sql(String.format("insert into %s values (20, 'unindexed')", fullTable));
+    int fragmentCount;
     try (org.lance.Dataset dataset =
         Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build()) {
-      dataset.delete("id = 0");
+      fragmentCount = dataset.getFragments().size();
+      for (String type : List.of("BTREE", "BITMAP", "ZONEMAP", "INVERTED", "NGRAM")) {
+        String field = type.equals("INVERTED") || type.equals("NGRAM") ? "text" : "id";
+        dataset.createIndex(
+            List.of(field),
+            IndexType.SCALAR,
+            Optional.of(type.toLowerCase(Locale.ROOT)),
+            IndexParams.builder().setScalarIndexParams(ScalarIndexParams.create(type)).build(),
+            false);
+      }
     }
-    List<Row> expected =
-        spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
-    Assertions.assertEquals(indexCount, expected.size());
-    for (Row row : expected) {
-      Assertions.assertEquals(2L, row.getLong(8));
-      Assertions.assertTrue(row.getLong(6) > 0L);
+    long version;
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build()) {
+      version = dataset.version();
     }
+    Files.move(Path.of(tableDir, "_indices"), Path.of(tableDir, "_hidden_indices"));
 
-    String jobGroup = "distributed-statistics-" + UUID.randomUUID();
-    int expectedTasks = Math.min(2 * indexCount, spark.sparkContext().defaultParallelism());
-    CountDownLatch segmentTasksScheduled = new CountDownLatch(1);
-    SparkListener listener =
-        new SparkListener() {
-          @Override
-          public void onJobStart(SparkListenerJobStart event) {
-            if (event.properties() != null
-                && jobGroup.equals(event.properties().getProperty("spark.jobGroup.id"))) {
-              for (int stageIndex = 0; stageIndex < event.stageInfos().size(); stageIndex++) {
-                if (event.stageInfos().apply(stageIndex).numTasks() == expectedTasks) {
-                  segmentTasksScheduled.countDown();
-                }
-              }
-            }
-          }
-        };
-    spark.sparkContext().addSparkListener(listener);
-    spark.sparkContext().setJobGroup(jobGroup, "Distributed index statistics", false);
-    spark.conf().set(DISTRIBUTED_STATISTICS_ENABLED, "true");
-    try {
-      List<Row> actual =
-          spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
-      Assertions.assertEquals(expected, actual);
-      Assertions.assertTrue(
-          segmentTasksScheduled.await(10, TimeUnit.SECONDS),
-          "Statistics must schedule segment tasks, not just one task per index name");
-    } finally {
-      spark.conf().unset(DISTRIBUTED_STATISTICS_ENABLED);
-      spark.sparkContext().clearJobGroup();
-      spark.sparkContext().removeSparkListener(listener);
+    List<Row> rows = spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+    Assertions.assertEquals(5, rows.size());
+    for (Row row : rows) {
+      Assertions.assertEquals(row.getString(0), row.getString(2));
+      Assertions.assertEquals(fragmentCount, row.getLong(3));
+      Assertions.assertEquals(20L, row.getLong(4));
+      Assertions.assertEquals(0L, row.getLong(5));
+      Assertions.assertEquals(0L, row.getLong(6));
+      Assertions.assertEquals(100.0, row.getDouble(7));
+      Assertions.assertEquals(1L, row.getLong(8));
+      Assertions.assertTrue(row.getLong(9) > 0L);
+    }
+    Assertions.assertEquals(
+        rows, spark.sql(String.format("show indexes from %s", fullTable)).collectAsList());
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build()) {
+      Assertions.assertEquals(version, dataset.version());
     }
   }
 
   @Test
-  public void testDistributedStatisticsWithNoIndexes() {
-    prepareDataset();
-    spark.conf().set(DISTRIBUTED_STATISTICS_ENABLED, "true");
-    try {
-      Assertions.assertTrue(
-          spark.sql(String.format("show indexes from %s", fullTable)).collectAsList().isEmpty());
-    } finally {
-      spark.conf().unset(DISTRIBUTED_STATISTICS_ENABLED);
-    }
-  }
-
-  @Test
-  public void testDistributedStatisticsForEmptyIndex() {
-    spark.sql(String.format("create table %s (id int, text string) using lance", fullTable));
-    spark.sql(String.format("alter table %s create index test_index using btree (id)", fullTable));
-    List<Row> expected =
-        spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
-    spark.conf().set(DISTRIBUTED_STATISTICS_ENABLED, "true");
-    try {
-      Assertions.assertEquals(
-          expected, spark.sql(String.format("show indexes from %s", fullTable)).collectAsList());
-    } finally {
-      spark.conf().unset(DISTRIBUTED_STATISTICS_ENABLED);
-    }
-  }
-
-  @Test
-  public void testDistributedStatisticsPropagatesSegmentReadFailure() throws IOException {
-    prepareDataset();
+  public void testShowIndexesUsesMetadataAcrossPartialVectorSegments() throws IOException {
     spark.sql(
         String.format(
-            "alter table %s create index test_index using btree (id) with (num_segments = 2)",
+            "create table %s (id int, vector array<float>) using lance "
+                + "tblproperties ('vector.arrow.fixed-size-list.size' = '4')",
             fullTable));
-    UUID segmentUuid;
+    for (int batch = 0; batch < 2; batch++) {
+      spark.sql(
+          String.format(
+              "insert into %s select cast(id as int), "
+                  + "transform(sequence(1, 4), element -> cast(id + element as float)) "
+                  + "from range(%d, %d, 1, 1)",
+              fullTable, batch * 32, (batch + 1) * 32));
+    }
     try (org.lance.Dataset dataset =
         Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build()) {
-      segmentUuid = dataset.getIndexes().get(0).uuid();
+      IndexParams params =
+          IndexParams.builder()
+              .setVectorIndexParams(VectorIndexParams.ivfFlat(1, DistanceType.L2))
+              .build();
+      List<Index> segments = new ArrayList<>();
+      for (Fragment fragment : dataset.getFragments()) {
+        segments.add(
+            dataset.createIndex(
+                IndexOptions.builder(List.of("vector"), IndexType.IVF_FLAT, params)
+                    .withIndexName("vector_idx")
+                    .withFragmentIds(List.of(fragment.getId()))
+                    .build()));
+      }
+      dataset.commitExistingIndexSegments("vector_idx", "vector", segments);
+      dataset.delete("id = 0");
     }
-    Files.move(
-        Path.of(tableDir, "_indices", segmentUuid.toString()), tempDir.resolve("missing-segment"));
-    spark.conf().set(DISTRIBUTED_STATISTICS_ENABLED, "true");
-    try {
-      SparkException error =
+    spark.sql(String.format("insert into %s values (64, array(1F, 2F, 3F, 4F))", fullTable));
+    Files.move(Path.of(tableDir, "_indices"), Path.of(tableDir, "_hidden_indices"));
+
+    List<Row> rows = spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+    Assertions.assertEquals(1, rows.size());
+    Row row = rows.get(0);
+    Assertions.assertEquals("vector_idx", row.getString(0));
+    Assertions.assertEquals(List.of("vector"), row.getList(1));
+    Assertions.assertEquals("ivf_flat", row.getString(2));
+    Assertions.assertEquals(2L, row.getLong(3));
+    Assertions.assertEquals(63L, row.getLong(4));
+    Assertions.assertEquals(1L, row.getLong(5));
+    Assertions.assertEquals(1L, row.getLong(6));
+    Assertions.assertEquals(98.43, row.getDouble(7));
+    Assertions.assertEquals(2L, row.getLong(8));
+    Assertions.assertTrue(row.getLong(9) > 0L);
+  }
+
+  @Test
+  public void testShowIndexesPreservesEmptyIndexValues() {
+    spark.sql(String.format("create table %s (id int) using lance", fullTable));
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build()) {
+      dataset.createIndex(
+          List.of("id"),
+          IndexType.BTREE,
+          Optional.of("empty_index"),
+          IndexParams.builder().setScalarIndexParams(ScalarIndexParams.create("BTREE")).build(),
+          false);
+    }
+
+    List<Row> rows = spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+    Assertions.assertEquals(1, rows.size());
+    Row row = rows.get(0);
+    Assertions.assertEquals("btree", row.getString(2));
+    for (int position = 3; position <= 6; position++) {
+      Assertions.assertEquals(0L, row.getLong(position));
+    }
+    Assertions.assertTrue(row.isNullAt(7));
+    Assertions.assertEquals(1L, row.getLong(8));
+    Assertions.assertTrue(row.getLong(9) > 0L);
+  }
+
+  @Test
+  public void testShowIndexesPreservesLegacyMigration() throws Exception {
+    copyLegacyDataset();
+    long version;
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build()) {
+      version = dataset.version();
+      Assertions.assertEquals(544L, dataset.describeIndices().get(0).getRowsIndexed());
+    }
+
+    if ("false".equalsIgnoreCase(System.getenv("LANCE_AUTO_MIGRATION"))) {
+      Exception error =
           Assertions.assertThrows(
-              SparkException.class,
+              Exception.class,
               () -> spark.sql(String.format("show indexes from %s", fullTable)).collectAsList());
-      Assertions.assertTrue(error.getMessage().contains("Job aborted due to stage failure"));
-      Assertions.assertTrue(error.getMessage().contains(segmentUuid.toString()));
-    } finally {
-      spark.conf().unset(DISTRIBUTED_STATISTICS_ENABLED);
+      Assertions.assertTrue(error.toString().contains("Overlap in indexed fragments"));
+    } else {
+      List<Row> rows = spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+      Assertions.assertEquals(1, rows.size());
+      Row row = rows.get(0);
+      Assertions.assertEquals("ivf_pq", row.getString(2));
+      Assertions.assertEquals(288L, row.getLong(4));
+      Assertions.assertEquals(0L, row.getLong(6));
+      Assertions.assertEquals(100.0, row.getDouble(7));
+      Assertions.assertEquals(2L, row.getLong(8));
+      Assertions.assertTrue(row.isNullAt(9));
+      List<Row> migratedRows =
+          spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+      Assertions.assertEquals(288L, migratedRows.get(0).getLong(4));
+      Assertions.assertEquals(0L, migratedRows.get(0).getLong(6));
+      Assertions.assertTrue(migratedRows.get(0).getLong(9) > 0L);
+      Assertions.assertEquals(
+          migratedRows,
+          spark.sql(String.format("show indexes from %s", fullTable)).collectAsList());
+    }
+    try (org.lance.Dataset latest =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build()) {
+      Assertions.assertEquals(
+          "false".equalsIgnoreCase(System.getenv("LANCE_AUTO_MIGRATION")) ? version : version + 1,
+          latest.version());
     }
   }
 
   @Test
-  public void testDistributedStatisticsRejectsLegacyMetadataWithoutWrites() throws Exception {
+  public void testShowIndexesPreservesMissingLegacyIndexBehavior() throws Exception {
+    copyLegacyDataset();
+    Files.move(Path.of(tableDir, "_indices"), Path.of(tableDir, "_hidden_indices"));
+    List<Row> rows = spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
+    Assertions.assertTrue(rows.isEmpty());
+  }
+
+  private void copyLegacyDataset() throws Exception {
     Path fixture =
         Path.of(
             getClass()
@@ -261,49 +298,13 @@ public abstract class BaseShowIndexesTest {
         }
       }
     }
-    long originalVersion;
-    try (org.lance.Dataset dataset =
-        Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build()) {
-      originalVersion = dataset.version();
-    }
-    spark.conf().set(DISTRIBUTED_STATISTICS_ENABLED, "true");
-    try {
-      RuntimeException error =
-          Assertions.assertThrows(
-              RuntimeException.class,
-              () -> spark.sql(String.format("show indexes from %s", fullTable)).collectAsList());
-      Assertions.assertTrue(error.getMessage().contains("Outdated fragment metadata"));
-      try (org.lance.Dataset dataset =
-          Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build()) {
-        Assertions.assertEquals(originalVersion, dataset.version());
-      }
-    } finally {
-      spark.conf().unset(DISTRIBUTED_STATISTICS_ENABLED);
-    }
-
-    List<Row> migrated =
-        spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
-    Assertions.assertEquals(1, migrated.size());
-    Assertions.assertEquals("vector_idx", migrated.get(0).getString(0));
-    try (org.lance.Dataset dataset =
-        Utils.openDatasetBuilder(LanceSparkReadOptions.from(tableDir)).build()) {
-      Assertions.assertTrue(dataset.version() > originalVersion);
-    }
-    List<Row> expected =
-        spark.sql(String.format("show indexes from %s", fullTable)).collectAsList();
-    spark.conf().set(DISTRIBUTED_STATISTICS_ENABLED, "true");
-    try {
-      Assertions.assertEquals(
-          expected, spark.sql(String.format("show indexes from %s", fullTable)).collectAsList());
-    } finally {
-      spark.conf().unset(DISTRIBUTED_STATISTICS_ENABLED);
-    }
   }
 
   @Test
   public void testShowIndexes() {
     prepareDataset();
 
+    // Create a B-tree index on id
     spark.sql(String.format("alter table %s create index test_index using btree (id)", fullTable));
 
     Dataset<Row> result = spark.sql(String.format("show indexes from %s", fullTable));
@@ -317,17 +318,22 @@ public abstract class BaseShowIndexesTest {
 
     Row row = rows.get(0);
 
+    // name should match created index
     Assertions.assertEquals("test_index", row.getString(0));
 
+    // fields should contain column name "id"
     @SuppressWarnings("unchecked")
     List<String> fieldNames = row.getList(1);
     Assertions.assertTrue(fieldNames.contains("id"), "fields should contain column name 'id'");
 
+    // index_type should be btree
     Assertions.assertEquals("btree", row.getString(2));
 
+    // num_indexed_fragments should be at least 1
     long numIndexedFragments = row.getLong(3);
     Assertions.assertTrue(numIndexedFragments >= 1L, "num_indexed_fragments should be at least 1");
 
+    // num_indexed_rows should be at least 1
     long numIndexedRows = row.getLong(4);
     Assertions.assertTrue(numIndexedRows >= 1L, "num_indexed_rows should be at least 1");
 
@@ -421,7 +427,8 @@ public abstract class BaseShowIndexesTest {
   public void testShowIndexesFiltersFragmentReuseIndex() {
     prepareDataset();
 
-    // One segment keeps the indexed fragments in the same compaction bin.
+    // Use one index segment over all fragments so compaction rewrites indexed data. Distributed
+    // CREATE INDEX produces per-task segments that the compaction planner keeps in separate bins.
     IndexParams indexParams =
         IndexParams.builder().setScalarIndexParams(ScalarIndexParams.create("BTREE")).build();
     try (var dataset =

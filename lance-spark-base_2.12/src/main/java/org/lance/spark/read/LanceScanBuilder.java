@@ -30,6 +30,7 @@ import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.internal.ArrowBatchAdapter;
 import org.lance.spark.search.LanceSearchQuery;
 import org.lance.spark.search.LanceSearchScan;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
@@ -49,6 +50,7 @@ import org.apache.spark.sql.connector.expressions.SortDirection;
 import org.apache.spark.sql.connector.expressions.SortOrder;
 import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
+import org.apache.spark.sql.connector.expressions.aggregate.Count;
 import org.apache.spark.sql.connector.expressions.aggregate.CountStar;
 import org.apache.spark.sql.connector.expressions.filter.Predicate;
 import org.apache.spark.sql.connector.read.Scan;
@@ -88,8 +90,7 @@ public class LanceScanBuilder
   /** Full table schema before column pruning; used to widen nested structs for vectorized reads. */
   private final StructType fullSchema;
 
-  /** Blob v2 column names in the read schema. Filters on these cannot push to Lance. */
-  private final Set<String> blobV2Columns;
+  private final Set<String> residualFilterColumns;
 
   private StructType schema;
 
@@ -102,6 +103,7 @@ public class LanceScanBuilder
   private Optional<Integer> offset = Optional.empty();
   private Optional<List<ColumnOrdering>> topNSortOrders = Optional.empty();
   private Optional<Aggregation> pushedAggregation = Optional.empty();
+  private Optional<String> countFilter = Optional.empty();
   private LanceLocalScan localScan = null;
   private LanceIndexedCountScan indexedCountScan = null;
 
@@ -138,7 +140,19 @@ public class LanceScanBuilder
       java.util.Map<String, String> namespaceProperties,
       ShardingSpec shardingSpec) {
     this.fullSchema = BlobUtils.applyBlobV2DescriptorSchema(schema);
-    this.blobV2Columns = BlobUtils.blobV2ColumnNames(this.fullSchema);
+    this.residualFilterColumns = new HashSet<>(BlobUtils.blobV2ColumnNames(this.fullSchema));
+    // Blob v1 virtual columns are computed by the connector and do not exist in the Lance
+    // dataset, so predicates on them must be evaluated by Spark.
+    for (String blobColumn : BlobUtils.blobV1ColumnNames(this.fullSchema)) {
+      this.residualFilterColumns.add(blobColumn + LanceConstant.BLOB_POSITION_SUFFIX);
+      this.residualFilterColumns.add(blobColumn + LanceConstant.BLOB_SIZE_SUFFIX);
+    }
+    if (readOptions.getFullTextQuery() != null) {
+      Utils.validateFullTextSearchSchema(this.fullSchema);
+    }
+    if (Arrays.stream(this.fullSchema.fields()).noneMatch(Utils::isStoredScoreColumn)) {
+      this.residualFilterColumns.add(LanceConstant.SCORE);
+    }
     this.schema = this.fullSchema;
     this.readOptions = readOptions;
     this.initialStorageOptions = initialStorageOptions;
@@ -178,6 +192,19 @@ public class LanceScanBuilder
       }
       if (indexedCountScan != null) {
         return indexedCountScan;
+      }
+
+      // Reject _score without an active FTS query. The metadata column is advertised
+      // unconditionally (analyzer resolves it before the FTS rule runs), so validation
+      // must happen here at build time, after the optimizer fixed-point has finalized
+      // the relation options.
+      if (Arrays.stream(schema.fields()).anyMatch(Utils::isScoreMetadataColumn)
+          && readOptions.getFullTextQuery() == null) {
+        throw new IllegalArgumentException(
+            "Column '_score' requires a full-text search predicate (lance_match, "
+                + "lance_match_phrase, or lance_multi_match) in the WHERE clause. "
+                + "_score is a relevance score computed by the Lance FTS index and has no "
+                + "value without an active full-text query.");
       }
 
       // Namespace-configured full-text search executes server-side via queryTable (single
@@ -258,6 +285,18 @@ public class LanceScanBuilder
                 .orElse(null);
       }
 
+      // Spark re-runs a partially pushed COUNT(*) as SUM over this scan's per-partition counts, so
+      // a scan that plans no partition leaves SUM with zero rows and it yields NULL instead of 0.
+      // Answering 0 is safe here: pruning never drops a fragment that could match.
+      if (isPushedCountStar()
+          && LanceScan.pruneForPlanning(
+                  scanPlan.getSplits(), pushedPredicates, survivingFragmentIds)
+              .isEmpty()) {
+        LOG.debug("All fragments pruned for a pushed COUNT(*); resolving the count to 0 locally");
+        setLocalCount(0L);
+        return localScan;
+      }
+
       // Scale rows and full size by the surviving-row ratio first, then let
       // LanceStatistics.estimateProjected apply the column-width ratio on top
       // (when the projected schema is narrower than the full schema).
@@ -289,9 +328,22 @@ public class LanceScanBuilder
             summary.getTotalRows());
       }
 
+      // Plan Arrow batches from the dataset schema already loaded here. A scan that cannot emit
+      // them reads as usual, also when the arrow_batch_reads read option asks for them.
+      ArrowBatchAdapter.Plan arrowBatchPlan =
+          pushedAggregation.isPresent()
+              ? ArrowBatchAdapter.Plan.unsupported("the scan has a pushed aggregation")
+              : ArrowBatchAdapter.plan(schema, dataset.getSchema());
       LanceSparkReadOptions resolvedReadOptions = readOptions.withRef(scanPlan.getRef());
       Optional<String> whereCondition =
           FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);
+      if (countFilter.isPresent()) {
+        whereCondition =
+            Optional.of(
+                whereCondition.isPresent()
+                    ? whereCondition.get() + " AND (" + countFilter.get() + ")"
+                    : countFilter.get());
+      }
       return new LanceScan(
           schema,
           resolvedReadOptions,
@@ -309,7 +361,8 @@ public class LanceScanBuilder
           fragmentShardingKeys,
           initialStorageOptions,
           namespaceImpl,
-          namespaceProperties);
+          namespaceProperties,
+          arrowBatchPlan);
     } finally {
       closeLazyDataset();
     }
@@ -557,6 +610,7 @@ public class LanceScanBuilder
             .topK(k)
             .offset(pushedOffset)
             .filter(whereCondition.isPresent() ? whereCondition.get() : null)
+            .prefilter(true)
             .version(
                 readOptions.getRef() == null || readOptions.getRef().getVersionNumber().isEmpty()
                     ? null
@@ -568,6 +622,10 @@ public class LanceScanBuilder
 
   @Override
   public void pruneColumns(StructType requiredSchema) {
+    LanceRef ref = readOptions.getRef();
+    if (ref != null && (ref.isBranchOrTag() || ref.getVersionNumber().isPresent())) {
+      ReadSchemaNestedStructWidening.validateRequiredSchema(requiredSchema, fullSchema);
+    }
     this.schema = ReadSchemaNestedStructWidening.widenRequiredSchema(requiredSchema, fullSchema);
   }
 
@@ -581,11 +639,9 @@ public class LanceScanBuilder
     } else {
       List<Predicate> pushedList = new ArrayList<>();
       List<Predicate> residualList = new ArrayList<>();
-      // Push supported predicates unless they touch a blob v2 column. Those read back as descriptor
-      // structs, so Lance cannot evaluate filters on them. Normal-column filters still prune.
       for (Predicate predicate : predicates) {
         if (FilterPushDown.isPredicateSupported(predicate)
-            && !FilterPushDown.referencesAny(predicate, blobV2Columns)) {
+            && !FilterPushDown.referencesAny(predicate, residualFilterColumns)) {
           pushedList.add(predicate);
         } else {
           residualList.add(predicate);
@@ -638,12 +694,20 @@ public class LanceScanBuilder
 
   @Override
   public boolean pushTopN(SortOrder[] orders, int limit) {
-    // The Order by operator will use compute thread in lance.
-    // So it's better to have an option to enable it.
     if (!readOptions.isTopNPushDown() || hasResidualPredicates) {
       return false;
     }
-    this.limit = Optional.of(limit);
+    if (readOptions.getFullTextQuery() != null) {
+      if (orders.length != 1
+          || !(orders[0].expression() instanceof FieldReference)
+          || !((FieldReference) orders[0].expression()).fieldNames()[0].equals(LanceConstant.SCORE)
+          || orders[0].direction() != SortDirection.DESCENDING
+          || !shouldNamespaceFtsScan()) {
+        return false;
+      }
+      this.limit = Optional.of(limit);
+      return true;
+    }
     List<ColumnOrdering> topNSortOrders = new ArrayList<>();
     for (SortOrder sortOrder : orders) {
       ColumnOrdering.Builder builder = new ColumnOrdering.Builder();
@@ -653,9 +717,11 @@ public class LanceScanBuilder
         return false;
       }
       FieldReference reference = (FieldReference) sortOrder.expression();
-      builder.setColumnName(reference.fieldNames()[0]);
+      String columnName = reference.fieldNames()[0];
+      builder.setColumnName(columnName);
       topNSortOrders.add(builder.build());
     }
+    this.limit = Optional.of(limit);
     this.topNSortOrders = Optional.of(topNSortOrders);
     return true;
   }
@@ -668,6 +734,27 @@ public class LanceScanBuilder
     AggregateFunc[] funcs = aggregation.aggregateExpressions();
     if (aggregation.groupByExpressions().length > 0) {
       return false;
+    }
+    if (funcs.length == 1 && funcs[0] instanceof Count) {
+      Count count = (Count) funcs[0];
+      if (count.isDistinct()
+          || !(count.column() instanceof NamedReference)
+          || !readOptions.isPushDownFilters()) {
+        return false;
+      }
+      String[] names = ((NamedReference) count.column()).fieldNames();
+      // shortcut: Keep backtick names in Spark until Lance scan field paths support them.
+      if (names.length != 1
+          || names[0].contains("`")
+          || residualFilterColumns.contains(names[0])
+          || Arrays.stream(fullSchema.fields()).noneMatch(field -> field.name().equals(names[0]))) {
+        return false;
+      }
+      this.countFilter = Optional.of("`" + names[0] + "` IS NOT NULL");
+      // COUNT(column) is COUNT(*) over non-null values; reuse the count-only reader.
+      this.pushedAggregation =
+          Optional.of(new Aggregation(new AggregateFunc[] {new CountStar()}, new Expression[0]));
+      return true;
     }
     if (funcs.length == 1 && funcs[0] instanceof CountStar) {
       // Metadata-based count is only valid when nothing restricts the rows. A full-text query is
@@ -741,6 +828,14 @@ public class LanceScanBuilder
     InternalRow[] rows = new InternalRow[1];
     rows[0] = new GenericInternalRow(new Object[] {count});
     this.localScan = new LanceLocalScan(countSchema, rows, readOptions.getDatasetUri());
+  }
+
+  private boolean isPushedCountStar() {
+    if (!pushedAggregation.isPresent()) {
+      return false;
+    }
+    AggregateFunc[] funcs = pushedAggregation.get().aggregateExpressions();
+    return funcs.length == 1 && funcs[0] instanceof CountStar;
   }
 
   private static Optional<Long> getCountFromMetadata(Dataset dataset) {

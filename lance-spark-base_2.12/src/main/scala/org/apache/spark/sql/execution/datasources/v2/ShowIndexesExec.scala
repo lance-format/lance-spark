@@ -19,15 +19,21 @@ import org.apache.spark.sql.catalyst.plans.logical.ShowIndexesOutputType
 import org.apache.spark.sql.catalyst.util.GenericArrayData
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.unsafe.types.UTF8String
-import org.lance.index.IndexSegmentStatistics
-import org.lance.spark.{LanceDataset, LanceSparkReadOptions}
-import org.lance.spark.internal.ExecutorNamespace
+import org.lance.Dataset
+import org.lance.index.{Index, IndexCriteria, IndexType}
+import org.lance.spark.LanceDataset
 import org.lance.spark.utils.{FieldPathUtils, Utils}
 
-import java.util.UUID
+import java.util.{Locale, Map => JMap}
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable
 
+/**
+ * Physical execution of SHOW INDEXES for Lance datasets.
+ *
+ * This command lists all indexes defined on the underlying Lance table.
+ */
 case class ShowIndexesExec(
     catalog: TableCatalog,
     ident: Identifier) extends LeafV2CommandExec {
@@ -42,9 +48,6 @@ case class ShowIndexesExec(
     }
 
     val readOptions = lanceDataset.readOptions()
-    val distributed = session.conf
-      .get(ShowIndexesExec.DISTRIBUTED_STATISTICS_ENABLED, "false")
-      .toBoolean
 
     val dataset = Utils.openDatasetBuilder(readOptions).build()
     try {
@@ -54,30 +57,8 @@ case class ShowIndexesExec(
         .toSeq
         .sortBy(_._1)
       val lanceSchema = dataset.getLanceSchema()
-      val statisticsByName: Map[String, Seq[IndexSegmentStatistics]] =
-        if (distributed && indexes.nonEmpty) {
-          val pinnedReadOptions = IndexUtils.pinVersion(readOptions, dataset)
-          val (namespaceImpl, namespaceProperties, _, initialStorageOptions) =
-            IndexUtils.extractNamespaceInfo(catalog, lanceDataset, readOptions)
-          val segments = indexes.flatMap { case (name, indexSegments) =>
-            indexSegments.map(segment => (name, segment.uuid()))
-          }
-          val partitions = math.min(segments.size, session.sparkContext.defaultParallelism)
-          session.sparkContext.parallelize(segments, partitions)
-            .mapPartitions { work =>
-              ShowIndexesExec.collectSegmentStatistics(
-                work,
-                pinnedReadOptions,
-                namespaceImpl,
-                namespaceProperties,
-                initialStorageOptions)
-            }
-            .collect()
-            .groupBy(_._1)
-            .map { case (name, results) => name -> results.map(_._2).toSeq }
-        } else {
-          Map.empty
-        }
+      lazy val fragmentIds = dataset.getFragments.asScala.iterator.map(_.getId).toSet
+      lazy val totalRows = dataset.countRows()
 
       indexes.map { case (_, indexSegments) =>
         val idx = indexSegments.head
@@ -95,18 +76,14 @@ case class ShowIndexesExec(
           }
 
         val name = idx.name()
-        val stats =
-          if (distributed) {
-            dataset.getIndexStatisticsFromSegments(name, statisticsByName(name).asJava)
-          } else {
-            dataset.getIndexStatistics(name)
-          }
+        val stats = metadataStatistics(dataset, indexSegments, fragmentIds, totalRows)
+          .getOrElse(dataset.getIndexStatistics(name))
         val indexTypeValue = stats.get("index_type")
         val indexTypeUtf8 =
           if (indexTypeValue == null) {
             null
           } else {
-            UTF8String.fromString(indexTypeValue.toString.toLowerCase(java.util.Locale.ROOT))
+            UTF8String.fromString(indexTypeValue.toString.toLowerCase(Locale.ROOT))
           }
 
         def getLong(key: String): java.lang.Long = {
@@ -165,39 +142,55 @@ case class ShowIndexesExec(
       dataset.close()
     }
   }
-}
 
-object ShowIndexesExec {
-  val DISTRIBUTED_STATISTICS_ENABLED = "spark.lance.indexStatistics.distributed.enabled"
-
-  private def collectSegmentStatistics(
-      segments: Iterator[(String, UUID)],
-      readOptions: LanceSparkReadOptions,
-      namespaceImpl: Option[String],
-      namespaceProperties: Option[Map[String, String]],
-      initialStorageOptions: Option[Map[String, String]])
-      : Iterator[(String, IndexSegmentStatistics)] = {
-    if (!segments.hasNext) {
-      return Iterator.empty
+  private def metadataStatistics(
+      dataset: Dataset,
+      segments: Seq[Index],
+      fragmentIds: => Set[Int],
+      totalRows: => Long): Option[JMap[String, Object]] = {
+    val coveredFragments = mutable.HashSet.empty[Int]
+    val knownCoverage = segments.forall { segment =>
+      segment.indexDetails().isPresent && segment.fragments().isPresent &&
+      segment.fragments().get().asScala.iterator
+        .map(_.intValue())
+        .filter(fragmentIds.contains)
+        .forall(coveredFragments.add)
     }
-    val namespace = ExecutorNamespace.acquire(
-      readOptions,
-      namespaceImpl.orNull,
-      namespaceProperties.map(_.asJava).orNull)
-    try {
-      val dataset = Utils.openDatasetBuilder(readOptions)
-        .initialStorageOptions(initialStorageOptions.map(_.asJava).orNull)
-        .build()
+    if (!knownCoverage) {
+      return None
+    }
+
+    val name = segments.head.name()
+    val descriptions =
       try {
-        segments.toVector.groupBy(_._1).iterator.flatMap { case (name, work) =>
-          dataset.getIndexSegmentStatistics(name, work.map(_._2).asJava).asScala
-            .map(statistics => name -> statistics)
-        }.toVector.iterator
-      } finally {
-        dataset.close()
+        dataset.describeIndices(new IndexCriteria.Builder().hasName(name).build()).asScala.toSeq
+      } catch {
+        case error: RuntimeException =>
+          logDebug(s"Falling back to native statistics for index $name", error)
+          return None
       }
-    } finally {
-      namespace.close()
+    descriptions.find(_.getName == name).flatMap { description =>
+      val indexType = description.getIndexType
+      val concreteType = indexType != null &&
+        !indexType.equalsIgnoreCase("Vector") &&
+        !indexType.equalsIgnoreCase("Scalar") &&
+        IndexType.values().exists(_.name().replace("_", "").equalsIgnoreCase(
+          indexType.replace("_", "")))
+      val sameSegments = description.getMetadata.asScala.map(_.uuid()).toSet ==
+        segments.map(_.uuid()).toSet
+      val indexedRows = description.getRowsIndexed
+      if (!concreteType || !sameSegments || indexedRows < 0 || indexedRows > totalRows) {
+        None
+      } else {
+        Some(Map[String, Object](
+          "index_type" -> indexType,
+          "num_indexed_fragments" -> Long.box(coveredFragments.size.toLong),
+          "num_indexed_rows" -> Long.box(indexedRows),
+          "num_unindexed_fragments" -> Long.box(
+            fragmentIds.size.toLong - coveredFragments.size),
+          "num_unindexed_rows" -> Long.box(totalRows - indexedRows),
+          "num_segments" -> Long.box(segments.size.toLong)).asJava)
+      }
     }
   }
 }

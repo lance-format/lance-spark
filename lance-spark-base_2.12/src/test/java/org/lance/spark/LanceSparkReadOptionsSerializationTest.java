@@ -77,12 +77,50 @@ public class LanceSparkReadOptionsSerializationTest {
 
   @Test
   public void testFromOptionsParsesBranch() {
-    LanceSparkReadOptions options =
-        LanceSparkReadOptions.from(
-            Collections.singletonMap(LanceSparkReadOptions.CONFIG_BRANCH, "audit"),
-            "s3://bucket/path");
+    for (String key : Arrays.asList("branch", "BrAnCh")) {
+      LanceSparkReadOptions options =
+          LanceSparkReadOptions.from(Collections.singletonMap(key, "audit"), "s3://bucket/path");
+      Assertions.assertEquals(LanceRef.ofBranch("audit"), options.getRef());
+    }
+  }
 
-    Assertions.assertEquals(LanceRef.ofBranch("audit"), options.getRef());
+  @Test
+  public void testFromOptionsParsesTag() {
+    for (String key : Arrays.asList("tag", "TaG", "TAG")) {
+      Map<String, String> properties = new HashMap<>();
+      properties.put(key, "stable");
+      properties.put("CustomStorageKey", "value");
+      LanceSparkReadOptions options = LanceSparkReadOptions.from(properties, "s3://bucket/path");
+      Assertions.assertEquals(LanceRef.ofTag("stable"), options.getRef());
+      Assertions.assertEquals(properties, options.getStorageOptions());
+    }
+  }
+
+  @Test
+  public void testFromOptionsParsesMixedCaseVersion() {
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.from(Collections.singletonMap("VeRsIoN", "2"), "s3://bucket/path");
+    Assertions.assertEquals(LanceRef.ofMain(2), options.getRef());
+  }
+
+  @Test
+  public void testFromOptionsRejectsEmptyOrConflictingTag() {
+    Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            LanceSparkReadOptions.from(
+                Collections.singletonMap(LanceSparkReadOptions.CONFIG_TAG, ""),
+                "s3://bucket/path"));
+    for (String tag : Arrays.asList("tag", "TaG")) {
+      for (String other : Arrays.asList("branch", "BrAnCh", "version", "VERSION")) {
+        Map<String, String> options = new HashMap<>();
+        options.put(tag, "stable");
+        options.put(other, "2");
+        Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> LanceSparkReadOptions.from(options, "s3://bucket/path"));
+      }
+    }
   }
 
   @Test

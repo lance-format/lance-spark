@@ -16,12 +16,14 @@ package org.lance.spark.read;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.internal.ArrowBatchAdapter;
 import org.lance.spark.read.metric.LanceCustomMetrics;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
 import org.lance.spark.utils.FullTextQueryUtils;
 import org.lance.spark.utils.Optional;
 
 import org.apache.arrow.util.Preconditions;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
@@ -120,6 +122,9 @@ public class LanceScan
 
   private final java.util.Map<String, String> namespaceProperties;
 
+  /** The Arrow batches the scan can emit; see {@link #arrowBatchSchema()}. */
+  private final ArrowBatchAdapter.Plan arrowBatchPlan;
+
   public LanceScan(
       StructType schema,
       LanceSparkReadOptions readOptions,
@@ -138,8 +143,68 @@ public class LanceScan
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
       java.util.Map<String, String> namespaceProperties) {
+    this(
+        schema,
+        readOptions,
+        whereConditions,
+        limit,
+        offset,
+        topNSortOrders,
+        pushedAggregation,
+        pushedPredicates,
+        statistics,
+        survivingFragmentIds,
+        precomputedSplits,
+        precomputedFragmentRowCounts,
+        activeShardingExpression,
+        fragmentShardingKeys,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        null);
+  }
+
+  /**
+   * @param arrowBatchPlan the Arrow batches the scan can emit (see {@link #arrowBatchSchema()}), or
+   *     null if it has none
+   */
+  public LanceScan(
+      StructType schema,
+      LanceSparkReadOptions readOptions,
+      Optional<String> whereConditions,
+      Optional<Integer> limit,
+      Optional<Integer> offset,
+      Optional<List<ColumnOrdering>> topNSortOrders,
+      Optional<Aggregation> pushedAggregation,
+      Predicate[] pushedPredicates,
+      LanceStatistics statistics,
+      Set<Integer> survivingFragmentIds,
+      List<LanceSplit> precomputedSplits,
+      java.util.Map<Integer, Long> precomputedFragmentRowCounts,
+      Expression activeShardingExpression,
+      java.util.Map<Integer, Object> fragmentShardingKeys,
+      java.util.Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      java.util.Map<String, String> namespaceProperties,
+      ArrowBatchAdapter.Plan arrowBatchPlan) {
     this.schema = schema;
-    this.readOptions = readOptions;
+    this.arrowBatchPlan =
+        arrowBatchPlan != null
+            ? arrowBatchPlan
+            : ArrowBatchAdapter.Plan.unsupported("the scan was built without an Arrow batch plan");
+    // The reader emits Arrow batches whenever the read option asks for them, so a scan that
+    // cannot emit them reads as usual whatever its read options say.
+    if (readOptions != null
+        && readOptions.isArrowBatchReadsEnabled()
+        && !this.arrowBatchPlan.isSupported()) {
+      LOG.info(
+          "Reading {} without Arrow batches: {}",
+          readOptions.getDatasetUri(),
+          this.arrowBatchPlan.unsupportedReason());
+      this.readOptions = readOptions.withArrowBatchReads(false);
+    } else {
+      this.readOptions = readOptions;
+    }
     this.whereConditions = whereConditions;
     this.limit = limit;
     this.offset = offset;
@@ -171,6 +236,68 @@ public class LanceScan
     return readOptions;
   }
 
+  /**
+   * The Arrow schema of the batches the columnar reader emits with Arrow batch reads ({@link
+   * LanceSparkReadOptions#CONFIG_ARROW_BATCH_READS}, {@link #withArrowBatches()}), or empty if this
+   * scan cannot emit Arrow batches; {@link #arrowBatchUnsupportedReason()} then says why. A
+   * consumer that takes the batches as Arrow can check here that it reads every type.
+   *
+   * <p>Every column of an Arrow batch is a Spark {@link
+   * org.apache.spark.sql.vectorized.ArrowColumnVector}, in {@link #readSchema()} order. A batch is
+   * valid until the reader's next {@code next()} or {@code close()} call, which reuses or releases
+   * its vectors, so a consumer that keeps a batch longer transfers its vectors first.
+   */
+  public Optional<Schema> arrowBatchSchema() {
+    return arrowBatchPlan.isSupported() ? Optional.of(arrowBatchPlan.schema()) : Optional.empty();
+  }
+
+  /** Why this scan cannot emit Arrow batches, if it cannot. See {@link #arrowBatchSchema()}. */
+  public Optional<String> arrowBatchUnsupportedReason() {
+    return arrowBatchPlan.isSupported()
+        ? Optional.empty()
+        : Optional.of(arrowBatchPlan.unsupportedReason());
+  }
+
+  /**
+   * A copy of this scan whose columnar reader emits Arrow batches, as with the {@link
+   * LanceSparkReadOptions#CONFIG_ARROW_BATCH_READS} read option.
+   *
+   * @throws IllegalStateException if this scan cannot emit Arrow batches (see {@link
+   *     #arrowBatchUnsupportedReason()})
+   */
+  public LanceScan withArrowBatches() {
+    if (!arrowBatchPlan.isSupported()) {
+      throw new IllegalStateException(
+          "Lance scan cannot emit Arrow batches: " + arrowBatchPlan.unsupportedReason());
+    }
+    if (readOptions.isArrowBatchReadsEnabled()) {
+      return this;
+    }
+    LanceScan copy =
+        new LanceScan(
+            schema,
+            readOptions.withArrowBatchReads(true),
+            whereConditions,
+            limit,
+            offset,
+            topNSortOrders,
+            pushedAggregation,
+            pushedPredicates,
+            statistics,
+            cachedSurvivingFragmentIds,
+            precomputedSplits,
+            precomputedFragmentRowCounts,
+            activeShardingExpression,
+            fragmentShardingKeys,
+            initialStorageOptions,
+            namespaceImpl,
+            namespaceProperties,
+            arrowBatchPlan);
+    // Planned partitions are the same, so the copy reports the same partitioning.
+    copy.numPartitions = numPartitions;
+    return copy;
+  }
+
   @Override
   public Batch toBatch() {
     return this;
@@ -181,12 +308,8 @@ public class LanceScan
     // Splits and per-fragment row counts are pre-computed on the driver during
     // LanceScanBuilder.build() from the same Dataset handle that loaded manifest /
     // schema / zonemap stats. This avoids a second Dataset.open() at plan time.
-    List<LanceSplit> prunedSplits = pruneByRowAddrFilters(precomputedSplits);
-
-    // Zonemap-based fragment pruning: uses per-column min/max/null_count
-    // statistics to eliminate fragments that provably cannot match
-    // pushed filters.
-    prunedSplits = pruneByZonemapStats(prunedSplits);
+    List<LanceSplit> prunedSplits =
+        pruneForPlanning(precomputedSplits, pushedPredicates, cachedSurvivingFragmentIds);
 
     // Limit-based split pruning: when a LIMIT is pushed down without filters or TopN sort,
     // use per-fragment row counts to plan only enough splits to satisfy the limit.
@@ -235,6 +358,19 @@ public class LanceScan
   }
 
   /**
+   * Shared with {@link LanceScanBuilder#build()} so planning can tell, before the scan exists,
+   * whether pruning leaves anything to read. An empty result means no fragment can match.
+   *
+   * @param survivingFragmentIds fragment IDs kept by zonemap pruning, or null when the builder did
+   *     not prune
+   */
+  static List<LanceSplit> pruneForPlanning(
+      List<LanceSplit> allSplits, Predicate[] pushedPredicates, Set<Integer> survivingFragmentIds) {
+    return pruneByZonemapStats(
+        pruneByRowAddrFilters(allSplits, pushedPredicates), survivingFragmentIds);
+  }
+
+  /**
    * Prunes splits based on {@code _rowaddr} filters — skipping fragment opens, scan setup, and task
    * scheduling for fragments that provably cannot match the query predicate.
    *
@@ -247,7 +383,8 @@ public class LanceScan
    * _rowaddr = 0 AND _rowaddr = 4294967296L}) and no fragments can match, resulting in zero rows
    * returned.
    */
-  private List<LanceSplit> pruneByRowAddrFilters(List<LanceSplit> allSplits) {
+  private static List<LanceSplit> pruneByRowAddrFilters(
+      List<LanceSplit> allSplits, Predicate[] pushedPredicates) {
     java.util.Optional<Set<Integer>> targetFragmentIds =
         RowAddressFilterAnalyzer.extractTargetFragmentIds(pushedPredicates);
     if (!targetFragmentIds.isPresent()) {
@@ -355,12 +492,13 @@ public class LanceScan
    * <p>This is analogous to partition pruning in Hive/Iceberg: fragments whose zones all fail the
    * predicate are skipped entirely, avoiding fragment opens, scan setup, and task scheduling.
    */
-  private List<LanceSplit> pruneByZonemapStats(List<LanceSplit> allSplits) {
+  private static List<LanceSplit> pruneByZonemapStats(
+      List<LanceSplit> allSplits, Set<Integer> survivingFragmentIds) {
     // Null means the builder did not prune. Do not recompute here.
-    if (cachedSurvivingFragmentIds == null) {
+    if (survivingFragmentIds == null) {
       return allSplits;
     }
-    Set<Integer> allowedIds = cachedSurvivingFragmentIds;
+    Set<Integer> allowedIds = survivingFragmentIds;
 
     List<LanceSplit> pruned =
         allSplits.stream()

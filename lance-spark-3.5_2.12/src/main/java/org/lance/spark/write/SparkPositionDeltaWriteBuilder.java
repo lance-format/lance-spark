@@ -43,6 +43,8 @@ public class SparkPositionDeltaWriteBuilder implements DeltaWriteBuilder {
   /** Blob source contexts for resolving copy tokens, keyed by source dataset URI. */
   private final Map<String, BlobSourceContext> blobSourceContexts;
 
+  private final boolean deleteOnly;
+
   public SparkPositionDeltaWriteBuilder(
       StructType sparkSchema,
       LanceSparkWriteOptions writeOptions,
@@ -52,6 +54,28 @@ public class SparkPositionDeltaWriteBuilder implements DeltaWriteBuilder {
       boolean managedVersioning,
       List<String> tableId,
       Map<String, BlobSourceContext> blobSourceContexts) {
+    this(
+        sparkSchema,
+        writeOptions,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        managedVersioning,
+        tableId,
+        blobSourceContexts,
+        false);
+  }
+
+  public SparkPositionDeltaWriteBuilder(
+      StructType sparkSchema,
+      LanceSparkWriteOptions writeOptions,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      boolean managedVersioning,
+      List<String> tableId,
+      Map<String, BlobSourceContext> blobSourceContexts,
+      boolean deleteOnly) {
     this.sparkSchema = sparkSchema;
     this.writeOptions = writeOptions;
     this.initialStorageOptions = initialStorageOptions;
@@ -60,6 +84,7 @@ public class SparkPositionDeltaWriteBuilder implements DeltaWriteBuilder {
     this.managedVersioning = managedVersioning;
     this.tableId = tableId;
     this.blobSourceContexts = blobSourceContexts;
+    this.deleteOnly = deleteOnly;
   }
 
   /** Returns the write options used by this builder. Visible for testing. */
@@ -76,6 +101,7 @@ public class SparkPositionDeltaWriteBuilder implements DeltaWriteBuilder {
         namespaceProperties,
         managedVersioning,
         tableId,
-        blobSourceContexts);
+        blobSourceContexts,
+        deleteOnly);
   }
 }

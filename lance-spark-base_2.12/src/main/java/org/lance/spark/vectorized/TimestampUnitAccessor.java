@@ -35,7 +35,7 @@ public class TimestampUnitAccessor {
   final long getLong(int rowId) {
     long raw = accessor.get(rowId);
     if (multiplier != 1L) {
-      return raw * multiplier;
+      return Math.multiplyExact(raw, multiplier);
     }
     return Math.floorDiv(raw, divisor);
   }

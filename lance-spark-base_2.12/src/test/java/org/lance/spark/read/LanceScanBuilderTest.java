@@ -14,12 +14,17 @@
 package org.lance.spark.read;
 
 import org.lance.ipc.FullTextQuery;
+import org.lance.spark.LanceConstant;
+import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceRef;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.search.LanceSearchInputPartition;
+import org.lance.spark.search.LanceSearchScan;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Optional;
 
+import org.apache.spark.sql.catalyst.expressions.MetadataAttribute;
 import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.FieldReference;
 import org.apache.spark.sql.connector.expressions.NullOrdering;
@@ -27,18 +32,23 @@ import org.apache.spark.sql.connector.expressions.SortDirection;
 import org.apache.spark.sql.connector.expressions.SortOrder;
 import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
+import org.apache.spark.sql.connector.expressions.aggregate.Count;
 import org.apache.spark.sql.connector.expressions.aggregate.CountStar;
 import org.apache.spark.sql.connector.expressions.aggregate.Sum;
 import org.apache.spark.sql.connector.expressions.filter.Predicate;
+import org.apache.spark.sql.connector.read.PartitionReader;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.types.ArrayType;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -57,6 +67,34 @@ public class LanceScanBuilderTest {
   }
 
   // --- pruneColumns ---
+
+  @Test
+  public void testScanOptionsDoNotRestoreStaleMixedCaseReference() {
+    for (String key : Arrays.asList("TaG", "BrAnCh", "VeRsIoN")) {
+      LanceSparkReadOptions options =
+          LanceSparkReadOptions.from(
+                  Collections.singletonMap(key, "999"), TestUtils.TestTable1Config.datasetUri)
+              .withRef(LanceRef.ofMain(1));
+      LanceDataset table =
+          new LanceDataset(
+              options,
+              TEST_SCHEMA,
+              Collections.emptyMap(),
+              null,
+              Collections.emptyMap(),
+              false,
+              null);
+      LanceScan scan =
+          (LanceScan)
+              table
+                  .newScanBuilder(
+                      new CaseInsensitiveStringMap(Collections.singletonMap("batch_size", "128")))
+                  .build();
+      LanceInputPartition partition = (LanceInputPartition) scan.planInputPartitions()[0];
+      assertEquals(LanceRef.ofMain(1), partition.getReadOptions().getRef());
+      assertEquals(128, partition.getReadOptions().getBatchSize());
+    }
+  }
 
   @Test
   public void testPruneColumnsUpdatesSchema() {
@@ -78,6 +116,104 @@ public class LanceScanBuilderTest {
     builder.pruneColumns(emptySchema);
     Scan scan = builder.build();
     assertEquals(emptySchema, scan.readSchema());
+  }
+
+  private LanceScanBuilder createSnapshotBuilder(StructType schema) {
+    return new LanceScanBuilder(
+        schema,
+        TestUtils.TestTable1Config.readOptions.withRef(LanceRef.ofMain(1)),
+        Collections.emptyMap(),
+        null,
+        Collections.emptyMap());
+  }
+
+  @Test
+  public void testPruneSnapshotColumnsRejectsMissingFields() {
+    LanceScanBuilder builder =
+        createSnapshotBuilder(
+            new StructType().add("payload", new StructType().add("value", DataTypes.IntegerType)));
+    for (StructType required :
+        Arrays.asList(
+            new StructType().add("extra", DataTypes.IntegerType),
+            new StructType()
+                .add("payload", new StructType().add("extra", DataTypes.IntegerType)))) {
+      IllegalArgumentException error =
+          assertThrows(IllegalArgumentException.class, () -> builder.pruneColumns(required));
+      assertTrue(error.getMessage().contains("extra"));
+      assertTrue(error.getMessage().contains("snapshot"));
+    }
+  }
+
+  @Test
+  public void testPruneSnapshotColumnsRejectsChangedTypes() {
+    StructType oldStruct = new StructType().add("value", DataTypes.IntegerType);
+    StructType newStruct = new StructType().add("value", DataTypes.LongType);
+    DataType[] oldTypes = {
+      DataTypes.IntegerType,
+      oldStruct,
+      DataTypes.createArrayType(oldStruct),
+      DataTypes.createMapType(DataTypes.StringType, oldStruct),
+      DataTypes.createMapType(DataTypes.StringType, DataTypes.IntegerType)
+    };
+    DataType[] newTypes = {
+      DataTypes.LongType,
+      newStruct,
+      DataTypes.createArrayType(newStruct),
+      DataTypes.createMapType(DataTypes.StringType, newStruct),
+      DataTypes.createMapType(DataTypes.IntegerType, DataTypes.IntegerType)
+    };
+    for (int i = 0; i < oldTypes.length; i++) {
+      LanceScanBuilder builder =
+          createSnapshotBuilder(new StructType().add("payload", oldTypes[i]));
+      StructType required = new StructType().add("payload", newTypes[i]);
+      IllegalArgumentException error =
+          assertThrows(IllegalArgumentException.class, () -> builder.pruneColumns(required));
+      assertTrue(error.getMessage().contains("payload"));
+      assertTrue(error.getMessage().contains("snapshot"));
+    }
+  }
+
+  @Test
+  public void testPruneSnapshotColumnsAllowsCompatibleProjections() {
+    StructType oldStruct =
+        new StructType().add("value", DataTypes.IntegerType).add("label", DataTypes.StringType);
+    StructType projected = new StructType().add("label", DataTypes.StringType, false);
+    DataType[] oldTypes = {
+      oldStruct,
+      DataTypes.createArrayType(oldStruct),
+      DataTypes.createMapType(DataTypes.StringType, oldStruct)
+    };
+    DataType[] projectedTypes = {
+      projected,
+      DataTypes.createArrayType(projected, false),
+      DataTypes.createMapType(DataTypes.StringType, projected, false)
+    };
+    for (int i = 0; i < oldTypes.length; i++) {
+      LanceScanBuilder builder =
+          createSnapshotBuilder(
+              new StructType().add("id", DataTypes.IntegerType).add("payload", oldTypes[i]));
+      StructType required = new StructType().add("payload", projectedTypes[i], false);
+      assertDoesNotThrow(() -> builder.pruneColumns(required));
+      assertDoesNotThrow(() -> builder.pruneColumns(new StructType()));
+    }
+  }
+
+  @Test
+  public void testPruneSnapshotColumnsAllowsVirtualMetadata() {
+    StructField[] fields =
+        Arrays.stream(LanceDataset.METADATA_COLUMNS)
+            .map(
+                column ->
+                    DataTypes.createStructField(
+                        column.name(),
+                        column.dataType(),
+                        column.isNullable(),
+                        MetadataAttribute.apply(
+                                column.name(), column.dataType(), column.isNullable())
+                            .metadata()))
+            .toArray(StructField[]::new);
+    LanceScanBuilder builder = createSnapshotBuilder(TEST_SCHEMA);
+    assertDoesNotThrow(() -> builder.pruneColumns(new StructType(fields)));
   }
 
   // --- pushPredicates ---
@@ -114,6 +250,57 @@ public class LanceScanBuilderTest {
   }
 
   @Test
+  public void testScoreFilterWithoutFtsStaysResidual() {
+    StructType schema =
+        new StructType()
+            .add(
+                LanceConstant.SCORE,
+                DataTypes.FloatType,
+                true,
+                MetadataAttribute.apply(LanceConstant.SCORE, DataTypes.FloatType, true).metadata());
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            schema,
+            TestUtils.TestTable1Config.readOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+    Predicate[] predicates = {TestPredicates.gt(LanceConstant.SCORE, 0.0f)};
+    assertArrayEquals(predicates, builder.pushPredicates(predicates));
+    assertEquals(0, builder.pushedPredicates().length);
+    assertFalse(builder.pushLimit(1));
+    assertFalse(builder.pushOffset(1));
+    assertFalse(
+        builder.pushTopN(
+            new SortOrder[] {
+              new TestSortOrder(
+                  LanceConstant.SCORE, SortDirection.DESCENDING, NullOrdering.NULLS_LAST)
+            },
+            1));
+    assertFalse(
+        builder.pushAggregation(
+            new Aggregation(new AggregateFunc[] {new CountStar()}, new Expression[0])));
+    assertTrue(
+        assertThrows(IllegalArgumentException.class, builder::build)
+            .getMessage()
+            .contains("full-text search predicate"));
+  }
+
+  @Test
+  public void testStoredScoreFilterWithoutFtsIsPushed() {
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            new StructType().add(LanceConstant.SCORE, DataTypes.FloatType),
+            TestUtils.TestTable1Config.readOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+    Predicate[] predicates = {TestPredicates.gt(LanceConstant.SCORE, 0.0f)};
+    assertEquals(0, builder.pushPredicates(predicates).length);
+    assertArrayEquals(predicates, builder.pushedPredicates());
+  }
+
+  @Test
   public void testPushPredicatesDisabledByConfig() {
     LanceSparkReadOptions options =
         LanceSparkReadOptions.from(
@@ -147,12 +334,48 @@ public class LanceScanBuilderTest {
             null,
             Collections.emptyMap());
 
+    assertFalse(
+        builder.pushAggregation(
+            new Aggregation(
+                new AggregateFunc[] {new Count(FieldReference.apply("payload"), false)},
+                new Expression[0])));
     Predicate onId = TestPredicates.gt("id", 1L);
     Predicate onBlob = TestPredicates.gt("payload", 1L);
     Predicate[] postScan = builder.pushPredicates(new Predicate[] {onId, onBlob});
 
     // Blob v2 filters stay in Spark. Normal-column filters still push to Lance.
     assertArrayEquals(new Predicate[] {onBlob}, postScan);
+    assertArrayEquals(new Predicate[] {onId}, builder.pushedPredicates());
+    assertFalse(builder.pushLimit(10));
+  }
+
+  @Test
+  public void testBlobV1VirtualColumnFilterStaysResidualWhileOtherColumnsPushDown() {
+    Metadata blobV1Metadata =
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build();
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.LongType, true),
+              new StructField("payload", DataTypes.BinaryType, true, blobV1Metadata)
+            });
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            schema,
+            TestUtils.TestTable1Config.readOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+
+    Predicate onId = TestPredicates.gt("id", 1L);
+    Predicate onSize = TestPredicates.gt("payload" + LanceConstant.BLOB_SIZE_SUFFIX, 5L);
+    Predicate onPos = TestPredicates.gt("payload" + LanceConstant.BLOB_POSITION_SUFFIX, 0L);
+    Predicate[] postScan = builder.pushPredicates(new Predicate[] {onId, onSize, onPos});
+
+    // Blob v1 virtual columns do not exist in Lance, so their filters stay in Spark.
+    assertArrayEquals(new Predicate[] {onSize, onPos}, postScan);
     assertArrayEquals(new Predicate[] {onId}, builder.pushedPredicates());
     assertFalse(builder.pushLimit(10));
   }
@@ -227,6 +450,80 @@ public class LanceScanBuilderTest {
     LanceScanBuilder builder = createBuilder();
     SortOrder order = new TestSortOrder("x", SortDirection.ASCENDING, NullOrdering.NULLS_FIRST);
     assertTrue(builder.pushTopN(new SortOrder[] {order}, 10));
+  }
+
+  @Test
+  public void testPushTopNForScoreOnlySupportsNamespaceDescendingOrder() {
+    int k = 10;
+    SortOrder scoreDescending =
+        new TestSortOrder(LanceConstant.SCORE, SortDirection.DESCENDING, NullOrdering.NULLS_LAST);
+    LanceScanBuilder namespaceBuilder = createFtsScoreBuilder("dir");
+    assertTrue(namespaceBuilder.pushTopN(new SortOrder[] {scoreDescending}, k));
+    assertEquals(k, getNamespaceFtsTopK(namespaceBuilder));
+
+    SortOrder scoreAscending =
+        new TestSortOrder(LanceConstant.SCORE, SortDirection.ASCENDING, NullOrdering.NULLS_FIRST);
+    LanceScanBuilder ascendingBuilder = createFtsScoreBuilder("dir");
+    assertFalse(ascendingBuilder.pushTopN(new SortOrder[] {scoreAscending}, k));
+    assertEquals(Integer.MAX_VALUE, getNamespaceFtsTopK(ascendingBuilder));
+
+    SortOrder otherColumnAscending =
+        new TestSortOrder("x", SortDirection.ASCENDING, NullOrdering.NULLS_FIRST);
+    LanceScanBuilder otherColumnBuilder = createFtsScoreBuilder("dir");
+    assertFalse(otherColumnBuilder.pushTopN(new SortOrder[] {otherColumnAscending}, k));
+    assertEquals(Integer.MAX_VALUE, getNamespaceFtsTopK(otherColumnBuilder));
+    LanceScanBuilder multiColumnBuilder = createFtsScoreBuilder("dir");
+    assertFalse(
+        multiColumnBuilder.pushTopN(new SortOrder[] {scoreDescending, otherColumnAscending}, k));
+    assertEquals(Integer.MAX_VALUE, getNamespaceFtsTopK(multiColumnBuilder));
+
+    LanceScanBuilder localBuilder = createFtsScoreBuilder(null);
+    assertFalse(localBuilder.pushTopN(new SortOrder[] {scoreDescending}, k));
+  }
+
+  private LanceScanBuilder createFtsScoreBuilder(String namespaceImpl) {
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder()
+            .datasetUri(TestUtils.TestTable1Config.datasetUri)
+            .tableId(Collections.singletonList("default"))
+            .fullTextQuery(FullTextQuery.match("hello", "body"))
+            .build();
+    StructType scoreSchema =
+        new StructType()
+            .add(
+                LanceConstant.SCORE,
+                DataTypes.FloatType,
+                true,
+                MetadataAttribute.apply(LanceConstant.SCORE, DataTypes.FloatType, true).metadata());
+    return new LanceScanBuilder(
+        scoreSchema, options, Collections.emptyMap(), namespaceImpl, Collections.emptyMap());
+  }
+
+  private int getNamespaceFtsTopK(LanceScanBuilder builder) {
+    LanceSearchScan scan = (LanceSearchScan) builder.build();
+    LanceSearchInputPartition partition = (LanceSearchInputPartition) scan.planInputPartitions()[0];
+    return partition.getQuery().toQueryTableRequest().getK();
+  }
+
+  @Test
+  public void testFtsRejectsStoredScore() {
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder()
+            .datasetUri(TestUtils.TestTable1Config.datasetUri)
+            .fullTextQuery(FullTextQuery.match("hello", "body"))
+            .build();
+    UnsupportedOperationException failure =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () ->
+                new LanceScanBuilder(
+                    new StructType().add(LanceConstant.SCORE, DataTypes.FloatType),
+                    options,
+                    Collections.emptyMap(),
+                    "dir",
+                    Collections.emptyMap()));
+    assertTrue(failure.getMessage().contains("stored '_score' column"));
+    assertTrue(failure.getMessage().contains("Rename the stored column"));
   }
 
   @Test
@@ -306,6 +603,93 @@ public class LanceScanBuilderTest {
         new Aggregation(new AggregateFunc[] {new CountStar()}, new Expression[] {});
     // With pushed predicates, metadata count cannot be used; falls back to scanner-based count
     assertTrue(builder.pushAggregation(countStar));
+  }
+
+  @Test
+  public void testPushAggregationCountColumnUsesCountOnlyReader() throws Exception {
+    LanceScanBuilder builder = createBuilder();
+    Predicate filter = TestPredicates.gt("x", 0L);
+    builder.pushPredicates(new Predicate[] {filter});
+    assertTrue(
+        builder.pushAggregation(
+            new Aggregation(
+                new AggregateFunc[] {new Count(FieldReference.apply("b"), false)},
+                new Expression[0])));
+    assertArrayEquals(new Predicate[] {filter}, builder.pushedPredicates());
+    LanceScan scan = (LanceScan) builder.build();
+    assertEquals(new StructType().add("count", DataTypes.LongType), scan.readSchema());
+    LanceInputPartition partition = (LanceInputPartition) scan.planInputPartitions()[0];
+    assertEquals(Optional.of("(x > 0) AND (`b` IS NOT NULL)"), partition.getWhereCondition());
+    try (PartitionReader<?> reader = scan.createReaderFactory().createColumnarReader(partition)) {
+      assertInstanceOf(LanceCountStarPartitionReader.class, reader);
+    }
+  }
+
+  @Test
+  public void testPushAggregationRejectsUnsupportedColumnCountsWithoutChangingFilters() {
+    AggregateFunc[][] unsupported = {
+      {new Count(FieldReference.apply("b"), true)},
+      {new Count(TestPredicates.literalOf(1), false)},
+      {new Count(FieldReference.apply("nested.value"), false)},
+      {new Count(FieldReference.apply("missing"), false)},
+      {new Count(FieldReference.apply(LanceConstant.SCORE), false)},
+      {new Count(FieldReference.apply("b"), false), new CountStar()}
+    };
+    for (AggregateFunc[] funcs : unsupported) {
+      LanceScanBuilder builder = createBuilder();
+      Predicate[] filters = {TestPredicates.gt("x", 0L)};
+      builder.pushPredicates(filters);
+      assertFalse(builder.pushAggregation(new Aggregation(funcs, new Expression[0])));
+      assertArrayEquals(filters, builder.pushedPredicates());
+    }
+  }
+
+  @Test
+  public void testPushAggregationRejectsCountColumnWithResidualFilters() {
+    LanceScanBuilder builder = createBuilder();
+    builder.pushPredicates(new Predicate[] {TestPredicates.contains("b", "test")});
+    assertFalse(
+        builder.pushAggregation(
+            new Aggregation(
+                new AggregateFunc[] {new Count(FieldReference.apply("b"), false)},
+                new Expression[0])));
+    assertEquals(0, builder.pushedPredicates().length);
+  }
+
+  @Test
+  public void testPushAggregationRejectsCountColumnWhenFiltersDisabled() {
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            TEST_SCHEMA,
+            LanceSparkReadOptions.builder()
+                .datasetUri(TestUtils.TestTable1Config.datasetUri)
+                .pushDownFilters(false)
+                .build(),
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+    assertFalse(
+        builder.pushAggregation(
+            new Aggregation(
+                new AggregateFunc[] {new Count(FieldReference.apply("b"), false)},
+                new Expression[0])));
+    assertEquals(0, builder.pushedPredicates().length);
+  }
+
+  @Test
+  public void testPushAggregationRejectsCountColumnWithBacktickName() {
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            new StructType().add("a`b", DataTypes.StringType),
+            TestUtils.TestTable1Config.readOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+    assertFalse(
+        builder.pushAggregation(
+            new Aggregation(
+                new AggregateFunc[] {new Count(FieldReference.apply("`a``b`"), false)},
+                new Expression[0])));
   }
 
   @Test

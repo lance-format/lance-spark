@@ -19,6 +19,7 @@ import org.lance.spark.read.LanceScanBuilder;
 import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Utils;
+import org.lance.spark.utils.VectorUtils;
 import org.lance.spark.write.AddColumnsBackfillWrite;
 import org.lance.spark.write.LanceWriteSchemaValidator;
 import org.lance.spark.write.SparkWrite;
@@ -157,10 +158,10 @@ public class LanceDataset
       };
 
   /**
-   * Relevance score, auto-projected by Lance only when a full-text query is active on the scan.
+   * BM25 relevance score, explicitly projected when a full-text query is active on the scan.
    * Advertised unconditionally because {@code metadataColumns()} is consulted by the analyzer
-   * before the query is known to contain FTS; selecting it without a full-text search yields an
-   * empty scan result for this column rather than a plan-time error (validation is a follow-up).
+   * before the query is known to contain FTS; selecting it without a full-text search raises {@code
+   * IllegalArgumentException} at scan-build time with a clear diagnostic message.
    */
   public static final MetadataColumn SCORE_COLUMN =
       new MetadataColumn() {
@@ -318,7 +319,7 @@ public class LanceDataset
     LanceSparkReadOptions scanOptions = mergeScanOptions(scanMap);
     StructType scanSchema = sparkSchema;
     LanceRef scanRef = scanOptions.getRef();
-    if (scanRef != null && scanRef.isBranch() && scanRef.getVersionNumber().isEmpty()) {
+    if (scanRef != null && (scanRef.isBranchOrTag() || scanRef.getVersionNumber().isPresent())) {
       try (Dataset dataset =
           Utils.openDatasetBuilder(scanOptions)
               .initialStorageOptions(initialStorageOptions)
@@ -342,14 +343,20 @@ public class LanceDataset
       return readOptions;
     }
     LanceRef tableRef = readOptions.getRef();
-    boolean scanSetsBranchOrVersion =
+    boolean scanSetsRef =
         scanMap.containsKey(LanceSparkReadOptions.CONFIG_VERSION)
-            || scanMap.containsKey(LanceSparkReadOptions.CONFIG_BRANCH);
+            || scanMap.containsKey(LanceSparkReadOptions.CONFIG_BRANCH)
+            || scanMap.containsKey(LanceSparkReadOptions.CONFIG_TAG);
     Map<String, String> merged = new HashMap<>(readOptions.getStorageOptions());
-    // Stored options can still hold version/branch keys. Strip them so fromOptions cannot
+    // Stored options can still hold reference keys. Strip them so fromOptions cannot
     // overwrite the table ref with a leftover key.
-    merged.remove(LanceSparkReadOptions.CONFIG_VERSION);
-    merged.remove(LanceSparkReadOptions.CONFIG_BRANCH);
+    merged
+        .keySet()
+        .removeIf(
+            key ->
+                key.equalsIgnoreCase(LanceSparkReadOptions.CONFIG_VERSION)
+                    || key.equalsIgnoreCase(LanceSparkReadOptions.CONFIG_BRANCH)
+                    || key.equalsIgnoreCase(LanceSparkReadOptions.CONFIG_TAG));
     merged.putAll(scanMap.asCaseSensitiveMap());
     LanceSparkReadOptions scanOptions =
         LanceSparkReadOptions.builder()
@@ -362,13 +369,13 @@ public class LanceDataset
             .ref(tableRef)
             .fromOptions(merged)
             .build();
-    if (tableRef != null && scanSetsBranchOrVersion) {
+    if (tableRef != null && scanSetsRef) {
       LanceRef scanRef = scanOptions.getRef();
       if (sameNamedBranch(tableRef, scanRef)) {
         return scanOptions.withRef(tableRef);
       }
       Preconditions.checkArgument(
-          tableRef.equals(scanRef), "Cannot combine %s with %s", tableRef, scanRef);
+          tableRef.equals(scanRef), "Cannot combine " + tableRef + " with " + scanRef);
     }
     return scanOptions;
   }
@@ -397,6 +404,14 @@ public class LanceDataset
     // physical URI is invisible to DESCRIBE EXTENDED and to any tooling that relies on it.
     Map<String, String> props = new HashMap<>(tableProperties);
     props.put("location", readOptions.getDatasetUri());
+    // Schema dimensions take precedence over stored config.
+    for (StructField field : sparkSchema.fields()) {
+      if (VectorUtils.shouldBeFixedSizeList(field.dataType(), field.metadata())) {
+        props.put(
+            VectorUtils.createVectorSizePropertyKey(field.name()),
+            Long.toString(field.metadata().getLong(VectorUtils.ARROW_FIXED_SIZE_LIST_SIZE_KEY)));
+      }
+    }
     return props;
   }
 

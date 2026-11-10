@@ -509,9 +509,6 @@ public abstract class BaseBlobJoinTest {
     assertEquals(87.3, resultRows.get(1).getDouble(2), 0.01);
 
     // Verify blob data is preserved via direct blob column read.
-    // NOTE: We query the blob column itself (not the virtual __blob_size column alone)
-    // because there is a pre-existing bug where querying only virtual blob columns
-    // without the base blob column causes an ArrayIndexOutOfBoundsException.
     Dataset<Row> blobResult =
         spark.sql(
             "SELECT id, blob_a, blob_a"

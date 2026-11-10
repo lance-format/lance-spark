@@ -18,12 +18,14 @@ import com.fasterxml.jackson.databind.node.ObjectNode
 import org.apache.arrow.c.{ArrowArrayStream, Data}
 import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.arrow.vector.ipc.ArrowReader
+import org.apache.arrow.vector.types.pojo.{ArrowType, Field, Schema}
 import org.apache.spark.SparkContext
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
 import org.apache.spark.sql.catalyst.plans.logical.{AddIndexOutputType, LanceNamedArgument}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
+import org.apache.spark.sql.functions.lit
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.LanceArrowUtils
 import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
@@ -322,6 +324,26 @@ class RangeBasedBTreeIndexJob(
       df.col(LanceDataset.ROW_ID_COLUMN.name),
       df.col(fragmentColumn))
 
+    // Spark reads an unsigned column as a wider signed type. The index has to hold the column's
+    // own type, and Lance takes each page's first and last value as its range, so the values
+    // must also be sorted in that type's order.
+    val storedValue = {
+      val dataset = Utils.openDatasetBuilder(readOptions).build()
+      try {
+        val stored =
+          FieldPathUtils.resolveLeafField(dataset.getLanceSchema, columns.head).asArrowField()
+        new Field(VALUE_COLUMN_NAME, stored.getFieldType, stored.getChildren)
+      } finally {
+        dataset.close()
+      }
+    }
+    val sortKey = storedValue.getType match {
+      // uint64 values of 2^63 or more read as negative; flipping the sign bit sorts them last.
+      case int: ArrowType.Int if !int.getIsSigned && int.getBitWidth == 64 =>
+        selectDf.col(VALUE_COLUMN_NAME).bitwiseXOR(lit(Long.MinValue))
+      case _ => selectDf.col(VALUE_COLUMN_NAME)
+    }
+
     // Partition by fragment id so each partition holds whole fragments (disjoint coverage),
     // then sort within each partition by the indexed value to feed Lance pre-sorted data.
     // repartitionByRange keeps equal fragment ids together and is the shuffle the connector
@@ -329,7 +351,10 @@ class RangeBasedBTreeIndexJob(
     val numPartitions = Math.max(1, numFragments)
     val rangeDf = selectDf
       .repartitionByRange(numPartitions, selectDf.col(fragmentColumn))
-      .sortWithinPartitions(selectDf.col(VALUE_COLUMN_NAME).asc)
+      .sortWithinPartitions(sortKey.asc)
+    val streamSchema = LanceArrowUtils.markUnsignedForWrite(
+      rangeDf.schema,
+      new Schema(Collections.singletonList(storedValue)))
 
     val indexBuilder = RangeBTreeIndexBuilder(
       encode(readOptions),
@@ -340,7 +365,7 @@ class RangeBasedBTreeIndexJob(
       nsProps,
       tableId,
       initialStorageOpts,
-      rangeDf.schema)
+      streamSchema)
 
     val results = rangeDf.queryExecution.toRdd.mapPartitionsWithIndex { case (_, rowsIter) =>
       indexBuilder.buildForFragmentGroup(rowsIter)

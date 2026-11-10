@@ -19,18 +19,47 @@ import org.lance.Ref;
 import org.lance.Tag;
 import org.lance.Version;
 import org.lance.namespace.LanceNamespace;
+import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkCatalogConfig;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.LanceSparkWriteOptions;
 
+import org.apache.spark.sql.catalyst.expressions.MetadataAttribute;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
+
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
 public class Utils {
+
+  public static boolean isScoreMetadataColumn(StructField field) {
+    return field.name().equals(LanceConstant.SCORE) && isMetadataColumn(field);
+  }
+
+  public static boolean isMetadataColumn(StructField field) {
+    return MetadataAttribute.unapply(
+            MetadataAttribute.apply(field.name(), field.dataType(), field.nullable())
+                .withMetadata(field.metadata()))
+        .isDefined();
+  }
+
+  public static boolean isStoredScoreColumn(StructField field) {
+    return field.name().equals(LanceConstant.SCORE) && !isScoreMetadataColumn(field);
+  }
+
+  public static void validateFullTextSearchSchema(StructType schema) {
+    if (Arrays.stream(schema.fields()).anyMatch(Utils::isStoredScoreColumn)) {
+      throw new UnsupportedOperationException(
+          "Full-text search is not supported on tables with a stored '_score' column. "
+              + "Rename the stored column to use FTS and access relevance scores.");
+    }
+  }
 
   public static long parseVersion(String version) {
     return Long.parseUnsignedLong(version);

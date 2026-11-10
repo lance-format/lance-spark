@@ -55,7 +55,8 @@ case class LanceBlobSourceContextRule() extends Rule[LogicalPlan] {
         }
         val annotatedTable = table match {
           case relation: DataSourceV2Relation if relationCarriesOptions =>
-            val merged = new java.util.HashMap[String, String](relation.options)
+            val merged =
+              new java.util.HashMap[String, String](relation.options.asCaseSensitiveMap())
             merged.put(key, encoded)
             relation.copy(options = new CaseInsensitiveStringMap(merged))
           case other => other

@@ -113,6 +113,9 @@ jobs:
       run: |
         python ci/bump_version.py --version "${{ steps.versions.outputs.pom_version }}"
 
+    - name: Resolve publishing plugins
+      run: mvn --batch-mode -N -P deploy-to-ossrh help:evaluate -Dexpression=project.version -q -DforceStdout
+
     - name: Configure git identity
       run: |
         git config user.name 'github-actions[bot]'

@@ -16,6 +16,8 @@ package org.lance.spark.arrow
 import org.apache.arrow.memory.RootAllocator
 import org.apache.arrow.vector._
 import org.apache.arrow.vector.complex._
+import org.apache.arrow.vector.types.TimeUnit
+import org.apache.arrow.vector.types.pojo.ArrowType
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.SpecializedGetters
 import org.apache.spark.sql.types._
@@ -99,6 +101,9 @@ object LanceArrowWriter {
       case (IntegerType, vector: IntVector) => new IntegerWriter(vector)
       case (LongType, vector: BigIntVector) => new LongWriter(vector)
       case (LongType, vector: UInt8Vector) => new UnsignedLongWriter(vector)
+      case (ShortType, vector: UInt1Vector) => new UnsignedByteWriter(vector)
+      case (IntegerType, vector: UInt2Vector) => new UnsignedShortWriter(vector)
+      case (LongType, vector: UInt4Vector) => new UnsignedIntWriter(vector)
       case (FloatType, vector)
           if vector.getClass.getName == "org.apache.arrow.vector.Float2Vector" =>
         new Float2Writer(vector)
@@ -120,8 +125,8 @@ object LanceArrowWriter {
       case (BinaryType, vector: FixedSizeBinaryVector) => new FixedSizeBinaryWriter(vector)
       case (DateType, vector: DateDayVector) => new DateWriter(vector)
       case (DateType, vector: DateMilliVector) => new DateMilliWriter(vector)
-      case (TimestampType, vector: TimeStampMicroTZVector) => new TimestampWriter(vector)
-      case (TimestampNTZType, vector: TimeStampMicroVector) => new TimestampNTZWriter(vector)
+      case (TimestampType | TimestampNTZType, vector: TimeStampVector) =>
+        new TimestampWriter(vector)
       case (MapType(_, _, _), vector: MapVector) =>
         val structVector = vector.getDataVector.asInstanceOf[StructVector]
         val keyWriter = createFieldWriter(
@@ -308,6 +313,46 @@ private[arrow] class UnsignedLongWriter(val valueVector: UInt8Vector)
   }
 }
 
+// Reject out of range values before Arrow silently truncates them.
+private[arrow] class UnsignedByteWriter(val valueVector: UInt1Vector)
+  extends LanceArrowFieldWriter {
+  override def setNull(): Unit = {}
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    val value = input.getShort(ordinal)
+    if (value < 0 || value > 255) {
+      throw new IllegalArgumentException(
+        s"uint8 column '$name' requires values in [0, 255], got $value")
+    }
+    valueVector.setSafe(count, value)
+  }
+}
+
+private[arrow] class UnsignedShortWriter(val valueVector: UInt2Vector)
+  extends LanceArrowFieldWriter {
+  override def setNull(): Unit = {}
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    val value = input.getInt(ordinal)
+    if (value < 0 || value > 65535) {
+      throw new IllegalArgumentException(
+        s"uint16 column '$name' requires values in [0, 65535], got $value")
+    }
+    valueVector.setSafe(count, value)
+  }
+}
+
+private[arrow] class UnsignedIntWriter(val valueVector: UInt4Vector)
+  extends LanceArrowFieldWriter {
+  override def setNull(): Unit = {}
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    val value = input.getLong(ordinal)
+    if (value < 0 || value > 4294967295L) {
+      throw new IllegalArgumentException(
+        s"uint32 column '$name' requires values in [0, 4294967295], got $value")
+    }
+    valueVector.setSafe(count, value.toInt)
+  }
+}
+
 private[arrow] class FloatWriter(val valueVector: Float4Vector) extends LanceArrowFieldWriter {
   override def setNull(): Unit = {}
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
@@ -420,19 +465,21 @@ private[arrow] class DateMilliWriter(val valueVector: DateMilliVector)
   }
 }
 
-private[arrow] class TimestampWriter(val valueVector: TimeStampMicroTZVector)
+private[arrow] class TimestampWriter(val valueVector: TimeStampVector)
   extends LanceArrowFieldWriter {
-  override def setNull(): Unit = {}
-  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
-    valueVector.setSafe(count, input.getLong(ordinal))
-  }
-}
+  private val unit = valueVector.getField.getType.asInstanceOf[ArrowType.Timestamp].getUnit
 
-private[arrow] class TimestampNTZWriter(val valueVector: TimeStampMicroVector)
-  extends LanceArrowFieldWriter {
-  override def setNull(): Unit = {}
+  override def setNull(): Unit = valueVector.setNull(count)
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
-    valueVector.setSafe(count, input.getLong(ordinal))
+    val micros = input.getLong(ordinal)
+    val value = unit match {
+      // Match Spark's downscaling semantics, including timestamps before the epoch.
+      case TimeUnit.SECOND => Math.floorDiv(micros, 1000000L)
+      case TimeUnit.MILLISECOND => Math.floorDiv(micros, 1000L)
+      case TimeUnit.MICROSECOND => micros
+      case TimeUnit.NANOSECOND => Math.multiplyExact(micros, 1000L)
+    }
+    valueVector.setSafe(count, value)
   }
 }
 

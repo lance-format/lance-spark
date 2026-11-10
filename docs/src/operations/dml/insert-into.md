@@ -2,6 +2,21 @@
 
 Add data to existing Lance tables using SQL or DataFrames.
 
+Writes to existing timestamp columns preserve their Arrow unit and timezone.
+Spark uses microsecond precision: second/millisecond columns round values down,
+while nanosecond values lose sub-microsecond precision when read through Spark.
+Conversions outside the target unit's range are rejected. New timestamp columns
+continue to use microseconds.
+
+Writes into an existing table, including `INSERT OVERWRITE`, keep its unsigned
+integer columns unsigned. Spark reads `uint8`, `uint16`, `uint32` and `uint64` as
+`SMALLINT`, `INT`, `BIGINT` and `BIGINT`, and a write rejects a value outside a
+`uint8`, `uint16` or `uint32` column's range. `uint64` values keep all 64 bits:
+those of 2^63 or more read as negative numbers, and a negative number is written
+with the same bits, so `-1` is stored as 2^64 - 1. Creating or replacing a table,
+as `CREATE TABLE AS SELECT`, `REPLACE TABLE` and `saveAsTable` in overwrite mode
+do, uses the Spark types even when the query reads an unsigned column.
+
 ## Basic Insert
 
 === "SQL"
@@ -290,9 +305,11 @@ These options control how data is written to Lance datasets. They can be set usi
 | `max_bytes_per_file`     | Long    | -        | Maximum size in bytes per Lance file.                                                |
 | `file_format_version`   | String  | -        | Lance file format version: `LEGACY` or `STABLE`.                                     |
 | `batch_size`             | Integer | `8192`   | Number of rows per batch during writing.                                             |
+| `max_batch_bytes`        | Long    | `268435456` (256 MiB) | Maximum bytes per write batch. The batch flushes at `batch_size` rows or at this size. |
 | `use_queued_write_buffer`| Boolean | `false`  | Use pipelined write buffer for improved throughput.                                  |
 | `queue_depth`            | Integer | `8`      | Queue depth for pipelined writes (only used when `use_queued_write_buffer=true`).    |
 | `use_large_var_types`    | Boolean | `false`  | Use 64-bit offset vectors for all string/binary columns to avoid 2GB batch limit. See [Large Var Types](#large-var-types).   |
+| `enable_stable_row_ids`  | Boolean | -        | Enable stable row IDs. When unset, the value is inherited from the existing dataset's manifest. |
 | `blob_pack_file_size_threshold` | Long | `1073741824` (1 GiB) | Maximum size in bytes for blob v2 pack (`.blob`) sidecar files. When a pack file reaches this size, a new one is started. |
 
 ### Example: Controlling File Size

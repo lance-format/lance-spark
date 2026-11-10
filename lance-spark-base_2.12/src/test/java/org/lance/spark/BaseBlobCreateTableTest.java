@@ -33,6 +33,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -502,6 +503,57 @@ public abstract class BaseBlobCreateTableTest {
   }
 
   @Test
+  public void testBlobV1VirtualColumnsWithoutBaseColumnAndInFilters() {
+    String tableName = "blob_virtual_only_" + System.currentTimeMillis();
+    String fqTable = catalogName + ".default." + tableName;
+    spark.sql(
+        "CREATE TABLE "
+            + fqTable
+            + " (id INT, title STRING, content BINARY) USING lance TBLPROPERTIES ("
+            + "'content.lance.encoding' = 'blob', 'file_format_version' = '2.1')");
+    // "HelloWorld" (10 bytes) and "Hi" (2 bytes)
+    spark.sql(
+        "INSERT INTO " + fqTable + " VALUES (1, 'a', X'48656C6C6F576F726C64'), (2, 'b', X'4869')");
+
+    // Only virtual columns, without the base blob column
+    List<Row> rows =
+        spark
+            .sql(
+                "SELECT id, title, content__blob_pos, content__blob_size FROM "
+                    + fqTable
+                    + " WHERE id = 1")
+            .collectAsList();
+    assertEquals(1, rows.size());
+    assertEquals(1, rows.get(0).getInt(0));
+    assertEquals("a", rows.get(0).getString(1));
+    assertTrue(rows.get(0).getLong(2) >= 0, "Blob position should be non-negative");
+    assertEquals(10L, rows.get(0).getLong(3));
+
+    // Filter on a virtual column without projecting it or the base column
+    rows =
+        spark
+            .sql("SELECT id FROM " + fqTable + " WHERE content__blob_size > 5 ORDER BY id")
+            .collectAsList();
+    assertEquals(1, rows.size());
+    assertEquals(1, rows.get(0).getInt(0));
+
+    // Filter on a virtual column together with the base column and a pushable predicate
+    rows =
+        spark
+            .sql(
+                "SELECT id, content, content__blob_size FROM "
+                    + fqTable
+                    + " WHERE content__blob_size = 2 AND id >= 1 ORDER BY id")
+            .collectAsList();
+    assertEquals(1, rows.size());
+    assertEquals(2, rows.get(0).getInt(0));
+    assertNotNull(rows.get(0).get(1));
+    assertEquals(2L, rows.get(0).getLong(2));
+
+    spark.sql("DROP TABLE IF EXISTS " + fqTable);
+  }
+
+  @Test
   public void testBlobV2SupportsSqlInsertAndDataFrameAppend() {
     String tableName = "blob_v2_sql_" + System.currentTimeMillis();
 
@@ -568,6 +620,62 @@ public abstract class BaseBlobCreateTableTest {
     assertEquals(testData2.getBytes(StandardCharsets.UTF_8).length, descriptors.get(1).getLong(1));
     assertEquals(100000L, descriptors.get(2).getLong(1));
     assertBlobV2Metadata(spark.table(catalogName + ".default." + tableName).schema(), "data");
+    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
+  }
+
+  /**
+   * The DDL-created array column allows null elements, so a DataFrame promising containsNull=false
+   * must be accepted: it can never produce a null element. Blob v2 tables are the ones routed
+   * through LanceWriteSchemaValidator, since they advertise ACCEPT_ANY_SCHEMA.
+   */
+  @Test
+  public void testBlobV2DataFrameAppendWithStricterArrayElementNullability() {
+    String tableName = "blob_v2_array_" + System.currentTimeMillis();
+
+    spark.sql(
+        "CREATE TABLE IF NOT EXISTS "
+            + catalogName
+            + ".default."
+            + tableName
+            + " ("
+            + "id INT NOT NULL, "
+            + "data BINARY, "
+            + "embedding ARRAY<FLOAT>"
+            + ") USING lance "
+            + "TBLPROPERTIES ("
+            + "'data.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.2'"
+            + ")");
+
+    StructType strictSchema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.IntegerType, false),
+              DataTypes.createStructField("data", DataTypes.BinaryType, true),
+              DataTypes.createStructField(
+                  "embedding", DataTypes.createArrayType(DataTypes.FloatType, false), true)
+            });
+    List<Row> rows =
+        Arrays.asList(
+            RowFactory.create(1, "one".getBytes(StandardCharsets.UTF_8), new float[] {0.5f, 1.5f}),
+            RowFactory.create(2, "two".getBytes(StandardCharsets.UTF_8), new float[] {2.5f, 3.5f}));
+    Dataset<Row> df = spark.createDataFrame(rows, strictSchema);
+
+    assertDoesNotThrow(() -> df.writeTo(catalogName + ".default." + tableName).append());
+
+    List<Row> written =
+        spark
+            .sql(
+                "SELECT id, embedding FROM "
+                    + catalogName
+                    + ".default."
+                    + tableName
+                    + " ORDER BY id")
+            .collectAsList();
+    assertEquals(2, written.size());
+    assertEquals(Arrays.asList(0.5f, 1.5f), written.get(0).getList(1));
+    assertEquals(Arrays.asList(2.5f, 3.5f), written.get(1).getList(1));
+
     spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
   }
 

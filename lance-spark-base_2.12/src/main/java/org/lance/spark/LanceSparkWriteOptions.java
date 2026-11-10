@@ -18,6 +18,7 @@ import org.lance.WriteParams.WriteMode;
 import org.lance.namespace.LanceNamespace;
 
 import com.google.common.base.Preconditions;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
 import java.io.Serializable;
 import java.util.HashMap;
@@ -268,6 +269,27 @@ public class LanceSparkWriteOptions implements Serializable {
   /** Returns a copy of these options with the given reference. */
   public LanceSparkWriteOptions withRef(LanceRef ref) {
     return toBuilder().ref(ref).build();
+  }
+
+  /**
+   * Converts these write options to read options that open the same dataset at the same ref. Used
+   * by executors that must read what the driver pinned, such as DELETE writing deletion files.
+   *
+   * <p>Read-only flags (block_size, cache sizes, executor_credential_refresh) are re-parsed from
+   * {@code storageOptions} rather than copied field by field, so they cannot be dropped by a caller
+   * that forgets one. The ref is applied last because {@code storageOptions} may also carry one.
+   */
+  public LanceSparkReadOptions toReadOptions() {
+    return LanceSparkReadOptions.builder()
+        .datasetUri(datasetUri)
+        .fromOptions(storageOptions)
+        .namespace(namespace)
+        .tableId(tableId)
+        .catalogName(catalogName)
+        .indexCacheBackend(indexCacheBackend)
+        .metadataCacheBackend(metadataCacheBackend)
+        .ref(ref)
+        .build();
   }
 
   public boolean hasNamespace() {
@@ -521,9 +543,12 @@ public class LanceSparkWriteOptions implements Serializable {
      * @return this builder
      */
     public Builder fromOptions(Map<String, String> options) {
+      CaseInsensitiveStringMap references = new CaseInsensitiveStringMap(options);
       Preconditions.checkArgument(
-          !options.containsKey(LanceSparkReadOptions.CONFIG_BRANCH),
+          !references.containsKey(LanceSparkReadOptions.CONFIG_BRANCH),
           "The branch option is read-only");
+      Preconditions.checkArgument(
+          !references.containsKey(LanceSparkReadOptions.CONFIG_TAG), "The tag option is read-only");
       this.storageOptions = new HashMap<>(options);
       if (options.containsKey(CONFIG_WRITE_MODE)) {
         this.writeMode = WriteMode.valueOf(options.get(CONFIG_WRITE_MODE).toUpperCase(Locale.ROOT));
