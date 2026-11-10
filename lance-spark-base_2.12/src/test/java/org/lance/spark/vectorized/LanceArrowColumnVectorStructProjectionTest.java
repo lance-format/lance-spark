@@ -24,6 +24,8 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.vectorized.ColumnarRow;
 import org.apache.spark.unsafe.types.UTF8String;
@@ -34,6 +36,7 @@ import java.util.Arrays;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -84,6 +87,34 @@ public class LanceArrowColumnVectorStructProjectionTest {
         assertEquals(75L, row1.getLong(1));
 
         assertTrue(vector.isNullAt(2));
+      }
+    }
+  }
+
+  /**
+   * The {@code (ValueVector, boolean, StructField)} constructor, which {@code
+   * LanceFragmentColumnarBatchScanner} uses, binds a pruned plain struct by name as well. Without
+   * the fix it reported the full Arrow struct and bound children by ordinal, so {@code getLong(0)}
+   * hit the {@code external_path} string accessor and threw.
+   */
+  @Test
+  public void structFieldConstructor_prunedStruct_issue499() {
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
+        StructVector reference = createReferenceStruct(allocator)) {
+      reference.setIndexDefined(0);
+      writeRow(reference, 0, "path-0", 100L, 50L, true);
+      setRowCounts(reference, 1);
+
+      StructType prunedSchema =
+          new StructType().add("offset", DataTypes.LongType).add("length", DataTypes.LongType);
+      StructField prunedField = new StructField("reference", prunedSchema, true, Metadata.empty());
+
+      try (LanceArrowColumnVector vector =
+          new LanceArrowColumnVector(reference, false, prunedField)) {
+        ColumnarRow row0 = vector.getStruct(0);
+        assertEquals(100L, row0.getLong(0));
+        assertEquals(50L, row0.getLong(1));
+        assertEquals(prunedSchema, vector.dataType());
       }
     }
   }
@@ -215,7 +246,7 @@ public class LanceArrowColumnVectorStructProjectionTest {
       StructType badSchema = new StructType().add("does_not_exist", DataTypes.LongType);
 
       IllegalArgumentException ex =
-          org.junit.jupiter.api.Assertions.assertThrows(
+          assertThrows(
               IllegalArgumentException.class,
               () -> new LanceArrowColumnVector(reference, badSchema));
       assertTrue(ex.getMessage().contains("does_not_exist"));
