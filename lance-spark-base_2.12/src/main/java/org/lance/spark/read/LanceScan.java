@@ -708,7 +708,6 @@ public class LanceScan
         .collect(Collectors.toList());
   }
 
-  /** Whether scans read with these options take runtime filters from Spark. */
   static boolean supportsRuntimeFiltering(LanceSparkReadOptions readOptions) {
     return isSpark41OrLater() && readOptions.isPushDownFilters();
   }
