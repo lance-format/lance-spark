@@ -28,7 +28,6 @@ import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.connector.expressions.BucketTransform;
 import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.Expressions;
-import org.apache.spark.sql.connector.expressions.FieldReference;
 import org.apache.spark.sql.connector.expressions.IdentityTransform;
 import org.apache.spark.sql.connector.expressions.NamedReference;
 import org.apache.spark.sql.connector.expressions.NullOrdering;
@@ -41,6 +40,7 @@ import org.apache.spark.unsafe.types.UTF8String;
 import scala.collection.JavaConverters;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -114,22 +114,20 @@ public final class SparkLanceShardingUtils {
   }
 
   public static NamedReference toClusteringRef(ShardingField field, LanceSchema schema) {
-    return FieldReference.column(columnName(field, schema));
+    return Expressions.column(quotedFieldPath(field, schema));
   }
 
   public static SortOrder toSortOrder(ShardingField field, LanceSchema schema) {
-    String column = columnName(field, schema);
     return Expressions.sort(
-        FieldReference.column(column), SortDirection.ASCENDING, NullOrdering.NULLS_FIRST);
+        toClusteringRef(field, schema), SortDirection.ASCENDING, NullOrdering.NULLS_FIRST);
   }
 
   public static Expression toSparkExpression(ShardingField field, LanceSchema schema) {
     String transform = field.transform().orElse(null);
-    String column = columnName(field, schema);
     if ("bucket".equals(transform)) {
-      return Expressions.bucket(numBuckets(field), quotedIdentifier(column));
+      return Expressions.bucket(numBuckets(field), quotedFieldPath(field, schema));
     } else if ("identity".equals(transform)) {
-      return FieldReference.column(column);
+      return toClusteringRef(field, schema);
     }
     throw new UnsupportedOperationException("Unsupported sharding transform: " + transform);
   }
@@ -314,8 +312,45 @@ public final class SparkLanceShardingUtils {
     return Integer.parseInt(value);
   }
 
-  private static String quotedIdentifier(String identifier) {
-    return "`" + identifier.replace("`", "``") + "`";
+  /**
+   * The sharding column as a quoted multipart identifier, so Spark resolves {@code parent.child} to
+   * the nested field and a top-level name containing dots or spaces to that single column.
+   */
+  private static String quotedFieldPath(ShardingField field, LanceSchema schema) {
+    List<String> path = fieldPath(field, schema);
+    List<String> quoted = new ArrayList<>(path.size());
+    for (String name : path) {
+      quoted.add("`" + name.replace("`", "``") + "`");
+    }
+    return String.join(".", quoted);
+  }
+
+  private static List<String> fieldPath(ShardingField field, LanceSchema schema) {
+    String column = columnName(field, schema);
+    if (schema != null) {
+      LanceField resolved = fieldByColumnName(schema.fields(), column);
+      if (resolved != null) {
+        List<String> path = fieldPathById(schema.fields(), resolved.getId());
+        if (path != null) {
+          return path;
+        }
+      }
+    }
+    return Arrays.asList(column.split("\\."));
+  }
+
+  private static List<String> fieldPathById(List<LanceField> fields, int fieldId) {
+    for (LanceField field : fields) {
+      if (field.getId() == fieldId) {
+        return new ArrayList<>(Collections.singletonList(field.getName()));
+      }
+      List<String> childPath = fieldPathById(field.getChildren(), fieldId);
+      if (childPath != null) {
+        childPath.add(0, field.getName());
+        return childPath;
+      }
+    }
+    return null;
   }
 
   private static List<Integer> sourceIds(String column, LanceSchema schema) {

@@ -519,8 +519,18 @@ public class LanceScan
     if (activeShardingExpression instanceof BucketTransform) {
       return DataTypes.IntegerType;
     }
-    StructField field = findField(activeShardingColumn);
-    return field != null ? field.dataType() : DataTypes.StringType;
+    if (!(activeShardingExpression instanceof NamedReference)) {
+      return DataTypes.StringType;
+    }
+    DataType type = schema;
+    for (String name : ((NamedReference) activeShardingExpression).fieldNames()) {
+      StructField field = type instanceof StructType ? findField((StructType) type, name) : null;
+      if (field == null) {
+        return DataTypes.StringType;
+      }
+      type = field.dataType();
+    }
+    return type;
   }
 
   /**
@@ -797,7 +807,7 @@ public class LanceScan
       return null;
     }
 
-    StructField field = findField(column);
+    StructField field = findField(schema, column);
     if (field == null) {
       return null;
     }
@@ -845,9 +855,9 @@ public class LanceScan
         canonical, column, literals.size(), serializedBytes, fingerprint);
   }
 
-  private StructField findField(String column) {
-    for (StructField field : schema.fields()) {
-      if (field.name().equals(column)) {
+  private static StructField findField(StructType struct, String name) {
+    for (StructField field : struct.fields()) {
+      if (field.name().equals(name)) {
         return field;
       }
     }
