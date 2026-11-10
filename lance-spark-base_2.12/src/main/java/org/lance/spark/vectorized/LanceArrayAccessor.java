@@ -14,6 +14,7 @@
 package org.lance.spark.vectorized;
 
 import org.apache.arrow.vector.complex.ListVector;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.vectorized.ColumnarArray;
 
 public class LanceArrayAccessor {
@@ -22,8 +23,17 @@ public class LanceArrayAccessor {
   private final LanceArrowColumnVector arrayData;
 
   public LanceArrayAccessor(ListVector vector) {
+    this(vector, new LanceArrowColumnVector(vector.getDataVector()));
+  }
+
+  /** Binds the elements through {@code elementType}, so pruned structs in them read by name. */
+  public LanceArrayAccessor(ListVector vector, DataType elementType) {
+    this(vector, new LanceArrowColumnVector(vector.getDataVector(), elementType));
+  }
+
+  private LanceArrayAccessor(ListVector vector, LanceArrowColumnVector arrayData) {
     this.accessor = vector;
-    this.arrayData = new LanceArrowColumnVector(vector.getDataVector());
+    this.arrayData = arrayData;
   }
 
   public boolean isNullAt(int rowId) {

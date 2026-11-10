@@ -17,22 +17,32 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.BitVector;
+import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.VarCharVector;
+import org.apache.arrow.vector.complex.FixedSizeListVector;
+import org.apache.arrow.vector.complex.LargeListVector;
+import org.apache.arrow.vector.complex.ListVector;
+import org.apache.arrow.vector.complex.MapVector;
 import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
+import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.MapType;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.vectorized.ColumnarArray;
+import org.apache.spark.sql.vectorized.ColumnarMap;
 import org.apache.spark.sql.vectorized.ColumnarRow;
 import org.apache.spark.unsafe.types.UTF8String;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -253,20 +263,191 @@ public class LanceArrowColumnVectorStructProjectionTest {
     }
   }
 
-  /** Builds the 4-child struct from the issue: external_path / offset / length / managed. */
-  private static StructVector createReferenceStruct(BufferAllocator allocator) {
+  /**
+   * List, LargeList and FixedSizeList elements bind through the Spark element type, so a list of
+   * pruned structs reads its elements by name as well.
+   */
+  @Test
+  public void listOfPrunedStructs_issue499() {
+    StructType prunedSchema =
+        new StructType().add("offset", DataTypes.LongType).add("length", DataTypes.LongType);
+    ArrayType prunedList = DataTypes.createArrayType(prunedSchema, true);
+    ArrowType[] listTypes = {
+      ArrowType.List.INSTANCE, ArrowType.LargeList.INSTANCE, new ArrowType.FixedSizeList(2)
+    };
+    for (ArrowType listType : listTypes) {
+      Field field =
+          new Field(
+              "items",
+              FieldType.nullable(listType),
+              Collections.singletonList(referenceField("item")));
+      try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
+          FieldVector items = field.createVector(allocator)) {
+        items.allocateNew();
+        writeTwoReferences(items);
+
+        try (LanceArrowColumnVector column = new LanceArrowColumnVector(items, prunedList, false)) {
+          String message = listType.toString();
+          ColumnarArray row0 = column.getArray(0);
+          assertEquals(2, row0.numElements(), message);
+          assertEquals(100L, row0.getStruct(0, 2).getLong(0), message);
+          assertEquals(50L, row0.getStruct(0, 2).getLong(1), message);
+          assertEquals(200L, row0.getStruct(1, 2).getLong(0), message);
+          assertEquals(75L, row0.getStruct(1, 2).getLong(1), message);
+          assertEquals(prunedList, column.dataType(), message);
+        }
+      }
+    }
+  }
+
+  /**
+   * Map keys and values bind through the Spark key and value types, so pruned struct values read by
+   * name as well.
+   */
+  @Test
+  public void mapOfPrunedStructValues_issue499() {
+    Field entries =
+        new Field(
+            "entries",
+            FieldType.notNullable(ArrowType.Struct.INSTANCE),
+            Arrays.asList(
+                new Field("key", FieldType.notNullable(ArrowType.Utf8.INSTANCE), null),
+                referenceField("value")));
     Field field =
         new Field(
-            "reference",
+            "m", FieldType.nullable(new ArrowType.Map(false)), Collections.singletonList(entries));
+    StructType prunedSchema =
+        new StructType().add("offset", DataTypes.LongType).add("length", DataTypes.LongType);
+    MapType prunedMap = DataTypes.createMapType(DataTypes.StringType, prunedSchema, true);
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
+        MapVector map = (MapVector) field.createVector(allocator)) {
+      map.allocateNew();
+      StructVector entryVector = (StructVector) map.getDataVector();
+      StructVector values = entryVector.getChild("value", StructVector.class);
+
+      // Row 0: {"k0" -> ("path-0", 100, 50, true)}
+      map.startNewValue(0);
+      byte[] key = "k0".getBytes(StandardCharsets.UTF_8);
+      entryVector.getChild("key", VarCharVector.class).setSafe(0, key, 0, key.length);
+      values.setIndexDefined(0);
+      writeRow(values, 0, "path-0", 100L, 50L, true);
+      entryVector.setIndexDefined(0);
+      map.endValue(0, 1);
+      setRowCounts(entryVector, 1);
+      map.setValueCount(1);
+
+      try (LanceArrowColumnVector column = new LanceArrowColumnVector(map, prunedMap, false)) {
+        ColumnarMap row0 = column.getMap(0);
+        assertEquals(1, row0.numElements());
+        assertEquals(UTF8String.fromString("k0"), row0.keyArray().getUTF8String(0));
+        ColumnarRow value = row0.valueArray().getStruct(0, 2);
+        assertEquals(100L, value.getLong(0));
+        assertEquals(50L, value.getLong(1));
+        assertEquals(prunedMap, column.dataType());
+      }
+    }
+  }
+
+  /**
+   * The scanner's {@code StructField} constructor follows the Spark type through a struct into a
+   * list. Pruning {@code s: struct<items: array<struct<a: bigint, b: bigint>>>} to {@code
+   * s.items.b} must read {@code b}; binding the elements by position would silently read {@code a}
+   * instead, since both are bigint.
+   */
+  @Test
+  public void structFieldConstructor_listOfPrunedStructsInStruct_issue499() {
+    Field element =
+        new Field(
+            "element",
             FieldType.nullable(ArrowType.Struct.INSTANCE),
             Arrays.asList(
-                new Field("external_path", FieldType.nullable(ArrowType.Utf8.INSTANCE), null),
-                new Field("offset", FieldType.nullable(new ArrowType.Int(64, true)), null),
-                new Field("length", FieldType.nullable(new ArrowType.Int(64, true)), null),
-                new Field("managed", FieldType.nullable(ArrowType.Bool.INSTANCE), null)));
-    StructVector vector = (StructVector) field.createVector(allocator);
+                new Field("a", FieldType.nullable(new ArrowType.Int(64, true)), null),
+                new Field("b", FieldType.nullable(new ArrowType.Int(64, true)), null)));
+    Field parentField =
+        new Field(
+            "s",
+            FieldType.nullable(ArrowType.Struct.INSTANCE),
+            Collections.singletonList(
+                new Field(
+                    "items",
+                    FieldType.nullable(ArrowType.List.INSTANCE),
+                    Collections.singletonList(element))));
+    StructType prunedParent =
+        new StructType()
+            .add(
+                "items",
+                DataTypes.createArrayType(new StructType().add("b", DataTypes.LongType), true));
+    StructField prunedField = new StructField("s", prunedParent, true, Metadata.empty());
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
+        StructVector parent = (StructVector) parentField.createVector(allocator)) {
+      parent.allocateNew();
+      ListVector items = parent.getChild("items", ListVector.class);
+      StructVector elements = (StructVector) items.getDataVector();
+      // Row 0: s.items = [{a: 11, b: 22}]
+      parent.setIndexDefined(0);
+      items.startNewValue(0);
+      elements.setIndexDefined(0);
+      elements.getChild("a", BigIntVector.class).setSafe(0, 11L);
+      elements.getChild("b", BigIntVector.class).setSafe(0, 22L);
+      items.endValue(0, 1);
+      setRowCounts(elements, 1);
+      parent.setValueCount(1);
+
+      try (LanceArrowColumnVector column = new LanceArrowColumnVector(parent, false, prunedField)) {
+        ColumnarArray row0 = column.getStruct(0).getArray(0);
+        assertEquals(1, row0.numElements());
+        assertEquals(22L, row0.getStruct(0, 1).getLong(0));
+        assertEquals(prunedParent, column.dataType());
+      }
+    }
+  }
+
+  /** The 4-child struct from the issue: external_path / offset / length / managed. */
+  private static Field referenceField(String name) {
+    return new Field(
+        name,
+        FieldType.nullable(ArrowType.Struct.INSTANCE),
+        Arrays.asList(
+            new Field("external_path", FieldType.nullable(ArrowType.Utf8.INSTANCE), null),
+            new Field("offset", FieldType.nullable(new ArrowType.Int(64, true)), null),
+            new Field("length", FieldType.nullable(new ArrowType.Int(64, true)), null),
+            new Field("managed", FieldType.nullable(ArrowType.Bool.INSTANCE), null)));
+  }
+
+  /** Builds a top-level {@link #referenceField} vector named {@code reference}. */
+  private static StructVector createReferenceStruct(BufferAllocator allocator) {
+    StructVector vector = (StructVector) referenceField("reference").createVector(allocator);
     vector.allocateNew();
     return vector;
+  }
+
+  /**
+   * Writes one row holding two reference structs, ("path-0", 100, 50, true) and ("path-1", 200, 75,
+   * false), into a List, LargeList or FixedSizeList(2) vector of reference structs.
+   */
+  private static void writeTwoReferences(FieldVector items) {
+    StructVector elements;
+    if (items instanceof FixedSizeListVector) {
+      FixedSizeListVector list = (FixedSizeListVector) items;
+      elements = (StructVector) list.getDataVector();
+      list.setNotNull(0);
+    } else if (items instanceof LargeListVector) {
+      LargeListVector list = (LargeListVector) items;
+      elements = (StructVector) list.getDataVector();
+      list.startNewValue(0);
+      list.endValue(0, 2L);
+    } else {
+      ListVector list = (ListVector) items;
+      elements = (StructVector) list.getDataVector();
+      list.startNewValue(0);
+      list.endValue(0, 2);
+    }
+    elements.setIndexDefined(0);
+    writeRow(elements, 0, "path-0", 100L, 50L, true);
+    elements.setIndexDefined(1);
+    writeRow(elements, 1, "path-1", 200L, 75L, false);
+    setRowCounts(elements, 2);
+    items.setValueCount(1);
   }
 
   private static void writeRow(
