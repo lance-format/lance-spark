@@ -15,6 +15,7 @@ package org.lance.spark;
 
 import org.lance.ipc.FullTextQuery;
 
+import org.apache.spark.sql.SparkSession;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -455,5 +456,104 @@ public class LanceSparkReadOptionsSerializationTest {
     LanceSparkReadOptions deserializedOptions = (LanceSparkReadOptions) ois.readObject();
 
     Assertions.assertFalse(deserializedOptions.isUseScalarIndex());
+  }
+
+  @Test
+  public void testStripSurroundingQuotes() {
+    Assertions.assertNull(LanceSparkReadOptions.stripSurroundingQuotes(null));
+    Assertions.assertEquals("", LanceSparkReadOptions.stripSurroundingQuotes(""));
+    Assertions.assertEquals("", LanceSparkReadOptions.stripSurroundingQuotes("''"));
+    Assertions.assertEquals("", LanceSparkReadOptions.stripSurroundingQuotes("\"\""));
+    Assertions.assertEquals("false", LanceSparkReadOptions.stripSurroundingQuotes("'false'"));
+    Assertions.assertEquals("false", LanceSparkReadOptions.stripSurroundingQuotes("\"false\""));
+    Assertions.assertEquals("4096", LanceSparkReadOptions.stripSurroundingQuotes("  '4096'  "));
+    Assertions.assertEquals(
+        "'unmatched", LanceSparkReadOptions.stripSurroundingQuotes("'unmatched"));
+  }
+
+  @Test
+  public void testQuotedOptionValuesAreParsedCleanly() {
+    Map<String, String> readProps = new HashMap<>();
+    readProps.put(LanceSparkReadOptions.CONFIG_DATASET_URI, "s3://bucket/path");
+    readProps.put(LanceSparkReadOptions.CONFIG_BATCH_SIZE, "'4096'");
+    readProps.put(LanceSparkReadOptions.CONFIG_BLOCK_SIZE, "\"65536\"");
+    readProps.put(LanceSparkReadOptions.CONFIG_USE_SCALAR_INDEX, "'false'");
+    readProps.put(LanceSparkReadOptions.CONFIG_PUSH_DOWN_FILTERS, "\"false\"");
+    readProps.put(LanceSparkReadOptions.CONFIG_TOP_N_PUSH_DOWN, "'false'");
+    readProps.put(LanceSparkReadOptions.CONFIG_EXECUTOR_CREDENTIAL_REFRESH, "'false'");
+    readProps.put(LanceSparkReadOptions.CONFIG_ARROW_BATCH_READS, "'true'");
+    readProps.put(LanceSparkReadOptions.CONFIG_VERSION, "'7'");
+
+    LanceSparkReadOptions readOptions = LanceSparkReadOptions.from(readProps);
+    Assertions.assertEquals(4096, readOptions.getBatchSize());
+    Assertions.assertEquals(Integer.valueOf(65536), readOptions.getBlockSize());
+    Assertions.assertFalse(readOptions.isUseScalarIndex());
+    Assertions.assertFalse(readOptions.isPushDownFilters());
+    Assertions.assertFalse(readOptions.isTopNPushDown());
+    Assertions.assertFalse(readOptions.isExecutorCredentialRefresh());
+    Assertions.assertTrue(readOptions.isArrowBatchReadsEnabled());
+    Assertions.assertEquals(LanceRef.ofMain(7L), readOptions.getRef());
+
+    Map<String, String> writeProps = new HashMap<>();
+    writeProps.put(LanceSparkWriteOptions.CONFIG_WRITE_MODE, "'OVERWRITE'");
+    writeProps.put(LanceSparkWriteOptions.CONFIG_BATCH_SIZE, "'2048'");
+    writeProps.put(LanceSparkWriteOptions.CONFIG_MAX_ROWS_PER_FILE, "\"10000\"");
+    writeProps.put(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS, "'true'");
+    writeProps.put(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION, "'2.1'");
+
+    LanceSparkWriteOptions writeOptions =
+        LanceSparkWriteOptions.from(writeProps, "s3://bucket/path");
+    Assertions.assertTrue(writeOptions.isOverwrite());
+    Assertions.assertEquals(2048, writeOptions.getBatchSize());
+    Assertions.assertEquals(Integer.valueOf(10000), writeOptions.getMaxRowsPerFile());
+    Assertions.assertEquals(Boolean.TRUE, writeOptions.getEnableStableRowIds());
+    Assertions.assertEquals("2.1", writeOptions.getFileFormatVersion());
+  }
+
+  @Test
+  public void testSparkSqlSetSessionConfigsWithQuotes() {
+    SparkSession spark =
+        SparkSession.builder()
+            .master("local[1]")
+            .appName("lance-session-config-quote-test")
+            .getOrCreate();
+    try {
+      spark.sql("SET spark.sql.lance.batch_size = '4096'");
+      spark.sql("SET spark.sql.lance.use_scalar_index = 'false'");
+      spark.sql("SET spark.sql.lance.pushDownFilters = \"false\"");
+      spark.sql("SET spark.sql.lance.topN_push_down = 'false'");
+
+      // 1. Session configs override catalog defaults
+      Map<String, String> catalogOpts = new HashMap<>();
+      catalogOpts.put(LanceSparkReadOptions.CONFIG_BATCH_SIZE, "1024");
+      catalogOpts.put(LanceSparkReadOptions.CONFIG_USE_SCALAR_INDEX, "true");
+      LanceSparkCatalogConfig catalogConfig = LanceSparkCatalogConfig.from(catalogOpts);
+
+      LanceSparkReadOptions fromCatalog =
+          LanceSparkReadOptions.builder()
+              .datasetUri("s3://bucket/path")
+              .withCatalogDefaults(catalogConfig)
+              .build();
+      Assertions.assertEquals(4096, fromCatalog.getBatchSize());
+      Assertions.assertFalse(fromCatalog.isUseScalarIndex());
+      Assertions.assertFalse(fromCatalog.isPushDownFilters());
+      Assertions.assertFalse(fromCatalog.isTopNPushDown());
+
+      // 2. Explicit per-read options override session configs
+      Map<String, String> perReadOpts = new HashMap<>();
+      perReadOpts.put(LanceSparkReadOptions.CONFIG_BATCH_SIZE, "2048");
+      perReadOpts.put(LanceSparkReadOptions.CONFIG_USE_SCALAR_INDEX, "true");
+      LanceSparkReadOptions overridden =
+          LanceSparkReadOptions.from(perReadOpts, "s3://bucket/path");
+      Assertions.assertEquals(2048, overridden.getBatchSize());
+      Assertions.assertTrue(overridden.isUseScalarIndex());
+      Assertions.assertFalse(overridden.isPushDownFilters());
+    } finally {
+      spark.conf().unset("spark.sql.lance.batch_size");
+      spark.conf().unset("spark.sql.lance.use_scalar_index");
+      spark.conf().unset("spark.sql.lance.pushDownFilters");
+      spark.conf().unset("spark.sql.lance.topN_push_down");
+      spark.stop();
+    }
   }
 }

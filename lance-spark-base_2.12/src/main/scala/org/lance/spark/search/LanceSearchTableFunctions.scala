@@ -351,7 +351,8 @@ object LanceSearchTableFunctions {
     // Not String.toBoolean: it throws on anything but "true"/"false", and this runs for every
     // VECTOR_SEARCH.
     val enabled = java.lang.Boolean.parseBoolean(
-      spark.conf.get("spark.sql.lance.search.distributed.enabled", "false"))
+      LanceSparkReadOptions.stripSurroundingQuotes(
+        spark.conf.get("spark.sql.lance.search.distributed.enabled", "false")))
     if (!enabled) return false
     // A distributed plan can only prefilter, while namespace execution defaults to post-filtering
     // the top k, which returns a different set of rows. Make the user pick.

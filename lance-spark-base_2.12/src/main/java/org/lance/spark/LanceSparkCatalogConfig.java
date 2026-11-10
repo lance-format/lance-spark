@@ -158,7 +158,9 @@ public class LanceSparkCatalogConfig {
    */
   public boolean isEnableStableRowIds() {
     return "true"
-        .equalsIgnoreCase(tableOptions.getOrDefault(TABLE_OPT_ENABLE_STABLE_ROW_IDS, "false"));
+        .equalsIgnoreCase(
+            LanceSparkReadOptions.stripSurroundingQuotes(
+                tableOptions.getOrDefault(TABLE_OPT_ENABLE_STABLE_ROW_IDS, "false")));
   }
 
   /**
@@ -171,7 +173,7 @@ public class LanceSparkCatalogConfig {
   public boolean isEnableStableRowIds(Map<String, String> tableProperties) {
     String override = tableProperties.get(TABLE_OPT_ENABLE_STABLE_ROW_IDS);
     if (override != null) {
-      return "true".equalsIgnoreCase(override);
+      return "true".equalsIgnoreCase(LanceSparkReadOptions.stripSurroundingQuotes(override));
     }
     return isEnableStableRowIds();
   }
@@ -182,7 +184,8 @@ public class LanceSparkCatalogConfig {
    * @return the file format version string, or null if not specified
    */
   public String getFileFormatVersion() {
-    return tableOptions.get(TABLE_OPT_FILE_FORMAT_VERSION);
+    return LanceSparkReadOptions.stripSurroundingQuotes(
+        tableOptions.get(TABLE_OPT_FILE_FORMAT_VERSION));
   }
 
   @Override

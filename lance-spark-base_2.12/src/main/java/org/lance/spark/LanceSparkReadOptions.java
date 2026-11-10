@@ -19,12 +19,16 @@ import org.lance.namespace.LanceNamespace;
 import org.lance.spark.utils.FullTextQueryUtils;
 
 import com.google.common.base.Preconditions;
+import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
+import scala.Option;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.Serializable;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -100,6 +104,36 @@ public class LanceSparkReadOptions implements Serializable {
 
   /** Enable Arrow batches when supported, otherwise use the regular reader. Default: false. */
   public static final String CONFIG_ARROW_BATCH_READS = "arrow_batch_reads";
+
+  public static final String SPARK_SESSION_CONFIG_PREFIX = "spark.sql.lance.";
+
+  private static final List<String> SESSION_OPTION_KEYS =
+      Collections.unmodifiableList(
+          Arrays.asList(
+              CONFIG_PUSH_DOWN_FILTERS,
+              CONFIG_BLOCK_SIZE,
+              CONFIG_VERSION,
+              CONFIG_BRANCH,
+              CONFIG_TAG,
+              CONFIG_INDEX_CACHE_SIZE,
+              CONFIG_METADATA_CACHE_SIZE,
+              CONFIG_BATCH_SIZE,
+              CONFIG_USE_SCALAR_INDEX,
+              CONFIG_TOP_N_PUSH_DOWN,
+              CONFIG_FULL_TEXT_QUERY,
+              CONFIG_EXECUTOR_CREDENTIAL_REFRESH,
+              CONFIG_ARROW_BATCH_READS,
+              LanceSparkWriteOptions.CONFIG_WRITE_MODE,
+              LanceSparkWriteOptions.CONFIG_MAX_ROWS_PER_FILE,
+              LanceSparkWriteOptions.CONFIG_MAX_ROWS_PER_GROUP,
+              LanceSparkWriteOptions.CONFIG_MAX_BYTES_PER_FILE,
+              LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION,
+              LanceSparkWriteOptions.CONFIG_USE_QUEUED_WRITE_BUFFER,
+              LanceSparkWriteOptions.CONFIG_QUEUE_DEPTH,
+              LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS,
+              LanceSparkWriteOptions.CONFIG_USE_LARGE_VAR_TYPES,
+              LanceSparkWriteOptions.CONFIG_MAX_BATCH_BYTES,
+              LanceSparkWriteOptions.CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD));
 
   public static final String LANCE_FILE_SUFFIX = ".lance";
 
@@ -205,10 +239,60 @@ public class LanceSparkReadOptions implements Serializable {
    * @return a new LanceSparkReadOptions
    */
   public static LanceSparkReadOptions from(String datasetUri) {
-    return builder().datasetUri(datasetUri).build();
+    return builder().datasetUri(datasetUri).fromOptions(Collections.emptyMap()).build();
   }
 
   // ========== Helper methods ==========
+
+  /**
+   * Strips a single pair of matching surrounding single ({@code '...'}) or double ({@code "..."})
+   * quotes after trimming whitespace. Spark SQL {@code SET key = 'value'} retains the surrounding
+   * quotes in the raw configuration value.
+   */
+  public static String stripSurroundingQuotes(String value) {
+    if (value == null) {
+      return null;
+    }
+    String trimmed = value.trim();
+    if (trimmed.length() >= 2) {
+      char first = trimmed.charAt(0);
+      char last = trimmed.charAt(trimmed.length() - 1);
+      if ((first == '\'' && last == '\'') || (first == '"' && last == '"')) {
+        return trimmed.substring(1, trimmed.length() - 1).trim();
+      }
+    }
+    return trimmed;
+  }
+
+  /**
+   * Extracts recognized {@code spark.sql.lance.<key>} session configurations from the active or
+   * default {@link SparkSession}, stripping any surrounding quotes added by Spark SQL {@code SET}.
+   */
+  public static Map<String, String> extractActiveSessionOptions() {
+    try {
+      Option<SparkSession> sessionOpt = SparkSession.getActiveSession();
+      if (sessionOpt.isEmpty()) {
+        sessionOpt = SparkSession.getDefaultSession();
+      }
+      if (sessionOpt.isEmpty()) {
+        return Collections.emptyMap();
+      }
+      SparkSession spark = sessionOpt.get();
+      if (spark.sparkContext().isStopped()) {
+        return Collections.emptyMap();
+      }
+      Map<String, String> sessionOpts = new HashMap<>();
+      for (String key : SESSION_OPTION_KEYS) {
+        String raw = spark.conf().get(SPARK_SESSION_CONFIG_PREFIX + key, null);
+        if (raw != null) {
+          sessionOpts.put(key, stripSurroundingQuotes(raw));
+        }
+      }
+      return sessionOpts;
+    } catch (Exception e) {
+      return Collections.emptyMap();
+    }
+  }
 
   private static String extractDatasetName(String datasetUri) {
     if (datasetUri == null) {
@@ -570,7 +654,9 @@ public class LanceSparkReadOptions implements Serializable {
      */
     public Builder fromOptions(Map<String, String> options) {
       this.storageOptions = new HashMap<>(options);
-      parseTypedFlags(options);
+      Map<String, String> effective = new HashMap<>(extractActiveSessionOptions());
+      effective.putAll(options);
+      parseTypedFlags(effective);
       return this;
     }
 
@@ -587,11 +673,18 @@ public class LanceSparkReadOptions implements Serializable {
      */
     public Builder withCatalogDefaults(LanceSparkCatalogConfig catalogConfig) {
       // Merge storage options: catalog options are defaults, current options override
-      Map<String, String> merged = new HashMap<>(catalogConfig.getStorageOptions());
-      merged.putAll(this.storageOptions);
+      Map<String, String> userOptions = new HashMap<>(this.storageOptions);
+      Map<String, String> mergedStorage = new HashMap<>(catalogConfig.getStorageOptions());
+      mergedStorage.putAll(userOptions);
+      this.storageOptions = mergedStorage;
       this.indexCacheBackend = catalogConfig.getIndexCacheBackend();
       this.metadataCacheBackend = catalogConfig.getMetadataCacheBackend();
-      return fromOptions(merged);
+
+      Map<String, String> effective = new HashMap<>(catalogConfig.getStorageOptions());
+      effective.putAll(extractActiveSessionOptions());
+      effective.putAll(userOptions);
+      parseTypedFlags(effective);
+      return this;
     }
 
     /**
@@ -611,45 +704,53 @@ public class LanceSparkReadOptions implements Serializable {
               <= 1,
           "Specify only one of branch, tag, or version");
       if (opts.containsKey(CONFIG_PUSH_DOWN_FILTERS)) {
-        this.pushDownFilters = Boolean.parseBoolean(opts.get(CONFIG_PUSH_DOWN_FILTERS));
+        this.pushDownFilters =
+            Boolean.parseBoolean(stripSurroundingQuotes(opts.get(CONFIG_PUSH_DOWN_FILTERS)));
       }
       if (opts.containsKey(CONFIG_BLOCK_SIZE)) {
-        this.blockSize = Integer.parseInt(opts.get(CONFIG_BLOCK_SIZE));
+        this.blockSize = Integer.parseInt(stripSurroundingQuotes(opts.get(CONFIG_BLOCK_SIZE)));
       }
       if (references.containsKey(CONFIG_VERSION)) {
-        this.ref = LanceRef.ofMain(Long.parseLong(references.get(CONFIG_VERSION)));
+        this.ref =
+            LanceRef.ofMain(Long.parseLong(stripSurroundingQuotes(references.get(CONFIG_VERSION))));
       } else if (references.containsKey(CONFIG_BRANCH)) {
-        this.ref = LanceRef.ofBranch(references.get(CONFIG_BRANCH));
+        this.ref = LanceRef.ofBranch(stripSurroundingQuotes(references.get(CONFIG_BRANCH)));
       } else if (references.containsKey(CONFIG_TAG)) {
-        this.ref = LanceRef.ofTag(references.get(CONFIG_TAG));
+        this.ref = LanceRef.ofTag(stripSurroundingQuotes(references.get(CONFIG_TAG)));
       }
       if (opts.containsKey(CONFIG_INDEX_CACHE_SIZE)) {
-        this.indexCacheSize = Integer.parseInt(opts.get(CONFIG_INDEX_CACHE_SIZE));
+        this.indexCacheSize =
+            Integer.parseInt(stripSurroundingQuotes(opts.get(CONFIG_INDEX_CACHE_SIZE)));
       }
       if (opts.containsKey(CONFIG_METADATA_CACHE_SIZE)) {
-        this.metadataCacheSize = Integer.parseInt(opts.get(CONFIG_METADATA_CACHE_SIZE));
+        this.metadataCacheSize =
+            Integer.parseInt(stripSurroundingQuotes(opts.get(CONFIG_METADATA_CACHE_SIZE)));
       }
       if (opts.containsKey(CONFIG_BATCH_SIZE)) {
-        int parsedBatchSize = Integer.parseInt(opts.get(CONFIG_BATCH_SIZE));
+        int parsedBatchSize = Integer.parseInt(stripSurroundingQuotes(opts.get(CONFIG_BATCH_SIZE)));
         Preconditions.checkArgument(parsedBatchSize > 0, "batch_size must be positive");
         this.batchSize = parsedBatchSize;
       }
       if (opts.containsKey(CONFIG_TOP_N_PUSH_DOWN)) {
-        this.topNPushDown = Boolean.parseBoolean(opts.get(CONFIG_TOP_N_PUSH_DOWN));
+        this.topNPushDown =
+            Boolean.parseBoolean(stripSurroundingQuotes(opts.get(CONFIG_TOP_N_PUSH_DOWN)));
       }
       if (opts.containsKey(CONFIG_FULL_TEXT_QUERY)) {
         String json = opts.get(CONFIG_FULL_TEXT_QUERY);
         this.fullTextQuery = FullTextQueryUtils.stringToFullTextQuery(json);
       }
       if (opts.containsKey(CONFIG_USE_SCALAR_INDEX)) {
-        this.useScalarIndex = Boolean.parseBoolean(opts.get(CONFIG_USE_SCALAR_INDEX));
+        this.useScalarIndex =
+            Boolean.parseBoolean(stripSurroundingQuotes(opts.get(CONFIG_USE_SCALAR_INDEX)));
       }
       if (opts.containsKey(CONFIG_EXECUTOR_CREDENTIAL_REFRESH)) {
         this.executorCredentialRefresh =
-            Boolean.parseBoolean(opts.get(CONFIG_EXECUTOR_CREDENTIAL_REFRESH));
+            Boolean.parseBoolean(
+                stripSurroundingQuotes(opts.get(CONFIG_EXECUTOR_CREDENTIAL_REFRESH)));
       }
       if (opts.containsKey(CONFIG_ARROW_BATCH_READS)) {
-        this.arrowBatchReads = Boolean.parseBoolean(opts.get(CONFIG_ARROW_BATCH_READS));
+        this.arrowBatchReads =
+            Boolean.parseBoolean(stripSurroundingQuotes(opts.get(CONFIG_ARROW_BATCH_READS)));
       }
     }
 

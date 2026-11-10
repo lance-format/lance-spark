@@ -75,6 +75,17 @@ and namespace-specific options:
 | `spark.sql.catalog.{name}.parent`           | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                             |
 | `spark.sql.catalog.{name}.parent_delimiter` | String | ✗        | Delimiter for parent prefix (default: `.`). See [Note on Namespace Levels](#note-on-namespace-levels).                           |
 
+## Session-Level Read and Write Options
+
+Read and write options (such as `batch_size`, `block_size`, `pushDownFilters`, `use_scalar_index`, `topN_push_down`, `executor_credential_refresh`, and `arrow_batch_reads`) can also be configured dynamically at the Spark session level under the `spark.sql.lance.` prefix:
+
+```sql
+SET spark.sql.lance.batch_size = 4096;
+SET spark.sql.lance.use_scalar_index = false;
+```
+
+Surrounding single or double quotes in `SET` statements (for example, `SET spark.sql.lance.use_scalar_index = 'false'`) are stripped automatically. Session-level settings override catalog-level defaults (`spark.sql.catalog.{name}.*`), while explicit per-query `.option(...)` settings override session-level settings.
+
 ## Distributed Vector Search
 
 Set `spark.sql.lance.search.distributed.enabled=true` to execute `VECTOR_SEARCH` with Spark tasks
