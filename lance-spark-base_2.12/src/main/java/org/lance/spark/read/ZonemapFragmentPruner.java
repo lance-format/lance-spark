@@ -208,7 +208,6 @@ public final class ZonemapFragmentPruner {
     return Optional.of(matchingFragments);
   }
 
-  @SuppressWarnings("unchecked")
   /**
    * Whether zonemap bounds of a column of Arrow {@code type} compare with the values Spark joins on
    * the way this pruner compares them, so that runtime filters, which carry Spark's join keys, can
@@ -257,6 +256,7 @@ public final class ZonemapFragmentPruner {
     return Integer.compare(a.length() - i, b.length() - j);
   }
 
+  @SuppressWarnings("unchecked")
   private static boolean zoneMatchesComparison(
       ZoneStats zone, Comparable<Object> target, ComparisonType type) {
 
@@ -313,31 +313,51 @@ public final class ZonemapFragmentPruner {
       normalizedValues.add(normalizeLiteral(((Literal<?>) children[i]).value()));
     }
 
+    // Sort the values once so that each zone takes a binary search rather than a pass over all of
+    // them: a runtime filter carries every join key of the other side of a join.
+    boolean hasNull = normalizedValues.removeIf(v -> v == null);
+    try {
+      normalizedValues.sort(ZonemapFragmentPruner::compare);
+    } catch (ClassCastException e) {
+      LOG.warn("Cannot order IN values for zonemap pruning, skipping pruning on {}", column, e);
+      return Optional.empty();
+    }
+
     Set<Integer> matchingFragments = new HashSet<>();
     for (ZoneStats zone : stats) {
-      for (Object value : normalizedValues) {
-        if (value == null) {
-          if (zone.getNullCount() > 0) {
-            matchingFragments.add(zone.getFragmentId());
-            break;
-          }
-        } else {
-          try {
-            @SuppressWarnings("unchecked")
-            Comparable<Object> target = (Comparable<Object>) value;
-            if (zoneMatchesComparison(zone, target, ComparisonType.EQUALS)) {
-              matchingFragments.add(zone.getFragmentId());
-              break;
-            }
-          } catch (ClassCastException e) {
-            matchingFragments.add(zone.getFragmentId());
-            break;
-          }
-        }
+      if ((hasNull && zone.getNullCount() > 0) || zoneContainsAny(zone, normalizedValues)) {
+        matchingFragments.add(zone.getFragmentId());
       }
     }
 
     return Optional.of(matchingFragments);
+  }
+
+  /** Whether one of the {@code sortedValues} lies within the zone's bounds. */
+  private static boolean zoneContainsAny(ZoneStats zone, List<Object> sortedValues) {
+    Object min = zone.getMin();
+    Object max = zone.getMax();
+    // A zone without bounds holds only nulls.
+    if (min == null || max == null || sortedValues.isEmpty()) {
+      return false;
+    }
+    try {
+      // The first value not below min.
+      int low = 0;
+      int high = sortedValues.size();
+      while (low < high) {
+        int mid = (low + high) >>> 1;
+        if (compare(sortedValues.get(mid), min) < 0) {
+          low = mid + 1;
+        } else {
+          high = mid;
+        }
+      }
+      return low < sortedValues.size() && compare(sortedValues.get(low), max) <= 0;
+    } catch (ClassCastException e) {
+      LOG.warn("Type mismatch in zonemap comparison, skipping pruning for zone", e);
+      return true;
+    }
   }
 
   private static Optional<Set<Integer>> analyzeIsNull(

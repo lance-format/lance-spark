@@ -25,12 +25,15 @@ import org.apache.spark.sql.connector.expressions.filter.Predicate;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Date;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Random;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -684,5 +687,57 @@ public class ZonemapFragmentPrunerTest {
     assertFalse(
         ZonemapFragmentPruner.prunesRuntimeFilters(
             new ArrowType.FloatingPoint(FloatingPointPrecision.DOUBLE)));
+  }
+
+  @Test
+  public void testInKeepsEveryZoneHoldingOneOfManyValues() {
+    // Unsorted values with duplicates, against overlapping zones and zones of only nulls.
+    Random random = new Random(42);
+    List<ZoneStats> zones = new ArrayList<>();
+    for (int z = 0; z < 500; z++) {
+      long min = random.nextInt(100_000);
+      zones.add(
+          z % 50 == 0
+              ? new ZoneStats(z, 0, 100, null, null, 100)
+              : new ZoneStats(z, 0, 100, min, min + random.nextInt(200), 0));
+    }
+    Object[] values = new Object[2_000];
+    for (int i = 0; i < values.length; i++) {
+      values[i] = (long) random.nextInt(100_000);
+    }
+    Set<Integer> expected = new HashSet<>();
+    for (ZoneStats zone : zones) {
+      for (Object value : values) {
+        if (zone.getMin() != null
+            && (long) value >= (Long) zone.getMin()
+            && (long) value <= (Long) zone.getMax()) {
+          expected.add(zone.getFragmentId());
+        }
+      }
+    }
+
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(
+            new Predicate[] {TestPredicates.in("x", values)}, Map.of("x", zones));
+
+    assertTrue(result.isPresent());
+    assertEquals(expected, result.get());
+  }
+
+  @Test
+  public void testInOrdersStringValuesByCodePoint() {
+    // By code point U+FFFD < U+FFFE < U+FFFF < U+1F600; UTF-16 puts U+1F600 first.
+    Map<String, List<ZoneStats>> stats =
+        Map.of(
+            "s",
+            Arrays.asList(
+                new ZoneStats(0, 0, 100, "\uD83D\uDE00", "\uD83D\uDE00", 0),
+                new ZoneStats(1, 0, 100, "\uFFFD", "\uFFFD", 0),
+                new ZoneStats(2, 0, 100, "\uFFFE", "\uFFFF", 0)));
+    Predicate[] filters = new Predicate[] {TestPredicates.in("s", "\uD83D\uDE00", "\uFFFD")};
+
+    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    assertTrue(result.isPresent());
+    assertEquals(Set.of(0, 1), result.get());
   }
 }
