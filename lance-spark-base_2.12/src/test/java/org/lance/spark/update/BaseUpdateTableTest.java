@@ -25,6 +25,8 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -81,11 +83,34 @@ public abstract class BaseUpdateTableTest {
     return configs;
   }
 
-  @Test
-  public void testTransactionPropertiesSql() throws Exception {
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  public void testTransactionPropertiesSql(boolean managedVersioning) throws Exception {
+    if (managedVersioning) {
+      catalogName += "_managed";
+      String catalogConfig = "spark.sql.catalog." + catalogName;
+      spark.conf().set(catalogConfig, "org.lance.spark.LanceNamespaceSparkCatalog");
+      spark.conf().set(catalogConfig + ".impl", "dir");
+      spark.conf().set(catalogConfig + ".root", tempDir.resolve("managed").toString());
+      spark.conf().set(catalogConfig + ".table_version_tracking_enabled", "true");
+      catalog = (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+      spark.sql("CREATE NAMESPACE " + catalogName + ".default");
+    }
     String table = catalogName + ".default.transaction_properties";
-    spark.sql("CREATE TABLE " + table + " (id INT, value INT) USING lance");
-    spark.sql("INSERT INTO " + table + " VALUES (1, 10), (2, 20)");
+    Map<String, String> createProperties = Collections.singletonMap("request", "create");
+    LanceSpark.executeSql(
+        spark,
+        "CREATE TABLE "
+            + table
+            + " USING lance AS SELECT 1 AS id, 10 AS value UNION ALL SELECT 2, 20",
+        createProperties);
+    if (managedVersioning) {
+      LanceDataset targetTable =
+          (LanceDataset)
+              catalog.loadTable(Identifier.of(new String[] {"default"}, "transaction_properties"));
+      Assertions.assertTrue(targetTable.getManagedVersioning());
+    }
+    assertTransactionProperties(createProperties);
     Map<String, String> properties = new HashMap<>();
     properties.put("RequestID", "Update-42");
     properties.put("empty", "");

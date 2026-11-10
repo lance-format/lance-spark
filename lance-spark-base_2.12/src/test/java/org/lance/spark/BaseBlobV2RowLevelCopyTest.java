@@ -129,17 +129,23 @@ public abstract class BaseBlobV2RowLevelCopyTest extends AbstractBlobV2CopyTest 
     createV2BlobTagTarget(fqTgt);
     insertTagRow(fqTgt, 1, originalBlob, "a");
     try {
-      spark.sql(
+      Map<String, String> properties = Collections.singletonMap("request", "blob-mixed-merge");
+      LanceSpark.executeSql(
+          spark,
           "MERGE INTO "
               + fqTgt
               + " t USING "
               + fqSrc
               + " s ON t.id = s.id"
               + " WHEN MATCHED THEN UPDATE SET t.data = s.data"
-              + " WHEN NOT MATCHED THEN INSERT (id, data, tag) VALUES (s.id, s.data, 'n')");
+              + " WHEN NOT MATCHED THEN INSERT (id, data, tag) VALUES (s.id, s.data, 'n')",
+          properties);
 
       assertTargetBlobBytes(
           datasetUriOf(tgt), rowAddressesOf(fqTgt), new byte[][] {updatedBlob, insertedBlob});
+      assertEquals(
+          properties,
+          TestUtils.readTransactionProperties(LanceSparkReadOptions.from(datasetUriOf(tgt))));
     } finally {
       spark.sql("DROP TABLE IF EXISTS " + fqSrc);
       spark.sql("DROP TABLE IF EXISTS " + fqTgt);

@@ -35,6 +35,7 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SaveMode;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.api.java.UDF1;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException;
 import org.apache.spark.sql.types.DataTypes;
@@ -51,6 +52,7 @@ import java.nio.file.Path;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -64,6 +66,7 @@ import java.util.stream.Collectors;
 
 import static org.apache.spark.sql.functions.col;
 import static org.apache.spark.sql.functions.lit;
+import static org.apache.spark.sql.functions.udf;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -76,6 +79,7 @@ public abstract class BaseSparkConnectorWriteTest {
 
   private static SparkSession spark;
   private static Dataset<Row> testData;
+  private static CountDownLatch concurrentWriteTasks;
   @TempDir static Path dbPath;
 
   @BeforeAll
@@ -83,7 +87,7 @@ public abstract class BaseSparkConnectorWriteTest {
     spark =
         SparkSession.builder()
             .appName("spark-lance-connector-test")
-            .master("local")
+            .master("local[2]")
             .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
             .config("spark.sql.catalog.lance.max_row_per_file", "1")
             .config("spark.sql.session.timeZone", "UTC")
@@ -237,53 +241,78 @@ public abstract class BaseSparkConnectorWriteTest {
         TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
     String table = "lance.`" + path + "`";
     testData.writeTo(table).create();
-    CountDownLatch ready = new CountDownLatch(2);
-    CountDownLatch start = new CountDownLatch(1);
+    long initialVersion;
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(path)).build()) {
+      initialVersion = dataset.version();
+    }
+    concurrentWriteTasks = new CountDownLatch(2);
+    String sourceView = "transaction_properties_concurrent_source";
+    // One task per write makes the barrier synchronize different writes, not source partitions.
+    testData
+        .coalesce(1)
+        .withColumn(
+            "id",
+            udf(
+                    (UDF1<Integer, Integer>)
+                        id -> {
+                          concurrentWriteTasks.countDown();
+                          if (!concurrentWriteTasks.await(30, TimeUnit.SECONDS)) {
+                            throw new IllegalStateException("Concurrent write tasks did not overlap");
+                          }
+                          return id;
+                        },
+                    DataTypes.IntegerType)
+                .asNondeterministic()
+                .apply(col("id")))
+        .createOrReplaceTempView(sourceView);
+    String statement =
+        "WITH source AS (SELECT * FROM "
+            + sourceView
+            + ") INSERT INTO "
+            + table
+            + " SELECT * FROM source";
+    Map<String, String> firstProperties =
+        new HashMap<>(Collections.singletonMap("request", "writer-a"));
+    firstProperties.put("only-a", "value-a");
+    Map<String, String> secondProperties =
+        new HashMap<>(Collections.singletonMap("request", "writer-b"));
+    secondProperties.put("only-b", "value-b");
     ExecutorService executor = Executors.newFixedThreadPool(2);
     try {
       List<Future<?>> writes =
           Arrays.asList(
-              executor.submit(() -> appendWithProperties(table, "writer-a", ready, start)),
-              executor.submit(() -> appendWithProperties(table, "writer-b", ready, start)));
-      assertTrue(ready.await(30, TimeUnit.SECONDS));
-      start.countDown();
+              executor.submit(() -> LanceSpark.executeSql(spark, statement, firstProperties)),
+              executor.submit(() -> LanceSpark.executeSql(spark, statement, secondProperties)));
       for (Future<?> write : writes) {
         write.get(60, TimeUnit.SECONDS);
       }
-      Set<String> requests = new HashSet<>();
+      Set<Map<String, String>> committedProperties = new HashSet<>();
       try (org.lance.Dataset dataset =
           Utils.openDatasetBuilder(LanceSparkReadOptions.from(path)).build()) {
         assertEquals(6, dataset.countRows());
-        for (long version = dataset.version(); version > dataset.version() - 2; version--) {
-          try (org.lance.Dataset historical = dataset.checkoutVersion(version);
+        List<Version> committedVersions =
+            dataset.listVersions().stream()
+                .filter(version -> version.getId() > initialVersion)
+                .collect(Collectors.toList());
+        assertEquals(2, committedVersions.size());
+        for (Version version : committedVersions) {
+          try (org.lance.Dataset historical = dataset.checkoutVersion(version.getId());
               Transaction transaction =
                   historical.readTransaction().orElseThrow(AssertionError::new)) {
-            requests.add(transaction.transactionProperties().get().get("request"));
+            committedProperties.add(
+                new HashMap<>(transaction.transactionProperties().orElseThrow(AssertionError::new)));
           }
         }
       }
-      assertEquals(new HashSet<>(Arrays.asList("writer-a", "writer-b")), requests);
+      assertEquals(
+          new HashSet<>(Arrays.asList(firstProperties, secondProperties)), committedProperties);
     } finally {
-      start.countDown();
+      concurrentWriteTasks.countDown();
+      concurrentWriteTasks.countDown();
       executor.shutdownNow();
+      spark.catalog().dropTempView(sourceView);
     }
-  }
-
-  private static void appendWithProperties(
-      String table, String request, CountDownLatch ready, CountDownLatch start) {
-    ready.countDown();
-    try {
-      if (!start.await(30, TimeUnit.SECONDS)) {
-        throw new AssertionError("Concurrent writer did not start");
-      }
-    } catch (InterruptedException exception) {
-      Thread.currentThread().interrupt();
-      throw new AssertionError(exception);
-    }
-    LanceSpark.executeSql(
-        spark,
-        "WITH source AS (SELECT * FROM tmp_view) INSERT INTO " + table + " SELECT * FROM source",
-        Collections.singletonMap("request", request));
   }
 
   @Test
