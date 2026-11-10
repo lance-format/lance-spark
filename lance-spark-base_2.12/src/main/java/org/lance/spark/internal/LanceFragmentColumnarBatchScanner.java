@@ -17,6 +17,7 @@ import org.lance.ipc.ScanStats;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.read.LanceInputPartition;
+import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Utils;
 import org.lance.spark.vectorized.BlobStructAccessor;
 import org.lance.spark.vectorized.LanceArrowColumnVector;
@@ -216,23 +217,11 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
         fragmentVector.setInt(fragmentScanner.fragmentId());
         fieldVectors.add(fragmentVector);
       } else if (fieldName.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)) {
-        String baseName =
-            fieldName.substring(
-                0, fieldName.length() - LanceConstant.BLOB_POSITION_SUFFIX.length());
-        FieldVector blobVector = actualFields.get(baseName);
-        if (blobVector instanceof StructVector) {
-          BlobPositionColumnVector posVector =
-              new BlobPositionColumnVector((StructVector) blobVector);
-          fieldVectors.add(posVector);
-        }
+        StructVector blobVector = blobV1DescriptorVector(actualFields, fieldName);
+        fieldVectors.add(new BlobPositionColumnVector(blobVector));
       } else if (fieldName.endsWith(LanceConstant.BLOB_SIZE_SUFFIX)) {
-        String baseName =
-            fieldName.substring(0, fieldName.length() - LanceConstant.BLOB_SIZE_SUFFIX.length());
-        FieldVector blobVector = actualFields.get(baseName);
-        if (blobVector instanceof StructVector) {
-          BlobSizeColumnVector sizeVector = new BlobSizeColumnVector((StructVector) blobVector);
-          fieldVectors.add(sizeVector);
-        }
+        StructVector blobVector = blobV1DescriptorVector(actualFields, fieldName);
+        fieldVectors.add(new BlobSizeColumnVector(blobVector));
       } else if (Utils.isScoreMetadataColumn(field)) {
         FieldVector vector = actualFields.get(fieldName);
         if (vector == null) {
@@ -263,6 +252,27 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
       }
     }
     return fieldVectors;
+  }
+
+  /**
+   * Returns the blob v1 descriptor struct backing a {@code __blob_pos} / {@code __blob_size}
+   * virtual column. {@link LanceFragmentScanner} always scans the base blob column for these
+   * virtual columns, so this check only guards against unexpected scan results.
+   */
+  private static StructVector blobV1DescriptorVector(
+      Map<String, FieldVector> actualFields, String virtualColumnName) {
+    String baseName = BlobUtils.blobV1VirtualColumnBaseName(virtualColumnName);
+    FieldVector blobVector = actualFields.get(baseName);
+    if (!(blobVector instanceof StructVector)) {
+      throw new IllegalStateException(
+          "Lance scan did not return blob v1 descriptor column '"
+              + baseName
+              + "' required by blob v1 virtual column '"
+              + virtualColumnName
+              + "', actual: "
+              + (blobVector == null ? "missing" : blobVector.getField().getType()));
+    }
+    return (StructVector) blobVector;
   }
 
   /**

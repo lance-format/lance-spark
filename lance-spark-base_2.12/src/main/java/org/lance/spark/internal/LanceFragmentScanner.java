@@ -280,6 +280,14 @@ public class LanceFragmentScanner implements AutoCloseable {
                         && !name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)
                         && !name.endsWith(LanceConstant.BLOB_SIZE_SUFFIX))
             .collect(Collectors.toList());
+    // Blob v1 virtual columns are derived from their base blob column, so scan the base column even
+    // when the query only projects the virtual columns.
+    for (StructField field : schema.fields()) {
+      String baseName = BlobUtils.blobV1VirtualColumnBaseName(field.name());
+      if (baseName != null && !columns.contains(baseName)) {
+        columns.add(baseName);
+      }
+    }
     if (schemaFields.contains(LanceConstant.ROW_LAST_UPDATED_AT_VERSION)) {
       columns.add(LanceConstant.ROW_LAST_UPDATED_AT_VERSION);
     }

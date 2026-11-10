@@ -350,6 +350,37 @@ public class LanceScanBuilderTest {
   }
 
   @Test
+  public void testBlobV1VirtualColumnFilterStaysResidualWhileOtherColumnsPushDown() {
+    Metadata blobV1Metadata =
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build();
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.LongType, true),
+              new StructField("payload", DataTypes.BinaryType, true, blobV1Metadata)
+            });
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            schema,
+            TestUtils.TestTable1Config.readOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+
+    Predicate onId = TestPredicates.gt("id", 1L);
+    Predicate onSize = TestPredicates.gt("payload" + LanceConstant.BLOB_SIZE_SUFFIX, 5L);
+    Predicate onPos = TestPredicates.gt("payload" + LanceConstant.BLOB_POSITION_SUFFIX, 0L);
+    Predicate[] postScan = builder.pushPredicates(new Predicate[] {onId, onSize, onPos});
+
+    // Blob v1 virtual columns do not exist in Lance, so their filters stay in Spark.
+    assertArrayEquals(new Predicate[] {onSize, onPos}, postScan);
+    assertArrayEquals(new Predicate[] {onId}, builder.pushedPredicates());
+    assertFalse(builder.pushLimit(10));
+  }
+
+  @Test
   public void testResidualPredicateBlocksLimitPushdownWithoutBlobColumn() {
     LanceScanBuilder builder = createBuilder();
     // Unsupported CONTAINS stays in Spark even on a table with no blob columns.

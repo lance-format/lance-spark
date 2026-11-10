@@ -13,6 +13,8 @@
  */
 package org.lance.spark.utils;
 
+import org.lance.spark.LanceConstant;
+
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
@@ -218,6 +220,20 @@ public class BlobUtils {
   /** Returns true if any field in {@code schema} carries legacy (v1) blob metadata. */
   public static boolean hasBlobV1Fields(StructType schema) {
     return !blobV1ColumnNames(schema).isEmpty();
+  }
+
+  /**
+   * Returns the base column name of a blob v1 {@code <column>__blob_pos} or {@code
+   * <column>__blob_size} virtual column, or null if {@code name} is not such a virtual column.
+   */
+  public static String blobV1VirtualColumnBaseName(String name) {
+    if (name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)) {
+      return name.substring(0, name.length() - LanceConstant.BLOB_POSITION_SUFFIX.length());
+    }
+    if (name.endsWith(LanceConstant.BLOB_SIZE_SUFFIX)) {
+      return name.substring(0, name.length() - LanceConstant.BLOB_SIZE_SUFFIX.length());
+    }
+    return null;
   }
 
   /**
