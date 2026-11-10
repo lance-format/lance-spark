@@ -368,6 +368,27 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
     assertEquals(metadata.get("originalFragmentCount"), metadata.get("survivingFragmentCount"));
   }
 
+  /**
+   * Row IDs are UInt64, so a negative captured key may be a valid ID of 2^63 or more. Lance leaves
+   * the whole runtime predicate to Spark instead of dropping that key.
+   */
+  @Test
+  public void testNegativeRowIdKeyLeavesRuntimeFilterToSpark() {
+    String fact = createFact(defaultCatalog, false, false);
+    Dataset<Row> joined = joinOnCapturedRowIds(fact, true);
+
+    assertEquals(
+        Arrays.asList("30:v_3_0", "31:v_3_1", "32:v_3_2"),
+        joined.collectAsList().stream()
+            .map(row -> row.getInt(0) + ":" + row.getString(1))
+            .sorted()
+            .collect(Collectors.toList()));
+    Map<String, String> metadata = runtimeMetadata(joined);
+    assertEquals("1", metadata.get("rejectedRuntimeFilterCount"), metadata.toString());
+    assertEquals("[]", metadata.get("runtimePredicates"));
+    assertEquals(metadata.get("originalFragmentCount"), metadata.get("survivingFragmentCount"));
+  }
+
   @Test
   public void testBtreeScalarIndexAdvertisesProjectedScalarColumn() {
     String table = defaultCatalog + ".default.btree_" + suffix();
@@ -651,18 +672,23 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
   }
 
   private Dataset<Row> joinOnCapturedRowIds(String fact) {
+    return joinOnCapturedRowIds(fact, false);
+  }
+
+  private Dataset<Row> joinOnCapturedRowIds(String fact, boolean withNegativeKey) {
     spark.conf().set("spark.sql.adaptive.enabled", "true");
     spark.conf().unset("spark.sql.optimizer.dynamicPartitionPruning.reuseBroadcastOnly");
     spark.conf().unset("spark.sql.optimizer.dynamicPartitionPruning.fallbackFilterRatio");
     spark.conf().unset("spark.sql.autoBroadcastJoinThreshold");
     String capturedPath = tempDir.resolve("captured_rowids_" + suffix()).toString();
     spark.sql("SELECT _rowid AS rid, k FROM " + fact).write().parquet(capturedPath);
-    // Row IDs are stored as UInt64, so a negative captured key cannot match any row.
-    spark
-        .sql("SELECT CAST(-1 AS BIGINT) AS rid, 3 AS k")
-        .write()
-        .mode("append")
-        .parquet(capturedPath);
+    if (withNegativeKey) {
+      spark
+          .sql("SELECT CAST(-1 AS BIGINT) AS rid, 3 AS k")
+          .write()
+          .mode("append")
+          .parquet(capturedPath);
+    }
     spark.read().parquet(capturedPath).createOrReplaceTempView("captured_rowids");
     return spark.sql(
         "SELECT /*+ BROADCAST(c) */ f.id, f.payload FROM "

@@ -15,6 +15,7 @@ package org.lance.spark.read;
 
 import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
+import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.internal.ArrowBatchAdapter;
@@ -801,6 +802,8 @@ public class LanceScan
       return null;
     }
 
+    boolean rowIdentifier =
+        LanceConstant.ROW_ADDRESS.equals(column) || LanceConstant.ROW_ID.equals(column);
     Long unsignedMax = unsignedRuntimeKeyMax.get(column);
     List<Literal<?>> literals = new ArrayList<>();
     Set<String> literalFingerprints = new LinkedHashSet<>();
@@ -814,6 +817,11 @@ public class LanceScan
         continue;
       }
       if (!runtimeLiteralMatchesField(field.dataType(), literal.dataType())) {
+        return null;
+      }
+      // A negative _rowid or _rowaddr is a valid UInt64 that Lance cannot compare as a literal,
+      // so the whole predicate is left to Spark rather than dropping a key that may match.
+      if (rowIdentifier && isNegative(literal.value())) {
         return null;
       }
       if (unsignedMax != null && !withinUnsignedRange(literal.value(), unsignedMax)) {
@@ -848,6 +856,10 @@ public class LanceScan
 
   private static boolean runtimeLiteralMatchesField(DataType fieldType, DataType literalType) {
     return literalType == DataTypes.NullType || fieldType.sameType(literalType);
+  }
+
+  private static boolean isNegative(Object value) {
+    return value instanceof Number && ((Number) value).longValue() < 0;
   }
 
   private static boolean withinUnsignedRange(Object value, long max) {

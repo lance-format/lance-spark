@@ -239,6 +239,16 @@ public abstract class BaseLanceRuntimeFilteringTest {
   }
 
   @Test
+  public void testNegativeRowAddressKeyLeavesRuntimePredicateToSpark() {
+    LanceScan scan = newScan(new String[] {"_rowaddr"}, options(), null, null, null, null);
+    scan.filter(new Predicate[] {TestPredicates.in("_rowaddr", 0L, -1L)});
+
+    assertEquals(0, scan.pushedPredicates().length);
+    assertArrayEquals(new int[] {0, 1, 2}, fragmentIds(scan.planInputPartitions()));
+    assertEquals("1", metadata(scan).get("rejectedRuntimeFilterCount"));
+  }
+
+  @Test
   public void testExactIdentityShardingPruningPreservesPartitionKeys() {
     Map<Integer, Object> keys = new HashMap<>();
     keys.put(0, 10L);

@@ -1072,16 +1072,13 @@ public class LanceScanBuilder
   }
 
   /**
-   * The largest value Lance can store in each unsigned runtime filter column. {@code _rowid} and
-   * {@code _rowaddr} are UInt64, so only negative keys fall outside them.
+   * The largest value Lance can store in each runtime filter column stored as an unsigned integer
+   * narrower than 64 bits. {@code _rowid} and {@code _rowaddr} are UInt64 and not listed: a
+   * negative key there is a valid ID, so {@link LanceScan} leaves such a predicate to Spark.
    */
   private static Map<String, Long> unsignedRuntimeKeyMax(Set<String> columns, Schema arrowSchema) {
     Map<String, Long> result = new HashMap<>();
     for (String column : columns) {
-      if (LanceConstant.ROW_ADDRESS.equals(column) || LanceConstant.ROW_ID.equals(column)) {
-        result.put(column, Long.MAX_VALUE);
-        continue;
-      }
       Field field = findField(arrowSchema.getFields(), column);
       if (field != null && field.getType() instanceof ArrowType.Int) {
         ArrowType.Int intType = (ArrowType.Int) field.getType();
