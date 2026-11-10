@@ -159,6 +159,7 @@ public class LanceSparkReadOptions implements Serializable {
     this.useScalarIndex = builder.useScalarIndex;
     this.topNPushDown = builder.topNPushDown;
     this.storageOptions = new HashMap<>(builder.storageOptions);
+    this.storageOptions.keySet().removeIf(TransactionProperties.option()::equalsIgnoreCase);
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
     this.catalogName = builder.catalogName;

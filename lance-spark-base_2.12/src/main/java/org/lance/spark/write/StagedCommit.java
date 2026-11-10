@@ -23,6 +23,7 @@ import org.lance.namespace.model.DeregisterTableRequest;
 import org.lance.operation.Operation;
 import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
+import org.lance.spark.TransactionProperties;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
 
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -54,6 +55,12 @@ public class StagedCommit {
   // "user didn't specify" and lets lance-core inherit the flag from the manifest.
   private boolean enableStableRowIds;
   private String fileFormatVersion;
+  private Map<String, String> transactionProperties = Collections.emptyMap();
+
+  public void setTransactionProperties(Map<String, String> properties) {
+    this.transactionProperties = TransactionProperties.snapshot(properties);
+  }
+
   private List<FragmentMetadata> fragments;
   private Schema schema;
   private ShardingSpec shardingSpec;
@@ -94,6 +101,7 @@ public class StagedCommit {
     this.schema = schema;
     this.datasetUri = datasetUri;
     this.storageOptions = new HashMap<>(options.getStorageOptions());
+    this.storageOptions.keySet().removeIf(TransactionProperties.option()::equalsIgnoreCase);
     this.isNewTable = datasetUri != null;
     this.enableStableRowIds = options.isEnableStableRowIds();
     this.fileFormatVersion = options.getFileFormatVersion();
@@ -165,7 +173,11 @@ public class StagedCommit {
       builder.storageFormat(fileFormatVersion);
     }
     applyManagedVersioning(builder);
-    try (Transaction txn = new Transaction.Builder().operation(operation).build();
+    try (Transaction txn =
+            new Transaction.Builder()
+                .operation(operation)
+                .transactionProperties(transactionProperties)
+                .build();
         Dataset committed = builder.execute(txn)) {
       SparkLanceShardingUtils.initializeMemWal(committed, shardingSpec);
     }
@@ -185,7 +197,7 @@ public class StagedCommit {
       builder.storageFormat(fileFormatVersion);
     }
     applyManagedVersioning(builder);
-    try (Dataset committed = commitOperation(builder, version, operation)) {
+    try (Dataset committed = commitOperation(builder, version, operation, transactionProperties)) {
       SparkLanceShardingUtils.initializeMemWal(committed, shardingSpec);
     }
   }
@@ -197,9 +209,16 @@ public class StagedCommit {
   }
 
   private static Dataset commitOperation(
-      final CommitBuilder builder, final long readVersion, final Operation operation) {
+      final CommitBuilder builder,
+      final long readVersion,
+      final Operation operation,
+      final Map<String, String> transactionProperties) {
     try (Transaction txn =
-        new Transaction.Builder().readVersion(readVersion).operation(operation).build()) {
+        new Transaction.Builder()
+            .readVersion(readVersion)
+            .operation(operation)
+            .transactionProperties(transactionProperties)
+            .build()) {
       return builder.execute(txn);
     }
   }

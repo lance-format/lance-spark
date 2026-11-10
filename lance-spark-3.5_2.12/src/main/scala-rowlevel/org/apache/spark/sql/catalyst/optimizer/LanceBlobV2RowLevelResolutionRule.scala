@@ -15,13 +15,14 @@ package org.apache.spark.sql.catalyst.optimizer
 
 import org.apache.spark.sql.catalyst.plans.logical.{DeleteFromTable, LogicalPlan, MergeIntoTable, UpdateTable}
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.connector.catalog.{MetadataColumn, SupportsMetadataColumns, SupportsRead, SupportsRowLevelOperations, SupportsWrite, Table, TableCapability}
+import org.apache.spark.sql.connector.catalog.{MetadataColumn, SupportsMetadataColumns, SupportsRead, SupportsRowLevelOperations, Table, TableCapability}
 import org.apache.spark.sql.connector.read.ScanBuilder
 import org.apache.spark.sql.connector.write.{LogicalWriteInfo, RowLevelOperationBuilder, RowLevelOperationInfo, WriteBuilder}
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.lance.spark.LanceDataset
+import org.lance.spark.internal.TransactionPropertiesWriteTable
 import org.lance.spark.utils.BlobUtils
 
 import java.util
@@ -54,7 +55,7 @@ case class LanceBlobV2RowLevelResolutionRule() extends Rule[LogicalPlan] {
 class RowLevelMaskedLanceTable(val delegate: LanceDataset with SupportsRowLevelOperations)
   extends Table
   with SupportsRead
-  with SupportsWrite
+  with TransactionPropertiesWriteTable
   with SupportsMetadataColumns
   with SupportsRowLevelOperations {
 

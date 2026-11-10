@@ -59,6 +59,59 @@ The following features require the Lance Spark SQL extension to be enabled:
 - [OPTIMIZE INDEX](operations/ddl/optimize-index.md) - Incrementally maintain a named index
 - [VACUUM](operations/ddl/vacuum.md) - Remove old versions and reclaim storage space
 
+## Per-write Transaction Properties
+
+The optional `transaction_properties` write option accepts a JSON object whose keys
+and values are strings:
+
+```python
+df.writeTo("lance.default.events").option(
+    "transaction_properties", '{"request_id":"example-42","application":"import"}'
+).append()
+```
+
+Properties are persisted in the same native transaction as the data change.
+They are not table properties, catalog defaults, storage options or read options.
+Option names are case-insensitive; property keys and values preserve their case,
+Unicode and empty strings. Malformed JSON, duplicate keys and non-string or null
+values are rejected before committing. Omitting the option or passing `{}` keeps
+existing metadata-free behavior; a no-op does not gain a metadata-only commit.
+
+For SQL, use the synchronous JVM API rather than a shared session setting:
+
+```scala
+import org.lance.spark.LanceSpark
+import scala.collection.JavaConverters._
+
+LanceSpark.executeSql(
+  spark,
+  "DELETE FROM lance.default.events WHERE expired = true",
+  Map("request_id" -> "example-43").asJava)
+```
+
+`executeSql` copies the map before planning and binds it to that statement's write
+target. Concurrent calls can use the same Spark session without sharing property
+maps. It returns after executing the command and does not return a commit receipt
+or query results. Supported statements are `INSERT`, `INSERT OVERWRITE`,
+`CREATE/REPLACE TABLE AS SELECT`, `UPDATE`, `DELETE`, `MERGE`, and the Lance
+`ADD COLUMNS` / `UPDATE COLUMNS` backfill commands, subject to the Spark version's
+existing operation support. Backfill commands require the SQL extensions above.
+The API uses classic Spark, not Spark Connect.
+
+This includes staged create/replace commits. It excludes schema-only DDL,
+index operations, compaction, vacuum, primary-key commands and streaming writes.
+Do not configure operation metadata in table properties or catalog/session defaults.
+
+Consumers can inspect each retained native version using `Dataset.checkoutVersion`
+and `Dataset.readTransaction`, then read `Transaction.transactionProperties`.
+Transaction history may be removed by cleanup, and a transaction's `readVersion`
+is not its committed version. Properties provide correlation, not exactly-once
+writes or retry deduplication.
+
+!!! warning
+    Properties are caller-supplied persisted data. Do not include credentials,
+    tokens or sensitive payloads.
+
 ## Basic Setup
 
 Configure Spark with the `LanceNamespaceSparkCatalog` by setting the appropriate Spark catalog implementation

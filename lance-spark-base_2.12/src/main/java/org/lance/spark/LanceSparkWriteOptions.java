@@ -21,6 +21,7 @@ import com.google.common.base.Preconditions;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
 import java.io.Serializable;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -52,6 +53,7 @@ public class LanceSparkWriteOptions implements Serializable {
 
   public static final String CONFIG_DATASET_URI = "path";
   public static final String CONFIG_WRITE_MODE = "write_mode";
+  public static final String CONFIG_TRANSACTION_PROPERTIES = "transaction_properties";
   public static final String CONFIG_MAX_ROWS_PER_FILE = "max_row_per_file";
   public static final String CONFIG_MAX_ROWS_PER_GROUP = "max_rows_per_group";
   public static final String CONFIG_MAX_BYTES_PER_FILE = "max_bytes_per_file";
@@ -107,6 +109,7 @@ public class LanceSparkWriteOptions implements Serializable {
   private final String indexCacheBackend;
 
   private final String metadataCacheBackend;
+  private final Map<String, String> transactionProperties;
 
   private LanceSparkWriteOptions(Builder builder) {
     this.datasetUri = builder.datasetUri;
@@ -123,6 +126,8 @@ public class LanceSparkWriteOptions implements Serializable {
     this.maxBatchBytes = builder.maxBatchBytes;
     this.blobPackFileSizeThreshold = builder.blobPackFileSizeThreshold;
     this.storageOptions = new HashMap<>(builder.storageOptions);
+    this.storageOptions.keySet().removeIf(TransactionProperties.option()::equalsIgnoreCase);
+    this.transactionProperties = builder.transactionProperties;
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
     this.ref = builder.ref;
@@ -241,6 +246,10 @@ public class LanceSparkWriteOptions implements Serializable {
     return metadataCacheBackend;
   }
 
+  public Map<String, String> getTransactionProperties() {
+    return transactionProperties == null ? Collections.emptyMap() : transactionProperties;
+  }
+
   /** Returns a builder pre-populated with all fields from this instance. */
   public Builder toBuilder() {
     return builder()
@@ -258,6 +267,7 @@ public class LanceSparkWriteOptions implements Serializable {
         .useLargeVarTypes(useLargeVarTypes)
         .blobPackFileSizeThreshold(blobPackFileSizeThreshold)
         .storageOptions(storageOptions)
+        .transactionProperties(getTransactionProperties())
         .namespace(namespace)
         .tableId(tableId)
         .ref(ref)
@@ -375,6 +385,7 @@ public class LanceSparkWriteOptions implements Serializable {
         && Objects.equals(enableStableRowIds, that.enableStableRowIds)
         && Objects.equals(blobPackFileSizeThreshold, that.blobPackFileSizeThreshold)
         && Objects.equals(storageOptions, that.storageOptions)
+        && Objects.equals(getTransactionProperties(), that.getTransactionProperties())
         && Objects.equals(tableId, that.tableId)
         && Objects.equals(ref, that.ref)
         && Objects.equals(catalogName, that.catalogName)
@@ -399,6 +410,7 @@ public class LanceSparkWriteOptions implements Serializable {
         maxBatchBytes,
         blobPackFileSizeThreshold,
         storageOptions,
+        getTransactionProperties(),
         tableId,
         ref,
         catalogName,
@@ -422,6 +434,7 @@ public class LanceSparkWriteOptions implements Serializable {
     private long maxBatchBytes = DEFAULT_MAX_BATCH_BYTES;
     private Long blobPackFileSizeThreshold;
     private Map<String, String> storageOptions = new HashMap<>();
+    private Map<String, String> transactionProperties = Collections.emptyMap();
     private LanceNamespace namespace;
     private List<String> tableId;
     private LanceRef ref;
@@ -430,6 +443,11 @@ public class LanceSparkWriteOptions implements Serializable {
     private String metadataCacheBackend;
 
     private Builder() {}
+
+    public Builder transactionProperties(Map<String, String> properties) {
+      this.transactionProperties = TransactionProperties.snapshot(properties);
+      return this;
+    }
 
     public Builder datasetUri(String datasetUri) {
       this.datasetUri = datasetUri;
@@ -550,6 +568,12 @@ public class LanceSparkWriteOptions implements Serializable {
       Preconditions.checkArgument(
           !references.containsKey(LanceSparkReadOptions.CONFIG_TAG), "The tag option is read-only");
       this.storageOptions = new HashMap<>(options);
+      this.storageOptions.keySet().removeIf(TransactionProperties.option()::equalsIgnoreCase);
+      this.transactionProperties = Collections.emptyMap();
+      if (references.containsKey(TransactionProperties.option())) {
+        transactionProperties(
+            TransactionProperties.decode(references.get(TransactionProperties.option())));
+      }
       if (options.containsKey(CONFIG_WRITE_MODE)) {
         this.writeMode = WriteMode.valueOf(options.get(CONFIG_WRITE_MODE).toUpperCase(Locale.ROOT));
       }
@@ -615,10 +639,12 @@ public class LanceSparkWriteOptions implements Serializable {
     public Builder withCatalogDefaults(LanceSparkCatalogConfig catalogConfig) {
       // Merge storage options: catalog options are defaults, current options override
       Map<String, String> merged = new HashMap<>(catalogConfig.getStorageOptions());
+      merged.keySet().removeIf(TransactionProperties.option()::equalsIgnoreCase);
       merged.putAll(this.storageOptions);
       this.indexCacheBackend = catalogConfig.getIndexCacheBackend();
       this.metadataCacheBackend = catalogConfig.getMetadataCacheBackend();
-      return fromOptions(merged);
+      Map<String, String> operationProperties = this.transactionProperties;
+      return fromOptions(merged).transactionProperties(operationProperties);
     }
 
     public LanceSparkWriteOptions build() {

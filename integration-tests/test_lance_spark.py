@@ -12,6 +12,7 @@ Test organization follows the Lance documentation structure:
 - DML (Data Manipulation Language): INSERT, UPDATE, DELETE, MERGE, ADD COLUMN, UPDATE COLUMN operations
 """
 
+import json
 import os
 import time
 import pytest
@@ -2162,6 +2163,57 @@ class TestDQLSelect:
 
 class TestDMLInsert:
     """Test DML INSERT INTO operations."""
+
+    @pytest.mark.rest_dir_compatible
+    def test_transaction_properties(self, spark, record_property):
+        jvm = spark._jvm
+        namespace = spark.sparkContext._gateway.new_array(jvm.java.lang.String, 1)
+        namespace[0] = "default"
+        identifier = jvm.org.apache.spark.sql.connector.catalog.Identifier.of(
+            namespace, "test_table"
+        )
+        catalog = spark._jsparkSession.sessionState().catalogManager().catalog(
+            LANCE_CATALOG
+        )
+
+        def read_properties():
+            table = catalog.loadTable(identifier)
+            dataset = jvm.org.lance.spark.utils.Utils.openDatasetBuilder(
+                table.readOptions()
+            ).build()
+            try:
+                transaction = dataset.readTransaction().get()
+                try:
+                    return dict(
+                        transaction.transactionProperties().orElse(
+                            jvm.java.util.Collections.emptyMap()
+                        )
+                    )
+                finally:
+                    transaction.close()
+            finally:
+                dataset.close()
+
+        properties = {"RequestID": "create-\u96ea", "": ""}
+        spark.createDataFrame([(1,)], "id INT").writeTo(
+            "default.test_table"
+        ).using("lance").option(
+            "transaction_properties", json.dumps(properties)
+        ).create()
+        record_property(
+            "managed_versioning", catalog.loadTable(identifier).getManagedVersioning()
+        )
+        assert read_properties() == properties
+        assert spark.table("default.test_table").count() == 1
+        jvm.org.lance.spark.LanceSpark.executeSql(
+            spark._jsparkSession,
+            "DELETE FROM default.test_table",
+            _java_hash_map(spark, {"RequestID": "delete-all"}),
+        )
+        assert read_properties() == {"RequestID": "delete-all"}
+        assert spark.table("default.test_table").count() == 0
+        spark.sql("INSERT INTO default.test_table VALUES (2)")
+        assert read_properties() == {}
 
     def test_insert_into_values(self, spark):
         """Test INSERT INTO with VALUES clause."""

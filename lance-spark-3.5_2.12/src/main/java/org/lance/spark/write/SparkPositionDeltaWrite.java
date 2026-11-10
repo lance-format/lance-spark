@@ -308,7 +308,11 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
               .namespaceClientManagedVersioning(true);
         }
         try (Transaction txn =
-                new Transaction.Builder().readVersion(version).operation(update).build();
+                new Transaction.Builder()
+                    .readVersion(version)
+                    .operation(update)
+                    .transactionProperties(writeOptions.getTransactionProperties())
+                    .build();
             Dataset committed = commitBuilder.execute(txn)) {
           // auto-close txn and committed dataset
         }

@@ -13,7 +13,12 @@
  */
 package org.lance.spark.update;
 
+import org.lance.spark.LanceDataset;
+import org.lance.spark.LanceSpark;
+import org.lance.spark.TestUtils;
+
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
@@ -74,6 +79,54 @@ public abstract class BaseUpdateTableTest {
     Map<String, String> configs = new HashMap<>();
     configs.put("root", tempDir.toString());
     return configs;
+  }
+
+  @Test
+  public void testTransactionPropertiesSql() throws Exception {
+    String table = catalogName + ".default.transaction_properties";
+    spark.sql("CREATE TABLE " + table + " (id INT, value INT) USING lance");
+    spark.sql("INSERT INTO " + table + " VALUES (1, 10), (2, 20)");
+    Map<String, String> properties = new HashMap<>();
+    properties.put("RequestID", "Update-42");
+    properties.put("empty", "");
+    properties.put("", "");
+    properties.put("\u96ea", "\u00e9");
+    Map<String, String> expected = new HashMap<>(properties);
+    LanceSpark.executeSql(spark, "UPDATE " + table + " SET value = value + 1", properties);
+    properties.put("RequestID", "mutated");
+    assertTransactionProperties(expected);
+    Assertions.assertEquals(32, spark.sql("SELECT SUM(value) FROM " + table).first().getLong(0));
+    LanceSpark.executeSql(
+        spark,
+        "MERGE INTO "
+            + table
+            + " target USING (SELECT 1 AS id, 99 AS value) source "
+            + "ON target.id = source.id WHEN MATCHED THEN UPDATE SET value = source.value",
+        Collections.singletonMap("RequestID", "Matched-Merge"));
+    assertTransactionProperties(Collections.singletonMap("RequestID", "Matched-Merge"));
+    Assertions.assertEquals(120, spark.sql("SELECT SUM(value) FROM " + table).first().getLong(0));
+    LanceSpark.executeSql(
+        spark,
+        "MERGE INTO "
+            + table
+            + " target USING (SELECT 3 AS id, 30 AS value) source "
+            + "ON target.id = source.id WHEN NOT MATCHED THEN INSERT *",
+        Collections.singletonMap("RequestID", "Insert-Merge"));
+    assertTransactionProperties(Collections.singletonMap("RequestID", "Insert-Merge"));
+    Assertions.assertEquals(3, spark.table(table).count());
+    LanceSpark.executeSql(
+        spark, "DELETE FROM " + table, Collections.singletonMap("RequestID", "Delete-43"));
+    Assertions.assertEquals(0, spark.table(table).count());
+    assertTransactionProperties(Collections.singletonMap("RequestID", "Delete-43"));
+    spark.sql("INSERT INTO " + table + " VALUES (3, 30)");
+    assertTransactionProperties(Collections.emptyMap());
+  }
+
+  private void assertTransactionProperties(Map<String, String> expected) throws Exception {
+    LanceDataset table =
+        (LanceDataset)
+            catalog.loadTable(Identifier.of(new String[] {"default"}, "transaction_properties"));
+    Assertions.assertEquals(expected, TestUtils.readTransactionProperties(table.readOptions()));
   }
 
   @Test

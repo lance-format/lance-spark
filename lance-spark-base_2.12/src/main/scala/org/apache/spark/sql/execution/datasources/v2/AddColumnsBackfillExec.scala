@@ -24,7 +24,8 @@ case class AddColumnsBackfillExec(
     catalog: TableCatalog,
     ident: Identifier,
     columnNames: Seq[String],
-    query: LogicalPlan)
+    query: LogicalPlan,
+    writeOptions: Map[String, String] = Map.empty)
   extends LeafV2CommandExec {
 
   override def output: Seq[Attribute] = Seq.empty
@@ -78,7 +79,7 @@ case class AddColumnsBackfillExec(
       AppendData.byPosition(
         relation,
         actualQuery,
-        Map(LanceConstant.BACKFILL_COLUMNS_KEY -> columnNames.mkString(",")))
+        writeOptions + (LanceConstant.BACKFILL_COLUMNS_KEY -> columnNames.mkString(",")))
     val qe = session.sessionState.executePlan(append)
     qe.assertCommandExecuted()
 
