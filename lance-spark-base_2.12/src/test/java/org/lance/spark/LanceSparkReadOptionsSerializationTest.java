@@ -539,20 +539,40 @@ public class LanceSparkReadOptionsSerializationTest {
       Assertions.assertFalse(fromCatalog.isPushDownFilters());
       Assertions.assertFalse(fromCatalog.isTopNPushDown());
 
-      // 2. Explicit per-read options override session configs
+      // 2. Explicit per-read options override session configs (including mixed case)
       Map<String, String> perReadOpts = new HashMap<>();
-      perReadOpts.put(LanceSparkReadOptions.CONFIG_BATCH_SIZE, "2048");
-      perReadOpts.put(LanceSparkReadOptions.CONFIG_USE_SCALAR_INDEX, "true");
+      perReadOpts.put("BATCH_SIZE", "2048");
+      perReadOpts.put("USE_SCALAR_INDEX", "true");
+      perReadOpts.put("VERSION", "3");
+      spark.sql("SET spark.sql.lance.version = '2'");
+      spark.sql("SET spark.sql.lance.write_mode = 'overwrite'");
       LanceSparkReadOptions overridden =
-          LanceSparkReadOptions.from(perReadOpts, "s3://bucket/path");
+          LanceSparkReadOptions.builder()
+              .datasetUri("s3://bucket/path")
+              .fromOptions(perReadOpts)
+              .withCatalogDefaults(catalogConfig)
+              .build();
       Assertions.assertEquals(2048, overridden.getBatchSize());
       Assertions.assertTrue(overridden.isUseScalarIndex());
       Assertions.assertFalse(overridden.isPushDownFilters());
+      Assertions.assertEquals(LanceRef.ofMain(3L), overridden.getRef());
+
+      Map<String, String> perWriteOpts = new HashMap<>();
+      perWriteOpts.put("WRITE_MODE", "append");
+      LanceSparkWriteOptions overriddenWrite =
+          LanceSparkWriteOptions.builder()
+              .datasetUri("s3://bucket/path")
+              .fromOptions(perWriteOpts)
+              .withCatalogDefaults(catalogConfig)
+              .build();
+      Assertions.assertFalse(overriddenWrite.isOverwrite());
     } finally {
       spark.conf().unset("spark.sql.lance.batch_size");
       spark.conf().unset("spark.sql.lance.use_scalar_index");
       spark.conf().unset("spark.sql.lance.pushDownFilters");
       spark.conf().unset("spark.sql.lance.topN_push_down");
+      spark.conf().unset("spark.sql.lance.version");
+      spark.conf().unset("spark.sql.lance.write_mode");
       spark.stop();
     }
   }

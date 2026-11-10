@@ -160,4 +160,33 @@ public abstract class BaseTestSparkDirectoryNamespace extends SparkLanceNamespac
         ex.getMessage().contains("Not supported"),
         "Expected 'Not supported' but got: " + ex.getMessage());
   }
+
+  @Test
+  public void testSessionVersionOverriddenByCaseInsensitiveReadOption() {
+    String fullTable = catalogName + ".default." + generateTableName("quote_read");
+    spark.sql("CREATE TABLE " + fullTable + " (id INT NOT NULL)");
+    spark.sql("INSERT INTO " + fullTable + " VALUES (1)");
+    spark.sql("INSERT INTO " + fullTable + " VALUES (2)");
+    spark.sql("SET spark.sql.lance.version = '2'");
+    try {
+      assertEquals(1, spark.table(fullTable).collectAsList().size());
+      assertEquals(2, spark.read().option("VERSION", "3").table(fullTable).collectAsList().size());
+    } finally {
+      spark.conf().unset("spark.sql.lance.version");
+    }
+  }
+
+  @Test
+  public void testSessionWriteModeOverriddenByCaseInsensitiveWriteOption() throws Exception {
+    String fullTable = catalogName + ".default." + generateTableName("quote_write");
+    spark.sql("CREATE TABLE " + fullTable + " (id INT NOT NULL)");
+    spark.sql("INSERT INTO " + fullTable + " VALUES (1), (2)");
+    spark.sql("SET spark.sql.lance.write_mode = 'overwrite'");
+    try {
+      spark.sql("SELECT 3 AS id").writeTo(fullTable).option("WRITE_MODE", "append").append();
+      assertEquals(3L, spark.table(fullTable).count());
+    } finally {
+      spark.conf().unset("spark.sql.lance.write_mode");
+    }
+  }
 }

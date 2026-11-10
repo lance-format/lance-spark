@@ -288,6 +288,8 @@ public class Utils {
 
     if (versionId.isPresent()) {
       builder.ref(LanceRef.ofMain(versionId.get()));
+    } else if (!catalogHasRef(catalogConfig)) {
+      builder.ref(null);
     }
     if (tableId.isPresent()) {
       builder.tableId(tableId.get());
@@ -297,6 +299,21 @@ public class Utils {
     }
 
     return builder.build();
+  }
+
+  private static boolean catalogHasRef(LanceSparkCatalogConfig catalogConfig) {
+    if (catalogConfig == null || catalogConfig.getStorageOptions() == null) {
+      return false;
+    }
+    for (String key : catalogConfig.getStorageOptions().keySet()) {
+      if (key != null
+          && (key.equalsIgnoreCase(LanceSparkReadOptions.CONFIG_VERSION)
+              || key.equalsIgnoreCase(LanceSparkReadOptions.CONFIG_BRANCH)
+              || key.equalsIgnoreCase(LanceSparkReadOptions.CONFIG_TAG))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // Determine if the timestamp is in microseconds or nanoseconds and convert to Instant

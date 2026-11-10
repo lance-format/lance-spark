@@ -21,14 +21,18 @@ import com.google.common.base.Preconditions;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
 import java.io.Serializable;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 import static org.lance.spark.LanceSparkReadOptions.extractActiveSessionOptions;
+import static org.lance.spark.LanceSparkReadOptions.mergeRecognizedOptions;
 import static org.lance.spark.LanceSparkReadOptions.stripSurroundingQuotes;
 
 /**
@@ -67,6 +71,26 @@ public class LanceSparkWriteOptions implements Serializable {
   public static final String CONFIG_USE_LARGE_VAR_TYPES = "use_large_var_types";
   public static final String CONFIG_MAX_BATCH_BYTES = "max_batch_bytes";
   public static final String CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD = "blob_pack_file_size_threshold";
+
+  private static final Set<String> RECOGNIZED_WRITE_OPTION_LOWER_KEYS =
+      Collections.unmodifiableSet(
+          new HashSet<>(
+              Arrays.asList(
+                  CONFIG_DATASET_URI.toLowerCase(Locale.ROOT),
+                  CONFIG_WRITE_MODE.toLowerCase(Locale.ROOT),
+                  CONFIG_MAX_ROWS_PER_FILE.toLowerCase(Locale.ROOT),
+                  CONFIG_MAX_ROWS_PER_GROUP.toLowerCase(Locale.ROOT),
+                  CONFIG_MAX_BYTES_PER_FILE.toLowerCase(Locale.ROOT),
+                  CONFIG_FILE_FORMAT_VERSION.toLowerCase(Locale.ROOT),
+                  CONFIG_USE_QUEUED_WRITE_BUFFER.toLowerCase(Locale.ROOT),
+                  CONFIG_QUEUE_DEPTH.toLowerCase(Locale.ROOT),
+                  CONFIG_BATCH_SIZE.toLowerCase(Locale.ROOT),
+                  CONFIG_ENABLE_STABLE_ROW_IDS.toLowerCase(Locale.ROOT),
+                  CONFIG_USE_LARGE_VAR_TYPES.toLowerCase(Locale.ROOT),
+                  CONFIG_MAX_BATCH_BYTES.toLowerCase(Locale.ROOT),
+                  CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD.toLowerCase(Locale.ROOT),
+                  LanceSparkReadOptions.CONFIG_BRANCH.toLowerCase(Locale.ROOT),
+                  LanceSparkReadOptions.CONFIG_TAG.toLowerCase(Locale.ROOT))));
 
   private static final WriteMode DEFAULT_WRITE_MODE = WriteMode.APPEND;
   private static final boolean DEFAULT_USE_QUEUED_WRITE_BUFFER = false;
@@ -549,7 +573,7 @@ public class LanceSparkWriteOptions implements Serializable {
     public Builder fromOptions(Map<String, String> options) {
       this.storageOptions = new HashMap<>(options);
       Map<String, String> effective = new HashMap<>(extractActiveSessionOptions());
-      effective.putAll(options);
+      mergeRecognizedOptions(effective, options, RECOGNIZED_WRITE_OPTION_LOWER_KEYS, false);
       parseTypedFlags(effective);
       return this;
     }
@@ -574,77 +598,78 @@ public class LanceSparkWriteOptions implements Serializable {
       // Merge storage options: catalog options are defaults, current options override
       Map<String, String> userOptions = new HashMap<>(this.storageOptions);
       Map<String, String> mergedStorage = new HashMap<>(catalogConfig.getStorageOptions());
-      mergedStorage.putAll(userOptions);
+      mergeRecognizedOptions(mergedStorage, userOptions, RECOGNIZED_WRITE_OPTION_LOWER_KEYS, false);
       this.storageOptions = mergedStorage;
       this.indexCacheBackend = catalogConfig.getIndexCacheBackend();
       this.metadataCacheBackend = catalogConfig.getMetadataCacheBackend();
 
       Map<String, String> effective = new HashMap<>(catalogConfig.getStorageOptions());
-      effective.putAll(extractActiveSessionOptions());
-      effective.putAll(userOptions);
+      mergeRecognizedOptions(
+          effective, extractActiveSessionOptions(), RECOGNIZED_WRITE_OPTION_LOWER_KEYS, false);
+      mergeRecognizedOptions(effective, userOptions, RECOGNIZED_WRITE_OPTION_LOWER_KEYS, false);
       parseTypedFlags(effective);
       return this;
     }
 
     private void parseTypedFlags(Map<String, String> options) {
-      CaseInsensitiveStringMap references = new CaseInsensitiveStringMap(options);
+      CaseInsensitiveStringMap ciOpts = new CaseInsensitiveStringMap(options);
       Preconditions.checkArgument(
-          !references.containsKey(LanceSparkReadOptions.CONFIG_BRANCH),
+          !ciOpts.containsKey(LanceSparkReadOptions.CONFIG_BRANCH),
           "The branch option is read-only");
       Preconditions.checkArgument(
-          !references.containsKey(LanceSparkReadOptions.CONFIG_TAG), "The tag option is read-only");
-      if (options.containsKey(CONFIG_WRITE_MODE)) {
+          !ciOpts.containsKey(LanceSparkReadOptions.CONFIG_TAG), "The tag option is read-only");
+      if (ciOpts.containsKey(CONFIG_WRITE_MODE)) {
         this.writeMode =
             WriteMode.valueOf(
-                stripSurroundingQuotes(options.get(CONFIG_WRITE_MODE)).toUpperCase(Locale.ROOT));
+                stripSurroundingQuotes(ciOpts.get(CONFIG_WRITE_MODE)).toUpperCase(Locale.ROOT));
       }
-      if (options.containsKey(CONFIG_MAX_ROWS_PER_FILE)) {
+      if (ciOpts.containsKey(CONFIG_MAX_ROWS_PER_FILE)) {
         this.maxRowsPerFile =
-            Integer.parseInt(stripSurroundingQuotes(options.get(CONFIG_MAX_ROWS_PER_FILE)));
+            Integer.parseInt(stripSurroundingQuotes(ciOpts.get(CONFIG_MAX_ROWS_PER_FILE)));
       }
-      if (options.containsKey(CONFIG_MAX_ROWS_PER_GROUP)) {
+      if (ciOpts.containsKey(CONFIG_MAX_ROWS_PER_GROUP)) {
         this.maxRowsPerGroup =
-            Integer.parseInt(stripSurroundingQuotes(options.get(CONFIG_MAX_ROWS_PER_GROUP)));
+            Integer.parseInt(stripSurroundingQuotes(ciOpts.get(CONFIG_MAX_ROWS_PER_GROUP)));
       }
-      if (options.containsKey(CONFIG_MAX_BYTES_PER_FILE)) {
+      if (ciOpts.containsKey(CONFIG_MAX_BYTES_PER_FILE)) {
         this.maxBytesPerFile =
-            Long.parseLong(stripSurroundingQuotes(options.get(CONFIG_MAX_BYTES_PER_FILE)));
+            Long.parseLong(stripSurroundingQuotes(ciOpts.get(CONFIG_MAX_BYTES_PER_FILE)));
       }
-      if (options.containsKey(CONFIG_FILE_FORMAT_VERSION)) {
-        this.fileFormatVersion = stripSurroundingQuotes(options.get(CONFIG_FILE_FORMAT_VERSION));
+      if (ciOpts.containsKey(CONFIG_FILE_FORMAT_VERSION)) {
+        this.fileFormatVersion = stripSurroundingQuotes(ciOpts.get(CONFIG_FILE_FORMAT_VERSION));
       }
-      if (options.containsKey(CONFIG_USE_QUEUED_WRITE_BUFFER)) {
+      if (ciOpts.containsKey(CONFIG_USE_QUEUED_WRITE_BUFFER)) {
         this.useQueuedWriteBuffer =
             Boolean.parseBoolean(
-                stripSurroundingQuotes(options.get(CONFIG_USE_QUEUED_WRITE_BUFFER)));
+                stripSurroundingQuotes(ciOpts.get(CONFIG_USE_QUEUED_WRITE_BUFFER)));
       }
-      if (options.containsKey(CONFIG_QUEUE_DEPTH)) {
-        this.queueDepth = Integer.parseInt(stripSurroundingQuotes(options.get(CONFIG_QUEUE_DEPTH)));
+      if (ciOpts.containsKey(CONFIG_QUEUE_DEPTH)) {
+        this.queueDepth = Integer.parseInt(stripSurroundingQuotes(ciOpts.get(CONFIG_QUEUE_DEPTH)));
       }
-      if (options.containsKey(CONFIG_BATCH_SIZE)) {
+      if (ciOpts.containsKey(CONFIG_BATCH_SIZE)) {
         int parsedBatchSize =
-            Integer.parseInt(stripSurroundingQuotes(options.get(CONFIG_BATCH_SIZE)));
+            Integer.parseInt(stripSurroundingQuotes(ciOpts.get(CONFIG_BATCH_SIZE)));
         Preconditions.checkArgument(parsedBatchSize > 0, "batch_size must be positive");
         this.batchSize = parsedBatchSize;
       }
-      if (options.containsKey(CONFIG_ENABLE_STABLE_ROW_IDS)) {
+      if (ciOpts.containsKey(CONFIG_ENABLE_STABLE_ROW_IDS)) {
         this.enableStableRowIds =
-            Boolean.parseBoolean(stripSurroundingQuotes(options.get(CONFIG_ENABLE_STABLE_ROW_IDS)));
+            Boolean.parseBoolean(stripSurroundingQuotes(ciOpts.get(CONFIG_ENABLE_STABLE_ROW_IDS)));
       }
-      if (options.containsKey(CONFIG_USE_LARGE_VAR_TYPES)) {
+      if (ciOpts.containsKey(CONFIG_USE_LARGE_VAR_TYPES)) {
         this.useLargeVarTypes =
-            Boolean.parseBoolean(stripSurroundingQuotes(options.get(CONFIG_USE_LARGE_VAR_TYPES)));
+            Boolean.parseBoolean(stripSurroundingQuotes(ciOpts.get(CONFIG_USE_LARGE_VAR_TYPES)));
       }
-      if (options.containsKey(CONFIG_MAX_BATCH_BYTES)) {
+      if (ciOpts.containsKey(CONFIG_MAX_BATCH_BYTES)) {
         long parsedMaxBatchBytes =
-            Long.parseLong(stripSurroundingQuotes(options.get(CONFIG_MAX_BATCH_BYTES)));
+            Long.parseLong(stripSurroundingQuotes(ciOpts.get(CONFIG_MAX_BATCH_BYTES)));
         Preconditions.checkArgument(parsedMaxBatchBytes > 0, "max_batch_bytes must be positive");
         this.maxBatchBytes = parsedMaxBatchBytes;
       }
-      if (options.containsKey(CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD)) {
+      if (ciOpts.containsKey(CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD)) {
         long parsed =
             Long.parseLong(
-                stripSurroundingQuotes(options.get(CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD)));
+                stripSurroundingQuotes(ciOpts.get(CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD)));
         Preconditions.checkArgument(parsed > 0, "blob_pack_file_size_threshold must be positive");
         this.blobPackFileSizeThreshold = parsed;
       }

@@ -22,6 +22,8 @@ import com.google.common.base.Preconditions;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import scala.Option;
+import scala.Tuple2;
+import scala.collection.Iterator;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
@@ -30,9 +32,12 @@ import java.io.Serializable;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Read-specific options for Lance Spark connector.
@@ -107,6 +112,25 @@ public class LanceSparkReadOptions implements Serializable {
 
   public static final String SPARK_SESSION_CONFIG_PREFIX = "spark.sql.lance.";
 
+  private static final List<String> READ_OPTION_KEYS =
+      Collections.unmodifiableList(
+          Arrays.asList(
+              CONFIG_DATASET_URI,
+              CONFIG_PUSH_DOWN_FILTERS,
+              CONFIG_BLOCK_SIZE,
+              CONFIG_VERSION,
+              CONFIG_BRANCH,
+              CONFIG_TAG,
+              CONFIG_INDEX_CACHE_SIZE,
+              CONFIG_METADATA_CACHE_SIZE,
+              CONFIG_BATCH_SIZE,
+              CONFIG_USE_SCALAR_INDEX,
+              CONFIG_TOP_N_PUSH_DOWN,
+              CONFIG_NEAREST,
+              CONFIG_FULL_TEXT_QUERY,
+              CONFIG_EXECUTOR_CREDENTIAL_REFRESH,
+              CONFIG_ARROW_BATCH_READS));
+
   private static final List<String> SESSION_OPTION_KEYS =
       Collections.unmodifiableList(
           Arrays.asList(
@@ -134,6 +158,27 @@ public class LanceSparkReadOptions implements Serializable {
               LanceSparkWriteOptions.CONFIG_USE_LARGE_VAR_TYPES,
               LanceSparkWriteOptions.CONFIG_MAX_BATCH_BYTES,
               LanceSparkWriteOptions.CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD));
+
+  static final Set<String> RECOGNIZED_READ_OPTION_LOWER_KEYS = buildLowerKeySet(READ_OPTION_KEYS);
+
+  private static final Map<String, String> CANONICAL_SESSION_OPTION_KEYS =
+      buildCanonicalKeyMap(SESSION_OPTION_KEYS);
+
+  private static Set<String> buildLowerKeySet(List<String> keys) {
+    Set<String> set = new HashSet<>(keys.size());
+    for (String key : keys) {
+      set.add(key.toLowerCase(Locale.ROOT));
+    }
+    return Collections.unmodifiableSet(set);
+  }
+
+  private static Map<String, String> buildCanonicalKeyMap(List<String> keys) {
+    Map<String, String> map = new HashMap<>(keys.size());
+    for (String key : keys) {
+      map.put(key.toLowerCase(Locale.ROOT), key);
+    }
+    return Collections.unmodifiableMap(map);
+  }
 
   public static final String LANCE_FILE_SUFFIX = ".lance";
 
@@ -214,7 +259,8 @@ public class LanceSparkReadOptions implements Serializable {
    * @return a new LanceSparkReadOptions
    */
   public static LanceSparkReadOptions from(Map<String, String> properties) {
-    String datasetUri = properties.get(CONFIG_DATASET_URI);
+    CaseInsensitiveStringMap ciProps = new CaseInsensitiveStringMap(properties);
+    String datasetUri = ciProps.get(CONFIG_DATASET_URI);
     if (datasetUri == null) {
       throw new IllegalArgumentException("Missing required option: " + CONFIG_DATASET_URI);
     }
@@ -282,15 +328,77 @@ public class LanceSparkReadOptions implements Serializable {
         return Collections.emptyMap();
       }
       Map<String, String> sessionOpts = new HashMap<>();
-      for (String key : SESSION_OPTION_KEYS) {
-        String raw = spark.conf().get(SPARK_SESSION_CONFIG_PREFIX + key, null);
-        if (raw != null) {
-          sessionOpts.put(key, stripSurroundingQuotes(raw));
+      Iterator<Tuple2<String, String>> iter = spark.conf().getAll().iterator();
+      while (iter.hasNext()) {
+        Tuple2<String, String> entry = iter.next();
+        String confKey = entry._1();
+        String confVal = entry._2();
+        if (confKey != null
+            && confVal != null
+            && confKey.regionMatches(
+                true, 0, SPARK_SESSION_CONFIG_PREFIX, 0, SPARK_SESSION_CONFIG_PREFIX.length())) {
+          String optName = confKey.substring(SPARK_SESSION_CONFIG_PREFIX.length());
+          String canonical = CANONICAL_SESSION_OPTION_KEYS.get(optName.toLowerCase(Locale.ROOT));
+          if (canonical != null) {
+            sessionOpts.put(canonical, stripSurroundingQuotes(confVal));
+          }
         }
       }
       return sessionOpts;
     } catch (Exception e) {
       return Collections.emptyMap();
+    }
+  }
+
+  /**
+   * Merges {@code overrides} into {@code target}, matching recognized connector option keys
+   * case-insensitively so that higher-precedence options replace lower-precedence entries
+   * regardless of key casing while preserving case-sensitive storage option keys.
+   */
+  static void mergeRecognizedOptions(
+      Map<String, String> target,
+      Map<String, String> overrides,
+      Set<String> recognizedLowerKeys,
+      boolean clearConflictingRefs) {
+    if (overrides == null || overrides.isEmpty()) {
+      return;
+    }
+    if (clearConflictingRefs) {
+      boolean hasVersion = false;
+      boolean hasBranch = false;
+      boolean hasTag = false;
+      for (String key : overrides.keySet()) {
+        if (key == null) {
+          continue;
+        }
+        if (key.equalsIgnoreCase(CONFIG_VERSION)) {
+          hasVersion = true;
+        } else if (key.equalsIgnoreCase(CONFIG_BRANCH)) {
+          hasBranch = true;
+        } else if (key.equalsIgnoreCase(CONFIG_TAG)) {
+          hasTag = true;
+        }
+      }
+      int refCount = (hasVersion ? 1 : 0) + (hasBranch ? 1 : 0) + (hasTag ? 1 : 0);
+      Preconditions.checkArgument(refCount <= 1, "Specify only one of branch, tag, or version");
+      if (refCount == 1) {
+        target
+            .keySet()
+            .removeIf(
+                existing ->
+                    existing != null
+                        && (existing.equalsIgnoreCase(CONFIG_VERSION)
+                            || existing.equalsIgnoreCase(CONFIG_BRANCH)
+                            || existing.equalsIgnoreCase(CONFIG_TAG)));
+      }
+    }
+    for (Map.Entry<String, String> entry : overrides.entrySet()) {
+      String key = entry.getKey();
+      String value = entry.getValue();
+      if (key != null && recognizedLowerKeys.contains(key.toLowerCase(Locale.ROOT))) {
+        target.keySet().removeIf(existing -> existing != null && existing.equalsIgnoreCase(key));
+      }
+      target.put(key, value);
     }
   }
 
@@ -655,7 +763,7 @@ public class LanceSparkReadOptions implements Serializable {
     public Builder fromOptions(Map<String, String> options) {
       this.storageOptions = new HashMap<>(options);
       Map<String, String> effective = new HashMap<>(extractActiveSessionOptions());
-      effective.putAll(options);
+      mergeRecognizedOptions(effective, options, RECOGNIZED_READ_OPTION_LOWER_KEYS, true);
       parseTypedFlags(effective);
       return this;
     }
@@ -675,14 +783,15 @@ public class LanceSparkReadOptions implements Serializable {
       // Merge storage options: catalog options are defaults, current options override
       Map<String, String> userOptions = new HashMap<>(this.storageOptions);
       Map<String, String> mergedStorage = new HashMap<>(catalogConfig.getStorageOptions());
-      mergedStorage.putAll(userOptions);
+      mergeRecognizedOptions(mergedStorage, userOptions, RECOGNIZED_READ_OPTION_LOWER_KEYS, true);
       this.storageOptions = mergedStorage;
       this.indexCacheBackend = catalogConfig.getIndexCacheBackend();
       this.metadataCacheBackend = catalogConfig.getMetadataCacheBackend();
 
       Map<String, String> effective = new HashMap<>(catalogConfig.getStorageOptions());
-      effective.putAll(extractActiveSessionOptions());
-      effective.putAll(userOptions);
+      mergeRecognizedOptions(
+          effective, extractActiveSessionOptions(), RECOGNIZED_READ_OPTION_LOWER_KEYS, true);
+      mergeRecognizedOptions(effective, userOptions, RECOGNIZED_READ_OPTION_LOWER_KEYS, true);
       parseTypedFlags(effective);
       return this;
     }
@@ -693,64 +802,65 @@ public class LanceSparkReadOptions implements Serializable {
      * both call sites stay in sync and catalog-level configs reach the typed fields.
      */
     private void parseTypedFlags(Map<String, String> opts) {
-      CaseInsensitiveStringMap references = new CaseInsensitiveStringMap(opts);
+      CaseInsensitiveStringMap ciOpts = new CaseInsensitiveStringMap(opts);
       Preconditions.checkArgument(
-          !opts.containsKey(CONFIG_NEAREST),
+          !ciOpts.containsKey(CONFIG_NEAREST),
           "The nearest read option is no longer supported; use VECTOR_SEARCH table function");
       Preconditions.checkArgument(
-          (references.containsKey(CONFIG_VERSION) ? 1 : 0)
-                  + (references.containsKey(CONFIG_BRANCH) ? 1 : 0)
-                  + (references.containsKey(CONFIG_TAG) ? 1 : 0)
+          (ciOpts.containsKey(CONFIG_VERSION) ? 1 : 0)
+                  + (ciOpts.containsKey(CONFIG_BRANCH) ? 1 : 0)
+                  + (ciOpts.containsKey(CONFIG_TAG) ? 1 : 0)
               <= 1,
           "Specify only one of branch, tag, or version");
-      if (opts.containsKey(CONFIG_PUSH_DOWN_FILTERS)) {
+      if (ciOpts.containsKey(CONFIG_PUSH_DOWN_FILTERS)) {
         this.pushDownFilters =
-            Boolean.parseBoolean(stripSurroundingQuotes(opts.get(CONFIG_PUSH_DOWN_FILTERS)));
+            Boolean.parseBoolean(stripSurroundingQuotes(ciOpts.get(CONFIG_PUSH_DOWN_FILTERS)));
       }
-      if (opts.containsKey(CONFIG_BLOCK_SIZE)) {
-        this.blockSize = Integer.parseInt(stripSurroundingQuotes(opts.get(CONFIG_BLOCK_SIZE)));
+      if (ciOpts.containsKey(CONFIG_BLOCK_SIZE)) {
+        this.blockSize = Integer.parseInt(stripSurroundingQuotes(ciOpts.get(CONFIG_BLOCK_SIZE)));
       }
-      if (references.containsKey(CONFIG_VERSION)) {
+      if (ciOpts.containsKey(CONFIG_VERSION)) {
         this.ref =
-            LanceRef.ofMain(Long.parseLong(stripSurroundingQuotes(references.get(CONFIG_VERSION))));
-      } else if (references.containsKey(CONFIG_BRANCH)) {
-        this.ref = LanceRef.ofBranch(stripSurroundingQuotes(references.get(CONFIG_BRANCH)));
-      } else if (references.containsKey(CONFIG_TAG)) {
-        this.ref = LanceRef.ofTag(stripSurroundingQuotes(references.get(CONFIG_TAG)));
+            LanceRef.ofMain(Long.parseLong(stripSurroundingQuotes(ciOpts.get(CONFIG_VERSION))));
+      } else if (ciOpts.containsKey(CONFIG_BRANCH)) {
+        this.ref = LanceRef.ofBranch(stripSurroundingQuotes(ciOpts.get(CONFIG_BRANCH)));
+      } else if (ciOpts.containsKey(CONFIG_TAG)) {
+        this.ref = LanceRef.ofTag(stripSurroundingQuotes(ciOpts.get(CONFIG_TAG)));
       }
-      if (opts.containsKey(CONFIG_INDEX_CACHE_SIZE)) {
+      if (ciOpts.containsKey(CONFIG_INDEX_CACHE_SIZE)) {
         this.indexCacheSize =
-            Integer.parseInt(stripSurroundingQuotes(opts.get(CONFIG_INDEX_CACHE_SIZE)));
+            Integer.parseInt(stripSurroundingQuotes(ciOpts.get(CONFIG_INDEX_CACHE_SIZE)));
       }
-      if (opts.containsKey(CONFIG_METADATA_CACHE_SIZE)) {
+      if (ciOpts.containsKey(CONFIG_METADATA_CACHE_SIZE)) {
         this.metadataCacheSize =
-            Integer.parseInt(stripSurroundingQuotes(opts.get(CONFIG_METADATA_CACHE_SIZE)));
+            Integer.parseInt(stripSurroundingQuotes(ciOpts.get(CONFIG_METADATA_CACHE_SIZE)));
       }
-      if (opts.containsKey(CONFIG_BATCH_SIZE)) {
-        int parsedBatchSize = Integer.parseInt(stripSurroundingQuotes(opts.get(CONFIG_BATCH_SIZE)));
+      if (ciOpts.containsKey(CONFIG_BATCH_SIZE)) {
+        int parsedBatchSize =
+            Integer.parseInt(stripSurroundingQuotes(ciOpts.get(CONFIG_BATCH_SIZE)));
         Preconditions.checkArgument(parsedBatchSize > 0, "batch_size must be positive");
         this.batchSize = parsedBatchSize;
       }
-      if (opts.containsKey(CONFIG_TOP_N_PUSH_DOWN)) {
+      if (ciOpts.containsKey(CONFIG_TOP_N_PUSH_DOWN)) {
         this.topNPushDown =
-            Boolean.parseBoolean(stripSurroundingQuotes(opts.get(CONFIG_TOP_N_PUSH_DOWN)));
+            Boolean.parseBoolean(stripSurroundingQuotes(ciOpts.get(CONFIG_TOP_N_PUSH_DOWN)));
       }
-      if (opts.containsKey(CONFIG_FULL_TEXT_QUERY)) {
-        String json = opts.get(CONFIG_FULL_TEXT_QUERY);
+      if (ciOpts.containsKey(CONFIG_FULL_TEXT_QUERY)) {
+        String json = ciOpts.get(CONFIG_FULL_TEXT_QUERY);
         this.fullTextQuery = FullTextQueryUtils.stringToFullTextQuery(json);
       }
-      if (opts.containsKey(CONFIG_USE_SCALAR_INDEX)) {
+      if (ciOpts.containsKey(CONFIG_USE_SCALAR_INDEX)) {
         this.useScalarIndex =
-            Boolean.parseBoolean(stripSurroundingQuotes(opts.get(CONFIG_USE_SCALAR_INDEX)));
+            Boolean.parseBoolean(stripSurroundingQuotes(ciOpts.get(CONFIG_USE_SCALAR_INDEX)));
       }
-      if (opts.containsKey(CONFIG_EXECUTOR_CREDENTIAL_REFRESH)) {
+      if (ciOpts.containsKey(CONFIG_EXECUTOR_CREDENTIAL_REFRESH)) {
         this.executorCredentialRefresh =
             Boolean.parseBoolean(
-                stripSurroundingQuotes(opts.get(CONFIG_EXECUTOR_CREDENTIAL_REFRESH)));
+                stripSurroundingQuotes(ciOpts.get(CONFIG_EXECUTOR_CREDENTIAL_REFRESH)));
       }
-      if (opts.containsKey(CONFIG_ARROW_BATCH_READS)) {
+      if (ciOpts.containsKey(CONFIG_ARROW_BATCH_READS)) {
         this.arrowBatchReads =
-            Boolean.parseBoolean(stripSurroundingQuotes(opts.get(CONFIG_ARROW_BATCH_READS)));
+            Boolean.parseBoolean(stripSurroundingQuotes(ciOpts.get(CONFIG_ARROW_BATCH_READS)));
       }
     }
 

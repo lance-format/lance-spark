@@ -344,13 +344,10 @@ public class LanceDataset
       return readOptions;
     }
     LanceRef tableRef = readOptions.getRef();
-    boolean scanSetsRef =
+    boolean scanMapSetsRef =
         scanMap.containsKey(LanceSparkReadOptions.CONFIG_VERSION)
             || scanMap.containsKey(LanceSparkReadOptions.CONFIG_BRANCH)
-            || scanMap.containsKey(LanceSparkReadOptions.CONFIG_TAG)
-            || sessionOptions.containsKey(LanceSparkReadOptions.CONFIG_VERSION)
-            || sessionOptions.containsKey(LanceSparkReadOptions.CONFIG_BRANCH)
-            || sessionOptions.containsKey(LanceSparkReadOptions.CONFIG_TAG);
+            || scanMap.containsKey(LanceSparkReadOptions.CONFIG_TAG);
     Map<String, String> baseStorage = new HashMap<>(readOptions.getStorageOptions());
     // Stored options can still hold reference keys. Strip them so fromOptions cannot
     // overwrite the table ref with a leftover key.
@@ -367,7 +364,7 @@ public class LanceDataset
             .indexCacheBackend(readOptions.getIndexCacheBackend())
             .metadataCacheBackend(readOptions.getMetadataCacheBackend())
             .build();
-    LanceSparkReadOptions scanOptions =
+    LanceSparkReadOptions.Builder scanOptionsBuilder =
         LanceSparkReadOptions.builder()
             .datasetUri(readOptions.getDatasetUri())
             .namespace(readOptions.getNamespace())
@@ -375,9 +372,12 @@ public class LanceDataset
             .catalogName(readOptions.getCatalogName())
             .ref(tableRef)
             .fromOptions(scanMap.asCaseSensitiveMap())
-            .withCatalogDefaults(baseCatalogDefaults)
-            .build();
-    if (tableRef != null && scanSetsRef) {
+            .withCatalogDefaults(baseCatalogDefaults);
+    if (tableRef != null && !scanMapSetsRef) {
+      scanOptionsBuilder.ref(tableRef);
+    }
+    LanceSparkReadOptions scanOptions = scanOptionsBuilder.build();
+    if (tableRef != null && scanMapSetsRef) {
       LanceRef scanRef = scanOptions.getRef();
       if (sameNamedBranch(tableRef, scanRef)) {
         return scanOptions.withRef(tableRef);
@@ -482,16 +482,17 @@ public class LanceDataset
             .fromOptions(perWriteOptions)
             .withCatalogDefaults(baseCatalogDefaults);
     Map<String, String> sessionOptions = LanceSparkReadOptions.extractActiveSessionOptions();
+    CaseInsensitiveStringMap ciBaseStorage = new CaseInsensitiveStringMap(baseStorage);
     // Use table's file format version if not explicitly set in write options
-    if (!perWriteOptions.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)
+    if (!sparkWriteOptions.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)
         && !sessionOptions.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)
-        && !baseStorage.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)
+        && !ciBaseStorage.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)
         && fileFormatVersion != null) {
       writeOptionsBuilder.fileFormatVersion(fileFormatVersion);
     }
-    if (!perWriteOptions.containsKey(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS)
+    if (!sparkWriteOptions.containsKey(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS)
         && !sessionOptions.containsKey(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS)
-        && !baseStorage.containsKey(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS)
+        && !ciBaseStorage.containsKey(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS)
         && tableProperties.containsKey(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS)) {
       writeOptionsBuilder.enableStableRowIds(
           Boolean.parseBoolean(
