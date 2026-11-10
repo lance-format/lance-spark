@@ -110,6 +110,10 @@ public abstract class BaseLanceRuntimeFilteringTest {
     assertEquals(1, scan.pushedPredicates().length);
     assertEquals(3, scan.pushedPredicates()[0].children().length);
     assertEquals(2, scan.planInputPartitions().length);
+    Map<String, String> metadata = metadata(scan);
+    assertEquals("[x]", metadata.get("runtimeFilterColumns"));
+    assertEquals("2", metadata.get("runtimeFilterKeyCount"));
+    assertEquals("2", metadata.get("numPartitions"));
   }
 
   @Test

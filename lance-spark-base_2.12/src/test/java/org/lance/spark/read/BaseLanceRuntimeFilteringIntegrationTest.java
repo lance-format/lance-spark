@@ -195,7 +195,7 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
 
     assertTrue(joined.collectAsList().isEmpty());
     Map<String, String> metadata = runtimeMetadata(joined);
-    assertEquals("0", metadata.get("survivingFragmentCount"));
+    assertEquals("0", metadata.get("numPartitions"));
   }
 
   @Test
@@ -213,7 +213,7 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
     assertEquals(ROWS_PER_KEY, joined.collectAsList().size());
     Map<String, String> metadata = runtimeMetadata(joined);
     assertNotEquals("Optional.empty", metadata.get("whereConditions"));
-    assertFalse(metadata.get("runtimePredicates").equals("[]"));
+    assertNotEquals("[]", metadata.get("runtimeFilterColumns"));
   }
 
   @Test
@@ -280,9 +280,9 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
 
     assertEquals(9, joined.collectAsList().size());
     Map<String, String> metadata = runtimeMetadata(joined);
-    assertEquals("[]", metadata.get("runtimePredicates"));
+    assertEquals("[]", metadata.get("runtimeFilterColumns"));
     assertEquals("1", metadata.get("rejectedRuntimeFilterCount"));
-    assertEquals(metadata.get("originalFragmentCount"), metadata.get("survivingFragmentCount"));
+    assertEquals(metadata.get("originalFragmentCount"), metadata.get("numPartitions"));
   }
 
   @Test
@@ -344,7 +344,7 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
             .sql("SELECT DISTINCT shiftrightunsigned(_rowaddr, 32) FROM " + fact + " WHERE k = 3")
             .count();
     assertEquals(
-        String.valueOf(matchingFragments), runtimeMetadata(joined).get("survivingFragmentCount"));
+        String.valueOf(matchingFragments), runtimeMetadata(joined).get("numPartitions"));
   }
 
   /**
@@ -364,8 +364,8 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
             .collect(Collectors.toList()));
     assertTrue(LanceScanTestHelper.hasLanceRuntimeFilters(joined));
     Map<String, String> metadata = runtimeMetadata(joined);
-    assertTrue(metadata.get("runtimePredicates").contains("_rowid"), metadata.toString());
-    assertEquals(metadata.get("originalFragmentCount"), metadata.get("survivingFragmentCount"));
+    assertEquals("[_rowid]", metadata.get("runtimeFilterColumns"), metadata.toString());
+    assertEquals(metadata.get("originalFragmentCount"), metadata.get("numPartitions"));
   }
 
   /**
@@ -385,8 +385,8 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
             .collect(Collectors.toList()));
     Map<String, String> metadata = runtimeMetadata(joined);
     assertEquals("1", metadata.get("rejectedRuntimeFilterCount"), metadata.toString());
-    assertEquals("[]", metadata.get("runtimePredicates"));
-    assertEquals(metadata.get("originalFragmentCount"), metadata.get("survivingFragmentCount"));
+    assertEquals("[]", metadata.get("runtimeFilterColumns"));
+    assertEquals(metadata.get("originalFragmentCount"), metadata.get("numPartitions"));
   }
 
   @Test
@@ -442,7 +442,7 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
     assertTrue(
         LanceScanTestHelper.hasLanceRuntimeFilters(joined),
         joined.queryExecution().executedPlan().toString());
-    assertTrue(runtimeMetadata(joined).get("runtimePredicates").contains(space));
+    assertEquals("[" + space + "]", runtimeMetadata(joined).get("runtimeFilterColumns"));
   }
 
   @Test
@@ -638,7 +638,7 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
             + " VALUES (-1, -1, -1, 'match'), (256, 65536, 4294967296, 'match'), "
             + "(255, 65535, 4294967295, 'match'), (2, 2, 2, 'other-long')");
 
-    String[][] joins = {{"u8", "s", "255"}, {"u16", "i", "65535"}, {"u32", "b", "4294967295"}};
+    String[][] joins = {{"u8", "s"}, {"u16", "i"}, {"u32", "b"}};
     for (String[] join : joins) {
       Dataset<Row> joined =
           spark.sql(
@@ -647,9 +647,9 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
                   fact, dim, join[0], join[1]));
       assertEquals(
           Collections.singletonList(RowFactory.create(1)), joined.collectAsList(), join[0]);
-      String predicates = runtimeMetadata(joined).get("runtimePredicates");
-      assertTrue(predicates.contains(join[2]), predicates);
-      assertFalse(predicates.contains("-1"), predicates);
+      Map<String, String> metadata = runtimeMetadata(joined);
+      assertEquals("[" + join[0] + "]", metadata.get("runtimeFilterColumns"), join[0]);
+      assertEquals("1", metadata.get("runtimeFilterKeyCount"), join[0]);
     }
   }
 
@@ -776,9 +776,9 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
         LanceScanTestHelper.hasLanceRuntimeFilters(dataset),
         dataset.queryExecution().executedPlan().toString());
     Map<String, String> metadata = runtimeMetadata(dataset);
-    assertFalse(metadata.get("runtimePredicates").equals("[]"));
+    assertNotEquals("[]", metadata.get("runtimeFilterColumns"));
     assertTrue(
-        Integer.parseInt(metadata.get("survivingFragmentCount"))
+        Integer.parseInt(metadata.get("numPartitions"))
             < Integer.parseInt(metadata.get("originalFragmentCount")));
   }
 

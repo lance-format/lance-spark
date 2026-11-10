@@ -107,7 +107,7 @@ public class LanceScan
   private final List<Predicate> runtimePredicates = new ArrayList<>();
   private final Set<String> runtimePredicateFingerprints = new LinkedHashSet<>();
   private int runtimeFilterKeyCount;
-  private int runtimeFilterSerializedBytes;
+  private int runtimeFilterEstimatedBytes;
   private int rejectedRuntimeFilterCount;
   private transient Object runtimeFilterLock = new Object();
 
@@ -135,8 +135,6 @@ public class LanceScan
 
   /** Number of partitions after pruning, set during {@link #planInputPartitions()}. */
   private transient int numPartitions = -1;
-
-  private transient int survivingFragmentCount = -1;
 
   /** Active Spark partition expression detected from sharding zonemap stats. */
   private final Expression activeShardingExpression;
@@ -425,12 +423,11 @@ public class LanceScan
       copy.runtimePredicates.addAll(runtimePredicates);
       copy.runtimePredicateFingerprints.addAll(runtimePredicateFingerprints);
       copy.runtimeFilterKeyCount = runtimeFilterKeyCount;
-      copy.runtimeFilterSerializedBytes = runtimeFilterSerializedBytes;
+      copy.runtimeFilterEstimatedBytes = runtimeFilterEstimatedBytes;
       copy.rejectedRuntimeFilterCount = rejectedRuntimeFilterCount;
     }
     // Planned partitions are the same, so the copy reports the same partitioning.
     copy.numPartitions = numPartitions;
-    copy.survivingFragmentCount = survivingFragmentCount;
     return copy;
   }
 
@@ -444,7 +441,6 @@ public class LanceScan
     Predicate[] runtimePredicatesSnapshot = runtimePredicatesSnapshot();
     if (containsEmptyRuntimeIn(runtimePredicatesSnapshot)) {
       this.numPartitions = 0;
-      this.survivingFragmentCount = 0;
       return new InputPartition[0];
     }
     Predicate[] effectivePredicates = concatPredicates(pushedPredicates, runtimePredicatesSnapshot);
@@ -511,7 +507,6 @@ public class LanceScan
             .toArray(InputPartition[]::new);
 
     this.numPartitions = result.length;
-    this.survivingFragmentCount = result.length;
     return result;
   }
 
@@ -742,14 +737,14 @@ public class LanceScan
             canonicalizeRuntimePredicate(predicate, advertisedColumns);
         if (canonical == null) {
           rejectedRuntimeFilterCount++;
-          LOG.warn("Ignoring unsupported Lance runtime predicate: {}", predicate);
+          LOG.debug("Ignoring unsupported Lance runtime predicate: {}", predicate);
           continue;
         }
         if (runtimePredicateFingerprints.contains(canonical.fingerprint)) {
           continue;
         }
         if (runtimeFilterKeyCount + canonical.keyCount > readOptions.getRuntimeFilterMaxKeys()
-            || runtimeFilterSerializedBytes + canonical.serializedBytes
+            || runtimeFilterEstimatedBytes + canonical.estimatedBytes
                 > readOptions.getRuntimeFilterMaxBytes()) {
           rejectedRuntimeFilterCount++;
           LOG.warn(
@@ -763,7 +758,7 @@ public class LanceScan
         runtimePredicates.add(canonical.predicate);
         runtimePredicateFingerprints.add(canonical.fingerprint);
         runtimeFilterKeyCount += canonical.keyCount;
-        runtimeFilterSerializedBytes += canonical.serializedBytes;
+        runtimeFilterEstimatedBytes += canonical.estimatedBytes;
       }
     }
   }
@@ -819,7 +814,7 @@ public class LanceScan
     Long unsignedMax = unsignedRuntimeKeyMax.get(column);
     List<Literal<?>> literals = new ArrayList<>();
     Set<String> literalFingerprints = new LinkedHashSet<>();
-    int serializedBytes = column.getBytes(StandardCharsets.UTF_8).length;
+    int estimatedBytes = column.getBytes(StandardCharsets.UTF_8).length;
     for (int i = 1; i < children.length; i++) {
       if (!(children[i] instanceof Literal)) {
         return null;
@@ -842,7 +837,7 @@ public class LanceScan
       String literalFingerprint = runtimeLiteralFingerprint(literal);
       if (literalFingerprints.add(literalFingerprint)) {
         literals.add(literal);
-        serializedBytes += literalFingerprint.getBytes(StandardCharsets.UTF_8).length;
+        estimatedBytes += literalFingerprint.getBytes(StandardCharsets.UTF_8).length;
       }
     }
 
@@ -854,7 +849,7 @@ public class LanceScan
     Predicate canonical = new Predicate("IN", canonicalChildren);
     String fingerprint = column + "|" + String.join("|", literalFingerprints);
     return new CanonicalRuntimePredicate(
-        canonical, column, literals.size(), serializedBytes, fingerprint);
+        canonical, column, literals.size(), estimatedBytes, fingerprint);
   }
 
   private static StructField findField(StructType struct, String name) {
@@ -1038,15 +1033,15 @@ public class LanceScan
     final Predicate predicate;
     final String column;
     final int keyCount;
-    final int serializedBytes;
+    final int estimatedBytes;
     final String fingerprint;
 
     CanonicalRuntimePredicate(
-        Predicate predicate, String column, int keyCount, int serializedBytes, String fingerprint) {
+        Predicate predicate, String column, int keyCount, int estimatedBytes, String fingerprint) {
       this.predicate = predicate;
       this.column = column;
       this.keyCount = keyCount;
-      this.serializedBytes = serializedBytes;
+      this.estimatedBytes = estimatedBytes;
       this.fingerprint = fingerprint;
     }
   }
@@ -1093,10 +1088,6 @@ public class LanceScan
     result = result.$plus(scala.Tuple2.apply("offset", offset.toString()));
     result = result.$plus(scala.Tuple2.apply("topNSortOrders", topNSortOrders.toString()));
     result = result.$plus(scala.Tuple2.apply("pushedAggregation", pushedAggregation.toString()));
-    Predicate[] runtimePredicatesSnapshot = runtimePredicatesSnapshot();
-    result =
-        result.$plus(
-            scala.Tuple2.apply("runtimePredicates", Arrays.toString(runtimePredicatesSnapshot)));
     result =
         result.$plus(
             scala.Tuple2.apply(
@@ -1104,12 +1095,19 @@ public class LanceScan
     result =
         result.$plus(
             scala.Tuple2.apply(
-                "survivingFragmentCount",
-                Integer.toString(
-                    survivingFragmentCount >= 0
-                        ? survivingFragmentCount
-                        : precomputedSplits.size())));
+                "numPartitions",
+                Integer.toString(numPartitions >= 0 ? numPartitions : precomputedSplits.size())));
     synchronized (runtimeFilterLock) {
+      Set<String> runtimeFilterColumns = new LinkedHashSet<>();
+      for (Predicate predicate : runtimePredicates) {
+        runtimeFilterColumns.add(columnName((NamedReference) predicate.children()[0]));
+      }
+      result =
+          result.$plus(
+              scala.Tuple2.apply("runtimeFilterColumns", runtimeFilterColumns.toString()));
+      result =
+          result.$plus(
+              scala.Tuple2.apply("runtimeFilterKeyCount", Integer.toString(runtimeFilterKeyCount)));
       result =
           result.$plus(
               scala.Tuple2.apply(
