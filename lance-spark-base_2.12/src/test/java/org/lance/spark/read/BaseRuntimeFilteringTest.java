@@ -660,4 +660,22 @@ public abstract class BaseRuntimeFilteringTest {
         });
     assertJoinKeepsRows("nan", "CASE WHEN id = 0 THEN CAST('NaN' AS DOUBLE) ELSE 9.0 END", 1);
   }
+
+  /**
+   * Zonemap stats built before rows were deleted or fragments compacted still prune only fragments
+   * without matching rows.
+   */
+  @Test
+  public void keepsRowsAfterDeletesAndCompaction() {
+    String fact = createFact(true);
+    String dim = createDim();
+    String query =
+        String.format(
+            "SELECT f.k, f.v FROM %s f JOIN %s d ON f.k = d.k WHERE d.attr = 'x'", fact, dim);
+    spark.sql("DELETE FROM " + fact + " WHERE k = 320");
+    assertEquals(2, runWithAndWithoutPruning(query).count());
+    spark.sql("OPTIMIZE " + fact);
+    Dataset<Row> df = runWithAndWithoutPruning(query);
+    assertEquals(2, df.count());
+  }
 }
