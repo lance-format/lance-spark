@@ -43,15 +43,24 @@ case class LanceDynamicPruningRule() extends Rule[LogicalPlan] with PredicateHel
     }
     plan.transformUp {
       case j @ Join(left, right, joinType, Some(condition), _) =>
-        val keys = equiJoinKeys(condition, left, right)
+        lazy val keys = equiJoinKeys(condition, left, right)
         // As PartitionPruning: a side can be pruned when the join keeps its rows only if they match,
-        // and here only a Lance scan with a zonemap index on the key prunes.
-        val pruneLeft =
-          canPruneLeft(joinType) && keys.exists { case (l, _) => prunableBy(left, l) }
-        val pruneRight =
-          canPruneRight(joinType) && keys.exists { case (_, r) => prunableBy(right, r) }
-        val newRight = if (pruneLeft) keepFilters(right) else right
-        val newLeft = if (pruneRight) keepFilters(left) else left
+        // and here only a Lance scan with a zonemap index on the key prunes. The filtering side is
+        // checked first, since looking up the other side's indexes opens its table.
+        val newRight =
+          if (canPruneLeft(joinType) && canKeepFilters(right) &&
+            keys.exists { case (l, _) => prunableBy(left, l) }) {
+            mark(right)
+          } else {
+            right
+          }
+        val newLeft =
+          if (canPruneRight(joinType) && canKeepFilters(left) &&
+            keys.exists { case (_, r) => prunableBy(right, r) }) {
+            mark(left)
+          } else {
+            left
+          }
         if ((newLeft ne left) || (newRight ne right)) j.copy(left = newLeft, right = newRight)
         else j
     }
@@ -78,7 +87,7 @@ case class LanceDynamicPruningRule() extends Rule[LogicalPlan] with PredicateHel
     lanceRelation(plan).exists { r =>
       val table = r.table.asInstanceOf[LanceDataset]
       r.outputSet.contains(key) && table.isRuntimeFilteringEnabled(r.options) &&
-      table.hasZonemapIndex(key.name)
+      table.runtimeFilterColumns().contains(key.name)
     }
 
   private def lanceRelation(plan: LogicalPlan): Option[DataSourceV2Relation] = plan match {
@@ -89,17 +98,16 @@ case class LanceDynamicPruningRule() extends Rule[LogicalPlan] with PredicateHel
   }
 
   /**
-   * `plan` with its Lance relation marked to keep its pushed filters, if it reads one through
-   * projections and filters, at least one of them selective; else `plan`.
+   * Whether `plan` reads a Lance relation through projections and filters, at least one of them
+   * selective, so that marking the relation keeps a Filter for PartitionPruning.
    */
-  private def keepFilters(plan: LogicalPlan): LogicalPlan = {
-    val selective = plan.exists {
+  private def canKeepFilters(plan: LogicalPlan): Boolean =
+    lanceRelation(plan).isDefined && plan.exists {
       case Filter(c, _) => isLikelySelective(c)
       case _ => false
     }
-    if (!selective || lanceRelation(plan).isEmpty) plan else mark(plan)
-  }
 
+  /** `plan` with its Lance relation marked to keep its pushed filters. */
   private def mark(plan: LogicalPlan): LogicalPlan = plan match {
     case r: DataSourceV2Relation =>
       val options = r.options.asCaseSensitiveMap().asScala

@@ -405,22 +405,11 @@ public class LanceScan
       return new NamedReference[0];
     }
     try (Dataset dataset = openDataset()) {
-      Set<Integer> fieldIds = new HashSet<>();
-      for (Index index : dataset.getIndexes()) {
-        if (index.indexType() == IndexType.ZONEMAP) {
-          fieldIds.addAll(index.fields());
-        }
-      }
-      if (fieldIds.isEmpty()) {
-        return new NamedReference[0];
-      }
-      Set<String> readColumns = new HashSet<>(Arrays.asList(schema.fieldNames()));
+      Set<String> prunable = runtimeFilterColumns(dataset);
       List<NamedReference> columns = new ArrayList<>();
-      for (LanceField field : dataset.getLanceSchema().fields()) {
-        if (fieldIds.contains(field.getId())
-            && readColumns.contains(field.getName())
-            && ZonemapFragmentPruner.prunesRuntimeFilters(field.getType())) {
-          columns.add(Expressions.column(field.getName()));
+      for (String column : schema.fieldNames()) {
+        if (prunable.contains(column)) {
+          columns.add(Expressions.column(column));
         }
       }
       return columns.toArray(new NamedReference[0]);
@@ -428,6 +417,31 @@ public class LanceScan
       LOG.debug("No runtime filtering for {}: {}", readOptions.getDatasetUri(), e.toString());
       return new NamedReference[0];
     }
+  }
+
+  /**
+   * The top-level columns of {@code dataset} that runtime filters can prune fragments by: those
+   * with a zonemap index and a type whose zone bounds compare like Spark's join keys ({@link
+   * ZonemapFragmentPruner#prunesRuntimeFilters}).
+   */
+  public static Set<String> runtimeFilterColumns(Dataset dataset) {
+    Set<Integer> fieldIds = new HashSet<>();
+    for (Index index : dataset.getIndexes()) {
+      if (index.indexType() == IndexType.ZONEMAP && index.fields() != null) {
+        fieldIds.addAll(index.fields());
+      }
+    }
+    if (fieldIds.isEmpty()) {
+      return Collections.emptySet();
+    }
+    Set<String> columns = new HashSet<>();
+    for (LanceField field : dataset.getLanceSchema().fields()) {
+      if (fieldIds.contains(field.getId())
+          && ZonemapFragmentPruner.prunesRuntimeFilters(field.getType())) {
+        columns.add(field.getName());
+      }
+    }
+    return columns;
   }
 
   /**
@@ -440,14 +454,7 @@ public class LanceScan
     if (predicates == null || predicates.length == 0) {
       return;
     }
-    Set<String> columns = new HashSet<>();
-    for (Predicate predicate : predicates) {
-      for (NamedReference reference : predicate.references()) {
-        if (reference.fieldNames().length == 1) {
-          columns.add(reference.fieldNames()[0]);
-        }
-      }
-    }
+    Set<String> columns = LanceScanBuilder.extractReferencedColumns(predicates);
     if (columns.isEmpty()) {
       return;
     }

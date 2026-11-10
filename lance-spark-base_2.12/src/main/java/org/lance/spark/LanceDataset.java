@@ -14,11 +14,9 @@
 package org.lance.spark;
 
 import org.lance.Dataset;
-import org.lance.index.IndexCriteria;
-import org.lance.index.IndexDescription;
 import org.lance.memwal.ShardingSpec;
+import org.lance.spark.read.LanceScan;
 import org.lance.spark.read.LanceScanBuilder;
-import org.lance.spark.read.ZonemapFragmentPruner;
 import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Utils;
@@ -31,7 +29,6 @@ import org.lance.spark.write.UpdateColumnsBackfillWrite;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
-import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.spark.sql.connector.catalog.MetadataColumn;
 import org.apache.spark.sql.connector.catalog.StagedTable;
 import org.apache.spark.sql.connector.catalog.SupportsMetadataColumns;
@@ -58,7 +55,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /** Lance Spark Dataset. */
@@ -358,40 +354,30 @@ public class LanceDataset
     return mergeScanOptions(scanOptions).isRuntimeFilteringEnabled();
   }
 
-  /** Whether each column asked about has a zonemap index; see {@link #hasZonemapIndex}. */
-  private final Map<String, Boolean> zonemapIndexed = new ConcurrentHashMap<>();
+  /** See {@link #runtimeFilterColumns}; looked up when first asked. */
+  private volatile Set<String> runtimeFilterColumns;
 
   /**
-   * Whether {@code column} has a zonemap index and a type whose zone bounds runtime filters can
-   * prune by ({@link ZonemapFragmentPruner#prunesRuntimeFilters}), so a scan of this table can
-   * prune fragments by a runtime filter on it. Looked up once per column of this table object.
+   * The columns a scan of this table can prune fragments by with a runtime filter ({@link
+   * LanceScan#runtimeFilterColumns}), looked up once per table object.
    */
-  public boolean hasZonemapIndex(String column) {
-    return zonemapIndexed.computeIfAbsent(column, this::loadHasZonemapIndex);
-  }
-
-  private boolean loadHasZonemapIndex(String column) {
-    try (Dataset dataset =
-        Utils.openDatasetBuilder(readOptions)
-            .initialStorageOptions(initialStorageOptions)
-            .runtimeNamespace(namespaceImpl, namespaceProperties, readOptions.getTableId())
-            .build()) {
-      Field field = dataset.getSchema().findField(column);
-      if (field == null || !ZonemapFragmentPruner.prunesRuntimeFilters(field.getType())) {
-        return false;
+  public Set<String> runtimeFilterColumns() {
+    Set<String> columns = runtimeFilterColumns;
+    if (columns == null) {
+      try (Dataset dataset =
+          Utils.openDatasetBuilder(readOptions)
+              .initialStorageOptions(initialStorageOptions)
+              .runtimeNamespace(namespaceImpl, namespaceProperties, readOptions.getTableId())
+              .build()) {
+        columns = LanceScan.runtimeFilterColumns(dataset);
+      } catch (RuntimeException e) {
+        LOG.debug(
+            "No runtime filter columns for {}: {}", readOptions.getDatasetUri(), e.toString());
+        columns = Collections.emptySet();
       }
-      for (IndexDescription index :
-          dataset.describeIndices(new IndexCriteria.Builder().forColumn(column).build())) {
-        String type = index.getIndexType();
-        if (type != null && type.replace("_", "").equalsIgnoreCase("zonemap")) {
-          return true;
-        }
-      }
-      return false;
-    } catch (RuntimeException e) {
-      LOG.debug("No zonemap index lookup for column {}: {}", column, e.toString());
-      return false;
+      runtimeFilterColumns = columns;
     }
+    return columns;
   }
 
   private LanceSparkReadOptions mergeScanOptions(CaseInsensitiveStringMap scanMap) {

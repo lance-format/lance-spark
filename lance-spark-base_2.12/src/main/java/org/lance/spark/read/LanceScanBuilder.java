@@ -936,7 +936,7 @@ public class LanceScanBuilder
     return new ZonemapLoadResult(stats, uncoveredByColumn);
   }
 
-  private static Set<String> extractReferencedColumns(Predicate[] predicates) {
+  static Set<String> extractReferencedColumns(Predicate[] predicates) {
     Set<String> columns = new HashSet<>();
     for (Predicate predicate : predicates) {
       for (NamedReference ref : predicate.references()) {
