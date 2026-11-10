@@ -1102,8 +1102,7 @@ public class LanceScan
         runtimeFilterColumns.add(columnName((NamedReference) predicate.children()[0]));
       }
       result =
-          result.$plus(
-              scala.Tuple2.apply("runtimeFilterColumns", runtimeFilterColumns.toString()));
+          result.$plus(scala.Tuple2.apply("runtimeFilterColumns", runtimeFilterColumns.toString()));
       result =
           result.$plus(
               scala.Tuple2.apply("runtimeFilterKeyCount", Integer.toString(runtimeFilterKeyCount)));

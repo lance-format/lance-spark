@@ -343,8 +343,7 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
         spark
             .sql("SELECT DISTINCT shiftrightunsigned(_rowaddr, 32) FROM " + fact + " WHERE k = 3")
             .count();
-    assertEquals(
-        String.valueOf(matchingFragments), runtimeMetadata(joined).get("numPartitions"));
+    assertEquals(String.valueOf(matchingFragments), runtimeMetadata(joined).get("numPartitions"));
   }
 
   /**
