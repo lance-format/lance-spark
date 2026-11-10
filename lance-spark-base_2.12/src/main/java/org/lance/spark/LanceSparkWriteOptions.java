@@ -272,6 +272,27 @@ public class LanceSparkWriteOptions implements Serializable {
     return toBuilder().ref(ref).build();
   }
 
+  /**
+   * Converts these write options to read options that open the same dataset at the same ref. Used
+   * by executors that must read what the driver pinned, such as DELETE writing deletion files.
+   *
+   * <p>Read-only flags (block_size, cache sizes, executor_credential_refresh) are re-parsed from
+   * {@code storageOptions} rather than copied field by field, so they cannot be dropped by a caller
+   * that forgets one. The ref is applied last because {@code storageOptions} may also carry one.
+   */
+  public LanceSparkReadOptions toReadOptions() {
+    return LanceSparkReadOptions.builder()
+        .datasetUri(datasetUri)
+        .fromOptions(storageOptions)
+        .namespace(namespace)
+        .tableId(tableId)
+        .catalogName(catalogName)
+        .indexCacheBackend(indexCacheBackend)
+        .metadataCacheBackend(metadataCacheBackend)
+        .ref(ref)
+        .build();
+  }
+
   public boolean hasNamespace() {
     return namespace != null && tableId != null;
   }

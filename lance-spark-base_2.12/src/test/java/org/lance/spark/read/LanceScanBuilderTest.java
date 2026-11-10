@@ -70,7 +70,7 @@ public class LanceScanBuilderTest {
   public void tableReadDefaultsReachScanPartitionsAndAllowOverrides() {
     LanceDataset table =
         new LanceDataset(
-            TestUtils.TestTable1Config.readOptions,
+            TestUtils.TestTable1Config.readOptions.withArrowBatchReads(true),
             TEST_SCHEMA,
             Collections.emptyMap(),
             null,
@@ -84,6 +84,7 @@ public class LanceScanBuilderTest {
         (LanceScan) table.newScanBuilder(CaseInsensitiveStringMap.empty()).build();
     LanceInputPartition partition = (LanceInputPartition) defaultScan.planInputPartitions()[0];
     assertEquals(16, partition.getReadOptions().getBatchSize());
+    assertTrue(partition.getReadOptions().isArrowBatchReadsEnabled());
     LanceScan overriddenScan =
         (LanceScan)
             table
@@ -92,6 +93,7 @@ public class LanceScanBuilderTest {
                 .build();
     LanceInputPartition overridden = (LanceInputPartition) overriddenScan.planInputPartitions()[0];
     assertEquals(32, overridden.getReadOptions().getBatchSize());
+    assertTrue(overridden.getReadOptions().isArrowBatchReadsEnabled());
   }
 
   // --- pruneColumns ---
@@ -373,6 +375,37 @@ public class LanceScanBuilderTest {
 
     // Blob v2 filters stay in Spark. Normal-column filters still push to Lance.
     assertArrayEquals(new Predicate[] {onBlob}, postScan);
+    assertArrayEquals(new Predicate[] {onId}, builder.pushedPredicates());
+    assertFalse(builder.pushLimit(10));
+  }
+
+  @Test
+  public void testBlobV1VirtualColumnFilterStaysResidualWhileOtherColumnsPushDown() {
+    Metadata blobV1Metadata =
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build();
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.LongType, true),
+              new StructField("payload", DataTypes.BinaryType, true, blobV1Metadata)
+            });
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            schema,
+            TestUtils.TestTable1Config.readOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+
+    Predicate onId = TestPredicates.gt("id", 1L);
+    Predicate onSize = TestPredicates.gt("payload" + LanceConstant.BLOB_SIZE_SUFFIX, 5L);
+    Predicate onPos = TestPredicates.gt("payload" + LanceConstant.BLOB_POSITION_SUFFIX, 0L);
+    Predicate[] postScan = builder.pushPredicates(new Predicate[] {onId, onSize, onPos});
+
+    // Blob v1 virtual columns do not exist in Lance, so their filters stay in Spark.
+    assertArrayEquals(new Predicate[] {onSize, onPos}, postScan);
     assertArrayEquals(new Predicate[] {onId}, builder.pushedPredicates());
     assertFalse(builder.pushLimit(10));
   }

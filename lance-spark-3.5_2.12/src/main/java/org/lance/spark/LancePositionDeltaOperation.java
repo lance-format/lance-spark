@@ -187,7 +187,8 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
         namespaceProperties,
         managedVersioning,
         readOptions.getTableId(),
-        contexts);
+        contexts,
+        command == Command.DELETE);
   }
 
   /**

@@ -34,14 +34,33 @@ Unsetting a property that does not exist is a no-op (no error is raised).
 
 ## Limitations
 
-The `enable_stable_row_ids` property controls stable row ID tracking in the Lance format and can only be set at table creation time via `TBLPROPERTIES` in `CREATE TABLE`. Changing it via `ALTER TABLE` updates the stored config value but does **not** change the actual row ID tracking behavior.
+Schema and encoding properties must be configured before the column exists: in `CREATE TABLE`
+for initial columns, or with `SET TBLPROPERTIES` before `ADD COLUMNS` for future columns.
+Once the column exists, SET rejects these keys, even when setting the current value:
+
+- `<column>.arrow.fixed-size-list.size`, `<column>.arrow.float16`,
+  `<column>.arrow.fixed-size-binary.byte-width`, and `<column>.arrow.large_var_char`.
+- `<column>.lance.encoding` and the supported `<column>.lance.*` encoding keys:
+  `compression`, `compression-level`, `structural-encoding`, `rle-threshold`, and `bss`.
+
+For directory-backed tables, use `ALTER TABLE` to persist future-column properties because
+`CREATE TABLE` does not persist user properties. See [ADD COLUMNS](../dml/add-columns.md)
+for a blob column example.
+
+`UNSET TBLPROPERTIES` can remove legacy config without changing the stored schema or encoding.
+If a SET names any protected existing column, the entire statement is rejected.
+Concurrent column additions can cause a commit conflict. Retry only if the columns named by
+the schema or encoding properties still do not exist; otherwise, SET is rejected.
+
+The `enable_stable_row_ids` property also can only be set at table creation;
+both SET and UNSET through `ALTER TABLE` are rejected.
 
 ```sql
 -- Correct: set at creation time
 CREATE TABLE users (id BIGINT, name STRING)
     TBLPROPERTIES ('enable_stable_row_ids' = 'true');
 
--- Has no behavioral effect after creation
+-- Rejected: this property is creation-only
 ALTER TABLE users SET TBLPROPERTIES ('enable_stable_row_ids' = 'true');
 ```
 

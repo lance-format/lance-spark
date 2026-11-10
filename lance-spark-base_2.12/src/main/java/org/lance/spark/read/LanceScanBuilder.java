@@ -30,6 +30,7 @@ import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.internal.ArrowBatchAdapter;
 import org.lance.spark.search.LanceSearchQuery;
 import org.lance.spark.search.LanceSearchScan;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
@@ -140,6 +141,12 @@ public class LanceScanBuilder
       ShardingSpec shardingSpec) {
     this.fullSchema = BlobUtils.applyBlobV2DescriptorSchema(schema);
     this.residualFilterColumns = new HashSet<>(BlobUtils.blobV2ColumnNames(this.fullSchema));
+    // Blob v1 virtual columns are computed by the connector and do not exist in the Lance
+    // dataset, so predicates on them must be evaluated by Spark.
+    for (String blobColumn : BlobUtils.blobV1ColumnNames(this.fullSchema)) {
+      this.residualFilterColumns.add(blobColumn + LanceConstant.BLOB_POSITION_SUFFIX);
+      this.residualFilterColumns.add(blobColumn + LanceConstant.BLOB_SIZE_SUFFIX);
+    }
     if (readOptions.getFullTextQuery() != null) {
       Utils.validateFullTextSearchSchema(this.fullSchema);
     }
@@ -321,6 +328,12 @@ public class LanceScanBuilder
             summary.getTotalRows());
       }
 
+      // Plan Arrow batches from the dataset schema already loaded here. A scan that cannot emit
+      // them reads as usual, also when the arrow_batch_reads read option asks for them.
+      ArrowBatchAdapter.Plan arrowBatchPlan =
+          pushedAggregation.isPresent()
+              ? ArrowBatchAdapter.Plan.unsupported("the scan has a pushed aggregation")
+              : ArrowBatchAdapter.plan(schema, dataset.getSchema());
       LanceSparkReadOptions resolvedReadOptions = readOptions.withRef(scanPlan.getRef());
       Optional<String> whereCondition =
           FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);
@@ -348,7 +361,8 @@ public class LanceScanBuilder
           fragmentShardingKeys,
           initialStorageOptions,
           namespaceImpl,
-          namespaceProperties);
+          namespaceProperties,
+          arrowBatchPlan);
     } finally {
       closeLazyDataset();
     }
