@@ -258,7 +258,8 @@ public abstract class BaseSparkConnectorWriteTest {
                         id -> {
                           concurrentWriteTasks.countDown();
                           if (!concurrentWriteTasks.await(30, TimeUnit.SECONDS)) {
-                            throw new IllegalStateException("Concurrent write tasks did not overlap");
+                            throw new IllegalStateException(
+                                "Concurrent write tasks did not overlap");
                           }
                           return id;
                         },
@@ -301,7 +302,8 @@ public abstract class BaseSparkConnectorWriteTest {
               Transaction transaction =
                   historical.readTransaction().orElseThrow(AssertionError::new)) {
             committedProperties.add(
-                new HashMap<>(transaction.transactionProperties().orElseThrow(AssertionError::new)));
+                new HashMap<>(
+                    transaction.transactionProperties().orElseThrow(AssertionError::new)));
           }
         }
       }
