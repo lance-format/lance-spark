@@ -104,7 +104,10 @@ object UpdateColumnsBackfillExec {
             .withMetadata(sourceField.metadata)
             .withMetadata(targetField.metadata)
             .build()
-          sourceField.copy(metadata = metadata)
+          sourceField.copy(
+            dataType = targetField.dataType,
+            nullable = targetField.nullable,
+            metadata = metadata)
         case _ =>
           sourceField
       }

@@ -240,6 +240,45 @@ public abstract class BaseUpdateColumnsBackfillTest {
   }
 
   @Test
+  public void testUpdateFixedSizeListColumnFromSqlTempView() {
+    spark.sql(
+        String.format(
+            "create table %s (id int, vec array<float>) using lance "
+                + "tblproperties ('vec.arrow.fixed-size-list.size' = '4')",
+            fullTable));
+    spark.sql(
+        String.format(
+            "insert into %s values "
+                + "(1, array(1.0F, 2.0F, 3.0F, 4.0F)), "
+                + "(2, array(5.0F, 6.0F, 7.0F, 8.0F))",
+            fullTable));
+
+    // Spark SQL's array(...) produces ArrayType(FloatType, containsNull = false), whereas the
+    // table's FixedSizeList column has containsNull = true.
+    spark.sql(
+        String.format(
+            "create temporary view update_source as "
+                + "select _rowaddr, _fragid, array(10.0F, 20.0F, 30.0F, 40.0F) as vec "
+                + "from %s where id = 2",
+            fullTable));
+
+    spark.sql(String.format("alter table %s update columns vec from update_source", fullTable));
+
+    List<Row> results =
+        spark.sql(String.format("select id, vec from %s order by id", fullTable)).collectAsList();
+    assertEquals(Arrays.asList(1.0f, 2.0f, 3.0f, 4.0f), results.get(0).getList(1));
+    assertEquals(Arrays.asList(10.0f, 20.0f, 30.0f, 40.0f), results.get(1).getList(1));
+    assertEquals(
+        4L,
+        spark
+            .table(fullTable)
+            .schema()
+            .apply("vec")
+            .metadata()
+            .getLong("arrow.fixed-size-list.size"));
+  }
+
+  @Test
   public void testUpdateNonExistentColumn() {
     prepareDataset();
 
