@@ -25,6 +25,8 @@ import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Optional;
 
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.spark.sql.catalyst.expressions.MetadataAttribute;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.MetadataBuilder;
@@ -322,6 +324,62 @@ public class LanceFragmentScannerTest {
                               .build())
                     }));
     assertEquals(java.util.Collections.singleton("payload"), names);
+  }
+
+  @Test
+  public void testCoalesceArrowReaderResolveAndComputeInitialColumns() {
+    Map<String, String> configured =
+        LanceSparkReadOptions.parseCoalesceColumns("y:b,missing:c,b:x");
+    List<String> projected = Arrays.asList("x", "y", "b", "c");
+    Map<String, String> active = CoalesceArrowReader.resolveActiveCoalesce(projected, configured);
+    assertEquals(Collections.singletonMap("y", "b"), active);
+    assertEquals(
+        Arrays.asList("x", "y", "c"), CoalesceArrowReader.computeInitialColumns(projected, active));
+  }
+
+  @Test
+  public void testFragmentScannerWithCoalesceColumns() throws Exception {
+    LanceSparkReadOptions readOptions =
+        LanceSparkReadOptions.builder()
+            .datasetUri(TestUtils.TestTable1Config.datasetUri)
+            .coalesceColumns(Collections.singletonMap("y", "b"))
+            .build();
+    LanceInputPartition partition =
+        new LanceInputPartition(
+            TestUtils.TestTable1Config.schema,
+            0,
+            new LanceSplit(Arrays.asList(0, 1)),
+            readOptions,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            "testFragmentScannerWithCoalesceColumns",
+            Collections.emptyMap(),
+            null,
+            null,
+            null);
+
+    int rowCount = 0;
+    try (LanceFragmentScanner scanner = LanceFragmentScanner.create(0, partition);
+        ArrowReader reader = scanner.getArrowReader()) {
+      while (reader.loadNextBatch()) {
+        VectorSchemaRoot root = reader.getVectorSchemaRoot();
+        assertEquals(4, root.getSchema().getFields().size());
+        for (int i = 0; i < root.getRowCount(); i++) {
+          List<Long> expected = TestUtils.TestTable1Config.expectedValues.get(rowCount);
+          assertEquals(
+              expected.get(0).longValue(), ((Number) root.getVector("x").getObject(i)).longValue());
+          assertEquals(
+              expected.get(1).longValue(), ((Number) root.getVector("y").getObject(i)).longValue());
+          assertEquals(
+              expected.get(3).longValue(), ((Number) root.getVector("c").getObject(i)).longValue());
+          rowCount++;
+        }
+      }
+    }
+    assertEquals(2, rowCount);
   }
 
   /**

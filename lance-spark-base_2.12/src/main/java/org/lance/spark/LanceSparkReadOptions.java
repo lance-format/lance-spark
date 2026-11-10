@@ -25,7 +25,9 @@ import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.Serializable;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -101,6 +103,13 @@ public class LanceSparkReadOptions implements Serializable {
   /** Enable Arrow batches when supported, otherwise use the regular reader. Default: false. */
   public static final String CONFIG_ARROW_BATCH_READS = "arrow_batch_reads";
 
+  /**
+   * Comma-separated {@code primary:fallback} column pairs for lazy fallback column materialization
+   * in {@code COALESCE(primary, fallback)} queries (e.g. {@code
+   * "col_v2:col_v1,other_v2:other_v1"}).
+   */
+  public static final String CONFIG_COALESCE_COLUMNS = "coalesce_columns";
+
   public static final String LANCE_FILE_SUFFIX = ".lance";
 
   private static final boolean DEFAULT_PUSH_DOWN_FILTERS = true;
@@ -146,6 +155,8 @@ public class LanceSparkReadOptions implements Serializable {
 
   private final boolean arrowBatchReads;
 
+  private final Map<String, String> coalesceColumns;
+
   private LanceSparkReadOptions(Builder builder) {
     this.datasetUri = builder.datasetUri;
     this.datasetName = extractDatasetName(datasetUri);
@@ -166,6 +177,8 @@ public class LanceSparkReadOptions implements Serializable {
     this.metadataCacheBackend = builder.metadataCacheBackend;
     this.executorCredentialRefresh = builder.executorCredentialRefresh;
     this.arrowBatchReads = builder.arrowBatchReads;
+    this.coalesceColumns =
+        Collections.unmodifiableMap(new LinkedHashMap<>(builder.coalesceColumns));
   }
 
   /** Creates a new builder for LanceSparkReadOptions. */
@@ -312,6 +325,51 @@ public class LanceSparkReadOptions implements Serializable {
     return arrowBatchReads;
   }
 
+  /**
+   * Returns the configured {@code primary -> fallback} column map for lazy fallback column
+   * materialization. See {@link #CONFIG_COALESCE_COLUMNS}.
+   */
+  public Map<String, String> getCoalesceColumns() {
+    return coalesceColumns != null ? coalesceColumns : Collections.emptyMap();
+  }
+
+  /**
+   * Parses a comma-separated {@code primary:fallback} specification string into a map. Surrounding
+   * single or double quotes are stripped automatically.
+   */
+  public static Map<String, String> parseCoalesceColumns(String spec) {
+    if (spec == null) {
+      return Collections.emptyMap();
+    }
+    String cleaned = spec.trim();
+    if (cleaned.length() >= 2) {
+      char first = cleaned.charAt(0);
+      char last = cleaned.charAt(cleaned.length() - 1);
+      if ((first == '\'' && last == '\'') || (first == '"' && last == '"')) {
+        cleaned = cleaned.substring(1, cleaned.length() - 1).trim();
+      }
+    }
+    if (cleaned.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    Map<String, String> map = new LinkedHashMap<>();
+    for (String pair : cleaned.split(",")) {
+      String trimmed = pair.trim();
+      if (trimmed.isEmpty()) {
+        continue;
+      }
+      int idx = trimmed.indexOf(':');
+      if (idx > 0 && idx < trimmed.length() - 1) {
+        String primary = trimmed.substring(0, idx).trim();
+        String fallback = trimmed.substring(idx + 1).trim();
+        if (!primary.isEmpty() && !fallback.isEmpty() && !primary.equals(fallback)) {
+          map.put(primary, fallback);
+        }
+      }
+    }
+    return Collections.unmodifiableMap(map);
+  }
+
   public boolean hasNamespace() {
     return namespace != null && tableId != null;
   }
@@ -362,7 +420,8 @@ public class LanceSparkReadOptions implements Serializable {
         .indexCacheBackend(this.indexCacheBackend)
         .metadataCacheBackend(this.metadataCacheBackend)
         .executorCredentialRefresh(this.executorCredentialRefresh)
-        .arrowBatchReads(this.arrowBatchReads);
+        .arrowBatchReads(this.arrowBatchReads)
+        .coalesceColumns(this.coalesceColumns);
   }
 
   /**
@@ -424,7 +483,8 @@ public class LanceSparkReadOptions implements Serializable {
         && Objects.equals(tableId, that.tableId)
         && Objects.equals(catalogName, that.catalogName)
         && Objects.equals(indexCacheBackend, that.indexCacheBackend)
-        && Objects.equals(metadataCacheBackend, that.metadataCacheBackend);
+        && Objects.equals(metadataCacheBackend, that.metadataCacheBackend)
+        && Objects.equals(getCoalesceColumns(), that.getCoalesceColumns());
   }
 
   @Override
@@ -446,7 +506,8 @@ public class LanceSparkReadOptions implements Serializable {
         indexCacheBackend,
         metadataCacheBackend,
         executorCredentialRefresh,
-        arrowBatchReads);
+        arrowBatchReads,
+        getCoalesceColumns());
   }
 
   /** Builder for creating LanceSparkReadOptions instances. */
@@ -469,6 +530,7 @@ public class LanceSparkReadOptions implements Serializable {
     private String metadataCacheBackend;
     private boolean executorCredentialRefresh = DEFAULT_EXECUTOR_CREDENTIAL_REFRESH;
     private boolean arrowBatchReads = DEFAULT_ARROW_BATCH_READS;
+    private Map<String, String> coalesceColumns = Collections.emptyMap();
 
     private Builder() {}
 
@@ -562,6 +624,14 @@ public class LanceSparkReadOptions implements Serializable {
       return this;
     }
 
+    public Builder coalesceColumns(Map<String, String> coalesceColumns) {
+      this.coalesceColumns =
+          coalesceColumns != null
+              ? Collections.unmodifiableMap(new LinkedHashMap<>(coalesceColumns))
+              : Collections.emptyMap();
+      return this;
+    }
+
     /**
      * Parses options from a map, extracting read-specific settings.
      *
@@ -650,6 +720,9 @@ public class LanceSparkReadOptions implements Serializable {
       }
       if (opts.containsKey(CONFIG_ARROW_BATCH_READS)) {
         this.arrowBatchReads = Boolean.parseBoolean(opts.get(CONFIG_ARROW_BATCH_READS));
+      }
+      if (opts.containsKey(CONFIG_COALESCE_COLUMNS)) {
+        this.coalesceColumns = parseCoalesceColumns(opts.get(CONFIG_COALESCE_COLUMNS));
       }
     }
 

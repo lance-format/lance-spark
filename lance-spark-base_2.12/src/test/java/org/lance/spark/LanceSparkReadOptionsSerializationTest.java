@@ -456,4 +456,40 @@ public class LanceSparkReadOptionsSerializationTest {
 
     Assertions.assertFalse(deserializedOptions.isUseScalarIndex());
   }
+
+  @Test
+  public void testCoalesceColumnsParsingAndSerialization()
+      throws IOException, ClassNotFoundException {
+    Assertions.assertTrue(LanceSparkReadOptions.parseCoalesceColumns(null).isEmpty());
+    Assertions.assertTrue(LanceSparkReadOptions.parseCoalesceColumns("   ").isEmpty());
+    Assertions.assertTrue(LanceSparkReadOptions.parseCoalesceColumns("a:a,invalid").isEmpty());
+
+    Map<String, String> parsed =
+        LanceSparkReadOptions.parseCoalesceColumns(" \"col_a:col_b , col_c : col_d\" ");
+    Assertions.assertEquals(2, parsed.size());
+    Assertions.assertEquals("col_b", parsed.get("col_a"));
+    Assertions.assertEquals("col_d", parsed.get("col_c"));
+
+    Map<String, String> props = new HashMap<>();
+    props.put(LanceSparkReadOptions.CONFIG_DATASET_URI, "s3://bucket/path");
+    props.put(LanceSparkReadOptions.CONFIG_COALESCE_COLUMNS, "'primary_val:fallback_val'");
+    LanceSparkReadOptions options = LanceSparkReadOptions.from(props);
+    Assertions.assertEquals(
+        Collections.singletonMap("primary_val", "fallback_val"), options.getCoalesceColumns());
+
+    LanceSparkReadOptions pinned = options.withRef(LanceRef.ofMain(3));
+    Assertions.assertEquals(
+        Collections.singletonMap("primary_val", "fallback_val"), pinned.getCoalesceColumns());
+
+    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+    try (ObjectOutputStream oos = new ObjectOutputStream(baos)) {
+      oos.writeObject(options);
+    }
+    try (ObjectInputStream ois =
+        new ObjectInputStream(new ByteArrayInputStream(baos.toByteArray()))) {
+      LanceSparkReadOptions deserialized = (LanceSparkReadOptions) ois.readObject();
+      Assertions.assertEquals(options.getCoalesceColumns(), deserialized.getCoalesceColumns());
+      Assertions.assertEquals(options, deserialized);
+    }
+  }
 }

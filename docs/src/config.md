@@ -656,6 +656,26 @@ version columns are exposed as signed 64-bit integers.
 Native vectors may be reused on `next()`, while converted vectors are released. Consumers must
 copy or transfer data they need to keep before advancing.
 
+## Lazy Fallback Column Materialization (`coalesce_columns`)
+
+When migrating schemas from a legacy column to a new column (for example, `COALESCE(new_col, legacy_col)`), Spark's required-column projection includes both `new_col` and `legacy_col` in the table scan even when `new_col` is non-null for most or all rows.
+
+Set the `coalesce_columns` read option to a comma-separated list of `primary:fallback` column pairs to defer reading `fallback` columns from storage until a batch actually contains `NULL`s in `primary`:
+
+```python
+df = spark.read \
+    .format("lance") \
+    .option("coalesce_columns", "new_payload:legacy_payload,new_meta:legacy_meta") \
+    .load("/path/to/dataset.lance") \
+    .selectExpr("id", "COALESCE(new_payload, legacy_payload) AS payload")
+```
+
+For each batch:
+
+- If `primary` has no `NULL` values (`nullCount == 0`), the `fallback` column is not read from storage and is populated with `NULL`s in memory (which `COALESCE(primary, fallback)` ignores).
+- If `primary` has `NULL` values on a subset of rows, only those rows' `_rowid`s are fetched for `fallback` via `Dataset.takeRows`.
+- If `primary` is entirely `NULL` in the batch, the `fallback` vector for the batch is loaded via `Dataset.takeRows`.
+
 ## Memory Configuration
 
 Lance Spark uses Arrow for data transfer between native code and Spark, and maintains caches for improved performance.

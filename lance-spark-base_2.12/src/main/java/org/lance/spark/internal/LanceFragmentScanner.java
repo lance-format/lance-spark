@@ -31,8 +31,10 @@ import org.apache.spark.sql.types.StructType;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -48,6 +50,9 @@ public class LanceFragmentScanner implements AutoCloseable {
   /** The names of blob columns in the projected schema. */
   private final Set<String> blobColumnNames;
 
+  private final List<String> projectedColumns;
+  private final Map<String, String> activeCoalesce;
+
   private LanceFragmentScanner(
       Dataset dataset,
       LanceScanner scanner,
@@ -55,7 +60,9 @@ public class LanceFragmentScanner implements AutoCloseable {
       LanceInputPartition inputPartition,
       long datasetOpenTimeNs,
       long scannerCreateTimeNs,
-      Set<String> blobColumnNames) {
+      Set<String> blobColumnNames,
+      List<String> projectedColumns,
+      Map<String, String> activeCoalesce) {
     this.dataset = dataset;
     this.scanner = scanner;
     this.fragmentId = fragmentId;
@@ -63,6 +70,8 @@ public class LanceFragmentScanner implements AutoCloseable {
     this.datasetOpenTimeNs = datasetOpenTimeNs;
     this.scannerCreateTimeNs = scannerCreateTimeNs;
     this.blobColumnNames = blobColumnNames;
+    this.projectedColumns = projectedColumns;
+    this.activeCoalesce = activeCoalesce;
   }
 
   public static LanceFragmentScanner create(int fragmentId, LanceInputPartition inputPartition) {
@@ -107,7 +116,17 @@ public class LanceFragmentScanner implements AutoCloseable {
         scanOptions.withRowAddress(true);
       }
 
-      scanOptions.columns(projectedColumns);
+      Map<String, String> activeCoalesce =
+          resolveEligibleCoalesce(
+              dataset, scanSchema, readOptions, projectedColumns, hasBlobColumns);
+      if (!activeCoalesce.isEmpty()) {
+        List<String> initialColumns =
+            CoalesceArrowReader.computeInitialColumns(projectedColumns, activeCoalesce);
+        scanOptions.columns(initialColumns);
+        scanOptions.withRowId(true);
+      } else {
+        scanOptions.columns(projectedColumns);
+      }
       if (inputPartition.getWhereCondition().isPresent()) {
         scanOptions.filter(inputPartition.getWhereCondition().get());
       }
@@ -141,7 +160,9 @@ public class LanceFragmentScanner implements AutoCloseable {
           inputPartition,
           dsOpenTimeNs,
           scanCreateTimeNs,
-          blobColumnNames);
+          blobColumnNames,
+          projectedColumns,
+          activeCoalesce);
     } catch (Throwable throwable) {
       if (lanceScanner != null) {
         try {
@@ -165,7 +186,45 @@ public class LanceFragmentScanner implements AutoCloseable {
    * @return the arrow reader. The caller is responsible for closing the reader
    */
   public ArrowReader getArrowReader() {
-    return scanner.scanBatches();
+    ArrowReader reader = scanner.scanBatches();
+    if (!activeCoalesce.isEmpty()) {
+      return new CoalesceArrowReader(dataset, reader, projectedColumns, activeCoalesce);
+    }
+    return reader;
+  }
+
+  private static Map<String, String> resolveEligibleCoalesce(
+      Dataset dataset,
+      StructType scanSchema,
+      LanceSparkReadOptions readOptions,
+      List<String> projectedColumns,
+      boolean hasBlobColumns) {
+    Map<String, String> configured = readOptions.getCoalesceColumns();
+    if (configured.isEmpty()
+        || projectedColumns.isEmpty()
+        || hasBlobColumns
+        || BlobUtils.hasBlobV2Fields(scanSchema)
+        || readOptions.isArrowBatchReadsEnabled()
+        || readOptions.getFullTextQuery() != null
+        || hasField(scanSchema, LanceConstant.ROW_ID)
+        || hasField(scanSchema, LanceConstant.ROW_ADDRESS)
+        || hasField(scanSchema, LanceConstant.ROW_CREATED_AT_VERSION)
+        || hasField(scanSchema, LanceConstant.ROW_LAST_UPDATED_AT_VERSION)) {
+      return Collections.emptyMap();
+    }
+    for (String col : projectedColumns) {
+      if (col.contains(".")) {
+        return Collections.emptyMap();
+      }
+      try {
+        if (dataset.getSchema().findField(col) == null) {
+          return Collections.emptyMap();
+        }
+      } catch (IllegalArgumentException e) {
+        return Collections.emptyMap();
+      }
+    }
+    return CoalesceArrowReader.resolveActiveCoalesce(projectedColumns, configured);
   }
 
   /**

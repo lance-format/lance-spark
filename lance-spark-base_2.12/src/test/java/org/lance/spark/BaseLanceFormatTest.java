@@ -506,4 +506,54 @@ public abstract class BaseLanceFormatTest {
     assertEquals(95, readMap.get("math"));
     assertEquals(88, readMap.get("science"));
   }
+
+  @Test
+  public void testReadWithCoalesceColumns() {
+    String outputPath = tempDir.resolve("test_coalesce_columns.lance").toString();
+
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("primary_val", DataTypes.StringType, true)
+            .add("fallback_val", DataTypes.StringType, true);
+
+    List<Row> data =
+        Arrays.asList(
+            // Batch 0 (non-null primary): fallback skipped completely
+            RowFactory.create(0, "p0", "fb0"),
+            RowFactory.create(1, "p1", "fb1"),
+            // Batch 1 (partial-null primary): fallback fetched only for id=3
+            RowFactory.create(2, "p2", "fb2"),
+            RowFactory.create(3, null, "fb3"),
+            // Batch 2 (all-null primary): fallback fetched for both rows (including null fallback)
+            RowFactory.create(4, null, "fb4"),
+            RowFactory.create(5, null, null));
+
+    spark
+        .createDataFrame(data, schema)
+        .coalesce(1)
+        .write()
+        .format("lance")
+        .mode(SaveMode.ErrorIfExists)
+        .save(outputPath);
+
+    List<Row> actual =
+        spark
+            .read()
+            .format("lance")
+            .option(LanceSparkReadOptions.CONFIG_COALESCE_COLUMNS, "primary_val:fallback_val")
+            .option(LanceSparkReadOptions.CONFIG_BATCH_SIZE, "2")
+            .load(outputPath)
+            .selectExpr("id", "coalesce(primary_val, fallback_val) as resolved")
+            .sort("id")
+            .collectAsList();
+
+    assertEquals(6, actual.size());
+    assertEquals("p0", actual.get(0).getString(1));
+    assertEquals("p1", actual.get(1).getString(1));
+    assertEquals("p2", actual.get(2).getString(1));
+    assertEquals("fb3", actual.get(3).getString(1));
+    assertEquals("fb4", actual.get(4).getString(1));
+    assertTrue(actual.get(5).isNullAt(1));
+  }
 }

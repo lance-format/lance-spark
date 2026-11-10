@@ -330,10 +330,14 @@ public class LanceScanBuilder
 
       // Plan Arrow batches from the dataset schema already loaded here. A scan that cannot emit
       // them reads as usual, also when the arrow_batch_reads read option asks for them.
-      ArrowBatchAdapter.Plan arrowBatchPlan =
-          pushedAggregation.isPresent()
-              ? ArrowBatchAdapter.Plan.unsupported("the scan has a pushed aggregation")
-              : ArrowBatchAdapter.plan(schema, dataset.getSchema());
+      ArrowBatchAdapter.Plan arrowBatchPlan;
+      if (pushedAggregation.isPresent()) {
+        arrowBatchPlan = ArrowBatchAdapter.Plan.unsupported("the scan has a pushed aggregation");
+      } else if (!readOptions.getCoalesceColumns().isEmpty()) {
+        arrowBatchPlan = ArrowBatchAdapter.Plan.unsupported("the scan uses coalesce_columns");
+      } else {
+        arrowBatchPlan = ArrowBatchAdapter.plan(schema, dataset.getSchema());
+      }
       LanceSparkReadOptions resolvedReadOptions = readOptions.withRef(scanPlan.getRef());
       Optional<String> whereCondition =
           FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);
