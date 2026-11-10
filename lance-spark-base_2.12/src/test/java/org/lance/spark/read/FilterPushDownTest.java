@@ -131,6 +131,20 @@ public class FilterPushDownTest {
   }
 
   @Test
+  public void testColumnNamesRequiringQuoting() {
+    Predicate[] filters =
+        new Predicate[] {
+          TestPredicates.eq("a b", 1),
+          TestPredicates.in("a.b", 2, 3),
+          TestPredicates.isNotNull("a`b")
+        };
+    assertArrayEquals(new String[] {"a.b"}, filters[1].references()[0].fieldNames());
+    Optional<String> whereClause = FilterPushDown.compileFiltersToSqlWhereClause(filters);
+    assertTrue(whereClause.isPresent());
+    assertEquals("(`a b` == 1) AND (`a.b` IN (2,3)) AND (`a``b` IS NOT NULL)", whereClause.get());
+  }
+
+  @Test
   public void testDecimalFilterPushDown() {
     // Decimal comparisons must use CAST so Lance's DataFusion parser produces Decimal128,
     // not Float64, which would fail type resolution against Decimal columns.

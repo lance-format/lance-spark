@@ -25,6 +25,7 @@ import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
 import org.lance.memwal.ShardingField;
 import org.lance.memwal.ShardingSpec;
+import org.lance.schema.LanceField;
 import org.lance.schema.LanceSchema;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRef;
@@ -40,6 +41,9 @@ import org.lance.spark.utils.FullTextQueryUtils;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.Utils;
 
+import org.apache.arrow.vector.types.DateUnit;
+import org.apache.arrow.vector.types.TimeUnit;
+import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.InternalRow;
@@ -63,6 +67,7 @@ import org.apache.spark.sql.connector.read.SupportsPushDownRequiredColumns;
 import org.apache.spark.sql.connector.read.SupportsPushDownTopN;
 import org.apache.spark.sql.connector.read.SupportsPushDownV2Filters;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.DecimalType;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.slf4j.Logger;
@@ -224,6 +229,13 @@ public class LanceScanBuilder
       Set<String> columnsToLoad = extractReferencedColumns(pushedPredicates);
       Dataset dataset = getOrOpenDataset();
       LanceSchema lanceSchema = dataset.getLanceSchema();
+      boolean advertiseRuntimeFilters =
+          !pushedAggregation.isPresent() && LanceScan.supportsRuntimeFiltering(readOptions);
+      Set<String> exactEqualityIndexedColumns =
+          advertiseRuntimeFilters
+              ? exactEqualityIndexedColumns(dataset, lanceSchema, schema)
+              : Collections.emptySet();
+      columnsToLoad.addAll(exactEqualityIndexedColumns);
       ShardingSpec activeShardingSpec =
           SparkLanceShardingUtils.isEmpty(shardingSpec)
               ? SparkLanceShardingUtils.firstShardingSpec(dataset)
@@ -235,6 +247,7 @@ public class LanceScanBuilder
       // zonemap stats and splits come from the same snapshot. The version is kept as a long
       // end-to-end so long-lived high-write-frequency datasets do not silently truncate it.
       LanceSplit.ScanPlanResult scanPlan = LanceSplit.planScan(dataset, readOptions);
+      boolean rowIdIsRowAddress = !dataset.hasStableRowIds();
       Set<Integer> liveFragmentIds = new HashSet<>(scanPlan.getFragmentRowCounts().keySet());
 
       for (ShardingField field : SparkLanceShardingUtils.fields(activeShardingSpec)) {
@@ -250,6 +263,7 @@ public class LanceScanBuilder
       // zones; if every fragment has a single sharding value, we get a fragment-to-key map.
       Map<Integer, Object> fragmentShardingKeys = null;
       Expression activeShardingExpression = null;
+      String activeShardingColumn = null;
       for (ShardingField field : SparkLanceShardingUtils.fields(activeShardingSpec)) {
         String column = SparkLanceShardingUtils.columnName(field, lanceSchema);
         List<ZoneStats> colStats = zonemapStats.get(column);
@@ -267,6 +281,7 @@ public class LanceScanBuilder
         if (keys.isPresent()) {
           fragmentShardingKeys = keys.get();
           activeShardingExpression = SparkLanceShardingUtils.toSparkExpression(field, lanceSchema);
+          activeShardingColumn = column;
           LOG.info(
               "Detected Lance sharding field {}('{}') with {} fragments",
               field.transform().orElse(null),
@@ -275,6 +290,17 @@ public class LanceScanBuilder
           break;
         }
       }
+
+      Set<String> runtimeFilterColumns =
+          advertiseRuntimeFilters
+              ? runtimeFilterColumns(
+                  schema,
+                  dataset.getSchema(),
+                  readOptions,
+                  exactEqualityIndexedColumns,
+                  zonemapStats.keySet(),
+                  activeShardingColumn)
+              : Collections.emptySet();
 
       // Pre-compute fragment pruning so we can (a) estimate post-pruning statistics for
       // JoinSelection (BroadcastHashJoin vs SortMergeJoin) and (b) pass the cached result
@@ -292,7 +318,7 @@ public class LanceScanBuilder
       // Answering 0 is safe here: pruning never drops a fragment that could match.
       if (isPushedCountStar()
           && LanceScan.pruneForPlanning(
-                  scanPlan.getSplits(), pushedPredicates, survivingFragmentIds)
+                  scanPlan.getSplits(), pushedPredicates, survivingFragmentIds, rowIdIsRowAddress)
               .isEmpty()) {
         LOG.debug("All fragments pruned for a pushed COUNT(*); resolving the count to 0 locally");
         setLocalCount(0L);
@@ -357,13 +383,22 @@ public class LanceScanBuilder
           pushedPredicates,
           statistics,
           survivingFragmentIds,
+          immutableZonemapStats(zonemapStats),
+          immutableCoverage(zonemapLoad.uncoveredByColumn),
+          runtimeFilterColumns.stream()
+              .sorted()
+              .map(FieldReference::column)
+              .toArray(NamedReference[]::new),
           scanPlan.getSplits(),
           scanPlan.getFragmentRowCounts(),
           activeShardingExpression,
+          activeShardingColumn,
           fragmentShardingKeys,
           initialStorageOptions,
           namespaceImpl,
           namespaceProperties,
+          rowIdIsRowAddress,
+          unsignedRuntimeKeyMax(runtimeFilterColumns, dataset.getSchema()),
           arrowBatchPlan);
     } finally {
       closeLazyDataset();
@@ -968,5 +1003,146 @@ public class LanceScanBuilder
       }
     }
     return columns;
+  }
+
+  private static Set<String> exactEqualityIndexedColumns(
+      Dataset dataset, LanceSchema lanceSchema, StructType projectedSchema) {
+    Map<Integer, String> topLevelNamesById = new HashMap<>();
+    for (LanceField field : lanceSchema.fields()) {
+      topLevelNamesById.put(field.getId(), field.getName());
+    }
+
+    Set<String> projectedScalarColumns = projectedScalarColumns(projectedSchema);
+
+    Set<String> result = new HashSet<>();
+    for (Index index : dataset.getIndexes()) {
+      if (index.fields().size() != 1) {
+        continue;
+      }
+      IndexType indexType = index.indexType();
+      if (indexType != IndexType.BTREE
+          && indexType != IndexType.BITMAP
+          && indexType != IndexType.ZONEMAP
+          && indexType != IndexType.SCALAR
+          && indexType != IndexType.BLOOM_FILTER) {
+        continue;
+      }
+      String column = topLevelNamesById.get(index.fields().get(0));
+      if (column != null && projectedScalarColumns.contains(column)) {
+        result.add(column);
+      }
+    }
+    return result;
+  }
+
+  private static Set<String> projectedScalarColumns(StructType projectedSchema) {
+    Set<String> result = new HashSet<>();
+    for (StructField field : projectedSchema.fields()) {
+      if (isRuntimeFilterScalarType(field)) {
+        result.add(field.name());
+      }
+    }
+    return result;
+  }
+
+  private static Set<String> runtimeFilterColumns(
+      StructType projectedSchema,
+      Schema arrowSchema,
+      LanceSparkReadOptions readOptions,
+      Set<String> exactEqualityIndexedColumns,
+      Set<String> zonemapColumns,
+      String activeShardingColumn) {
+    Set<String> result = new HashSet<>();
+    for (StructField field : projectedSchema.fields()) {
+      String column = field.name();
+      if (LanceConstant.ROW_ADDRESS.equals(column) || LanceConstant.ROW_ID.equals(column)) {
+        result.add(column);
+      } else if (isRuntimeFilterScalarType(field)
+          && hasExactSparkMapping(findField(arrowSchema.getFields(), column))
+          && (column.equals(activeShardingColumn)
+              || zonemapColumns.contains(column)
+              || (readOptions.isUseScalarIndex()
+                  && exactEqualityIndexedColumns.contains(column)))) {
+        result.add(column);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * The largest value Lance can store in each runtime filter column stored as an unsigned integer
+   * narrower than 64 bits. {@code _rowid} and {@code _rowaddr} are UInt64 and not listed: a
+   * negative key there is a valid ID, so {@link LanceScan} leaves such a predicate to Spark.
+   */
+  private static Map<String, Long> unsignedRuntimeKeyMax(Set<String> columns, Schema arrowSchema) {
+    Map<String, Long> result = new HashMap<>();
+    for (String column : columns) {
+      Field field = findField(arrowSchema.getFields(), column);
+      if (field != null && field.getType() instanceof ArrowType.Int) {
+        ArrowType.Int intType = (ArrowType.Int) field.getType();
+        if (!intType.getIsSigned() && intType.getBitWidth() < 64) {
+          result.put(column, (1L << intType.getBitWidth()) - 1);
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Whether every stored value maps to a distinct Spark value, so filtering in Lance with Spark's
+   * join keys keeps every row Spark would join. Nanosecond timestamps and {@code Date(MILLISECOND)}
+   * are truncated on read, so an exact match in Lance misses values that only truncate to a key.
+   * {@code UInt64} values of 2^63 or more read as negative longs, which Lance cannot compare with
+   * the column.
+   */
+  private static boolean hasExactSparkMapping(Field field) {
+    if (field == null) {
+      return false;
+    }
+    ArrowType type = field.getType();
+    if (type instanceof ArrowType.Timestamp) {
+      return ((ArrowType.Timestamp) type).getUnit() != TimeUnit.NANOSECOND;
+    }
+    if (type instanceof ArrowType.Date) {
+      return ((ArrowType.Date) type).getUnit() == DateUnit.DAY;
+    }
+    if (type instanceof ArrowType.Int) {
+      ArrowType.Int intType = (ArrowType.Int) type;
+      return intType.getIsSigned() || intType.getBitWidth() < 64;
+    }
+    return true;
+  }
+
+  private static boolean isRuntimeFilterScalarType(StructField field) {
+    if (field.metadata().contains(BlobUtils.ARROW_EXTENSION_NAME_KEY)) {
+      return false;
+    }
+    return field.dataType() == DataTypes.ByteType
+        || field.dataType() == DataTypes.ShortType
+        || field.dataType() == DataTypes.IntegerType
+        || field.dataType() == DataTypes.LongType
+        || field.dataType() == DataTypes.BooleanType
+        || field.dataType() == DataTypes.StringType
+        || field.dataType() == DataTypes.DateType
+        || field.dataType() == DataTypes.TimestampType
+        || field.dataType() instanceof DecimalType;
+  }
+
+  private static Map<String, List<ZoneStats>> immutableZonemapStats(
+      Map<String, List<ZoneStats>> stats) {
+    Map<String, List<ZoneStats>> copy = new HashMap<>();
+    for (Map.Entry<String, List<ZoneStats>> entry : stats.entrySet()) {
+      copy.put(entry.getKey(), Collections.unmodifiableList(new ArrayList<>(entry.getValue())));
+    }
+    return Collections.unmodifiableMap(copy);
+  }
+
+  private static Map<String, Set<Integer>> immutableCoverage(
+      Map<String, Set<Integer>> uncoveredByColumn) {
+    Map<String, Set<Integer>> copy = new HashMap<>();
+    for (Map.Entry<String, Set<Integer>> entry : uncoveredByColumn.entrySet()) {
+      copy.put(entry.getKey(), Collections.unmodifiableSet(new HashSet<>(entry.getValue())));
+    }
+    return Collections.unmodifiableMap(copy);
   }
 }
