@@ -84,10 +84,14 @@ Read and write tuning options use this precedence:
 3. Catalog options (`spark.sql.catalog.<name>.<key>`).
 4. The connector or Lance Core default.
 
-SQL `CREATE TABLE ... OPTIONS (...)` and `TBLPROPERTIES (...)` set table properties,
-including for CTAS. They apply to the initial CTAS write and subsequent operations after
-reloading the table. In the DataFrame V2 API, use `.tableProperty(...)` for persistent
-defaults and `.option(...)` for one operation. Operation options never update table properties.
+SQL `CREATE TABLE ... OPTIONS (...)` and `TBLPROPERTIES (...)` populate the same persisted
+manifest configuration, including for CTAS. Supported tuning keys from either clause apply
+to the initial CTAS write and subsequent operations after reloading the table. Other keys
+remain metadata unless another documented feature consumes them.
+
+In the DataFrame V2 API, `.tableProperty(...)` supplies persistent defaults and `.option(...)`
+overrides only the current operation, including when both are supplied to `.create()`.
+Explicit DataFrame operation options never update the persisted table properties.
 
 ```sql
 CREATE TABLE lance.default.events USING lance

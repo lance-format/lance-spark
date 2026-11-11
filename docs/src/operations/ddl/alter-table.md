@@ -43,9 +43,9 @@ Once the column exists, SET rejects these keys, even when setting the current va
 - `<column>.lance.encoding` and the supported `<column>.lance.*` encoding keys:
   `compression`, `compression-level`, `structural-encoding`, `rle-threshold`, and `bss`.
 
-For directory-backed tables, use `ALTER TABLE` to persist future-column properties because
-`CREATE TABLE` does not persist user properties. See [ADD COLUMNS](../dml/add-columns.md)
-for a blob column example.
+Future-column properties can be persisted during `CREATE TABLE` or later with
+`ALTER TABLE SET TBLPROPERTIES`, including for directory-backed tables. See
+[ADD COLUMNS](../dml/add-columns.md) for a blob column example.
 
 `UNSET TBLPROPERTIES` can remove legacy config without changing the stored schema or encoding.
 If a SET names any protected existing column, the entire statement is rejected.
