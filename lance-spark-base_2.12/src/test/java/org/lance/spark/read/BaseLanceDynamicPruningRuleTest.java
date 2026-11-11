@@ -17,6 +17,7 @@ import org.lance.spark.LanceSparkReadOptions;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.execution.ColumnarToRowExec;
 import org.apache.spark.sql.execution.FilterExec;
@@ -33,6 +34,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -134,6 +136,38 @@ public abstract class BaseLanceDynamicPruningRuleTest {
 
     assertEquals(ROWS_PER_KEY, joined.collectAsList().size());
     assertPrunedOnlyWhereSupported(joined, dim);
+  }
+
+  /**
+   * Lance orders string bounds by code point, so U+1F600 is the fact zone's max, while Java's
+   * UTF-16 order puts it below U+FFFD: a runtime filter on '\uFFFD' must keep the fragment.
+   */
+  @Test
+  public void keepsRowsOfStringKeysWithSupplementaryCharacters() {
+    spark.conf().set("spark.sql.adaptive.enabled", "true");
+    spark.conf().set("spark.sql.optimizer.dynamicPartitionPruning.reuseBroadcastOnly", "true");
+    String fact = catalog + ".default.fact_" + suffix();
+    spark.sql("CREATE TABLE " + fact + " (id INT, k STRING) USING lance");
+    // One fragment, so that one zone holds both values.
+    spark.sql(
+        "INSERT INTO "
+            + fact
+            + " SELECT /*+ COALESCE(1) */ * FROM VALUES (1, '\uFFFD'), (2, '\uD83D\uDE00')"
+            + " AS v(id, k)");
+    spark.sql("ALTER TABLE " + fact + " CREATE INDEX k_zm USING zonemap (k)");
+    String dim = catalog + ".default.dim_" + suffix();
+    spark.sql("CREATE TABLE " + dim + " (k STRING, label STRING) USING lance");
+    spark.sql("INSERT INTO " + dim + " VALUES ('\uFFFD', 'keep'), ('other', 'drop')");
+
+    Dataset<Row> joined =
+        spark.sql(
+            String.format(
+                "SELECT /*+ BROADCAST(d) */ f.id FROM %s f JOIN %s d ON f.k = d.k"
+                    + " WHERE d.label = 'keep'",
+                fact, dim));
+
+    assertEquals(Collections.singletonList(RowFactory.create(1)), joined.collectAsList());
+    assertEquals(runtimeFilteringSupported(), LanceScanTestHelper.hasLanceRuntimeFilters(joined));
   }
 
   @Test
