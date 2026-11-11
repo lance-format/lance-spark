@@ -13,6 +13,11 @@
  */
 package org.lance.spark;
 
+import org.lance.spark.internal.LanceFragmentColumnarBatchScanner;
+import org.lance.spark.read.LanceInputPartition;
+import org.lance.spark.read.LanceSplit;
+import org.lance.spark.utils.Optional;
+
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
@@ -21,6 +26,7 @@ import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -31,7 +37,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -505,5 +513,166 @@ public abstract class BaseLanceFormatTest {
     assertEquals(2, readMap.size());
     assertEquals(95, readMap.get("math"));
     assertEquals(88, readMap.get("science"));
+  }
+
+  @Test
+  public void testReadWithBatchSizeBytesAndNativeScanOptions() throws Exception {
+    String outputPath = tempDir.resolve("test_native_scan_options.lance").toString();
+
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("label", DataTypes.StringType, true)
+            .add("payload", DataTypes.BinaryType, false);
+
+    int totalRows = 200;
+    byte[] widePayload = new byte[16 * 1024];
+    Arrays.fill(widePayload, (byte) 0x5A);
+    List<Row> inputRows = new ArrayList<>(totalRows);
+    for (int i = 0; i < totalRows; i++) {
+      byte[] rowPayload = widePayload.clone();
+      rowPayload[0] = (byte) (i & 0xFF);
+      String label = (i % 7 == 0) ? null : "row-" + i;
+      inputRows.add(RowFactory.create(i, label, rowPayload));
+    }
+
+    spark
+        .createDataFrame(inputRows, schema)
+        .coalesce(1)
+        .write()
+        .format("lance")
+        .mode(SaveMode.ErrorIfExists)
+        .save(outputPath);
+
+    // Same batch_size=8192 + batch_size_bytes=64KB:
+    // 1) Narrow projection (id only) fits all 200 rows into 1 batch.
+    // 2) Wide projection (id + 16KB payload) automatically shrinks batch row counts (< 200 rows).
+    LanceSparkReadOptions sharedReadOptions =
+        LanceSparkReadOptions.builder()
+            .datasetUri(outputPath)
+            .batchSize(8192)
+            .batchSizeBytes(64L * 1024L)
+            .batchReadahead(2)
+            .fragmentReadahead(2)
+            .ioBufferSize(16L * 1024L * 1024L)
+            .build();
+
+    StructType narrowSchema = new StructType().add("id", DataTypes.IntegerType, false);
+    LanceInputPartition narrowPartition =
+        new LanceInputPartition(
+            narrowSchema,
+            0,
+            new LanceSplit(Collections.singletonList(0)),
+            sharedReadOptions,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            "narrow-scan",
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            null);
+
+    int narrowBatches = 0;
+    int narrowRows = 0;
+    try (LanceFragmentColumnarBatchScanner scanner =
+        LanceFragmentColumnarBatchScanner.create(0, narrowPartition)) {
+      while (scanner.loadNextBatch()) {
+        try (ColumnarBatch batch = scanner.getCurrentBatch()) {
+          narrowBatches++;
+          narrowRows += batch.numRows();
+        }
+      }
+    }
+    assertEquals(totalRows, narrowRows);
+    assertEquals(1, narrowBatches, "Narrow projection should fit in a single batch");
+
+    LanceInputPartition widePartition =
+        new LanceInputPartition(
+            schema,
+            0,
+            new LanceSplit(Collections.singletonList(0)),
+            sharedReadOptions,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            "wide-scan",
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            null);
+
+    int wideBatches = 0;
+    int wideRows = 0;
+    int maxWideBatchRows = 0;
+    try (LanceFragmentColumnarBatchScanner scanner =
+        LanceFragmentColumnarBatchScanner.create(0, widePartition)) {
+      while (scanner.loadNextBatch()) {
+        try (ColumnarBatch batch = scanner.getCurrentBatch()) {
+          wideBatches++;
+          wideRows += batch.numRows();
+          maxWideBatchRows = Math.max(maxWideBatchRows, batch.numRows());
+        }
+      }
+    }
+    assertEquals(totalRows, wideRows);
+    assertTrue(
+        wideBatches > 1 && maxWideBatchRows < totalRows,
+        "Wide binary projection with batch_size_bytes=64KB should split into smaller batches, got "
+            + wideBatches
+            + " batches (maxRows="
+            + maxWideBatchRows
+            + ")");
+
+    // End-to-end Spark DataFrame reads across all late_materialization styles + readahead/io
+    // options
+    for (String style :
+        Arrays.asList("heuristic", "all_late", "all_early", "all_early_except:payload")) {
+      List<Row> filteredRows =
+          spark
+              .read()
+              .format("lance")
+              .option(LanceSparkReadOptions.CONFIG_BATCH_SIZE, "8192")
+              .option(LanceSparkReadOptions.CONFIG_BATCH_SIZE_BYTES, String.valueOf(64 * 1024))
+              .option(LanceSparkReadOptions.CONFIG_BATCH_READAHEAD, "2")
+              .option(LanceSparkReadOptions.CONFIG_FRAGMENT_READAHEAD, "2")
+              .option(LanceSparkReadOptions.CONFIG_IO_BUFFER_SIZE, String.valueOf(16 * 1024 * 1024))
+              .option(LanceSparkReadOptions.CONFIG_LATE_MATERIALIZATION, style)
+              .load(outputPath)
+              .filter("id >= 50 AND id < 90")
+              .orderBy("id")
+              .collectAsList();
+
+      assertEquals(40, filteredRows.size(), "Row count mismatch for style=" + style);
+      for (int idx = 0; idx < 40; idx++) {
+        int expectedId = 50 + idx;
+        Row row = filteredRows.get(idx);
+        assertEquals(expectedId, row.getInt(0));
+        assertEquals(expectedId % 7 == 0 ? null : "row-" + expectedId, row.getString(1));
+        byte[] actualPayload = (byte[]) row.get(2);
+        assertEquals(16 * 1024, actualPayload.length);
+        assertEquals((byte) (expectedId & 0xFF), actualPayload[0]);
+      }
+    }
+
+    // Also verify arrow_batch_reads=true with sliced early-materialized batches
+    List<Row> arrowBatchRows =
+        spark
+            .read()
+            .format("lance")
+            .option(LanceSparkReadOptions.CONFIG_ARROW_BATCH_READS, "true")
+            .option(LanceSparkReadOptions.CONFIG_BATCH_SIZE, "8192")
+            .option(LanceSparkReadOptions.CONFIG_BATCH_SIZE_BYTES, String.valueOf(64 * 1024))
+            .option(LanceSparkReadOptions.CONFIG_LATE_MATERIALIZATION, "all_early")
+            .load(outputPath)
+            .filter("id >= 50 AND id < 90")
+            .orderBy("id")
+            .collectAsList();
+    assertEquals(40, arrowBatchRows.size());
+    assertEquals("row-53", arrowBatchRows.get(3).getString(1));
   }
 }

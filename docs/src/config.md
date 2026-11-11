@@ -688,6 +688,28 @@ Lance Spark maintains index and metadata caches to minimize redundant I/O. Cache
 
 For details on how caching works and tuning recommendations, see [Performance Tuning - Caching](performance.md#caching).
 
+### Native Scanner Memory and Materialization Options
+
+Read-side off-heap memory, readahead depth, and late materialization can be configured per query via `.option(...)` or as catalog defaults (`spark.sql.catalog.<name>.<option>`):
+
+| Option                 | Type    | Default | Description |
+|------------------------|---------|---------|-------------|
+| `batch_size_bytes`     | Long    | -       | Target byte budget per decoded Arrow batch. Combined with `batch_size`, the scanner uses whichever limit yields fewer rows. |
+| `batch_readahead`      | Integer | `16`    | Concurrent batch decode/prefetch depth per scanner. Reduce (for example `2`–`4`) on wide binary columns to bound memory amplification. |
+| `fragment_readahead`   | Integer | -       | Concurrent fragment readahead depth for multi-fragment native scans. |
+| `io_buffer_size`       | Long    | -       | Per-scanner native I/O buffer size in bytes. |
+| `late_materialization` | String  | -       | Controls which non-filter columns are fetched via `Take` after filter evaluation: `heuristic`, `all_late` (`true`), `all_early` (`false`), or `all_early_except:col1,col2`. |
+
+```python
+df = spark.read \
+    .format("lance") \
+    .option("batch_size_bytes", "16777216") \
+    .option("batch_readahead", "4") \
+    .option("io_buffer_size", "134217728") \
+    .option("late_materialization", "all_early_except:raw_payload") \
+    .load("/path/to/dataset.lance")
+```
+
 ## Blob v2 Reads
 
 Lance exposes blob v2 columns as `struct<kind:short, position:long, size:long, blob_id:long, blob_uri:string>`. Descriptor queries do not fetch bytes.

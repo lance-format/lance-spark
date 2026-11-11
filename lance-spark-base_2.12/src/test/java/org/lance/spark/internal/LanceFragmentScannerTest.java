@@ -13,6 +13,8 @@
  */
 package org.lance.spark.internal;
 
+import org.lance.ipc.MaterializationStyle;
+import org.lance.ipc.ScanOptions;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.DescribeTableRequest;
 import org.lance.namespace.model.DescribeTableResponse;
@@ -41,8 +43,10 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class LanceFragmentScannerTest {
 
@@ -322,6 +326,74 @@ public class LanceFragmentScannerTest {
                               .build())
                     }));
     assertEquals(java.util.Collections.singleton("payload"), names);
+  }
+
+  @Test
+  public void testBuildScanOptionsPropagatesNativeExecutionOptions() {
+    LanceInputPartition defaultPartition =
+        new LanceInputPartition(
+            TestUtils.TestTable1Config.schema,
+            0,
+            new LanceSplit(Collections.singletonList(0)),
+            TestUtils.TestTable1Config.readOptions,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            "default-scan",
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            null);
+    ScanOptions defaultScanOpts = LanceFragmentScanner.buildScanOptions(defaultPartition);
+    assertFalse(defaultScanOpts.getBatchSizeBytes().isPresent());
+    assertEquals(16, defaultScanOpts.getBatchReadahead());
+    assertFalse(defaultScanOpts.getFragmentReadahead().isPresent());
+    assertFalse(defaultScanOpts.getIoBufferSize().isPresent());
+    assertFalse(defaultScanOpts.getLateMaterialization().isPresent());
+
+    LanceSparkReadOptions tunedReadOptions =
+        TestUtils.TestTable1Config.readOptions.toBuilder()
+            .batchSize(4096)
+            .batchSizeBytes(16_777_216L)
+            .batchReadahead(3)
+            .fragmentReadahead(2)
+            .ioBufferSize(67_108_864L)
+            .lateMaterialization("all_early_except:z,t")
+            .build();
+    LanceInputPartition tunedPartition =
+        new LanceInputPartition(
+            TestUtils.TestTable1Config.schema,
+            0,
+            new LanceSplit(Collections.singletonList(0)),
+            tunedReadOptions,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            "tuned-scan",
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            null);
+    ScanOptions tunedScanOpts = LanceFragmentScanner.buildScanOptions(tunedPartition);
+    assertTrue(tunedScanOpts.getBatchSize().isPresent());
+    assertEquals(4096L, tunedScanOpts.getBatchSize().get());
+    assertTrue(tunedScanOpts.getBatchSizeBytes().isPresent());
+    assertEquals(16_777_216L, tunedScanOpts.getBatchSizeBytes().get());
+    assertEquals(3, tunedScanOpts.getBatchReadahead());
+    assertTrue(tunedScanOpts.getFragmentReadahead().isPresent());
+    assertEquals(2, tunedScanOpts.getFragmentReadahead().get());
+    assertTrue(tunedScanOpts.getIoBufferSize().isPresent());
+    assertEquals(67_108_864L, tunedScanOpts.getIoBufferSize().get());
+    assertTrue(tunedScanOpts.getLateMaterialization().isPresent());
+    assertEquals(
+        MaterializationStyle.Mode.ALL_EARLY_EXCEPT,
+        tunedScanOpts.getLateMaterialization().get().getMode());
+    assertEquals(
+        Arrays.asList("z", "t"), tunedScanOpts.getLateMaterialization().get().getColumns());
   }
 
   /**

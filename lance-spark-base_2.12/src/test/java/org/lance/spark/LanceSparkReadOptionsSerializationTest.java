@@ -14,6 +14,7 @@
 package org.lance.spark;
 
 import org.lance.ipc.FullTextQuery;
+import org.lance.ipc.MaterializationStyle;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -26,6 +27,7 @@ import java.io.ObjectOutputStream;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -489,5 +491,141 @@ public class LanceSparkReadOptionsSerializationTest {
     LanceSparkReadOptions deserializedOptions = (LanceSparkReadOptions) ois.readObject();
 
     Assertions.assertFalse(deserializedOptions.isUseScalarIndex());
+  }
+
+  @Test
+  public void testNativeScanExecutionOptionsDefaultsAndParsing() {
+    LanceSparkReadOptions defaults =
+        LanceSparkReadOptions.builder().datasetUri("s3://bucket/path").build();
+    Assertions.assertNull(defaults.getBatchSizeBytes());
+    Assertions.assertNull(defaults.getBatchReadahead());
+    Assertions.assertNull(defaults.getFragmentReadahead());
+    Assertions.assertNull(defaults.getIoBufferSize());
+    Assertions.assertNull(defaults.getLateMaterialization());
+
+    Map<String, String> opts = new HashMap<>();
+    opts.put(LanceSparkReadOptions.CONFIG_BATCH_SIZE_BYTES, "16777216");
+    opts.put(LanceSparkReadOptions.CONFIG_BATCH_READAHEAD, "4");
+    opts.put(LanceSparkReadOptions.CONFIG_FRAGMENT_READAHEAD, "2");
+    opts.put(LanceSparkReadOptions.CONFIG_IO_BUFFER_SIZE, "268435456");
+    opts.put(
+        LanceSparkReadOptions.CONFIG_LATE_MATERIALIZATION, "all_early_except: heavy_blob , proto ");
+
+    LanceSparkReadOptions parsed = LanceSparkReadOptions.from(opts, "s3://bucket/path");
+    Assertions.assertEquals(16777216L, parsed.getBatchSizeBytes());
+    Assertions.assertEquals(4, parsed.getBatchReadahead());
+    Assertions.assertEquals(2, parsed.getFragmentReadahead());
+    Assertions.assertEquals(268435456L, parsed.getIoBufferSize());
+    Assertions.assertNotNull(parsed.getLateMaterialization());
+    Assertions.assertEquals(
+        MaterializationStyle.Mode.ALL_EARLY_EXCEPT, parsed.getLateMaterialization().getMode());
+    Assertions.assertEquals(
+        Arrays.asList("heavy_blob", "proto"), parsed.getLateMaterialization().getColumns());
+
+    // Verify all late_materialization string aliases
+    Assertions.assertEquals(
+        MaterializationStyle.Mode.HEURISTIC,
+        LanceSparkReadOptions.parseMaterializationStyle("heuristic").getMode());
+    Assertions.assertEquals(
+        MaterializationStyle.Mode.ALL_LATE,
+        LanceSparkReadOptions.parseMaterializationStyle("all_late").getMode());
+    Assertions.assertEquals(
+        MaterializationStyle.Mode.ALL_LATE,
+        LanceSparkReadOptions.parseMaterializationStyle("true").getMode());
+    Assertions.assertEquals(
+        MaterializationStyle.Mode.ALL_EARLY,
+        LanceSparkReadOptions.parseMaterializationStyle("all_early").getMode());
+    Assertions.assertEquals(
+        MaterializationStyle.Mode.ALL_EARLY,
+        LanceSparkReadOptions.parseMaterializationStyle("false").getMode());
+  }
+
+  @Test
+  public void testNativeScanExecutionOptionsValidation() {
+    for (String key :
+        Arrays.asList(
+            LanceSparkReadOptions.CONFIG_BATCH_SIZE_BYTES,
+            LanceSparkReadOptions.CONFIG_BATCH_READAHEAD,
+            LanceSparkReadOptions.CONFIG_FRAGMENT_READAHEAD,
+            LanceSparkReadOptions.CONFIG_IO_BUFFER_SIZE)) {
+      Assertions.assertThrows(
+          IllegalArgumentException.class,
+          () -> LanceSparkReadOptions.from(Collections.singletonMap(key, "0"), "s3://bucket/path"));
+      Assertions.assertThrows(
+          IllegalArgumentException.class,
+          () ->
+              LanceSparkReadOptions.from(Collections.singletonMap(key, "-5"), "s3://bucket/path"));
+    }
+
+    for (String invalidStyle :
+        Arrays.asList(
+            "", " ", "invalid_mode", "all_early_except:", "all_early_except:col1,,col2")) {
+      Assertions.assertThrows(
+          IllegalArgumentException.class,
+          () ->
+              LanceSparkReadOptions.from(
+                  Collections.singletonMap(
+                      LanceSparkReadOptions.CONFIG_LATE_MATERIALIZATION, invalidStyle),
+                  "s3://bucket/path"));
+    }
+  }
+
+  @Test
+  public void testNativeScanExecutionOptionsSerializationAndEquality()
+      throws IOException, ClassNotFoundException {
+    List<MaterializationStyle> styles =
+        Arrays.asList(
+            null,
+            MaterializationStyle.heuristic(),
+            MaterializationStyle.allLate(),
+            MaterializationStyle.allEarly(),
+            MaterializationStyle.allEarlyExcept(Arrays.asList("col_a", "col_b")));
+
+    for (MaterializationStyle style : styles) {
+      LanceSparkReadOptions opts1 =
+          LanceSparkReadOptions.builder()
+              .datasetUri("s3://bucket/path")
+              .batchSizeBytes(8_388_608L)
+              .batchReadahead(3)
+              .fragmentReadahead(2)
+              .ioBufferSize(134_217_728L)
+              .lateMaterialization(style)
+              .build();
+
+      LanceSparkReadOptions opts2 = opts1.withRef(LanceRef.ofMain(5));
+      LanceSparkReadOptions opts2Expected =
+          LanceSparkReadOptions.builder()
+              .datasetUri("s3://bucket/path")
+              .ref(LanceRef.ofMain(5))
+              .batchSizeBytes(8_388_608L)
+              .batchReadahead(3)
+              .fragmentReadahead(2)
+              .ioBufferSize(134_217_728L)
+              .lateMaterialization(
+                  style == null
+                      ? null
+                      : style.getMode() == MaterializationStyle.Mode.ALL_EARLY_EXCEPT
+                          ? MaterializationStyle.allEarlyExcept(Arrays.asList("col_a", "col_b"))
+                          : style.getMode() == MaterializationStyle.Mode.HEURISTIC
+                              ? MaterializationStyle.heuristic()
+                              : style.getMode() == MaterializationStyle.Mode.ALL_LATE
+                                  ? MaterializationStyle.allLate()
+                                  : MaterializationStyle.allEarly())
+              .build();
+      Assertions.assertEquals(opts2Expected, opts2);
+      Assertions.assertEquals(opts2Expected.hashCode(), opts2.hashCode());
+
+      ByteArrayOutputStream baos = new ByteArrayOutputStream();
+      try (ObjectOutputStream oos = new ObjectOutputStream(baos)) {
+        oos.writeObject(opts1);
+      }
+      LanceSparkReadOptions deserialized;
+      try (ObjectInputStream ois =
+          new ObjectInputStream(new ByteArrayInputStream(baos.toByteArray()))) {
+        deserialized = (LanceSparkReadOptions) ois.readObject();
+      }
+      Assertions.assertEquals(opts1, deserialized);
+      Assertions.assertEquals(opts1.hashCode(), deserialized.hashCode());
+    }
   }
 }
