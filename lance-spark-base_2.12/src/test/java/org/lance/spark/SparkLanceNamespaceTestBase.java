@@ -962,7 +962,8 @@ public abstract class SparkLanceNamespaceTestBase {
                   TableChange.addColumn(
                       new String[] {"new_col"}, org.apache.spark.sql.types.DataTypes.StringType));
             });
-    assertTrue(ex.getMessage().contains("Only SET/UNSET TBLPROPERTIES is supported"));
+    assertTrue(
+        ex.getMessage().contains("Only SET/UNSET TBLPROPERTIES and DROP COLUMN are supported"));
   }
 
   @Test
