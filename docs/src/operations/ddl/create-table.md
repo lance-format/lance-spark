@@ -69,44 +69,33 @@ Create new Lance tables with SQL DDL statements or DataFrames.
     df.writeTo("users").create();
     ```
 
-## Persistent Table Properties
+## Table Properties
 
-User properties supplied through `TBLPROPERTIES`, SQL `OPTIONS`, or
-`DataFrameWriterV2.tableProperty` are saved in the Lance manifest configuration and
-remain available after the table is reloaded. Both SQL clauses contribute to the same
-manifest configuration map; SQL `OPTIONS` are persistent creation properties, including
-in CTAS. In the DataFrame V2 API, `.tableProperty(...)` supplies persistent properties,
-while `.option(...)` supplies options for the current operation.
-Spark's reserved properties, such as `provider` and `location`, are not copied into that
-configuration.
+Set table properties with `TBLPROPERTIES` or SQL `OPTIONS`. Both clauses save user
+properties on the table, including in `CREATE TABLE ... AS SELECT` (CTAS):
 
 ```sql
 CREATE TABLE events USING lance
 OPTIONS ('app.source' = 'events')
-TBLPROPERTIES ('app.owner' = 'analytics', 'app.retention' = 'weekly')
+TBLPROPERTIES ('app.owner' = 'analytics')
 AS SELECT 1 AS id;
 
-REPLACE TABLE events USING lance
-TBLPROPERTIES ('app.owner' = 'platform')
-AS SELECT 2 AS id;
-
-REFRESH TABLE events;
 SHOW TBLPROPERTIES events;
--- app.source = events; app.owner = platform; app.retention = weekly
+-- app.source = events; app.owner = analytics
 ```
 
-`REPLACE TABLE` and `CREATE OR REPLACE TABLE` update the supplied properties and
-retain existing properties that are not mentioned. CTAS does not copy properties
-from its source tables. Use `ALTER TABLE ... UNSET TBLPROPERTIES` to remove a property.
-Storing a property does not make it a supported reader or writer option; supported
-behavioral settings are documented in [Configuration](../../config.md).
+With DataFrame V2, use `.tableProperty("app.owner", "analytics")` to save a property;
+`.option(...)` applies only to the current operation.
 
-Staged creates and replacements commit the properties in the same Lance transaction
-as the data. An aborted staged replacement leaves the existing data and properties
-unchanged. Ordinary `CREATE TABLE` without `AS SELECT` currently creates the empty
-dataset and then saves nonempty properties in a separate version, because the Java
-create builder does not accept initial manifest configuration. Registering an
-existing dataset with `LOCATION` leaves its configuration unchanged.
+`REPLACE TABLE` and `CREATE OR REPLACE TABLE` update supplied properties and retain
+unspecified ones. CTAS does not inherit properties from its source tables.
+Use [ALTER TABLE](alter-table.md) to update or remove properties. See
+[Configuration](../../config.md) for settings that affect table behavior.
+
+!!! note
+    CTAS and replacements commit properties together with data. Ordinary CREATE with
+    nonempty user properties adds a separate metadata version after creating the empty table.
+    Registering an existing dataset with `LOCATION` leaves its configuration unchanged.
 
 ## Complex Data Types
 

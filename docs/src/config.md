@@ -77,42 +77,33 @@ and namespace-specific options:
 
 ## Table Defaults and Operation Options
 
-Read and write tuning options use this precedence:
+Use table properties for persistent settings and DataFrame options for one operation:
 
-1. Explicit DataFrame read/write `.option(...)` for the current operation.
-2. Supported defaults in the table's persisted properties.
-3. Catalog options (`spark.sql.catalog.<name>.<key>`).
-4. The connector or Lance Core default.
+| Purpose | How to set it |
+|-------|---------------|
+| Save properties at creation | SQL `CREATE TABLE ... TBLPROPERTIES (...)` or `OPTIONS (...)`; DataFrame V2 `.tableProperty(...)` |
+| Update or remove properties | `ALTER TABLE ... SET/UNSET TBLPROPERTIES` |
+| Override one read or write | DataFrame `.option(...)`, including DataFrame V2 `.create()` |
 
-SQL `CREATE TABLE ... OPTIONS (...)` and `TBLPROPERTIES (...)` populate the same persisted
-manifest configuration, including for CTAS. Supported tuning keys from either clause apply
-to the initial CTAS write and subsequent operations after reloading the table. Other keys
-remain metadata unless another documented feature consumes them.
-
-In the DataFrame V2 API, `.tableProperty(...)` supplies persistent defaults and `.option(...)`
-overrides only the current operation, including when both are supplied to `.create()`.
-Explicit DataFrame operation options never update the persisted table properties.
+Supported table defaults apply to the initial CTAS write and subsequent reads and writes,
+including row-level DML. Explicit operation options override table defaults without changing
+them. The precedence is **operation option > table property > catalog option > built-in default**.
 
 ```sql
 CREATE TABLE lance.default.events USING lance
-OPTIONS ('max_row_per_file' = '200000', 'batch_size' = '1024')
+TBLPROPERTIES ('max_row_per_file' = '200000', 'batch_size' = '1024')
 AS SELECT * FROM source_events;
-
-ALTER TABLE lance.default.events
-SET TBLPROPERTIES ('max_row_per_file' = '400000');
-
--- Later writes use 400000 as the file row limit.
-INSERT INTO lance.default.events SELECT * FROM more_events;
 ```
 
 ```python
-# Override the file row limit only for this append.
+# This append uses 100000; subsequent writes still default to 200000.
 more_events.writeTo("lance.default.events") \
     .option("max_row_per_file", "100000") \
     .append()
 ```
 
-Supported table defaults are:
+The following properties can be used as table defaults. See [Read Options](operations/dql/select.md#read-options)
+and [Write Options](operations/dml/insert-into.md#write-options) for their types, values, and defaults.
 
 | Applies to | Properties |
 |------------|------------|
@@ -120,23 +111,17 @@ Supported table defaults are:
 | Writes | `max_row_per_file`, `max_rows_per_group`, `max_bytes_per_file`, `max_batch_bytes`, `use_queued_write_buffer`, `queue_depth`, `use_large_var_types`, `blob_pack_file_size_threshold` |
 | Reads | `pushDownFilters`, `block_size`, `index_cache_size`, `metadata_cache_size`, `use_scalar_index`, `topN_push_down` |
 
-These names retain their existing option semantics. In particular, `batch_size` is a shared
-read/write default, and file limits apply within each Spark writer task. They do not repartition
-the input or combine files across tasks. Table defaults also apply to row-level DML scans and writes.
-`file_format_version`, stable row IDs, and column encoding properties retain their existing
-schema and table-creation handling; they are not part of the tuning-default list above.
+File limits apply per Spark writer task; they do not repartition data or combine files across tasks.
+To remove a table default, use `ALTER TABLE ... UNSET TBLPROPERTIES`; subsequent operations
+fall back to the catalog or built-in default.
 
-`path`, `version`, `branch`, `tag`, `write_mode`, and `fullTextQuery` are operation selectors,
-not table defaults. Storage credentials, namespace configuration, cache backend URIs, and
-`executor_credential_refresh` also do not become defaults when stored as table properties.
-Other properties remain metadata unless another documented feature consumes them.
+Other keys are not read/write tuning defaults. Configure storage credentials on the catalog or
+operation, and snapshot selectors such as `version`, `branch`, and `tag` on the read.
+See [CREATE TABLE](operations/ddl/create-table.md) for schema, encoding, and creation settings.
+Custom properties such as `app.owner` are metadata only.
 
-Option names are case-insensitive when consumed. Table property names themselves retain their
-spelling: use that spelling for `ALTER TABLE ... SET/UNSET TBLPROPERTIES`. Conflicting values under
-multiple spellings of a recognized option are rejected; unset the unwanted spelling. Spark's
-internal `option.<key>` copies are not interpreted as defaults, so unsetting the raw key restores
-the catalog or built-in default. Invalid values are checked when the corresponding operation
-consumes them, using the same validation as explicit options.
+Option names are case-insensitive when read. Use the stored spelling for `SET/UNSET TBLPROPERTIES`;
+conflicting values under different spellings of the same option are rejected.
 
 ## Distributed Vector Search
 
