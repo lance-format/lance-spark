@@ -694,7 +694,7 @@ Read-side off-heap memory, readahead depth, and late materialization can be conf
 
 | Option                 | Type    | Default | Description |
 |------------------------|---------|---------|-------------|
-| `batch_size_bytes`     | Long    | -       | Target byte budget per decoded Arrow batch. Combined with `batch_size`, the scanner uses whichever limit yields fewer rows. |
+| `batch_size_bytes`     | Long    | -       | Soft byte target per output Arrow batch. Combined with `batch_size`, the scanner splits batches to fewer rows when wide columns exceed the target; because split slices can retain shared parent buffers, pair with a conservative `batch_size` on memory-constrained wide scans. |
 | `batch_readahead`      | Integer | `16`    | Concurrent batch decode/prefetch depth per scanner. Reduce (for example `2`–`4`) on wide binary columns to bound memory amplification. |
 | `fragment_readahead`   | Integer | -       | Concurrent fragment readahead depth for multi-fragment native scans. |
 | `io_buffer_size`       | Long    | -       | Per-scanner native I/O buffer size in bytes. |
