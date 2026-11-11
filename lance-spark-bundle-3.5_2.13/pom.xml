@@ -106,8 +106,52 @@
                                         <exclude>META-INF/*.RSA</exclude>
                                     </excludes>
                                 </filter>
+                                <!--
+                                  Strip only the unused Arrow Dataset JNI native (~50-77 MB per
+                                  platform) while KEEPING the arrow-dataset Java API classes.
+                                  lance-core's org.lance.ipc.LanceScanner implements
+                                  org.apache.arrow.dataset.scanner.Scanner, so removing the whole
+                                  artifact would break class loading on the Spark read path
+                                  (NoClassDefFoundError). Runtime native interop goes through the
+                                  Arrow C Data Interface (arrow-c-data), not this native.
+                                  Native paths differ across Arrow versions: arrow 15 packages them
+                                  at the jar root (x86_64/, aarch_64/); arrow 18+ under
+                                  arrow_dataset_jni/. Both are matched below.
+                                -->
+                                <filter>
+                                    <artifact>org.apache.arrow:arrow-dataset</artifact>
+                                    <excludes>
+                                        <exclude>**/*arrow_dataset_jni*</exclude>
+                                        <exclude>arrow_dataset_jni/**</exclude>
+                                    </excludes>
+                                </filter>
                             </filters>
                         </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <!--
+              Verify the shaded bundle after it is built: the Arrow Dataset JNI native
+              must be stripped (size), while the arrow-dataset Java API classes must be
+              retained so lance-core's LanceScanner (which implements
+              org.apache.arrow.dataset.scanner.Scanner) still links on the read path.
+              Runs at integration-test (after package/shade), so the uber jar exists.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-surefire-plugin.version}</version>
+                <configuration>
+                    <systemPropertyVariables>
+                        <bundle.shaded.jar>${project.build.directory}/${project.artifactId}-${project.version}.jar</bundle.shaded.jar>
+                    </systemPropertyVariables>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
                     </execution>
                 </executions>
             </plugin>
