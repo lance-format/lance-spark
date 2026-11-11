@@ -73,11 +73,16 @@ Create new Lance tables with SQL DDL statements or DataFrames.
 
 User properties supplied through `TBLPROPERTIES`, SQL `OPTIONS`, or
 `DataFrameWriterV2.tableProperty` are saved in the Lance manifest configuration and
-remain available after the table is reloaded. Spark's reserved properties, such as
-`provider` and `location`, are not copied into that configuration.
+remain available after the table is reloaded. Both SQL clauses contribute to the same
+manifest configuration map; SQL `OPTIONS` are persistent creation properties, including
+in CTAS. In the DataFrame V2 API, `.tableProperty(...)` supplies persistent properties,
+while `.option(...)` supplies options for the current operation.
+Spark's reserved properties, such as `provider` and `location`, are not copied into that
+configuration.
 
 ```sql
 CREATE TABLE events USING lance
+OPTIONS ('app.source' = 'events')
 TBLPROPERTIES ('app.owner' = 'analytics', 'app.retention' = 'weekly')
 AS SELECT 1 AS id;
 
@@ -87,7 +92,7 @@ AS SELECT 2 AS id;
 
 REFRESH TABLE events;
 SHOW TBLPROPERTIES events;
--- app.owner = platform; app.retention = weekly
+-- app.source = events; app.owner = platform; app.retention = weekly
 ```
 
 `REPLACE TABLE` and `CREATE OR REPLACE TABLE` update the supplied properties and
