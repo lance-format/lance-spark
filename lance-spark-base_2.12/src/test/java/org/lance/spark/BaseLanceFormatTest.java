@@ -30,7 +30,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -505,5 +507,109 @@ public abstract class BaseLanceFormatTest {
     assertEquals(2, readMap.size());
     assertEquals(95, readMap.get("math"));
     assertEquals(88, readMap.get("science"));
+  }
+
+  @Test
+  public void testSchemaEvolutionMissingColumnsRead() {
+    String outputPath = tempDir.resolve("test_schema_evolution_missing_cols.lance").toString();
+
+    StructType initialSchema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("label", DataTypes.StringType, true);
+
+    writeIdLabelRange(outputPath, initialSchema, 0, 50, SaveMode.ErrorIfExists);
+    writeIdLabelRange(outputPath, initialSchema, 50, 120, SaveMode.Append);
+
+    // Metadata-only schema evolution: add primitive, binary, and nested struct columns
+    StructType extraStructType =
+        new StructType()
+            .add("code", DataTypes.IntegerType, true)
+            .add("note", DataTypes.StringType, true);
+    StructType addedColumns =
+        new StructType()
+            .add("extra_int", DataTypes.IntegerType, true)
+            .add("extra_bin", DataTypes.BinaryType, true)
+            .add("extra_struct", extraStructType, true);
+    TestUtils.addColumnsToDataset(outputPath, addedColumns);
+
+    // Append a new fragment containing populated values for the evolved schema
+    StructType evolvedSchema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("label", DataTypes.StringType, true)
+            .add("extra_int", DataTypes.IntegerType, true)
+            .add("extra_bin", DataTypes.BinaryType, true)
+            .add("extra_struct", extraStructType, true);
+    List<Row> newFragmentRows = new ArrayList<>();
+    for (int i = 120; i < 140; i++) {
+      newFragmentRows.add(
+          RowFactory.create(
+              i,
+              "row_" + i,
+              i * 10,
+              ("bin_" + i).getBytes(StandardCharsets.UTF_8),
+              RowFactory.create(i, "note_" + i)));
+    }
+    spark
+        .createDataFrame(newFragmentRows, evolvedSchema)
+        .coalesce(1)
+        .write()
+        .format("lance")
+        .mode(SaveMode.Append)
+        .save(outputPath);
+
+    for (String arrowBatchReads : Arrays.asList("false", "true")) {
+      Dataset<Row> evolvedDf =
+          spark
+              .read()
+              .format("lance")
+              .option(LanceSparkReadOptions.CONFIG_ARROW_BATCH_READS, arrowBatchReads)
+              .load(outputPath);
+
+      List<Row> evolvedResult = evolvedDf.orderBy("id").collectAsList();
+      assertEquals(140, evolvedResult.size());
+      for (int idx = 0; idx < 120; idx++) {
+        Row row = evolvedResult.get(idx);
+        assertEquals(idx, row.getInt(0));
+        assertTrue(row.isNullAt(2));
+        assertTrue(row.isNullAt(3));
+        assertTrue(row.isNullAt(4));
+      }
+      for (int idx = 120; idx < 140; idx++) {
+        Row row = evolvedResult.get(idx);
+        assertEquals(idx, row.getInt(0));
+        assertEquals(idx * 10, row.getInt(2));
+        assertEquals("bin_" + idx, new String((byte[]) row.get(3), StandardCharsets.UTF_8));
+        assertEquals(idx, row.getStruct(4).getInt(0));
+        assertEquals("note_" + idx, row.getStruct(4).getString(1));
+      }
+
+      // Projecting only columns that are physically missing on pre-evolution fragments
+      List<Row> projectedNewCols =
+          evolvedDf.select("extra_bin", "extra_struct.note").collectAsList();
+      assertEquals(140, projectedNewCols.size());
+      long nonNullNotes = projectedNewCols.stream().filter(r -> !r.isNullAt(1)).count();
+      assertEquals(20L, nonNullNotes);
+
+      // Filtering on an evolved column across pre-evolution and post-evolution fragments
+      assertEquals(120L, evolvedDf.filter("extra_int IS NULL").count());
+      assertEquals(10L, evolvedDf.filter("extra_int >= 1300").count());
+    }
+  }
+
+  private void writeIdLabelRange(
+      String outputPath, StructType schema, int startInclusive, int endExclusive, SaveMode mode) {
+    List<Row> rows = new ArrayList<>(endExclusive - startInclusive);
+    for (int i = startInclusive; i < endExclusive; i++) {
+      rows.add(RowFactory.create(i, "row_" + i));
+    }
+    spark
+        .createDataFrame(rows, schema)
+        .coalesce(1)
+        .write()
+        .format("lance")
+        .mode(mode)
+        .save(outputPath);
   }
 }
