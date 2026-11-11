@@ -75,6 +75,23 @@ and namespace-specific options:
 | `spark.sql.catalog.{name}.parent`           | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                             |
 | `spark.sql.catalog.{name}.parent_delimiter` | String | ✗        | Delimiter for parent prefix (default: `.`). See [Note on Namespace Levels](#note-on-namespace-levels).                           |
 
+## Kerberos REST Namespace Configuration
+
+The Kerberos provider configuration uses the existing `dynamic_context_provider.*` namespace
+options. Configuration parsing and validation are implemented first. The provider and HTTP
+authentication will be added in a subsequent step.
+
+| Option under `spark.sql.catalog.{name}.dynamic_context_provider.` | Required | Description |
+|-----------------------------------------------------------------|----------|-------------|
+| `service_principal` | Yes | Complete REST service principal, for example `HTTP/lance.example.com@EXAMPLE.COM`. |
+| `principal` | With `keytab` | Client principal used to log in from the keytab. Omit both credential options to use the Spark login identity. |
+| `keytab` | With `principal` | Local path to the client's keytab file. |
+
+Configured values must be nonblank. `principal` and `keytab` must be configured together.
+The REST service principal identifies the server. The client principal identifies the Spark user.
+Driver and executor JVMs that call the REST namespace each need valid Kerberos credentials.
+For explicit keytab login, the configured path must be readable in each of those JVMs.
+
 ## Distributed Vector Search
 
 Set `spark.sql.lance.search.distributed.enabled=true` to execute `VECTOR_SEARCH` with Spark tasks
