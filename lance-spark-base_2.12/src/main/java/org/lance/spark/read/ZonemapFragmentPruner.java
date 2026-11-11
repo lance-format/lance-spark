@@ -269,6 +269,34 @@ public final class ZonemapFragmentPruner {
     return Optional.of(matchingFragments);
   }
 
+  /**
+   * Compares {@code a} with {@code b}, strings by code point, which is how Lance orders zone
+   * bounds. Java's {@link String#compareTo} compares UTF-16 code units, which orders a character
+   * above U+FFFF, stored as a surrogate pair, below U+E000 to U+FFFF.
+   */
+  @SuppressWarnings("unchecked")
+  private static int compare(Object a, Object b) {
+    if (a instanceof String && b instanceof String) {
+      return compareCodePoints((String) a, (String) b);
+    }
+    return ((Comparable<Object>) a).compareTo(b);
+  }
+
+  static int compareCodePoints(String a, String b) {
+    int i = 0;
+    int j = 0;
+    while (i < a.length() && j < b.length()) {
+      int x = a.codePointAt(i);
+      int y = b.codePointAt(j);
+      if (x != y) {
+        return Integer.compare(x, y);
+      }
+      i += Character.charCount(x);
+      j += Character.charCount(y);
+    }
+    return Integer.compare(a.length() - i, b.length() - j);
+  }
+
   @SuppressWarnings("unchecked")
   private static boolean zoneMatchesComparison(
       ZoneStats zone, Comparable<Object> target, ComparisonType type) {
@@ -285,15 +313,15 @@ public final class ZonemapFragmentPruner {
     try {
       switch (type) {
         case EQUALS:
-          return target.compareTo(min) >= 0 && target.compareTo(max) <= 0;
+          return compare(target, min) >= 0 && compare(target, max) <= 0;
         case LESS_THAN:
-          return min.compareTo(target) < 0;
+          return compare(min, target) < 0;
         case LESS_THAN_OR_EQUAL:
-          return min.compareTo(target) <= 0;
+          return compare(min, target) <= 0;
         case GREATER_THAN:
-          return max.compareTo(target) > 0;
+          return compare(max, target) > 0;
         case GREATER_THAN_OR_EQUAL:
-          return max.compareTo(target) >= 0;
+          return compare(max, target) >= 0;
         default:
           return true;
       }
