@@ -23,6 +23,7 @@ import org.apache.spark.sql.connector.expressions.filter.Not;
 import org.apache.spark.sql.connector.expressions.filter.Or;
 import org.apache.spark.sql.connector.expressions.filter.Predicate;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.DayTimeIntervalType;
 
 import java.math.BigDecimal;
 import java.sql.Date;
@@ -125,6 +126,12 @@ public class FilterPushDown {
     }
     for (int i = 1; i < children.length; i++) {
       if (!(children[i] instanceof Literal)) {
+        return false;
+      }
+      if (((Literal<?>) children[i]).dataType() instanceof DayTimeIntervalType) {
+        // The value is a bare count of microseconds, which Lance does not convert to the column's
+        // duration type, and a typed literal would be compared in the column's unit, while Spark
+        // compares nanosecond values rounded down to microseconds. Let Spark evaluate it.
         return false;
       }
       if (isTimeTypeLiteral((Literal<?>) children[i])) {
