@@ -22,6 +22,7 @@ import org.lance.spark.utils.Utils;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -37,6 +38,34 @@ public class LanceSplit implements Serializable {
 
   public List<Integer> getFragments() {
     return fragments;
+  }
+
+  /**
+   * Returns a new list with {@code splits} stably sorted by descending logical row count (Longest
+   * Processing Time first, matching Spark's {@code FilePartition} ordering) so larger fragments are
+   * scheduled first and do not become tail stragglers.
+   */
+  public static List<LanceSplit> orderByRowsDescending(
+      List<LanceSplit> splits, Map<Integer, Long> fragmentRowCounts) {
+    if (splits.size() <= 1 || fragmentRowCounts == null || fragmentRowCounts.isEmpty()) {
+      return splits;
+    }
+    List<LanceSplit> ordered = new ArrayList<>(splits);
+    ordered.sort(
+        Comparator.comparingLong((LanceSplit split) -> splitRowCount(split, fragmentRowCounts))
+            .reversed());
+    return ordered;
+  }
+
+  private static long splitRowCount(LanceSplit split, Map<Integer, Long> fragmentRowCounts) {
+    long total = 0L;
+    for (Integer fragmentId : split.getFragments()) {
+      Long count = fragmentRowCounts.get(fragmentId);
+      if (count != null && count > 0) {
+        total += count;
+      }
+    }
+    return total;
   }
 
   /** Result of scan planning containing splits, resolved version, and per-fragment row counts. */
