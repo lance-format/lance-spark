@@ -354,7 +354,12 @@ These options control how data is read from Lance datasets. They can be set usin
 
 | Option                | Type    | Default | Description                                                                                                       |
 |-----------------------|---------|---------|-------------------------------------------------------------------------------------------------------------------|
-| `batch_size`          | Integer | `8192`  | Number of rows to read per batch during scanning. Larger values may improve throughput but increase memory usage. |
+| `batch_size`          | Integer | `8192`  | Maximum number of rows to read per batch during scanning. When combined with `batch_size_bytes`, the smaller batch size wins. |
+| `batch_size_bytes`    | Long    | -       | Soft byte budget per Arrow batch during scanning. Automatically shrinks row count per batch on wide binary/string projections while keeping high row counts on narrow projections. |
+| `batch_readahead`     | Integer | `16`    | Number of batches to prefetch concurrently per scanner in native Rust I/O. Lowering to `2`–`4` caps peak off-heap memory on wide binary schemas. |
+| `fragment_readahead`  | Integer | -       | Number of fragments to read ahead concurrently in multi-fragment native scans.                                    |
+| `io_buffer_size`      | Long    | -       | Maximum off-heap I/O buffer size in bytes per native scanner (defaults to Lance's native 2 GiB budget).           |
+| `late_materialization`| String  | -       | Native late materialization strategy for filtered scans: `heuristic`, `all_late` (`true`), `all_early` (`false`), or `all_early_except:col1,col2`. |
 | `use_scalar_index`    | Boolean | `true`  | Whether to use scalar indices (e.g. btree) for filter acceleration during scanning.                               |
 | `version`             | Integer | Latest  | Specific dataset version to read. If not specified, reads the latest version.                                     |
 | `branch`              | String  | Main    | Named branch to read. Reads the current head. Do not set with `tag` or `version`.                                 |

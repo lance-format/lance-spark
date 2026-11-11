@@ -15,6 +15,8 @@ package org.lance.spark;
 
 import org.lance.ReadOptions;
 import org.lance.ipc.FullTextQuery;
+import org.lance.ipc.MaterializationStyle;
+import org.lance.ipc.ScanOptions;
 import org.lance.namespace.LanceNamespace;
 import org.lance.spark.utils.FullTextQueryUtils;
 
@@ -25,8 +27,10 @@ import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 
@@ -48,7 +52,7 @@ import java.util.Objects;
  * }</pre>
  */
 public class LanceSparkReadOptions implements Serializable {
-  private static final long serialVersionUID = 5L;
+  private static final long serialVersionUID = 6L;
 
   public static final String CONFIG_DATASET_URI = "path";
   public static final String CONFIG_PUSH_DOWN_FILTERS = "pushDownFilters";
@@ -59,6 +63,11 @@ public class LanceSparkReadOptions implements Serializable {
   public static final String CONFIG_INDEX_CACHE_SIZE = "index_cache_size";
   public static final String CONFIG_METADATA_CACHE_SIZE = "metadata_cache_size";
   public static final String CONFIG_BATCH_SIZE = "batch_size";
+  public static final String CONFIG_BATCH_SIZE_BYTES = "batch_size_bytes";
+  public static final String CONFIG_BATCH_READAHEAD = "batch_readahead";
+  public static final String CONFIG_FRAGMENT_READAHEAD = "fragment_readahead";
+  public static final String CONFIG_IO_BUFFER_SIZE = "io_buffer_size";
+  public static final String CONFIG_LATE_MATERIALIZATION = "late_materialization";
   public static final String CONFIG_USE_SCALAR_INDEX = "use_scalar_index";
   public static final String CONFIG_RUNTIME_FILTER_MAX_KEYS = "runtime_filter_max_keys";
   public static final String CONFIG_RUNTIME_FILTER_MAX_BYTES = "runtime_filter_max_bytes";
@@ -123,6 +132,11 @@ public class LanceSparkReadOptions implements Serializable {
   private final Integer indexCacheSize;
   private final Integer metadataCacheSize;
   private final int batchSize;
+  private final Long batchSizeBytes;
+  private final Integer batchReadahead;
+  private final Integer fragmentReadahead;
+  private final Long ioBufferSize;
+  private transient MaterializationStyle lateMaterialization;
   private transient FullTextQuery fullTextQuery;
   private final boolean useScalarIndex;
   private final int runtimeFilterMaxKeys;
@@ -161,6 +175,11 @@ public class LanceSparkReadOptions implements Serializable {
     this.indexCacheSize = builder.indexCacheSize;
     this.metadataCacheSize = builder.metadataCacheSize;
     this.batchSize = builder.batchSize;
+    this.batchSizeBytes = builder.batchSizeBytes;
+    this.batchReadahead = builder.batchReadahead;
+    this.fragmentReadahead = builder.fragmentReadahead;
+    this.ioBufferSize = builder.ioBufferSize;
+    this.lateMaterialization = builder.lateMaterialization;
     this.fullTextQuery = builder.fullTextQuery;
     this.useScalarIndex = builder.useScalarIndex;
     this.runtimeFilterMaxKeys = builder.runtimeFilterMaxKeys;
@@ -270,6 +289,48 @@ public class LanceSparkReadOptions implements Serializable {
     return batchSize;
   }
 
+  public Long getBatchSizeBytes() {
+    return batchSizeBytes;
+  }
+
+  public Integer getBatchReadahead() {
+    return batchReadahead;
+  }
+
+  public Integer getFragmentReadahead() {
+    return fragmentReadahead;
+  }
+
+  public Long getIoBufferSize() {
+    return ioBufferSize;
+  }
+
+  public MaterializationStyle getLateMaterialization() {
+    return lateMaterialization;
+  }
+
+  /**
+   * Applies native scanner memory, readahead, I/O buffer, and late materialization options onto the
+   * provided {@link ScanOptions.Builder} when configured.
+   */
+  public void applyScanExecutionOptions(ScanOptions.Builder scanOptions) {
+    if (batchSizeBytes != null) {
+      scanOptions.batchSizeBytes(batchSizeBytes);
+    }
+    if (batchReadahead != null) {
+      scanOptions.batchReadahead(batchReadahead);
+    }
+    if (fragmentReadahead != null) {
+      scanOptions.fragmentReadahead(fragmentReadahead);
+    }
+    if (ioBufferSize != null) {
+      scanOptions.ioBufferSize(ioBufferSize);
+    }
+    if (lateMaterialization != null) {
+      scanOptions.lateMaterialization(lateMaterialization);
+    }
+  }
+
   public FullTextQuery getFullTextQuery() {
     return fullTextQuery;
   }
@@ -368,6 +429,11 @@ public class LanceSparkReadOptions implements Serializable {
         .indexCacheSize(this.indexCacheSize)
         .metadataCacheSize(this.metadataCacheSize)
         .batchSize(this.batchSize)
+        .batchSizeBytes(this.batchSizeBytes)
+        .batchReadahead(this.batchReadahead)
+        .fragmentReadahead(this.fragmentReadahead)
+        .ioBufferSize(this.ioBufferSize)
+        .lateMaterialization(this.lateMaterialization)
         .fullTextQuery(this.fullTextQuery)
         .useScalarIndex(this.useScalarIndex)
         .runtimeFilterMaxKeys(this.runtimeFilterMaxKeys)
@@ -412,12 +478,109 @@ public class LanceSparkReadOptions implements Serializable {
   private void writeObject(ObjectOutputStream out) throws IOException {
     out.defaultWriteObject();
     out.writeObject(FullTextQueryUtils.fullTextQueryToString(fullTextQuery));
+    if (lateMaterialization == null) {
+      out.writeObject(null);
+    } else {
+      out.writeObject(lateMaterialization.getMode().name());
+      if (lateMaterialization.getMode() == MaterializationStyle.Mode.ALL_EARLY_EXCEPT) {
+        out.writeObject(new ArrayList<>(lateMaterialization.getColumns()));
+      }
+    }
   }
 
   private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
     in.defaultReadObject();
     String ftsJson = (String) in.readObject();
     this.fullTextQuery = FullTextQueryUtils.stringToFullTextQuery(ftsJson);
+    String modeName = (String) in.readObject();
+    if (modeName != null) {
+      MaterializationStyle.Mode mode = MaterializationStyle.Mode.valueOf(modeName);
+      switch (mode) {
+        case HEURISTIC:
+          this.lateMaterialization = MaterializationStyle.heuristic();
+          break;
+        case ALL_LATE:
+          this.lateMaterialization = MaterializationStyle.allLate();
+          break;
+        case ALL_EARLY:
+          this.lateMaterialization = MaterializationStyle.allEarly();
+          break;
+        case ALL_EARLY_EXCEPT:
+          @SuppressWarnings("unchecked")
+          List<String> cols = (List<String>) in.readObject();
+          this.lateMaterialization = MaterializationStyle.allEarlyExcept(cols);
+          break;
+        default:
+          throw new IOException("Unsupported MaterializationStyle mode: " + mode);
+      }
+    }
+  }
+
+  private static boolean materializationStyleEquals(
+      MaterializationStyle a, MaterializationStyle b) {
+    if (a == b) {
+      return true;
+    }
+    if (a == null || b == null) {
+      return false;
+    }
+    return a.getMode() == b.getMode() && Objects.equals(a.getColumns(), b.getColumns());
+  }
+
+  private static int materializationStyleHashCode(MaterializationStyle style) {
+    return style == null ? 0 : Objects.hash(style.getMode(), style.getColumns());
+  }
+
+  /**
+   * Parses a user-facing {@code late_materialization} option string into a {@link
+   * MaterializationStyle}.
+   *
+   * <p>Supported formats (case-insensitive mode names):
+   *
+   * <ul>
+   *   <li>{@code "heuristic"} -> {@link MaterializationStyle#heuristic()}
+   *   <li>{@code "all_late"} or {@code "true"} -> {@link MaterializationStyle#allLate()}
+   *   <li>{@code "all_early"} or {@code "false"} -> {@link MaterializationStyle#allEarly()}
+   *   <li>{@code "all_early_except:col1,col2"} -> {@link MaterializationStyle#allEarlyExcept(List)}
+   * </ul>
+   */
+  public static MaterializationStyle parseMaterializationStyle(String rawValue) {
+    Preconditions.checkArgument(
+        rawValue != null && !rawValue.trim().isEmpty(), "late_materialization must not be empty");
+    String trimmed = rawValue.trim();
+    String lower = trimmed.toLowerCase(Locale.ROOT);
+    if ("heuristic".equals(lower)) {
+      return MaterializationStyle.heuristic();
+    }
+    if ("all_late".equals(lower) || "true".equals(lower)) {
+      return MaterializationStyle.allLate();
+    }
+    if ("all_early".equals(lower) || "false".equals(lower)) {
+      return MaterializationStyle.allEarly();
+    }
+    String prefix = "all_early_except:";
+    if (lower.startsWith(prefix)) {
+      String columnsPart = trimmed.substring(prefix.length()).trim();
+      Preconditions.checkArgument(
+          !columnsPart.isEmpty(),
+          "late_materialization 'all_early_except:' requires at least one column name");
+      String[] rawColumns = columnsPart.split(",", -1);
+      List<String> columns = new ArrayList<>(rawColumns.length);
+      for (String rawColumn : rawColumns) {
+        String col = rawColumn.trim();
+        Preconditions.checkArgument(
+            !col.isEmpty(),
+            "late_materialization 'all_early_except:' contains an empty column name: '%s'",
+            rawValue);
+        columns.add(col);
+      }
+      return MaterializationStyle.allEarlyExcept(columns);
+    }
+    throw new IllegalArgumentException(
+        "Invalid late_materialization value: '"
+            + rawValue
+            + "'. Expected 'heuristic', 'all_late' ('true'), 'all_early' ('false'), "
+            + "or 'all_early_except:<col1>,<col2>'");
   }
 
   @Override
@@ -435,11 +598,16 @@ public class LanceSparkReadOptions implements Serializable {
         && executorCredentialRefresh == that.executorCredentialRefresh
         && arrowBatchReads == that.arrowBatchReads
         && FullTextQueryUtils.equals(fullTextQuery, that.fullTextQuery)
+        && materializationStyleEquals(lateMaterialization, that.lateMaterialization)
         && Objects.equals(datasetUri, that.datasetUri)
         && Objects.equals(blockSize, that.blockSize)
         && Objects.equals(ref, that.ref)
         && Objects.equals(indexCacheSize, that.indexCacheSize)
         && Objects.equals(metadataCacheSize, that.metadataCacheSize)
+        && Objects.equals(batchSizeBytes, that.batchSizeBytes)
+        && Objects.equals(batchReadahead, that.batchReadahead)
+        && Objects.equals(fragmentReadahead, that.fragmentReadahead)
+        && Objects.equals(ioBufferSize, that.ioBufferSize)
         && Objects.equals(storageOptions, that.storageOptions)
         && Objects.equals(tableId, that.tableId)
         && Objects.equals(catalogName, that.catalogName)
@@ -457,6 +625,11 @@ public class LanceSparkReadOptions implements Serializable {
         indexCacheSize,
         metadataCacheSize,
         batchSize,
+        batchSizeBytes,
+        batchReadahead,
+        fragmentReadahead,
+        ioBufferSize,
+        materializationStyleHashCode(lateMaterialization),
         FullTextQueryUtils.fullTextQueryToString(fullTextQuery),
         useScalarIndex,
         runtimeFilterMaxKeys,
@@ -481,6 +654,11 @@ public class LanceSparkReadOptions implements Serializable {
     private Integer indexCacheSize;
     private Integer metadataCacheSize;
     private int batchSize = DEFAULT_BATCH_SIZE;
+    private Long batchSizeBytes;
+    private Integer batchReadahead;
+    private Integer fragmentReadahead;
+    private Long ioBufferSize;
+    private MaterializationStyle lateMaterialization;
     private boolean useScalarIndex = DEFAULT_USE_SCALAR_INDEX;
     private int runtimeFilterMaxKeys = DEFAULT_RUNTIME_FILTER_MAX_KEYS;
     private int runtimeFilterMaxBytes = DEFAULT_RUNTIME_FILTER_MAX_BYTES;
@@ -533,6 +711,46 @@ public class LanceSparkReadOptions implements Serializable {
 
     public Builder batchSize(int batchSize) {
       this.batchSize = batchSize;
+      return this;
+    }
+
+    public Builder batchSizeBytes(Long batchSizeBytes) {
+      Preconditions.checkArgument(
+          batchSizeBytes == null || batchSizeBytes > 0, "batch_size_bytes must be positive");
+      this.batchSizeBytes = batchSizeBytes;
+      return this;
+    }
+
+    public Builder batchReadahead(Integer batchReadahead) {
+      Preconditions.checkArgument(
+          batchReadahead == null || batchReadahead > 0, "batch_readahead must be positive");
+      this.batchReadahead = batchReadahead;
+      return this;
+    }
+
+    public Builder fragmentReadahead(Integer fragmentReadahead) {
+      Preconditions.checkArgument(
+          fragmentReadahead == null || fragmentReadahead > 0,
+          "fragment_readahead must be positive");
+      this.fragmentReadahead = fragmentReadahead;
+      return this;
+    }
+
+    public Builder ioBufferSize(Long ioBufferSize) {
+      Preconditions.checkArgument(
+          ioBufferSize == null || ioBufferSize > 0, "io_buffer_size must be positive");
+      this.ioBufferSize = ioBufferSize;
+      return this;
+    }
+
+    public Builder lateMaterialization(MaterializationStyle lateMaterialization) {
+      this.lateMaterialization = lateMaterialization;
+      return this;
+    }
+
+    public Builder lateMaterialization(String lateMaterialization) {
+      this.lateMaterialization =
+          lateMaterialization == null ? null : parseMaterializationStyle(lateMaterialization);
       return this;
     }
 
@@ -671,6 +889,21 @@ public class LanceSparkReadOptions implements Serializable {
         int parsedBatchSize = Integer.parseInt(opts.get(CONFIG_BATCH_SIZE));
         Preconditions.checkArgument(parsedBatchSize > 0, "batch_size must be positive");
         this.batchSize = parsedBatchSize;
+      }
+      if (references.containsKey(CONFIG_BATCH_SIZE_BYTES)) {
+        batchSizeBytes(Long.parseLong(references.get(CONFIG_BATCH_SIZE_BYTES).trim()));
+      }
+      if (references.containsKey(CONFIG_BATCH_READAHEAD)) {
+        batchReadahead(Integer.parseInt(references.get(CONFIG_BATCH_READAHEAD).trim()));
+      }
+      if (references.containsKey(CONFIG_FRAGMENT_READAHEAD)) {
+        fragmentReadahead(Integer.parseInt(references.get(CONFIG_FRAGMENT_READAHEAD).trim()));
+      }
+      if (references.containsKey(CONFIG_IO_BUFFER_SIZE)) {
+        ioBufferSize(Long.parseLong(references.get(CONFIG_IO_BUFFER_SIZE).trim()));
+      }
+      if (references.containsKey(CONFIG_LATE_MATERIALIZATION)) {
+        lateMaterialization(references.get(CONFIG_LATE_MATERIALIZATION));
       }
       if (opts.containsKey(CONFIG_TOP_N_PUSH_DOWN)) {
         this.topNPushDown = Boolean.parseBoolean(opts.get(CONFIG_TOP_N_PUSH_DOWN));

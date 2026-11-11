@@ -166,6 +166,9 @@ public class LanceDistributedSearchColumnarPartitionReader
     }
 
     ScanOptions.Builder b = new ScanOptions.Builder().nearest(q.build());
+    if (base.getReadOptions() != null) {
+      base.getReadOptions().applyScanExecutionOptions(b);
+    }
     // ensure_not_fragment_scan rejects a fragment-restricted nearest scan unless prefilter is
     // set, so a fallback unit always sets it. Indexed units only do what the user asked; a
     // filtered query cannot reach a worker without prefilter=true.
