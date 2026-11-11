@@ -77,12 +77,31 @@ and namespace-specific options:
 
 ## Kerberos REST Namespace Configuration
 
-The Kerberos provider configuration uses the existing `dynamic_context_provider.*` namespace
-options. Configuration parsing and validation are implemented first. The provider and HTTP
-authentication will be added in a subsequent step.
+Use `org.lance.spark.auth.KerberosContextProvider` with a Kerberos-protected REST namespace.
+Configure Hadoop with `hadoop.security.authentication=kerberos` and provide a Kerberos login
+identity in each JVM that calls the namespace. The provider uses the Spark login UGI by default.
+
+```scala
+val spark = SparkSession.builder()
+  .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
+  .config("spark.sql.catalog.lance.impl", "rest")
+  .config("spark.sql.catalog.lance.uri", "https://lance.example.com")
+  .config(
+    "spark.sql.catalog.lance.dynamic_context_provider.impl",
+    "org.lance.spark.auth.KerberosContextProvider")
+  .config(
+    "spark.sql.catalog.lance.dynamic_context_provider.service_principal",
+    "HTTP/lance.example.com@EXAMPLE.COM")
+  .getOrCreate()
+```
+
+For an explicit keytab login, also set
+`spark.sql.catalog.lance.dynamic_context_provider.principal` and
+`spark.sql.catalog.lance.dynamic_context_provider.keytab`. This creates an independent UGI.
 
 | Option under `spark.sql.catalog.{name}.dynamic_context_provider.` | Required | Description |
 |-----------------------------------------------------------------|----------|-------------|
+| `impl` | Yes | Set to `org.lance.spark.auth.KerberosContextProvider`. |
 | `service_principal` | Yes | Complete REST service principal, for example `HTTP/lance.example.com@EXAMPLE.COM`. |
 | `principal` | With `keytab` | Client principal used to log in from the keytab. Omit both credential options to use the Spark login identity. |
 | `keytab` | With `principal` | Local path to the client's keytab file. |
@@ -91,6 +110,22 @@ Configured values must be nonblank. `principal` and `keytab` must be configured 
 The REST service principal identifies the server. The client principal identifies the Spark user.
 Driver and executor JVMs that call the REST namespace each need valid Kerberos credentials.
 For explicit keytab login, the configured path must be readable in each of those JVMs.
+
+Each callback generates a fresh SPNEGO token and returns `headers.Authorization` with a
+`Negotiate` value. The provider reuses UGI credentials and checks for keytab ticket renewal before
+generating a token. It releases the GSSContext after each callback and supports concurrent calls.
+Credentials supplied by Spark remain subject to Spark's credential management.
+
+If token generation fails, the provider logs the cause and supplies an invalid `Negotiate` token.
+This overrides any static Authorization header so the Kerberos-protected endpoint rejects the
+request. This handling avoids propagating Java exceptions through the Lance Core 12.0.0 JNI
+callback, which can terminate the JVM. The REST server must require Kerberos authentication for
+namespace operations.
+
+The REST endpoint must accept the initial token in one request. Response-driven SPNEGO negotiation
+and Kerberos mutual authentication require additional REST-client support. Use HTTPS with normal
+TLS certificate verification to authenticate the server. Hadoop delegation tokens alone do not
+provide the Kerberos credentials needed for HTTP authentication on executors.
 
 ## Distributed Vector Search
 

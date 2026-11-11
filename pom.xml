@@ -113,6 +113,7 @@
 
         <opentelemetry.version>1.64.0</opentelemetry.version>
         <junit.version>5.10.1</junit.version>
+        <hadoop-minikdc.version>3.3.4</hadoop-minikdc.version>
         <scalatest.version>3.2.10</scalatest.version>
 
         <scala-maven-plugin.version>4.9.10</scala-maven-plugin.version>
@@ -242,6 +243,22 @@
             <artifactId>junit-jupiter</artifactId>
             <version>${junit.version}</version>
             <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-minikdc</artifactId>
+            <version>${hadoop-minikdc.version}</version>
+            <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>commons-io</groupId>
+                    <artifactId>commons-io</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-reload4j</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <dependency>
             <groupId>org.scalatest</groupId>
