@@ -18,8 +18,9 @@ import org.ietf.jgss.{GSSContext, GSSManager, Oid}
 import org.lance.namespace.DynamicContextProvider
 import org.slf4j.LoggerFactory
 
-import java.security.PrivilegedExceptionAction
+import java.security.{AccessController, PrivilegedAction, PrivilegedExceptionAction}
 import java.util.{Base64, Collections, Map => JMap}
+import javax.security.auth.Subject
 
 import scala.util.control.NonFatal
 
@@ -49,6 +50,11 @@ final class KerberosContextProvider(properties: JMap[String, String])
       UserGroupInformation.loginUserFromKeytabAndReturnUGI(principal, config.keytab.get)
     case None => UserGroupInformation.getLoginUser
   }
+  // Hadoop holds this same lock when replacing and destroying tickets during re-login.
+  private val credentialLock = user.doAs(new PrivilegedAction[AnyRef] {
+    override def run(): AnyRef =
+      Subject.getSubject(AccessController.getContext).getPrivateCredentials
+  })
 
   if (!user.hasKerberosCredentials) {
     throw new IllegalStateException(
@@ -66,30 +72,32 @@ final class KerberosContextProvider(properties: JMap[String, String])
    */
   override def provideContext(operation: String, objectId: String): JMap[String, String] = {
     try {
-      user.checkTGTAndReloginFromKeytab()
-      user.doAs(new PrivilegedExceptionAction[JMap[String, String]] {
-        override def run(): JMap[String, String] = {
-          val manager = GSSManager.getInstance()
-          val serviceName = manager.createName(config.servicePrincipal, principalNameType)
-          val context = manager.createContext(
-            serviceName,
-            spnegoMechanism,
-            null,
-            GSSContext.DEFAULT_LIFETIME)
-          try {
-            // DynamicContextProvider supplies request headers and cannot consume server responses.
-            context.requestMutualAuth(false)
-            val token = context.initSecContext(Array.emptyByteArray, 0, 0)
-            if (token == null || token.isEmpty) {
-              throw new IllegalStateException(
-                "GSSAPI did not produce a Kerberos authentication token")
-            }
-            Collections.singletonMap(
-              "headers.Authorization",
-              "Negotiate " + Base64.getEncoder.encodeToString(token))
-          } finally context.dispose()
-        }
-      })
+      credentialLock.synchronized {
+        user.checkTGTAndReloginFromKeytab()
+        user.doAs(new PrivilegedExceptionAction[JMap[String, String]] {
+          override def run(): JMap[String, String] = {
+            val manager = GSSManager.getInstance()
+            val serviceName = manager.createName(config.servicePrincipal, principalNameType)
+            val context = manager.createContext(
+              serviceName,
+              spnegoMechanism,
+              null,
+              GSSContext.DEFAULT_LIFETIME)
+            try {
+              // DynamicContextProvider supplies request headers and cannot consume server responses.
+              context.requestMutualAuth(false)
+              val token = context.initSecContext(Array.emptyByteArray, 0, 0)
+              if (token == null || token.isEmpty) {
+                throw new IllegalStateException(
+                  "GSSAPI did not produce a Kerberos authentication token")
+              }
+              Collections.singletonMap(
+                "headers.Authorization",
+                "Negotiate " + Base64.getEncoder.encodeToString(token))
+            } finally context.dispose()
+          }
+        })
+      }
     } catch {
       case e: InterruptedException =>
         Thread.currentThread().interrupt()

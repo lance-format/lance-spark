@@ -111,10 +111,23 @@ The REST service principal identifies the server. The client principal identifie
 Driver and executor JVMs that call the REST namespace each need valid Kerberos credentials.
 For explicit keytab login, the configured path must be readable in each of those JVMs.
 
+With `executor_credential_refresh=true` (the default), executors create their own namespace clients
+to refresh storage credentials. Provide a Kerberos TGT in each executor, or configure the provider's
+`principal` and `keytab` so it can log in there. Use a consistent local keytab path on the driver and
+executors, for example by mounting the same credential directory in each process.
+Include `hadoop.security.authentication=kerberos` in the Hadoop configuration available to both.
+When using a custom `krb5.conf`, set `-Djava.security.krb5.conf=/path/to/krb5.conf` through both
+`spark.driver.extraJavaOptions` and `spark.executor.extraJavaOptions` at application submission.
+
 Each callback generates a fresh SPNEGO token and returns `headers.Authorization` with a
 `Negotiate` value. The provider reuses UGI credentials and checks for keytab ticket renewal before
-generating a token. It releases the GSSContext after each callback and supports concurrent calls.
+generating a token. It releases the GSSContext after each callback. Token generation and re-login
+share Hadoop's credential lock so concurrent calls can complete while credentials are renewed.
 Credentials supplied by Spark remain subject to Spark's credential management.
+
+UGI controls the interval between keytab login attempts with
+`hadoop.kerberos.min.seconds.before.relogin`. After a keytab or KDC failure is resolved,
+authentication can recover when this interval allows a new login attempt.
 
 If token generation fails, the provider logs the cause and supplies an invalid `Negotiate` token.
 This overrides any static Authorization header so the Kerberos-protected endpoint rejects the
