@@ -378,6 +378,28 @@ public abstract class BaseUpdateTableTest {
             Row.of(3, "Charlie", 300, "Charlie", 300, Arrays.asList(301, 302))));
   }
 
+  /**
+   * UPDATE and DELETE push their condition to Lance, so a literal Lance reads as a different number
+   * changes which rows they touch.
+   */
+  @Test
+  public void testUpdateAndDeleteMatchExactNumericLiterals() {
+    String table =
+        catalogName + ".default.exact_literals_" + UUID.randomUUID().toString().replace("-", "");
+    spark.sql("CREATE TABLE " + table + " (id INT NOT NULL, amount DECIMAL(38, 18), score FLOAT)");
+    spark.sql(
+        "INSERT INTO " + table + " VALUES (1, 1234.57, 0.1F), (2, 590.29, 0.5F), (3, 10, 1.1F)");
+
+    spark.sql("UPDATE " + table + " SET id = 100 WHERE amount = 1234.57");
+    spark.sql("DELETE FROM " + table + " WHERE score <> 0.1F");
+
+    List<Integer> ids =
+        spark.sql("SELECT id FROM " + table).collectAsList().stream()
+            .map(r -> r.getInt(0))
+            .collect(Collectors.toList());
+    Assertions.assertEquals(Collections.singletonList(100), ids);
+  }
+
   private static class TableOperator {
     private final SparkSession spark;
     private final String catalogName;
