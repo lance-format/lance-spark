@@ -3,5 +3,6 @@ nav:
   - select.md
   - fts.md
   - vector-search.md
+  - nearest-neighbor-join.md
   - search.md
   - hybrid-search.md
