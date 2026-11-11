@@ -69,6 +69,34 @@ Create new Lance tables with SQL DDL statements or DataFrames.
     df.writeTo("users").create();
     ```
 
+## Table Properties
+
+Set table properties with `TBLPROPERTIES` or SQL `OPTIONS`. Both clauses save user
+properties on the table, including in `CREATE TABLE ... AS SELECT` (CTAS):
+
+```sql
+CREATE TABLE events USING lance
+OPTIONS ('app.source' = 'events')
+TBLPROPERTIES ('app.owner' = 'analytics')
+AS SELECT 1 AS id;
+
+SHOW TBLPROPERTIES events;
+-- app.source = events; app.owner = analytics
+```
+
+With DataFrame V2, use `.tableProperty("app.owner", "analytics")` to save a property;
+`.option(...)` applies only to the current operation.
+
+`REPLACE TABLE` and `CREATE OR REPLACE TABLE` update supplied properties and retain
+unspecified ones. CTAS does not inherit properties from its source tables.
+Use [ALTER TABLE](alter-table.md) to update or remove properties. See
+[Configuration](../../config.md) for settings that affect table behavior.
+
+!!! note
+    CTAS and replacements commit properties together with data. Ordinary CREATE with
+    nonempty user properties adds a separate metadata version after creating the empty table.
+    Registering an existing dataset with `LOCATION` leaves its configuration unchanged.
+
 ## Complex Data Types
 
 === "SQL"

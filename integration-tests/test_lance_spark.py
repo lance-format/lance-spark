@@ -359,6 +359,32 @@ class TestDDLStagingTable:
         assert result[0].name == "Alice"
         assert result[2].id == 3
 
+    @pytest.mark.parametrize("create_as_select", [False, True])
+    def test_table_properties_survive_create_and_replace(self, spark, create_as_select):
+        schema = "" if create_as_select else "(id INT)"
+        query = "AS SELECT 1 AS id" if create_as_select else ""
+        spark.sql(f"""
+            CREATE TABLE default.test_table {schema} USING lance
+            OPTIONS ('app.option' = 'persisted')
+            TBLPROPERTIES ('app.owner' = 'old', 'app.retained' = 'keep')
+            {query}
+        """)
+        spark.sql("REFRESH TABLE default.test_table")
+        props = dict(spark.sql("SHOW TBLPROPERTIES default.test_table").collect())
+        assert props["app.owner"] == "old"
+        assert props["app.option"] == "persisted"
+
+        spark.sql("""
+            REPLACE TABLE default.test_table USING lance
+            TBLPROPERTIES ('app.owner' = 'new') AS SELECT 2 AS id
+        """)
+        spark.sql("REFRESH TABLE default.test_table")
+        props = dict(spark.sql("SHOW TBLPROPERTIES default.test_table").collect())
+        assert props["app.owner"] == "new"
+        assert props["app.retained"] == "keep"
+        assert props["app.option"] == "persisted"
+        assert spark.table("default.test_table").first().id == 2
+
     def test_replace_table_as_select(self, spark, test_table):
         """Test REPLACE TABLE AS SELECT (RTAS) replaces data."""
         # Create initial table with data
@@ -3723,12 +3749,12 @@ class TestStableRowIds:
         Simulates a CDC pipeline that tracks the last processed version and
         incrementally processes changes using version tracking columns.
         """
+        # Empty CTAS establishes a single-version baseline for the CDC checkpoints below.
         spark.sql("""
-            CREATE TABLE default.test_table (
-                id INT,
-                name STRING,
-                value INT
-            ) TBLPROPERTIES ('enable_stable_row_ids' = 'true')
+            CREATE TABLE default.test_table USING lance
+            TBLPROPERTIES ('enable_stable_row_ids' = 'true')
+            AS SELECT 0 AS id, CAST(NULL AS STRING) AS name, CAST(NULL AS INT) AS value
+            WHERE false
         """)
 
         # v2: Initial data load
