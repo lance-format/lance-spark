@@ -19,6 +19,7 @@ import org.lance.memwal.ShardingSpec;
 
 import org.apache.spark.sql.connector.expressions.Expressions;
 import org.apache.spark.sql.connector.expressions.FieldReference;
+import org.apache.spark.sql.connector.expressions.NamedReference;
 import org.apache.spark.sql.connector.expressions.Transform;
 import org.junit.jupiter.api.Test;
 
@@ -97,6 +98,32 @@ public class SparkLanceShardingUtilsTest {
     FieldReference expression =
         (FieldReference) SparkLanceShardingUtils.toSparkExpression(field, null);
     assertArrayEquals(new String[] {"region"}, expression.fieldNames());
+  }
+
+  @Test
+  public void testNestedShardingColumnKeepsFieldPath() {
+    String[] path = new String[] {"parent", "child"};
+    ShardingField identity =
+        SparkLanceShardingUtils.fromSparkTransforms(
+                new Transform[] {Expressions.identity("parent.child")})
+            .fields()
+            .get(0);
+    assertArrayEquals(
+        path,
+        ((NamedReference) SparkLanceShardingUtils.toSparkExpression(identity, null)).fieldNames());
+    assertArrayEquals(path, SparkLanceShardingUtils.toClusteringRef(identity, null).fieldNames());
+    assertArrayEquals(
+        path,
+        ((NamedReference) SparkLanceShardingUtils.toSortOrder(identity, null).expression())
+            .fieldNames());
+
+    ShardingField bucket =
+        SparkLanceShardingUtils.fromSparkTransforms(
+                new Transform[] {Expressions.bucket(4, "parent.child")})
+            .fields()
+            .get(0);
+    Transform transform = (Transform) SparkLanceShardingUtils.toSparkExpression(bucket, null);
+    assertArrayEquals(path, transform.references()[0].fieldNames());
   }
 
   @Test
