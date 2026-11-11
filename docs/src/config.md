@@ -58,6 +58,7 @@ The following features require the Lance Spark SQL extension to be enabled:
 - [OPTIMIZE](operations/ddl/optimize.md) - Compact table fragments for improved query performance
 - [OPTIMIZE INDEX](operations/ddl/optimize-index.md) - Incrementally maintain a named index
 - [VACUUM](operations/ddl/vacuum.md) - Remove old versions and reclaim storage space
+- [Runtime join filtering by a filtered Lance table](operations/dql/select.md#runtime-join-filtering) - Prune a Lance table by a join with a filtered Lance table (Spark 4.1+)
 
 ## Basic Setup
 

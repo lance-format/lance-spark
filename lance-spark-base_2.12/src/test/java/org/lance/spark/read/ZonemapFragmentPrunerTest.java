@@ -652,4 +652,47 @@ public class ZonemapFragmentPrunerTest {
         result.get(),
         "fragment 2 is outside column x's index, so x's predicate cannot rule it out");
   }
+
+  @Test
+  public void testComparesStringsByCodePoint() {
+    // UTF-16 puts the surrogates of U+1F600 below U+FFFD; Lance orders bounds by code point.
+    assertTrue(ZonemapFragmentPruner.compareCodePoints("\uFFFD", "\uD83D\uDE00") < 0);
+    assertTrue("\uFFFD".compareTo("\uD83D\uDE00") > 0);
+    assertEquals(0, ZonemapFragmentPruner.compareCodePoints("ab", "ab"));
+    assertTrue(ZonemapFragmentPruner.compareCodePoints("ab", "abc") < 0);
+    assertTrue(ZonemapFragmentPruner.compareCodePoints("\uD83D\uDE00", "\uD83D\uDE00a") < 0);
+  }
+
+  @Test
+  public void testStringBoundsWithSupplementaryCharacters() {
+    // Fragment 1's zone holds U+FFFD and U+1F600; by code point U+FFFD is its min.
+    Map<String, List<ZoneStats>> stats = new HashMap<>();
+    stats.put(
+        "s",
+        Arrays.asList(
+            new ZoneStats(0, 0, 100, "\uD83D\uDE00", "\uD83D\uDE00", 0),
+            new ZoneStats(1, 0, 100, "\uFFFD", "\uD83D\uDE00", 0),
+            new ZoneStats(2, 0, 100, "a", "b", 0)));
+
+    assertEquals(
+        Set.of(1),
+        ZonemapFragmentPruner.pruneFragments(
+                new Predicate[] {TestPredicates.eq("s", "\uFFFD")}, stats)
+            .get());
+    assertEquals(
+        Set.of(0, 1),
+        ZonemapFragmentPruner.pruneFragments(
+                new Predicate[] {TestPredicates.gt("s", "\uFFFD")}, stats)
+            .get());
+    assertEquals(
+        Set.of(1, 2),
+        ZonemapFragmentPruner.pruneFragments(
+                new Predicate[] {TestPredicates.lt("s", "\uD83D\uDE00")}, stats)
+            .get());
+    assertEquals(
+        Set.of(1, 2),
+        ZonemapFragmentPruner.pruneFragments(
+                new Predicate[] {TestPredicates.in("s", "\uFFFD", "a")}, stats)
+            .get());
+  }
 }

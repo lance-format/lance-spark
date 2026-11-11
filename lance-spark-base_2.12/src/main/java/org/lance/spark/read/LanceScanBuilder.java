@@ -70,6 +70,7 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.DecimalType;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -130,6 +131,9 @@ public class LanceScanBuilder
 
   private final ShardingSpec shardingSpec;
 
+  /** See {@link #keepPushedFilters}. */
+  private boolean keepPushedFilters = false;
+
   public LanceScanBuilder(
       StructType schema,
       LanceSparkReadOptions readOptions,
@@ -166,6 +170,17 @@ public class LanceScanBuilder
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.shardingSpec = shardingSpec;
+  }
+
+  /**
+   * With {@code keep} set, {@link #pushPredicates} also returns the predicates it pushes, so that
+   * Spark keeps evaluating them in a Filter above the scan. {@code LanceDynamicPruningRule} sets
+   * this on the filtering side of a join, through {@link LanceConstant#KEEP_PUSHED_FILTERS_KEY}, so
+   * that Spark's dynamic partition pruning finds the Filter it looks for.
+   */
+  public LanceScanBuilder keepPushedFilters(boolean keep) {
+    this.keepPushedFilters = keep;
+    return this;
   }
 
   /**
@@ -688,6 +703,9 @@ public class LanceScanBuilder
       residual = residualList.toArray(new Predicate[0]);
     }
     this.pushedPredicates = pushed;
+    if (keepPushedFilters) {
+      residual = predicates;
+    }
     this.hasResidualPredicates = residual.length > 0;
     return residual;
   }
@@ -1043,6 +1061,40 @@ public class LanceScanBuilder
       }
     }
     return result;
+  }
+
+  /**
+   * The columns of {@code dataset} that a scan with {@code readOptions} would take runtime filters
+   * on, as {@link LanceScan#filterAttributes()} reports them, from the index metadata only, so that
+   * the optimizer can tell before a scan is built. Sharding columns count through their zonemap.
+   */
+  public static Set<String> runtimeFilterColumns(
+      Dataset dataset, LanceSparkReadOptions readOptions) {
+    if (!LanceScan.supportsRuntimeFiltering(readOptions)) {
+      return Collections.emptySet();
+    }
+    LanceSchema lanceSchema = dataset.getLanceSchema();
+    StructType schema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
+    Map<Integer, String> topLevelNamesById = new HashMap<>();
+    for (LanceField field : lanceSchema.fields()) {
+      topLevelNamesById.put(field.getId(), field.getName());
+    }
+    Set<String> zonemapColumns = new HashSet<>();
+    for (Index index : dataset.getIndexes()) {
+      if (index.indexType() == IndexType.ZONEMAP && index.fields().size() == 1) {
+        String column = topLevelNamesById.get(index.fields().get(0));
+        if (column != null) {
+          zonemapColumns.add(column);
+        }
+      }
+    }
+    return runtimeFilterColumns(
+        schema,
+        dataset.getSchema(),
+        readOptions,
+        exactEqualityIndexedColumns(dataset, lanceSchema, schema),
+        zonemapColumns,
+        null);
   }
 
   private static Set<String> runtimeFilterColumns(

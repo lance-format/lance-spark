@@ -15,6 +15,7 @@ package org.lance.spark;
 
 import org.lance.Dataset;
 import org.lance.memwal.ShardingSpec;
+import org.lance.spark.read.LanceScan;
 import org.lance.spark.read.LanceScanBuilder;
 import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.BlobUtils;
@@ -54,6 +55,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /** Lance Spark Dataset. */
@@ -330,12 +332,43 @@ public class LanceDataset
       }
     }
     return new LanceScanBuilder(
-        scanSchema,
-        scanOptions,
-        initialStorageOptions,
-        namespaceImpl,
-        namespaceProperties,
-        shardingSpec);
+            scanSchema,
+            scanOptions,
+            initialStorageOptions,
+            namespaceImpl,
+            namespaceProperties,
+            shardingSpec)
+        .keepPushedFilters(scanMap.getBoolean(LanceConstant.KEEP_PUSHED_FILTERS_KEY, false));
+  }
+
+  /** See {@link #runtimeFilterColumns}, by the scan options they were looked up for. */
+  private final Map<LanceSparkReadOptions, Set<String>> runtimeFilterColumns =
+      new ConcurrentHashMap<>();
+
+  /**
+   * The columns that a scan of this table with {@code scanMap} would take runtime filters on
+   * ({@link LanceScanBuilder#runtimeFilterColumns(Dataset, LanceSparkReadOptions)}), looked up once
+   * per table object and scan options.
+   */
+  public Set<String> runtimeFilterColumns(CaseInsensitiveStringMap scanMap) {
+    LanceSparkReadOptions scanOptions = mergeScanOptions(scanMap);
+    if (!LanceScan.supportsRuntimeFiltering(scanOptions)) {
+      return Collections.emptySet();
+    }
+    return runtimeFilterColumns.computeIfAbsent(scanOptions, this::loadRuntimeFilterColumns);
+  }
+
+  private Set<String> loadRuntimeFilterColumns(LanceSparkReadOptions scanOptions) {
+    try (Dataset dataset =
+        Utils.openDatasetBuilder(scanOptions)
+            .initialStorageOptions(initialStorageOptions)
+            .runtimeNamespace(namespaceImpl, namespaceProperties, readOptions.getTableId())
+            .build()) {
+      return LanceScanBuilder.runtimeFilterColumns(dataset, scanOptions);
+    } catch (RuntimeException e) {
+      LOG.debug("No runtime filter columns for {}: {}", readOptions.getDatasetUri(), e.toString());
+      return Collections.emptySet();
+    }
   }
 
   private LanceSparkReadOptions mergeScanOptions(CaseInsensitiveStringMap scanMap) {
