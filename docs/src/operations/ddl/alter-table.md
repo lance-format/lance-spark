@@ -34,18 +34,14 @@ Unsetting a property that does not exist is a no-op (no error is raised).
 
 ## Limitations
 
-Schema and encoding properties must be configured before the column exists: in `CREATE TABLE`
-for initial columns, or with `SET TBLPROPERTIES` before `ADD COLUMNS` for future columns.
+Set schema and encoding properties before the column exists, using `CREATE TABLE` or
+`SET TBLPROPERTIES` before [ADD COLUMNS](../dml/add-columns.md#adding-a-blob-v2-column).
 Once the column exists, SET rejects these keys, even when setting the current value:
 
 - `<column>.arrow.fixed-size-list.size`, `<column>.arrow.float16`,
   `<column>.arrow.fixed-size-binary.byte-width`, and `<column>.arrow.large_var_char`.
 - `<column>.lance.encoding` and the supported `<column>.lance.*` encoding keys:
   `compression`, `compression-level`, `structural-encoding`, `rle-threshold`, and `bss`.
-
-Future-column properties can be persisted during `CREATE TABLE` or later with
-`ALTER TABLE SET TBLPROPERTIES`, including for directory-backed tables. See
-[ADD COLUMNS](../dml/add-columns.md) for a blob column example.
 
 `UNSET TBLPROPERTIES` can remove legacy config without changing the stored schema or encoding.
 If a SET names any protected existing column, the entire statement is rejected.
