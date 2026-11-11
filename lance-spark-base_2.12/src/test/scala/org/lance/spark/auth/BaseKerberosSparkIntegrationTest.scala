@@ -75,15 +75,23 @@ abstract class BaseKerberosSparkIntegrationTest extends KerberosIntegrationTestB
         spark.sessionState.catalogManager.catalog("keytab")
         spark.sessionState.catalogManager.catalog("login")
         spark.udf.register("worker_pid", (_: Long) => ProcessHandle.current().pid())
+        spark.udf.register(
+          "provider_source",
+          (_: Long) =>
+            classOf[KerberosContextProvider].getProtectionDomain.getCodeSource.getLocation.toString)
 
         spark.sql("CREATE NAMESPACE keytab.demo")
         spark.sql("CREATE TABLE keytab.demo.data (id BIGINT) USING lance")
         spark.sql("INSERT INTO keytab.demo.data VALUES (1), (2), (3)")
         val rows = spark.sql(
-          "SELECT id, worker_pid(id) AS pid FROM keytab.demo.data ORDER BY id").collect()
+          "SELECT id, worker_pid(id) AS pid, provider_source(id) AS source " +
+            "FROM keytab.demo.data ORDER BY id").collect()
 
         assertEquals(Seq(1L, 2L, 3L), rows.map(_.getLong(0)).toSeq)
         rows.foreach(row => assertNotEquals(ProcessHandle.current().pid(), row.getLong(1)))
+        val providerSource =
+          classOf[KerberosContextProvider].getProtectionDomain.getCodeSource.getLocation.toString
+        rows.foreach(row => assertEquals(providerSource, row.getString(2)))
         assertTrue(authenticated.get() > 0)
 
         // The driver login works, while the independent executor has no Kerberos login identity.
