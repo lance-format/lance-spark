@@ -338,15 +338,8 @@ public class LanceDataset
             namespaceImpl,
             namespaceProperties,
             shardingSpec)
-        .keepPushedFilters(scanMap.getBoolean(KEEP_PUSHED_FILTERS_OPTION, false));
+        .keepPushedFilters(scanMap.getBoolean(LanceConstant.KEEP_PUSHED_FILTERS_KEY, false));
   }
-
-  /**
-   * Scan option that {@code LanceDynamicPruningRule} sets on the filtering side of a join, so that
-   * its pushed filters stay in the plan for dynamic partition pruning to find. See {@link
-   * LanceScanBuilder#keepPushedFilters}.
-   */
-  public static final String KEEP_PUSHED_FILTERS_OPTION = "lance.internal.keep_pushed_filters";
 
   /** See {@link #runtimeFilterColumns}, by the scan options they were looked up for. */
   private final Map<LanceSparkReadOptions, Set<String>> runtimeFilterColumns =

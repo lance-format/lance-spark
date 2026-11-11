@@ -93,7 +93,7 @@ public abstract class BaseLanceDynamicPruningRuleTest {
   }
 
   @Test
-  public void prunesByAPushedFilterOnALanceTable() {
+  public void testPrunesByAPushedFilterOnALanceTable() {
     String fact = createFact(true);
     String dim = createDimension();
     Dataset<Row> joined =
@@ -107,7 +107,7 @@ public abstract class BaseLanceDynamicPruningRuleTest {
   }
 
   @Test
-  public void prunesByAFilteredLanceDerivedTableInASemiJoin() {
+  public void testPrunesByAFilteredLanceDerivedTableInASemiJoin() {
     String fact = createFact(true);
     String dim = createDimension();
     Dataset<Row> joined =
@@ -122,7 +122,7 @@ public abstract class BaseLanceDynamicPruningRuleTest {
   }
 
   @Test
-  public void prunesUnderAdaptiveExecutionWithABroadcastLanceTable() {
+  public void testPrunesUnderAdaptiveExecutionWithABroadcastLanceTable() {
     spark.conf().set("spark.sql.adaptive.enabled", "true");
     spark.conf().set("spark.sql.optimizer.dynamicPartitionPruning.reuseBroadcastOnly", "true");
     String fact = createFact(true);
@@ -143,7 +143,7 @@ public abstract class BaseLanceDynamicPruningRuleTest {
    * UTF-16 order puts it below U+FFFD: a runtime filter on '\uFFFD' must keep the fragment.
    */
   @Test
-  public void keepsRowsOfStringKeysWithSupplementaryCharacters() {
+  public void testKeepsRowsOfStringKeysWithSupplementaryCharacters() {
     spark.conf().set("spark.sql.adaptive.enabled", "true");
     spark.conf().set("spark.sql.optimizer.dynamicPartitionPruning.reuseBroadcastOnly", "true");
     String fact = catalog + ".default.fact_" + suffix();
@@ -171,7 +171,7 @@ public abstract class BaseLanceDynamicPruningRuleTest {
   }
 
   @Test
-  public void keepsNoFilterForAnUnfilteredLanceTable() {
+  public void testKeepsNoFilterForAnUnfilteredLanceTable() {
     String fact = createFact(true);
     String dim = createDimension();
     Dataset<Row> joined =
@@ -184,7 +184,7 @@ public abstract class BaseLanceDynamicPruningRuleTest {
   }
 
   @Test
-  public void keepsNoFilterWhenTheOtherSideTakesNoRuntimeFilter() {
+  public void testKeepsNoFilterWhenTheOtherSideTakesNoRuntimeFilter() {
     // Without an index on k, the fact table's scan takes no runtime filter on it.
     String fact = createFact(false);
     String dim = createDimension();
@@ -199,7 +199,7 @@ public abstract class BaseLanceDynamicPruningRuleTest {
   }
 
   @Test
-  public void keepsThePushDownsOfOtherScans() {
+  public void testKeepsThePushDownsOfOtherScans() {
     String fact = createFact(true);
     Dataset<Row> limited = spark.sql("SELECT * FROM " + fact + " WHERE k > 1 LIMIT 2");
     assertEquals(2, limited.collectAsList().size());

@@ -175,8 +175,8 @@ public class LanceScanBuilder
   /**
    * With {@code keep} set, {@link #pushPredicates} also returns the predicates it pushes, so that
    * Spark keeps evaluating them in a Filter above the scan. {@code LanceDynamicPruningRule} sets
-   * this on the filtering side of a join, through {@code LanceDataset.KEEP_PUSHED_FILTERS_OPTION},
-   * so that Spark's dynamic partition pruning finds the Filter it looks for.
+   * this on the filtering side of a join, through {@link LanceConstant#KEEP_PUSHED_FILTERS_KEY}, so
+   * that Spark's dynamic partition pruning finds the Filter it looks for.
    */
   public LanceScanBuilder keepPushedFilters(boolean keep) {
     this.keepPushedFilters = keep;

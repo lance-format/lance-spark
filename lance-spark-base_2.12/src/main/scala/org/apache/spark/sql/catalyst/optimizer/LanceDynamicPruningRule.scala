@@ -19,7 +19,7 @@ import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
-import org.lance.spark.LanceDataset
+import org.lance.spark.{LanceConstant, LanceDataset}
 
 import scala.collection.JavaConverters._
 
@@ -28,7 +28,7 @@ import scala.collection.JavaConverters._
  * PartitionPruning looks for a selective Filter on the side of the join that filters the other,
  * but a filter on a Lance table is pushed into its scan, which removes the Filter before that rule
  * runs. Before the scan push-down, this rule marks such a filtering side's Lance relation with
- * [[LanceDataset.KEEP_PUSHED_FILTERS_OPTION]], so its scan also returns the predicates it pushes
+ * [[LanceConstant.KEEP_PUSHED_FILTERS_KEY]], so its scan also returns the predicates it pushes
  * as ones Spark still evaluates, and the Filter stays for PartitionPruning to find.
  *
  * Only a relation read through projections and filters straight under the join is marked: such a
@@ -109,11 +109,11 @@ case class LanceDynamicPruningRule() extends Rule[LogicalPlan] with PredicateHel
   private def mark(plan: LogicalPlan): LogicalPlan = plan match {
     case r: DataSourceV2Relation =>
       val options = r.options.asCaseSensitiveMap().asScala
-      if (options.get(LanceDataset.KEEP_PUSHED_FILTERS_OPTION).contains("true")) {
+      if (options.get(LanceConstant.KEEP_PUSHED_FILTERS_KEY).contains("true")) {
         r
       } else {
         r.copy(options = new CaseInsensitiveStringMap(
-          (options + (LanceDataset.KEEP_PUSHED_FILTERS_OPTION -> "true")).asJava))
+          (options + (LanceConstant.KEEP_PUSHED_FILTERS_KEY -> "true")).asJava))
       }
     case p @ Project(_, child) => p.copy(child = mark(child))
     case f @ Filter(_, child) => f.copy(child = mark(child))
