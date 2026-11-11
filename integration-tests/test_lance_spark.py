@@ -4121,5 +4121,52 @@ class TestDQLFullTextSearch:
         )
 
 
+class TestTableOptionDefaults:
+    """Table tuning defaults survive reloads and per-operation overrides."""
+
+    @pytest.mark.parametrize("create_api", ["sql", "dataframe_v2"])
+    def test_create_defaults_and_operation_overrides(self, spark, test_table, create_api):
+        source = spark.range(0, 6, 1, 1)
+        source.createOrReplaceTempView("table_default_source")
+        if create_api == "sql":
+            spark.sql(f"""
+                CREATE TABLE {test_table} USING lance
+                OPTIONS ('max_row_per_file' = '2', 'batch_size' = '2')
+                TBLPROPERTIES ('app.owner' = 'analytics')
+                AS SELECT * FROM table_default_source
+            """)
+            initial_fragments = 3
+        else:
+            (source.writeTo(test_table).using("lance")
+             .tableProperty("max_row_per_file", "2")
+             .tableProperty("batch_size", "2")
+             .tableProperty("app.owner", "analytics")
+             .option("max_row_per_file", "3")
+             .option("app.operation", "create-only")
+             .create())
+            initial_fragments = 2
+        spark.catalog.refreshTable(test_table)
+        assert spark.sql(
+            f"SELECT COUNT(DISTINCT _fragid) FROM {test_table}"
+        ).first()[0] == initial_fragments
+        spark.range(0, 6, 1, 1).writeTo(test_table).option("MAX_ROW_PER_FILE", "3").append()
+        assert spark.sql(
+            f"SELECT COUNT(DISTINCT _fragid) FROM {test_table}"
+        ).first()[0] == initial_fragments + 2
+        properties = {row.key: row.value for row in spark.sql(
+            f"SHOW TBLPROPERTIES {test_table}"
+        ).collect()}
+        assert properties["max_row_per_file"] == "2"
+        assert properties["batch_size"] == "2"
+        assert properties["app.owner"] == "analytics"
+        assert "app.operation" not in properties
+        assert "option.app.operation" not in properties
+        spark.sql(f"INSERT INTO {test_table} SELECT * FROM table_default_source")
+        assert spark.sql(
+            f"SELECT COUNT(DISTINCT _fragid) FROM {test_table}"
+        ).first()[0] == initial_fragments + 5
+        assert spark.table(test_table).count() == 18
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

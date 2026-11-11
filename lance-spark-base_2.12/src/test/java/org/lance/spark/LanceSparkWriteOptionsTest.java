@@ -23,6 +23,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -38,6 +39,104 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class LanceSparkWriteOptionsTest {
 
   private final String TEMP_URL = "file:///tmp/test";
+
+  @Test
+  public void tableDefaultsApplyOnlySupportedWriteTuning() {
+    Map<String, String> properties = new HashMap<>();
+    properties.put("MAX_ROW_PER_FILE", "3");
+    properties.put("max_rows_per_group", "2");
+    properties.put("max_bytes_per_file", "4096");
+    properties.put("batch_size", "16");
+    properties.put("max_batch_bytes", "1024");
+    properties.put("use_queued_write_buffer", "true");
+    properties.put("queue_depth", "2");
+    properties.put("use_large_var_types", "true");
+    properties.put("blob_pack_file_size_threshold", "2048");
+    properties.put("write_mode", "overwrite");
+    properties.put("branch", "audit");
+    properties.put("path", "different-path");
+    properties.put("secret_access_key", "not-a-storage-option");
+    properties.put("custom.Property", "metadata-only");
+    Map<String, String> catalog = new HashMap<>();
+    catalog.put("max_row_per_file", "1");
+    catalog.put("endpoint", "http://localhost");
+
+    LanceSparkWriteOptions options =
+        LanceSparkWriteOptions.builder()
+            .datasetUri(TEMP_URL)
+            .fromOptions(catalog, properties, Collections.emptyMap())
+            .build();
+    assertEquals(3, options.getMaxRowsPerFile());
+    assertEquals(2, options.getMaxRowsPerGroup());
+    assertEquals(4096L, options.getMaxBytesPerFile());
+    assertEquals(16, options.getBatchSize());
+    assertEquals(1024L, options.getMaxBatchBytes());
+    assertTrue(options.isUseQueuedWriteBuffer());
+    assertEquals(2, options.getQueueDepth());
+    assertTrue(options.isUseLargeVarTypes());
+    assertEquals(2048L, options.getBlobPackFileSizeThreshold());
+    assertEquals(WriteParams.WriteMode.APPEND, options.getWriteMode());
+    assertEquals(TEMP_URL, options.getDatasetUri());
+    assertEquals("http://localhost", options.getStorageOptions().get("endpoint"));
+    assertFalse(options.getStorageOptions().containsKey("secret_access_key"));
+    assertFalse(options.getStorageOptions().containsKey("custom.Property"));
+    assertFalse(options.getStorageOptions().containsKey("branch"));
+
+    LanceSparkWriteOptions overridden =
+        LanceSparkWriteOptions.builder()
+            .datasetUri(TEMP_URL)
+            .fromOptions(catalog, properties, Collections.singletonMap("Max_Row_Per_File", "5"))
+            .build();
+    assertEquals(5, overridden.getMaxRowsPerFile());
+    assertEquals("3", properties.get("MAX_ROW_PER_FILE"));
+  }
+
+  @Test
+  public void tableDefaultsIgnoreSparkAliasesAndValidateConsumedValues() {
+    Map<String, String> properties = new HashMap<>();
+    properties.put("option.batch_size", "0");
+    LanceSparkWriteOptions.Builder builder = LanceSparkWriteOptions.builder().datasetUri(TEMP_URL);
+    assertEquals(
+        8192,
+        builder
+            .fromOptions(Collections.emptyMap(), properties, Collections.emptyMap())
+            .build()
+            .getBatchSize());
+    properties.put("batch_size", "0");
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> builder.fromOptions(Collections.emptyMap(), properties, Collections.emptyMap()));
+    assertEquals(
+        4,
+        builder
+            .fromOptions(
+                Collections.emptyMap(), properties, Collections.singletonMap("BATCH_SIZE", "4"))
+            .build()
+            .getBatchSize());
+  }
+
+  @Test
+  public void conflictingTableDefaultSpellingsAreRejected() {
+    Map<String, String> properties = new HashMap<>();
+    properties.put("batch_size", "16");
+    properties.put("BATCH_SIZE", "32");
+    IllegalArgumentException error =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                LanceSparkWriteOptions.builder()
+                    .datasetUri(TEMP_URL)
+                    .fromOptions(Collections.emptyMap(), properties, Collections.emptyMap()));
+    assertTrue(error.getMessage().contains("Conflicting table defaults for batch_size"));
+    properties.put("BATCH_SIZE", "16");
+    assertEquals(
+        16,
+        LanceSparkWriteOptions.builder()
+            .datasetUri(TEMP_URL)
+            .fromOptions(Collections.emptyMap(), properties, Collections.emptyMap())
+            .build()
+            .getBatchSize());
+  }
 
   @Test
   public void refIsNullByDefault() {

@@ -75,6 +75,54 @@ and namespace-specific options:
 | `spark.sql.catalog.{name}.parent`           | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                             |
 | `spark.sql.catalog.{name}.parent_delimiter` | String | ✗        | Delimiter for parent prefix (default: `.`). See [Note on Namespace Levels](#note-on-namespace-levels).                           |
 
+## Table Defaults and Operation Options
+
+Use table properties for persistent settings and DataFrame options for one operation:
+
+| Purpose | How to set it |
+|-------|---------------|
+| Save properties at creation | SQL `CREATE TABLE ... TBLPROPERTIES (...)` or `OPTIONS (...)`; DataFrame V2 `.tableProperty(...)` |
+| Update or remove properties | `ALTER TABLE ... SET/UNSET TBLPROPERTIES` |
+| Override one read or write | DataFrame `.option(...)`, including DataFrame V2 `.create()` |
+
+Supported table defaults apply to the initial CTAS write and subsequent reads and writes,
+including row-level DML. Explicit operation options override table defaults without changing
+them. The precedence is **operation option > table property > catalog option > built-in default**.
+
+```sql
+CREATE TABLE lance.default.events USING lance
+TBLPROPERTIES ('max_row_per_file' = '200000', 'batch_size' = '1024')
+AS SELECT * FROM source_events;
+```
+
+```python
+# This append uses 100000; subsequent writes still default to 200000.
+more_events.writeTo("lance.default.events") \
+    .option("max_row_per_file", "100000") \
+    .append()
+```
+
+The following properties can be used as table defaults. See [Read Options](operations/dql/select.md#read-options)
+and [Write Options](operations/dml/insert-into.md#write-options) for their types, values, and defaults.
+
+| Applies to | Properties |
+|------------|------------|
+| Reads and writes | `batch_size` |
+| Writes | `max_row_per_file`, `max_rows_per_group`, `max_bytes_per_file`, `max_batch_bytes`, `use_queued_write_buffer`, `queue_depth`, `use_large_var_types`, `blob_pack_file_size_threshold` |
+| Reads | `pushDownFilters`, `block_size`, `index_cache_size`, `metadata_cache_size`, `use_scalar_index`, `topN_push_down` |
+
+File limits apply per Spark writer task; they do not repartition data or combine files across tasks.
+To remove a table default, use `ALTER TABLE ... UNSET TBLPROPERTIES`; subsequent operations
+fall back to the catalog or built-in default.
+
+Other keys are not read/write tuning defaults. Configure storage credentials on the catalog or
+operation, and snapshot selectors such as `version`, `branch`, and `tag` on the read.
+See [CREATE TABLE](operations/ddl/create-table.md) for schema, encoding, and creation settings.
+Custom properties such as `app.owner` are metadata only.
+
+Option names are case-insensitive when read. Use the stored spelling for `SET/UNSET TBLPROPERTIES`;
+conflicting values under different spellings of the same option are rejected.
+
 ## Distributed Vector Search
 
 Set `spark.sql.lance.search.distributed.enabled=true` to execute `VECTOR_SEARCH` with Spark tasks

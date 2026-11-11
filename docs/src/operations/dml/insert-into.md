@@ -295,7 +295,9 @@ subsequent writes will automatically use `LargeVarCharVector`. No additional con
 
 ## Write Options
 
-These options control how data is written to Lance datasets. They can be set using the `.option()` method when writing data.
+Set `.option(...)` for an individual operation. Supported tuning options can also be saved
+as [table defaults](../../config.md#table-defaults-and-operation-options); explicit operation
+options take precedence.
 
 | Option                   | Type    | Default  | Description                                                                          |
 |--------------------------|---------|----------|--------------------------------------------------------------------------------------|
@@ -388,7 +390,7 @@ By default, Arrow uses 32-bit offset vectors (`VarCharVector` / `VarBinaryVector
 Setting `use_large_var_types` to `true` switches all string and binary columns to 64-bit offset vectors (`LargeVarCharVector` / `LargeVarBinaryVector`), removing the 2GB-per-batch ceiling. This applies to all string and binary columns in the schema, including those nested inside structs, arrays, and maps.
 
 !!!note
-    This differs from the per-column [`arrow.large_var_char` table property](../ddl/create-table.md#large-string-columns), which is set at table creation time and applies only to specific columns. The `use_large_var_types` write option applies to all string/binary columns for a single write operation.
+    This differs from the per-column [`arrow.large_var_char` table property](../ddl/create-table.md#large-string-columns), which is set at table creation time and applies only to specific columns. The `use_large_var_types` write option applies to all string/binary columns and can be set per operation or as a table default.
 
 === "Python"
     ```python

@@ -20,6 +20,7 @@ import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
@@ -42,6 +43,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.File;
 import java.nio.file.Path;
@@ -322,6 +325,47 @@ public abstract class BaseSparkConnectorWriteTest {
     Dataset<Row> result =
         spark.read().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, path).load();
     assertEquals(2, result.count());
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"OPTIONS", "TBLPROPERTIES"})
+  public void tableWriteDefaultsSurviveReloadAndReplacement(String clause) throws Exception {
+    String path = TestUtils.getDatasetUri(dbPath.toString(), "table_defaults_" + clause);
+    String table = "lance.`" + path + "`";
+    spark.sql(
+        "CREATE TABLE "
+            + table
+            + " USING lance "
+            + clause
+            + " ('max_row_per_file'='3', 'batch_size'='2') AS SELECT * FROM range(0, 6, 1, 1)");
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(path)).build()) {
+      assertEquals(2, dataset.getFragments().size());
+    }
+    spark.catalog().refreshTable(table);
+    spark.sql("INSERT INTO " + table + " SELECT * FROM range(0, 6, 1, 1)");
+    spark.range(0, 6, 1, 1).writeTo(table).option("MAX_ROW_PER_FILE", "2").append();
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(path)).build()) {
+      assertEquals(7, dataset.getFragments().size());
+      assertEquals("3", dataset.getConfig().get("max_row_per_file"));
+      assertEquals("2", dataset.getConfig().get("batch_size"));
+    }
+    spark.sql("ALTER TABLE " + table + " SET TBLPROPERTIES ('max_row_per_file'='6')");
+    spark.sql("REPLACE TABLE " + table + " AS SELECT * FROM range(0, 6, 1, 1)");
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(path)).build()) {
+      assertEquals(1, dataset.getFragments().size());
+      assertEquals("6", dataset.getConfig().get("max_row_per_file"));
+    }
+    spark.sql("ALTER TABLE " + table + " UNSET TBLPROPERTIES ('max_row_per_file')");
+    spark.sql("INSERT INTO " + table + " SELECT * FROM range(0, 6, 1, 1)");
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(path)).build()) {
+      // Falls back to this suite's catalog max_row_per_file=1, not the stale option.* alias.
+      assertEquals(7, dataset.getFragments().size());
+    }
+    assertEquals(12, spark.table(table).count());
   }
 
   @Test
