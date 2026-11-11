@@ -99,6 +99,29 @@ public abstract class BaseZonemapIndexTest {
   }
 
   @Test
+  public void testZonemapKeepsRowsOfSupplementaryCharacterStrings() {
+    // Lance orders string bounds by code point, so U+1F600 is this zone's max, while Java's UTF-16
+    // order puts it below U+FFFD.
+    String table = catalogName + ".default.zm_str_" + UUID.randomUUID().toString().replace("-", "");
+    spark.sql(String.format("CREATE TABLE %s (id INT, s STRING) USING lance", table));
+    // One fragment, so that one zone holds both values.
+    spark.sql(
+        String.format(
+            "INSERT INTO %s SELECT /*+ COALESCE(1) */ * FROM VALUES (1, '\uFFFD'),"
+                + " (2, '\uD83D\uDE00') AS v(id, s)",
+            table));
+    spark.sql(String.format("ALTER TABLE %s CREATE INDEX s_zm USING zonemap (s)", table));
+    assertEquals(
+        Collections.singletonList(RowFactory.create(1)),
+        spark.sql(String.format("SELECT id FROM %s WHERE s = '\uFFFD'", table)).collectAsList());
+    assertEquals(
+        Collections.singletonList(RowFactory.create(1)),
+        spark
+            .sql(String.format("SELECT id FROM %s WHERE s IN ('\uFFFD', 'a')", table))
+            .collectAsList());
+  }
+
+  @Test
   public void testZonemapThenSecondTable() {
     String t1 = catalogName + ".default.zm_t1_" + UUID.randomUUID().toString().replace("-", "");
     String t2 = catalogName + ".default.zm_t2_" + UUID.randomUUID().toString().replace("-", "");
