@@ -354,31 +354,58 @@ public final class ZonemapFragmentPruner {
       normalizedValues.add(normalizeLiteral(((Literal<?>) children[i]).value()));
     }
 
+    // Sort the values once so that each zone takes a binary search rather than a pass over all of
+    // them: a runtime filter can carry many thousands of join keys.
+    boolean hasNull = normalizedValues.removeIf(v -> v == null);
+    try {
+      normalizedValues.sort(ZonemapFragmentPruner::compare);
+    } catch (ClassCastException e) {
+      LOG.warn("Cannot order IN values for zonemap pruning, skipping pruning on {}", column, e);
+      return Optional.empty();
+    }
+
     Set<Integer> matchingFragments = new HashSet<>();
     for (ZoneStats zone : stats) {
-      for (Object value : normalizedValues) {
-        if (value == null) {
-          if (zone.getNullCount() > 0) {
-            matchingFragments.add(zone.getFragmentId());
-            break;
-          }
-        } else {
-          try {
-            @SuppressWarnings("unchecked")
-            Comparable<Object> target = (Comparable<Object>) value;
-            if (zoneMatchesComparison(zone, target, ComparisonType.EQUALS)) {
-              matchingFragments.add(zone.getFragmentId());
-              break;
-            }
-          } catch (ClassCastException e) {
-            matchingFragments.add(zone.getFragmentId());
-            break;
-          }
-        }
+      if ((hasNull && zone.getNullCount() > 0) || zoneContainsAny(zone, normalizedValues)) {
+        matchingFragments.add(zone.getFragmentId());
       }
     }
 
     return Optional.of(matchingFragments);
+  }
+
+  /**
+   * Whether one of the {@code sortedValues}, none of them null, may lie within the zone, as {@link
+   * #zoneMatchesComparison} decides for each value with {@code EQUALS}.
+   */
+  private static boolean zoneContainsAny(ZoneStats zone, List<Object> sortedValues) {
+    if (sortedValues.isEmpty()) {
+      return false;
+    }
+    Object min = zone.getMin();
+    Object max = zone.getMax();
+    // Missing bounds mean either an all-null zone, which no value matches, or a type whose bounds
+    // Lance does not report (e.g. decimals), which may match anything.
+    if (min == null || max == null) {
+      return zone.getNullCount() < zone.getZoneLength();
+    }
+    try {
+      // The first value not below min.
+      int low = 0;
+      int high = sortedValues.size();
+      while (low < high) {
+        int mid = (low + high) >>> 1;
+        if (compare(sortedValues.get(mid), min) < 0) {
+          low = mid + 1;
+        } else {
+          high = mid;
+        }
+      }
+      return low < sortedValues.size() && compare(sortedValues.get(low), max) <= 0;
+    } catch (ClassCastException e) {
+      LOG.warn("Type mismatch in zonemap comparison, skipping pruning for zone", e);
+      return true;
+    }
   }
 
   private static Optional<Set<Integer>> analyzeIsNull(
