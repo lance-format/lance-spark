@@ -7,7 +7,7 @@ List all indexes defined on a Lance table.
 
 ## Overview
 
-The `SHOW INDEXES` command returns one row for each index on a Lance table. The information is retrieved using the `Dataset.describeIndices` method, and the output columns align with the attributes of `org.lance.index.IndexDescription`. Per-segment metadata is not listed individually; `num_segments` and `size_bytes` summarise it.
+The `SHOW INDEXES` command returns one row for each index on a Lance table. It uses dataset metadata when index type and coverage are known, avoiding per-segment index-statistics reads. Legacy or unsupported metadata falls back to native index statistics, which may repair outdated metadata according to Lance's automatic migration policy. Per-segment metadata is not listed individually; `num_segments` and `size_bytes` summarise it.
 
 This command is useful for inspecting existing indexes, verifying index creation, and understanding the high-level properties of each index.
 
