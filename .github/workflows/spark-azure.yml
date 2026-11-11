@@ -1,0 +1,97 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Spark Azure Integration
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'docs/**'
+      - 'README.md'
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - ready_for_review
+      - reopened
+    paths-ignore:
+      - 'docs/**'
+      - 'README.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  azure-integration-test:
+    if: >
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository) &&
+      github.actor != 'dependabot[bot]'
+    name: Azure Test Spark 4.1 / Scala 2.13
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      SPARK_VERSION: "4.1"
+      SCALA_VERSION: "2.13"
+      TEST_BACKENDS: azure
+      AZURE_TEST_PREFIX: lance_spark_test_${{ github.run_id }}_${{ github.run_attempt }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Set up Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: "maven"
+      - name: Verify Azure storage target
+        env:
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+          AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
+          AZURE_STORAGE_CONTAINER: ${{ secrets.AZURE_STORAGE_CONTAINER }}
+        run: |
+          if [ -z "${AZURE_STORAGE_ACCOUNT}" ] || [ -z "${AZURE_STORAGE_KEY}" ] || [ -z "${AZURE_STORAGE_CONTAINER}" ]; then
+            echo "AZURE_STORAGE_ACCOUNT, AZURE_STORAGE_KEY, and AZURE_STORAGE_CONTAINER secrets are required for real Azure integration tests"
+            exit 1
+          fi
+          az storage container show --name "${AZURE_STORAGE_CONTAINER}" --only-show-errors >/dev/null
+      - name: Run Azure integration tests
+        env:
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+          AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
+          AZURE_STORAGE_CONTAINER: ${{ secrets.AZURE_STORAGE_CONTAINER }}
+        uses: ./.github/actions/pytest-integration
+        with:
+          spark-version: ${{ env.SPARK_VERSION }}
+          scala-version: ${{ env.SCALA_VERSION }}
+      - name: Clean up Azure test data
+        if: always()
+        env:
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+          AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
+          AZURE_STORAGE_CONTAINER: ${{ secrets.AZURE_STORAGE_CONTAINER }}
+        run: |
+          if [ -n "${AZURE_STORAGE_ACCOUNT}" ] && [ -n "${AZURE_STORAGE_KEY}" ] && [ -n "${AZURE_STORAGE_CONTAINER}" ]; then
+            az storage blob delete-batch \
+              --source "${AZURE_STORAGE_CONTAINER}" \
+              --pattern "${AZURE_TEST_PREFIX}/*" \
+              --only-show-errors
+          fi
