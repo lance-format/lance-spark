@@ -13,8 +13,8 @@
  */
 package org.lance.spark.vectorized;
 
-import org.apache.arrow.vector.ValueVector;
 import org.apache.arrow.vector.complex.FixedSizeListVector;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.vectorized.ColumnarArray;
 
 /**
@@ -27,11 +27,18 @@ public class FixedSizeListAccessor {
   private final int listSize;
 
   public FixedSizeListAccessor(FixedSizeListVector vector) {
+    this(vector, new LanceArrowColumnVector(vector.getDataVector()));
+  }
+
+  /** Binds the elements through {@code elementType}, so pruned structs in them read by name. */
+  public FixedSizeListAccessor(FixedSizeListVector vector, DataType elementType) {
+    this(vector, new LanceArrowColumnVector(vector.getDataVector(), elementType));
+  }
+
+  private FixedSizeListAccessor(FixedSizeListVector vector, LanceArrowColumnVector childAccessor) {
     this.vector = vector;
     this.listSize = vector.getListSize();
-    ValueVector dataVector = vector.getDataVector();
-    // Wrap the child vector for element access
-    this.childAccessor = new LanceArrowColumnVector(dataVector);
+    this.childAccessor = childAccessor;
   }
 
   public boolean isNullAt(int rowId) {

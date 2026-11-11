@@ -15,6 +15,7 @@ package org.lance.spark.vectorized;
 
 import org.apache.arrow.vector.complex.MapVector;
 import org.apache.arrow.vector.complex.StructVector;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.vectorized.ColumnarMap;
 
 public class LanceMapAccessor {
@@ -23,10 +24,32 @@ public class LanceMapAccessor {
   private final LanceArrowColumnVector values;
 
   public LanceMapAccessor(MapVector vector) {
+    this(
+        vector,
+        new LanceArrowColumnVector(entries(vector).getChildByOrdinal(0)),
+        new LanceArrowColumnVector(entries(vector).getChildByOrdinal(1)));
+  }
+
+  /**
+   * Binds the keys and values through {@code keyType} and {@code valueType}, so pruned structs in
+   * them read by name.
+   */
+  public LanceMapAccessor(MapVector vector, DataType keyType, DataType valueType) {
+    this(
+        vector,
+        new LanceArrowColumnVector(entries(vector).getChildByOrdinal(0), keyType),
+        new LanceArrowColumnVector(entries(vector).getChildByOrdinal(1), valueType));
+  }
+
+  private LanceMapAccessor(
+      MapVector vector, LanceArrowColumnVector keys, LanceArrowColumnVector values) {
     this.accessor = vector;
-    StructVector entries = (StructVector) vector.getDataVector();
-    this.keys = new LanceArrowColumnVector(entries.getChildByOrdinal(0));
-    this.values = new LanceArrowColumnVector(entries.getChildByOrdinal(1));
+    this.keys = keys;
+    this.values = values;
+  }
+
+  private static StructVector entries(MapVector vector) {
+    return (StructVector) vector.getDataVector();
   }
 
   public boolean isNullAt(int rowId) {
