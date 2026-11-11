@@ -269,6 +269,34 @@ public final class ZonemapFragmentPruner {
     return Optional.of(matchingFragments);
   }
 
+  /**
+   * Compares {@code a} with {@code b}, strings by code point, which is how Lance orders zone
+   * bounds. Java's {@link String#compareTo} compares UTF-16 code units, which orders a character
+   * above U+FFFF, stored as a surrogate pair, below U+E000 to U+FFFF.
+   */
+  @SuppressWarnings("unchecked")
+  private static int compare(Object a, Object b) {
+    if (a instanceof String && b instanceof String) {
+      return compareCodePoints((String) a, (String) b);
+    }
+    return ((Comparable<Object>) a).compareTo(b);
+  }
+
+  static int compareCodePoints(String a, String b) {
+    int i = 0;
+    int j = 0;
+    while (i < a.length() && j < b.length()) {
+      int x = a.codePointAt(i);
+      int y = b.codePointAt(j);
+      if (x != y) {
+        return Integer.compare(x, y);
+      }
+      i += Character.charCount(x);
+      j += Character.charCount(y);
+    }
+    return Integer.compare(a.length() - i, b.length() - j);
+  }
+
   @SuppressWarnings("unchecked")
   private static boolean zoneMatchesComparison(
       ZoneStats zone, Comparable<Object> target, ComparisonType type) {
@@ -285,15 +313,15 @@ public final class ZonemapFragmentPruner {
     try {
       switch (type) {
         case EQUALS:
-          return target.compareTo(min) >= 0 && target.compareTo(max) <= 0;
+          return compare(target, min) >= 0 && compare(target, max) <= 0;
         case LESS_THAN:
-          return min.compareTo(target) < 0;
+          return compare(min, target) < 0;
         case LESS_THAN_OR_EQUAL:
-          return min.compareTo(target) <= 0;
+          return compare(min, target) <= 0;
         case GREATER_THAN:
-          return max.compareTo(target) > 0;
+          return compare(max, target) > 0;
         case GREATER_THAN_OR_EQUAL:
-          return max.compareTo(target) >= 0;
+          return compare(max, target) >= 0;
         default:
           return true;
       }
@@ -326,31 +354,58 @@ public final class ZonemapFragmentPruner {
       normalizedValues.add(normalizeLiteral(((Literal<?>) children[i]).value()));
     }
 
+    // Sort the values once so that each zone takes a binary search rather than a pass over all of
+    // them: a runtime filter can carry many thousands of join keys.
+    boolean hasNull = normalizedValues.removeIf(v -> v == null);
+    try {
+      normalizedValues.sort(ZonemapFragmentPruner::compare);
+    } catch (ClassCastException e) {
+      LOG.warn("Cannot order IN values for zonemap pruning, skipping pruning on {}", column, e);
+      return Optional.empty();
+    }
+
     Set<Integer> matchingFragments = new HashSet<>();
     for (ZoneStats zone : stats) {
-      for (Object value : normalizedValues) {
-        if (value == null) {
-          if (zone.getNullCount() > 0) {
-            matchingFragments.add(zone.getFragmentId());
-            break;
-          }
-        } else {
-          try {
-            @SuppressWarnings("unchecked")
-            Comparable<Object> target = (Comparable<Object>) value;
-            if (zoneMatchesComparison(zone, target, ComparisonType.EQUALS)) {
-              matchingFragments.add(zone.getFragmentId());
-              break;
-            }
-          } catch (ClassCastException e) {
-            matchingFragments.add(zone.getFragmentId());
-            break;
-          }
-        }
+      if ((hasNull && zone.getNullCount() > 0) || zoneContainsAny(zone, normalizedValues)) {
+        matchingFragments.add(zone.getFragmentId());
       }
     }
 
     return Optional.of(matchingFragments);
+  }
+
+  /**
+   * Whether one of the {@code sortedValues}, none of them null, may lie within the zone, as {@link
+   * #zoneMatchesComparison} decides for each value with {@code EQUALS}.
+   */
+  private static boolean zoneContainsAny(ZoneStats zone, List<Object> sortedValues) {
+    if (sortedValues.isEmpty()) {
+      return false;
+    }
+    Object min = zone.getMin();
+    Object max = zone.getMax();
+    // Missing bounds mean either an all-null zone, which no value matches, or a type whose bounds
+    // Lance does not report (e.g. decimals), which may match anything.
+    if (min == null || max == null) {
+      return zone.getNullCount() < zone.getZoneLength();
+    }
+    try {
+      // The first value not below min.
+      int low = 0;
+      int high = sortedValues.size();
+      while (low < high) {
+        int mid = (low + high) >>> 1;
+        if (compare(sortedValues.get(mid), min) < 0) {
+          low = mid + 1;
+        } else {
+          high = mid;
+        }
+      }
+      return low < sortedValues.size() && compare(sortedValues.get(low), max) <= 0;
+    } catch (ClassCastException e) {
+      LOG.warn("Type mismatch in zonemap comparison, skipping pruning for zone", e);
+      return true;
+    }
   }
 
   private static Optional<Set<Integer>> analyzeIsNull(
