@@ -14,11 +14,13 @@
 package org.lance.spark;
 
 import org.apache.spark.sql.AnalysisException;
+import org.apache.spark.sql.connector.catalog.Identifier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -162,32 +164,45 @@ public abstract class BaseTestSparkDirectoryNamespace extends SparkLanceNamespac
   }
 
   @Test
-  public void testSessionQuotedTuningOptionsAndNonTuningExclusions() {
-    String fullTable = catalogName + ".default." + generateTableName("quote_session");
-    spark.sql("CREATE TABLE " + fullTable + " (id INT NOT NULL)");
-    spark.sql("INSERT INTO " + fullTable + " VALUES (1)");
-    spark.sql("INSERT INTO " + fullTable + " VALUES (2)");
+  public void testCatalogConfiguredViaSparkSqlSetWithQuotes() throws Exception {
+    String quotedCatalog = "lance_quoted_cat";
+    Path quotedRoot = tempDir.resolve("quoted_root");
+    String tableName = generateTableName("quoted_tbl");
+    String fullTable = quotedCatalog + ".default." + tableName;
 
-    spark.sql("SET spark.sql.lance.batch_size = '1'");
-    spark.sql("SET spark.sql.lance.use_scalar_index = 'false'");
-    spark.sql("SET spark.sql.lance.max_row_per_file = '1'");
-    // Non-tuning options must be ignored at session level
-    spark.sql("SET spark.sql.lance.version = '2'");
-    spark.sql("SET spark.sql.lance.branch = 'nonexistent'");
-    spark.sql("SET spark.sql.lance.write_mode = 'overwrite'");
+    spark.sql(
+        "SET spark.sql.catalog." + quotedCatalog + " = org.lance.spark.LanceNamespaceSparkCatalog");
+    spark.sql("SET spark.sql.catalog." + quotedCatalog + ".impl = 'dir'");
+    spark.sql("SET spark.sql.catalog." + quotedCatalog + ".root = '" + quotedRoot + "'");
+    spark.sql("SET spark.sql.catalog." + quotedCatalog + ".single_level_ns = 'true'");
+    spark.sql("SET spark.sql.catalog." + quotedCatalog + ".batch_size = '2'");
+    spark.sql("SET spark.sql.catalog." + quotedCatalog + ".use_scalar_index = \"false\"");
+    spark.sql("SET spark.sql.catalog." + quotedCatalog + ".max_row_per_file = '1'");
+    spark.sql("SET spark.sql.catalog." + quotedCatalog + ".enable_stable_row_ids = 'true'");
     try {
-      // Latest snapshot (2 rows) is read; quoted tuning options parse without NumberFormatException
-      assertEquals(2L, spark.table(fullTable).count());
-      // Plain INSERT INTO remains an append despite session write_mode='overwrite' and branch
-      spark.sql("INSERT INTO " + fullTable + " VALUES (3)");
+      spark.sql("CREATE TABLE " + fullTable + " (id INT NOT NULL)");
+      spark.sql("INSERT INTO " + fullTable + " VALUES (1), (2), (3)");
       assertEquals(3L, spark.table(fullTable).count());
+
+      BaseLanceNamespaceSparkCatalog lanceCatalog =
+          (BaseLanceNamespaceSparkCatalog)
+              spark.sessionState().catalogManager().catalog(quotedCatalog);
+      assertTrue(lanceCatalog.getCatalogConfig().isEnableStableRowIds());
+
+      LanceDataset table =
+          (LanceDataset) lanceCatalog.loadTable(Identifier.of(new String[] {"default"}, tableName));
+      assertEquals(2, table.readOptions().getBatchSize());
+      assertFalse(table.readOptions().isUseScalarIndex());
+      assertEquals("2", table.readOptions().getStorageOptions().get("batch_size"));
     } finally {
-      spark.conf().unset("spark.sql.lance.batch_size");
-      spark.conf().unset("spark.sql.lance.use_scalar_index");
-      spark.conf().unset("spark.sql.lance.max_row_per_file");
-      spark.conf().unset("spark.sql.lance.version");
-      spark.conf().unset("spark.sql.lance.branch");
-      spark.conf().unset("spark.sql.lance.write_mode");
+      spark.conf().unset("spark.sql.catalog." + quotedCatalog);
+      spark.conf().unset("spark.sql.catalog." + quotedCatalog + ".impl");
+      spark.conf().unset("spark.sql.catalog." + quotedCatalog + ".root");
+      spark.conf().unset("spark.sql.catalog." + quotedCatalog + ".single_level_ns");
+      spark.conf().unset("spark.sql.catalog." + quotedCatalog + ".batch_size");
+      spark.conf().unset("spark.sql.catalog." + quotedCatalog + ".use_scalar_index");
+      spark.conf().unset("spark.sql.catalog." + quotedCatalog + ".max_row_per_file");
+      spark.conf().unset("spark.sql.catalog." + quotedCatalog + ".enable_stable_row_ids");
     }
   }
 }

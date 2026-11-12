@@ -19,25 +19,16 @@ import org.lance.namespace.LanceNamespace;
 import org.lance.spark.utils.FullTextQueryUtils;
 
 import com.google.common.base.Preconditions;
-import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
-import scala.Option;
-import scala.Tuple2;
-import scala.collection.Iterator;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.Serializable;
-import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 
 /**
  * Read-specific options for Lance Spark connector.
@@ -111,28 +102,6 @@ public class LanceSparkReadOptions implements Serializable {
 
   /** Enable Arrow batches when supported, otherwise use the regular reader. Default: false. */
   public static final String CONFIG_ARROW_BATCH_READS = "arrow_batch_reads";
-
-  public static final String SPARK_SESSION_CONFIG_PREFIX = "spark.sql.lance.";
-
-  /**
-   * Read performance tuning options allowed via {@code SET spark.sql.lance.<key> = <value>}.
-   * Table-identity and query-specific options (such as {@code version}, {@code branch}, {@code
-   * tag}, and {@code full_text_query}) are intentionally excluded from session defaults.
-   */
-  private static final Set<String> READ_SESSION_OPTION_LOWER_KEYS =
-      Collections.unmodifiableSet(
-          new HashSet<>(
-              Arrays.asList(
-                  CONFIG_PUSH_DOWN_FILTERS.toLowerCase(Locale.ROOT),
-                  CONFIG_BLOCK_SIZE.toLowerCase(Locale.ROOT),
-                  CONFIG_INDEX_CACHE_SIZE.toLowerCase(Locale.ROOT),
-                  CONFIG_METADATA_CACHE_SIZE.toLowerCase(Locale.ROOT),
-                  CONFIG_BATCH_SIZE.toLowerCase(Locale.ROOT),
-                  CONFIG_USE_SCALAR_INDEX.toLowerCase(Locale.ROOT),
-                  CONFIG_RUNTIME_FILTER_MAX_KEYS.toLowerCase(Locale.ROOT),
-                  CONFIG_RUNTIME_FILTER_MAX_BYTES.toLowerCase(Locale.ROOT),
-                  CONFIG_TOP_N_PUSH_DOWN.toLowerCase(Locale.ROOT),
-                  CONFIG_ARROW_BATCH_READS.toLowerCase(Locale.ROOT))));
 
   public static final String LANCE_FILE_SUFFIX = ".lance";
 
@@ -248,78 +217,6 @@ public class LanceSparkReadOptions implements Serializable {
   }
 
   // ========== Helper methods ==========
-
-  /**
-   * Strips a single pair of matching surrounding single ({@code '...'}) or double ({@code "..."})
-   * quotes after trimming whitespace. Spark SQL {@code SET key = 'value'} retains the surrounding
-   * quotes in the raw configuration value.
-   */
-  public static String stripSurroundingQuotes(String value) {
-    if (value == null) {
-      return null;
-    }
-    String trimmed = value.trim();
-    if (trimmed.length() >= 2) {
-      char first = trimmed.charAt(0);
-      char last = trimmed.charAt(trimmed.length() - 1);
-      if ((first == '\'' && last == '\'') || (first == '"' && last == '"')) {
-        return trimmed.substring(1, trimmed.length() - 1).trim();
-      }
-    }
-    return trimmed;
-  }
-
-  /**
-   * Extracts allowed {@code spark.sql.lance.<key>} tuning options (lowercased keys) from the active
-   * or default {@link SparkSession}, stripping surrounding quotes added by Spark SQL {@code SET}.
-   */
-  static Map<String, String> extractActiveSessionOptions(Set<String> allowedLowerKeys) {
-    Option<SparkSession> sessionOpt = SparkSession.getActiveSession();
-    if (sessionOpt.isEmpty()) {
-      sessionOpt = SparkSession.getDefaultSession();
-    }
-    if (sessionOpt.isEmpty()) {
-      return Collections.emptyMap();
-    }
-    SparkSession spark = sessionOpt.get();
-    try {
-      if (spark.sparkContext().isStopped()) {
-        return Collections.emptyMap();
-      }
-      Map<String, String> sessionOpts = new HashMap<>();
-      Iterator<Tuple2<String, String>> iter = spark.conf().getAll().iterator();
-      while (iter.hasNext()) {
-        Tuple2<String, String> entry = iter.next();
-        String confKey = entry._1();
-        String confVal = entry._2();
-        if (confKey != null
-            && confVal != null
-            && confKey.regionMatches(
-                true, 0, SPARK_SESSION_CONFIG_PREFIX, 0, SPARK_SESSION_CONFIG_PREFIX.length())) {
-          String lowerKey =
-              confKey.substring(SPARK_SESSION_CONFIG_PREFIX.length()).toLowerCase(Locale.ROOT);
-          if (allowedLowerKeys.contains(lowerKey)) {
-            sessionOpts.put(lowerKey, stripSurroundingQuotes(confVal));
-          }
-        }
-      }
-      return sessionOpts;
-    } catch (IllegalStateException e) {
-      return Collections.emptyMap();
-    }
-  }
-
-  static void putLowerKeys(Map<String, String> target, Map<String, String> source) {
-    if (source == null || source.isEmpty()) {
-      return;
-    }
-    for (Map.Entry<String, String> entry : source.entrySet()) {
-      String key = entry.getKey();
-      if (key != null) {
-        target.put(key.toLowerCase(Locale.ROOT), entry.getValue());
-      }
-    }
-  }
 
   private static String extractDatasetName(String datasetUri) {
     if (datasetUri == null) {
@@ -711,10 +608,7 @@ public class LanceSparkReadOptions implements Serializable {
      */
     public Builder fromOptions(Map<String, String> options) {
       this.storageOptions = new HashMap<>(options);
-      Map<String, String> effective =
-          new HashMap<>(extractActiveSessionOptions(READ_SESSION_OPTION_LOWER_KEYS));
-      putLowerKeys(effective, options);
-      parseTypedFlags(effective);
+      parseTypedFlags(options);
       return this;
     }
 
@@ -731,30 +625,11 @@ public class LanceSparkReadOptions implements Serializable {
      */
     public Builder withCatalogDefaults(LanceSparkCatalogConfig catalogConfig) {
       // Merge storage options: catalog options are defaults, current options override
-      Map<String, String> userOptions = new HashMap<>(this.storageOptions);
-      Map<String, String> mergedStorage = new HashMap<>(catalogConfig.getStorageOptions());
-      mergedStorage.putAll(userOptions);
-      this.storageOptions = mergedStorage;
+      Map<String, String> merged = new HashMap<>(catalogConfig.getStorageOptions());
+      merged.putAll(this.storageOptions);
       this.indexCacheBackend = catalogConfig.getIndexCacheBackend();
       this.metadataCacheBackend = catalogConfig.getMetadataCacheBackend();
-
-      Map<String, String> effective = new HashMap<>();
-      putLowerKeys(effective, catalogConfig.getStorageOptions());
-      effective.putAll(extractActiveSessionOptions(READ_SESSION_OPTION_LOWER_KEYS));
-      putLowerKeys(effective, userOptions);
-      parseTypedFlags(effective);
-      return this;
-    }
-
-    /** Overrides only the typed flags explicitly present in {@code options}. */
-    Builder overrideTypedOptions(Map<String, String> options) {
-      if (options == null || options.isEmpty()) {
-        return this;
-      }
-      Map<String, String> lower = new HashMap<>();
-      putLowerKeys(lower, options);
-      parseTypedFlags(lower);
-      return this;
+      return fromOptions(merged);
     }
 
     /**
@@ -763,73 +638,62 @@ public class LanceSparkReadOptions implements Serializable {
      * both call sites stay in sync and catalog-level configs reach the typed fields.
      */
     private void parseTypedFlags(Map<String, String> opts) {
-      CaseInsensitiveStringMap ciOpts = new CaseInsensitiveStringMap(opts);
+      CaseInsensitiveStringMap references = new CaseInsensitiveStringMap(opts);
       Preconditions.checkArgument(
-          !ciOpts.containsKey(CONFIG_NEAREST),
+          !opts.containsKey(CONFIG_NEAREST),
           "The nearest read option is no longer supported; use VECTOR_SEARCH table function");
       Preconditions.checkArgument(
-          (ciOpts.containsKey(CONFIG_VERSION) ? 1 : 0)
-                  + (ciOpts.containsKey(CONFIG_BRANCH) ? 1 : 0)
-                  + (ciOpts.containsKey(CONFIG_TAG) ? 1 : 0)
+          (references.containsKey(CONFIG_VERSION) ? 1 : 0)
+                  + (references.containsKey(CONFIG_BRANCH) ? 1 : 0)
+                  + (references.containsKey(CONFIG_TAG) ? 1 : 0)
               <= 1,
           "Specify only one of branch, tag, or version");
-      if (ciOpts.containsKey(CONFIG_PUSH_DOWN_FILTERS)) {
-        this.pushDownFilters =
-            Boolean.parseBoolean(stripSurroundingQuotes(ciOpts.get(CONFIG_PUSH_DOWN_FILTERS)));
+      if (opts.containsKey(CONFIG_PUSH_DOWN_FILTERS)) {
+        this.pushDownFilters = Boolean.parseBoolean(opts.get(CONFIG_PUSH_DOWN_FILTERS));
       }
-      if (ciOpts.containsKey(CONFIG_BLOCK_SIZE)) {
-        this.blockSize = Integer.parseInt(stripSurroundingQuotes(ciOpts.get(CONFIG_BLOCK_SIZE)));
+      if (opts.containsKey(CONFIG_BLOCK_SIZE)) {
+        this.blockSize = Integer.parseInt(opts.get(CONFIG_BLOCK_SIZE));
       }
-      if (ciOpts.containsKey(CONFIG_VERSION)) {
-        this.ref =
-            LanceRef.ofMain(Long.parseLong(stripSurroundingQuotes(ciOpts.get(CONFIG_VERSION))));
-      } else if (ciOpts.containsKey(CONFIG_BRANCH)) {
-        this.ref = LanceRef.ofBranch(ciOpts.get(CONFIG_BRANCH));
-      } else if (ciOpts.containsKey(CONFIG_TAG)) {
-        this.ref = LanceRef.ofTag(ciOpts.get(CONFIG_TAG));
+      if (references.containsKey(CONFIG_VERSION)) {
+        this.ref = LanceRef.ofMain(Long.parseLong(references.get(CONFIG_VERSION)));
+      } else if (references.containsKey(CONFIG_BRANCH)) {
+        this.ref = LanceRef.ofBranch(references.get(CONFIG_BRANCH));
+      } else if (references.containsKey(CONFIG_TAG)) {
+        this.ref = LanceRef.ofTag(references.get(CONFIG_TAG));
       }
-      if (ciOpts.containsKey(CONFIG_INDEX_CACHE_SIZE)) {
-        this.indexCacheSize =
-            Integer.parseInt(stripSurroundingQuotes(ciOpts.get(CONFIG_INDEX_CACHE_SIZE)));
+      if (opts.containsKey(CONFIG_INDEX_CACHE_SIZE)) {
+        this.indexCacheSize = Integer.parseInt(opts.get(CONFIG_INDEX_CACHE_SIZE));
       }
-      if (ciOpts.containsKey(CONFIG_METADATA_CACHE_SIZE)) {
-        this.metadataCacheSize =
-            Integer.parseInt(stripSurroundingQuotes(ciOpts.get(CONFIG_METADATA_CACHE_SIZE)));
+      if (opts.containsKey(CONFIG_METADATA_CACHE_SIZE)) {
+        this.metadataCacheSize = Integer.parseInt(opts.get(CONFIG_METADATA_CACHE_SIZE));
       }
-      if (ciOpts.containsKey(CONFIG_BATCH_SIZE)) {
-        int parsedBatchSize =
-            Integer.parseInt(stripSurroundingQuotes(ciOpts.get(CONFIG_BATCH_SIZE)));
+      if (opts.containsKey(CONFIG_BATCH_SIZE)) {
+        int parsedBatchSize = Integer.parseInt(opts.get(CONFIG_BATCH_SIZE));
         Preconditions.checkArgument(parsedBatchSize > 0, "batch_size must be positive");
         this.batchSize = parsedBatchSize;
       }
-      if (ciOpts.containsKey(CONFIG_TOP_N_PUSH_DOWN)) {
-        this.topNPushDown =
-            Boolean.parseBoolean(stripSurroundingQuotes(ciOpts.get(CONFIG_TOP_N_PUSH_DOWN)));
+      if (opts.containsKey(CONFIG_TOP_N_PUSH_DOWN)) {
+        this.topNPushDown = Boolean.parseBoolean(opts.get(CONFIG_TOP_N_PUSH_DOWN));
       }
-      if (ciOpts.containsKey(CONFIG_FULL_TEXT_QUERY)) {
-        String json = ciOpts.get(CONFIG_FULL_TEXT_QUERY);
+      if (opts.containsKey(CONFIG_FULL_TEXT_QUERY)) {
+        String json = opts.get(CONFIG_FULL_TEXT_QUERY);
         this.fullTextQuery = FullTextQueryUtils.stringToFullTextQuery(json);
       }
-      if (ciOpts.containsKey(CONFIG_USE_SCALAR_INDEX)) {
-        this.useScalarIndex =
-            Boolean.parseBoolean(stripSurroundingQuotes(ciOpts.get(CONFIG_USE_SCALAR_INDEX)));
+      if (opts.containsKey(CONFIG_USE_SCALAR_INDEX)) {
+        this.useScalarIndex = Boolean.parseBoolean(opts.get(CONFIG_USE_SCALAR_INDEX));
       }
-      if (ciOpts.containsKey(CONFIG_RUNTIME_FILTER_MAX_KEYS)) {
-        runtimeFilterMaxKeys(
-            Integer.parseInt(stripSurroundingQuotes(ciOpts.get(CONFIG_RUNTIME_FILTER_MAX_KEYS))));
+      if (opts.containsKey(CONFIG_RUNTIME_FILTER_MAX_KEYS)) {
+        runtimeFilterMaxKeys(Integer.parseInt(opts.get(CONFIG_RUNTIME_FILTER_MAX_KEYS)));
       }
-      if (ciOpts.containsKey(CONFIG_RUNTIME_FILTER_MAX_BYTES)) {
-        runtimeFilterMaxBytes(
-            Integer.parseInt(stripSurroundingQuotes(ciOpts.get(CONFIG_RUNTIME_FILTER_MAX_BYTES))));
+      if (opts.containsKey(CONFIG_RUNTIME_FILTER_MAX_BYTES)) {
+        runtimeFilterMaxBytes(Integer.parseInt(opts.get(CONFIG_RUNTIME_FILTER_MAX_BYTES)));
       }
-      if (ciOpts.containsKey(CONFIG_EXECUTOR_CREDENTIAL_REFRESH)) {
+      if (opts.containsKey(CONFIG_EXECUTOR_CREDENTIAL_REFRESH)) {
         this.executorCredentialRefresh =
-            Boolean.parseBoolean(
-                stripSurroundingQuotes(ciOpts.get(CONFIG_EXECUTOR_CREDENTIAL_REFRESH)));
+            Boolean.parseBoolean(opts.get(CONFIG_EXECUTOR_CREDENTIAL_REFRESH));
       }
-      if (ciOpts.containsKey(CONFIG_ARROW_BATCH_READS)) {
-        this.arrowBatchReads =
-            Boolean.parseBoolean(stripSurroundingQuotes(ciOpts.get(CONFIG_ARROW_BATCH_READS)));
+      if (opts.containsKey(CONFIG_ARROW_BATCH_READS)) {
+        this.arrowBatchReads = Boolean.parseBoolean(opts.get(CONFIG_ARROW_BATCH_READS));
       }
     }
 

@@ -359,9 +359,15 @@ public class LanceDataset
                     || key.equalsIgnoreCase(LanceSparkReadOptions.CONFIG_TAG));
     merged.putAll(scanMap.asCaseSensitiveMap());
     LanceSparkReadOptions scanOptions =
-        readOptions.toBuilder()
-            .storageOptions(merged)
-            .overrideTypedOptions(scanMap.asCaseSensitiveMap())
+        LanceSparkReadOptions.builder()
+            .datasetUri(readOptions.getDatasetUri())
+            .namespace(readOptions.getNamespace())
+            .tableId(readOptions.getTableId())
+            .catalogName(readOptions.getCatalogName())
+            .indexCacheBackend(readOptions.getIndexCacheBackend())
+            .metadataCacheBackend(readOptions.getMetadataCacheBackend())
+            .ref(tableRef)
+            .fromOptions(merged)
             .build();
     if (tableRef != null && scanSetsRef) {
       LanceRef scanRef = scanOptions.getRef();
@@ -447,17 +453,10 @@ public class LanceDataset
     CaseInsensitiveStringMap sparkWriteOptions = logicalWriteInfo.options();
     Map<String, BlobSourceContext> blobSourceContexts =
         BlobSourceContext.decodeFromWriteOptions(sparkWriteOptions);
-    Map<String, String> perWriteOptions = new HashMap<>(sparkWriteOptions.asCaseSensitiveMap());
+    Map<String, String> mergedOptions = new HashMap<>(readOptions.getStorageOptions());
+    mergedOptions.putAll(sparkWriteOptions.asCaseSensitiveMap());
     // Internal-only option (see LanceBlobSourceContextRule); never forward it as a storage option.
-    perWriteOptions.remove(LanceConstant.BLOB_SOURCE_CONTEXTS_KEY);
-    Map<String, String> baseStorage = new HashMap<>(readOptions.getStorageOptions());
-    baseStorage.remove(LanceConstant.BLOB_SOURCE_CONTEXTS_KEY);
-    LanceSparkCatalogConfig baseCatalogDefaults =
-        LanceSparkCatalogConfig.builder()
-            .storageOptions(baseStorage)
-            .indexCacheBackend(readOptions.getIndexCacheBackend())
-            .metadataCacheBackend(readOptions.getMetadataCacheBackend())
-            .build();
+    mergedOptions.remove(LanceConstant.BLOB_SOURCE_CONTEXTS_KEY);
 
     LanceSparkWriteOptions.Builder writeOptionsBuilder =
         LanceSparkWriteOptions.builder()
@@ -465,17 +464,15 @@ public class LanceDataset
             .namespace(readOptions.getNamespace())
             .tableId(readOptions.getTableId())
             .catalogName(readOptions.getCatalogName())
-            .fromOptions(perWriteOptions)
-            .withCatalogDefaults(baseCatalogDefaults);
-    CaseInsensitiveStringMap ciBaseStorage = new CaseInsensitiveStringMap(baseStorage);
+            .indexCacheBackend(readOptions.getIndexCacheBackend())
+            .metadataCacheBackend(readOptions.getMetadataCacheBackend())
+            .fromOptions(mergedOptions);
     // Use table's file format version if not explicitly set in write options
-    if (!sparkWriteOptions.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)
-        && !ciBaseStorage.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)
+    if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)
         && fileFormatVersion != null) {
       writeOptionsBuilder.fileFormatVersion(fileFormatVersion);
     }
-    if (!sparkWriteOptions.containsKey(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS)
-        && !ciBaseStorage.containsKey(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS)
+    if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS)
         && tableProperties.containsKey(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS)) {
       writeOptionsBuilder.enableStableRowIds(
           Boolean.parseBoolean(

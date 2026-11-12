@@ -65,6 +65,26 @@ public class Utils {
     return Long.parseUnsignedLong(version);
   }
 
+  /**
+   * Strips a single pair of matching surrounding single ({@code '...'}) or double ({@code "..."})
+   * quotes after trimming outer whitespace. Spark SQL {@code SET key = 'value'} retains the
+   * surrounding quotes in the raw {@code SQLConf} value; unquoted values are returned unchanged.
+   */
+  public static String stripSurroundingQuotes(String value) {
+    if (value == null) {
+      return null;
+    }
+    String trimmed = value.trim();
+    if (trimmed.length() >= 2) {
+      char first = trimmed.charAt(0);
+      char last = trimmed.charAt(trimmed.length() - 1);
+      if ((first == '\'' && last == '\'') || (first == '"' && last == '"')) {
+        return trimmed.substring(1, trimmed.length() - 1);
+      }
+    }
+    return value;
+  }
+
   // Tag names and branch heads move. Store the opened version, and the branch if a tag points at
   // one.
   public static LanceRef pinOpenedRef(Dataset dataset, LanceRef requested) {
