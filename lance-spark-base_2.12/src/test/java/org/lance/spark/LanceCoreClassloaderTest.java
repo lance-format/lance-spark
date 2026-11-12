@@ -16,6 +16,7 @@ package org.lance.spark;
 import org.junit.jupiter.api.Test;
 
 import java.io.File;
+import java.lang.reflect.InvocationTargetException;
 import java.net.URI;
 import java.net.URL;
 import java.net.URLClassLoader;
@@ -23,13 +24,55 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class LanceCoreClassloaderTest {
+
+  /** Verifies the Kerberos provider's reflective SPI entry point in Spark's library classloader. */
+  @Test
+  public void testKerberosProviderSpiWithIsolatedClassloader() throws Exception {
+    Set<String> classpath = collectClasspath();
+    URL[] urls = new URL[classpath.size()];
+    int index = 0;
+    for (String entry : classpath) {
+      urls[index++] = Path.of(entry).toUri().toURL();
+    }
+    try (URLClassLoader loader = new URLClassLoader(urls, ClassLoader.getPlatformClassLoader())) {
+      Class<?> provider =
+          Class.forName("org.lance.spark.auth.KerberosContextProvider", true, loader);
+      Class<?> spi = Class.forName("org.lance.namespace.DynamicContextProvider", false, loader);
+      assertTrue(spi.isAssignableFrom(provider));
+      InvocationTargetException error =
+          assertThrows(
+              InvocationTargetException.class,
+              () -> provider.getConstructor(Map.class).newInstance(Map.of()));
+      assertInstanceOf(IllegalArgumentException.class, error.getCause());
+      assertTrue(error.getCause().getMessage().contains("'service_principal' is required"));
+
+      String bundle = System.getProperty("lance.test.bundle");
+      if (bundle != null) {
+        for (String name :
+            new String[] {
+              "org.lance.spark.auth.KerberosContextProvider",
+              "org.lance.spark.auth.KerberosAuthConfig",
+              "org.lance.namespace.RestNamespace"
+            }) {
+          Class<?> bundledClass = Class.forName(name, false, loader);
+          assertEquals(
+              Path.of(bundle).toRealPath(),
+              Path.of(bundledClass.getProtectionDomain().getCodeSource().getLocation().toURI())
+                  .toRealPath());
+        }
+      }
+    }
+  }
 
   /**
    * Verifies that Lance JNI callbacks work when Spark loads the connector outside the system
