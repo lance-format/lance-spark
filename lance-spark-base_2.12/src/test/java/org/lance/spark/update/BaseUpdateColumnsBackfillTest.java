@@ -13,8 +13,11 @@
  */
 package org.lance.spark.update;
 
+import org.lance.BlobFile;
+import org.lance.Dataset;
 import org.lance.WriteParams;
 import org.lance.spark.LanceConstant;
+import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
 import org.lance.spark.write.LanceBatchWrite;
@@ -30,6 +33,8 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
+import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.write.DataWriter;
 import org.apache.spark.sql.connector.write.DataWriterFactory;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
@@ -49,6 +54,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -276,6 +282,47 @@ public abstract class BaseUpdateColumnsBackfillTest {
             .apply("vec")
             .metadata()
             .getLong("arrow.fixed-size-list.size"));
+  }
+
+  @Test
+  public void testUpdateBlobV2ColumnFromSqlTempView() throws Exception {
+    spark.sql(
+        String.format(
+            "create table %s (id int, payload binary) using lance tblproperties "
+                + "('payload.lance.encoding'='blob', 'file_format_version'='2.2')",
+            fullTable));
+    spark.sql(String.format("insert into %s values (1, X'0102'), (2, X'0304')", fullTable));
+    spark.sql(
+        String.format(
+            "create temporary view update_source as "
+                + "select _rowaddr, _fragid, X'0506' as payload from %s where id = 2",
+            fullTable));
+
+    spark.sql(String.format("alter table %s update columns payload from update_source", fullTable));
+
+    List<Row> rows =
+        spark
+            .sql(String.format("select id, _rowaddr from %s order by id", fullTable))
+            .collectAsList();
+    assertEquals(2, rows.size());
+    assertEquals(1, rows.get(0).getInt(0));
+    assertEquals(2, rows.get(1).getInt(0));
+    List<Long> rowAddresses = Arrays.asList(rows.get(0).getLong(1), rows.get(1).getLong(1));
+    LanceDataset table =
+        (LanceDataset)
+            ((TableCatalog) spark.sessionState().catalogManager().catalog(catalogName))
+                .loadTable(Identifier.of(new String[] {"default"}, tableName));
+    try (BufferAllocator allocator = new RootAllocator();
+        Dataset dataset =
+            Dataset.open().allocator(allocator).uri(table.readOptions().getDatasetUri()).build()) {
+      List<BlobFile> blobs = dataset.takeBlobs(rowAddresses, "payload");
+      assertEquals(2, blobs.size());
+      try (BlobFile firstBlob = blobs.get(0);
+          BlobFile secondBlob = blobs.get(1)) {
+        assertArrayEquals(new byte[] {1, 2}, firstBlob.read());
+        assertArrayEquals(new byte[] {5, 6}, secondBlob.read());
+      }
+    }
   }
 
   @Test
