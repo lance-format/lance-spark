@@ -206,7 +206,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
   }
 
   @Override
-  public void initialize(String name, CaseInsensitiveStringMap options) {
+  public void initialize(String name, CaseInsensitiveStringMap rawOptions) {
+    CaseInsensitiveStringMap options = stripOptionQuotes(rawOptions);
     this.name = name;
     this.storageOptions = new HashMap<>(options.asCaseSensitiveMap());
 
@@ -262,6 +263,19 @@ public abstract class BaseLanceNamespaceSparkCatalog
       // Default: multi-level namespace mode (manifest mode)
       this.singleLevelNs = false;
     }
+  }
+
+  private static CaseInsensitiveStringMap stripOptionQuotes(CaseInsensitiveStringMap options) {
+    Map<String, String> stripped = new HashMap<>(options.size());
+    for (Map.Entry<String, String> entry : options.asCaseSensitiveMap().entrySet()) {
+      stripped.put(entry.getKey(), Utils.stripSurroundingQuotes(entry.getValue()));
+    }
+    return new CaseInsensitiveStringMap(stripped);
+  }
+
+  /** Returns the parsed catalog configuration for version-specific subclasses. */
+  protected LanceSparkCatalogConfig getCatalogConfig() {
+    return catalogConfig;
   }
 
   @Override

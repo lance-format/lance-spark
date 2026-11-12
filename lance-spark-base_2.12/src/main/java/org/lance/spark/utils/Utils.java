@@ -65,6 +65,28 @@ public class Utils {
     return Long.parseUnsignedLong(version);
   }
 
+  /**
+   * If {@code value} (ignoring leading and trailing whitespace) is enclosed in a matching pair of
+   * single ({@code '...'}) or double ({@code "..."}) quotes, strips that outer whitespace and quote
+   * pair and returns the inner content verbatim (preserving any inner whitespace). Otherwise
+   * returns {@code value} unchanged. Spark SQL {@code SET key = 'value'} retains surrounding quotes
+   * in the raw {@code SQLConf} value.
+   */
+  public static String stripSurroundingQuotes(String value) {
+    if (value == null) {
+      return null;
+    }
+    String trimmed = value.trim();
+    if (trimmed.length() >= 2) {
+      char first = trimmed.charAt(0);
+      char last = trimmed.charAt(trimmed.length() - 1);
+      if ((first == '\'' && last == '\'') || (first == '"' && last == '"')) {
+        return trimmed.substring(1, trimmed.length() - 1);
+      }
+    }
+    return value;
+  }
+
   // Tag names and branch heads move. Store the opened version, and the branch if a tag points at
   // one.
   public static LanceRef pinOpenedRef(Dataset dataset, LanceRef requested) {

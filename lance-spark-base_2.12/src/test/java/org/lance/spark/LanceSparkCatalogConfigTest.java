@@ -13,6 +13,8 @@
  */
 package org.lance.spark;
 
+import org.lance.spark.utils.Utils;
+
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -189,5 +191,20 @@ public class LanceSparkCatalogConfigTest {
     LanceSparkCatalogConfig config = LanceSparkCatalogConfig.from(catalogOptions);
 
     assertEquals("LEGACY", config.getFileFormatVersion());
+  }
+
+  @Test
+  public void testStripSurroundingQuotes() {
+    assertNull(Utils.stripSurroundingQuotes(null));
+    assertEquals("", Utils.stripSurroundingQuotes(""));
+    assertEquals("", Utils.stripSurroundingQuotes("''"));
+    assertEquals("", Utils.stripSurroundingQuotes("\"\""));
+    assertEquals("false", Utils.stripSurroundingQuotes("'false'"));
+    assertEquals("false", Utils.stripSurroundingQuotes("\"false\""));
+    assertEquals("4096", Utils.stripSurroundingQuotes("  '4096'  "));
+    assertEquals(" ", Utils.stripSurroundingQuotes("' '"));
+    assertEquals(" ", Utils.stripSurroundingQuotes(" "));
+    assertEquals("\"nested\"", Utils.stripSurroundingQuotes("'\"nested\"'"));
+    assertEquals("'unmatched", Utils.stripSurroundingQuotes("'unmatched"));
   }
 }
