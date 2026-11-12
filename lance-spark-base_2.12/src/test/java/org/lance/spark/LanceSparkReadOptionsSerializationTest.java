@@ -556,11 +556,20 @@ public class LanceSparkReadOptionsSerializationTest {
       spark.sql("SET spark.sql.lance.use_scalar_index = 'false'");
       spark.sql("SET spark.sql.lance.pushDownFilters = \"false\"");
       spark.sql("SET spark.sql.lance.topN_push_down = 'false'");
+      spark.sql("SET spark.sql.lance.max_row_per_file = '5000'");
+      // Non-tuning options must be ignored at session level
+      spark.sql("SET spark.sql.lance.version = '2'");
+      spark.sql("SET spark.sql.lance.branch = 'dev'");
+      spark.sql("SET spark.sql.lance.write_mode = 'overwrite'");
+      spark.sql("SET spark.sql.lance.file_format_version = '2.0'");
+      spark.sql("SET spark.sql.lance.enable_stable_row_ids = 'true'");
 
-      // 1. Session configs override catalog defaults
+      // 1. Session tuning configs override catalog defaults, while non-tuning session keys are
+      // ignored
       Map<String, String> catalogOpts = new HashMap<>();
       catalogOpts.put(LanceSparkReadOptions.CONFIG_BATCH_SIZE, "1024");
       catalogOpts.put(LanceSparkReadOptions.CONFIG_USE_SCALAR_INDEX, "true");
+      catalogOpts.put(LanceSparkWriteOptions.CONFIG_MAX_ROWS_PER_FILE, "1000");
       LanceSparkCatalogConfig catalogConfig = LanceSparkCatalogConfig.from(catalogOpts);
 
       LanceSparkReadOptions fromCatalog =
@@ -572,14 +581,23 @@ public class LanceSparkReadOptionsSerializationTest {
       Assertions.assertFalse(fromCatalog.isUseScalarIndex());
       Assertions.assertFalse(fromCatalog.isPushDownFilters());
       Assertions.assertFalse(fromCatalog.isTopNPushDown());
+      Assertions.assertNull(fromCatalog.getRef());
 
-      // 2. Explicit per-read options override session configs (including mixed case)
+      LanceSparkWriteOptions writeFromCatalog =
+          LanceSparkWriteOptions.builder()
+              .datasetUri("s3://bucket/path")
+              .withCatalogDefaults(catalogConfig)
+              .build();
+      Assertions.assertEquals(4096, writeFromCatalog.getBatchSize());
+      Assertions.assertEquals(Integer.valueOf(5000), writeFromCatalog.getMaxRowsPerFile());
+      Assertions.assertFalse(writeFromCatalog.isOverwrite());
+      Assertions.assertNull(writeFromCatalog.getFileFormatVersion());
+      Assertions.assertNull(writeFromCatalog.getEnableStableRowIds());
+
+      // 2. Explicit per-read / per-write options override session configs (including mixed case)
       Map<String, String> perReadOpts = new HashMap<>();
       perReadOpts.put("BATCH_SIZE", "2048");
       perReadOpts.put("USE_SCALAR_INDEX", "true");
-      perReadOpts.put("VERSION", "3");
-      spark.sql("SET spark.sql.lance.version = '2'");
-      spark.sql("SET spark.sql.lance.write_mode = 'overwrite'");
       LanceSparkReadOptions overridden =
           LanceSparkReadOptions.builder()
               .datasetUri("s3://bucket/path")
@@ -589,24 +607,29 @@ public class LanceSparkReadOptionsSerializationTest {
       Assertions.assertEquals(2048, overridden.getBatchSize());
       Assertions.assertTrue(overridden.isUseScalarIndex());
       Assertions.assertFalse(overridden.isPushDownFilters());
-      Assertions.assertEquals(LanceRef.ofMain(3L), overridden.getRef());
 
       Map<String, String> perWriteOpts = new HashMap<>();
-      perWriteOpts.put("WRITE_MODE", "append");
+      perWriteOpts.put("BATCH_SIZE", "512");
+      perWriteOpts.put("MAX_ROW_PER_FILE", "2500");
       LanceSparkWriteOptions overriddenWrite =
           LanceSparkWriteOptions.builder()
               .datasetUri("s3://bucket/path")
               .fromOptions(perWriteOpts)
               .withCatalogDefaults(catalogConfig)
               .build();
-      Assertions.assertFalse(overriddenWrite.isOverwrite());
+      Assertions.assertEquals(512, overriddenWrite.getBatchSize());
+      Assertions.assertEquals(Integer.valueOf(2500), overriddenWrite.getMaxRowsPerFile());
     } finally {
       spark.conf().unset("spark.sql.lance.batch_size");
       spark.conf().unset("spark.sql.lance.use_scalar_index");
       spark.conf().unset("spark.sql.lance.pushDownFilters");
       spark.conf().unset("spark.sql.lance.topN_push_down");
+      spark.conf().unset("spark.sql.lance.max_row_per_file");
       spark.conf().unset("spark.sql.lance.version");
+      spark.conf().unset("spark.sql.lance.branch");
       spark.conf().unset("spark.sql.lance.write_mode");
+      spark.conf().unset("spark.sql.lance.file_format_version");
+      spark.conf().unset("spark.sql.lance.enable_stable_row_ids");
       spark.stop();
     }
   }

@@ -114,77 +114,25 @@ public class LanceSparkReadOptions implements Serializable {
 
   public static final String SPARK_SESSION_CONFIG_PREFIX = "spark.sql.lance.";
 
-  private static final List<String> READ_OPTION_KEYS =
-      Collections.unmodifiableList(
-          Arrays.asList(
-              CONFIG_DATASET_URI,
-              CONFIG_PUSH_DOWN_FILTERS,
-              CONFIG_BLOCK_SIZE,
-              CONFIG_VERSION,
-              CONFIG_BRANCH,
-              CONFIG_TAG,
-              CONFIG_INDEX_CACHE_SIZE,
-              CONFIG_METADATA_CACHE_SIZE,
-              CONFIG_BATCH_SIZE,
-              CONFIG_USE_SCALAR_INDEX,
-              CONFIG_RUNTIME_FILTER_MAX_KEYS,
-              CONFIG_RUNTIME_FILTER_MAX_BYTES,
-              CONFIG_TOP_N_PUSH_DOWN,
-              CONFIG_NEAREST,
-              CONFIG_FULL_TEXT_QUERY,
-              CONFIG_EXECUTOR_CREDENTIAL_REFRESH,
-              CONFIG_ARROW_BATCH_READS));
-
-  private static final List<String> SESSION_OPTION_KEYS =
-      Collections.unmodifiableList(
-          Arrays.asList(
-              CONFIG_PUSH_DOWN_FILTERS,
-              CONFIG_BLOCK_SIZE,
-              CONFIG_VERSION,
-              CONFIG_BRANCH,
-              CONFIG_TAG,
-              CONFIG_INDEX_CACHE_SIZE,
-              CONFIG_METADATA_CACHE_SIZE,
-              CONFIG_BATCH_SIZE,
-              CONFIG_USE_SCALAR_INDEX,
-              CONFIG_RUNTIME_FILTER_MAX_KEYS,
-              CONFIG_RUNTIME_FILTER_MAX_BYTES,
-              CONFIG_TOP_N_PUSH_DOWN,
-              CONFIG_FULL_TEXT_QUERY,
-              CONFIG_EXECUTOR_CREDENTIAL_REFRESH,
-              CONFIG_ARROW_BATCH_READS,
-              LanceSparkWriteOptions.CONFIG_WRITE_MODE,
-              LanceSparkWriteOptions.CONFIG_MAX_ROWS_PER_FILE,
-              LanceSparkWriteOptions.CONFIG_MAX_ROWS_PER_GROUP,
-              LanceSparkWriteOptions.CONFIG_MAX_BYTES_PER_FILE,
-              LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION,
-              LanceSparkWriteOptions.CONFIG_USE_QUEUED_WRITE_BUFFER,
-              LanceSparkWriteOptions.CONFIG_QUEUE_DEPTH,
-              LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS,
-              LanceSparkWriteOptions.CONFIG_USE_LARGE_VAR_TYPES,
-              LanceSparkWriteOptions.CONFIG_MAX_BATCH_BYTES,
-              LanceSparkWriteOptions.CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD));
-
-  static final Set<String> RECOGNIZED_READ_OPTION_LOWER_KEYS = buildLowerKeySet(READ_OPTION_KEYS);
-
-  private static final Map<String, String> CANONICAL_SESSION_OPTION_KEYS =
-      buildCanonicalKeyMap(SESSION_OPTION_KEYS);
-
-  private static Set<String> buildLowerKeySet(List<String> keys) {
-    Set<String> set = new HashSet<>(keys.size());
-    for (String key : keys) {
-      set.add(key.toLowerCase(Locale.ROOT));
-    }
-    return Collections.unmodifiableSet(set);
-  }
-
-  private static Map<String, String> buildCanonicalKeyMap(List<String> keys) {
-    Map<String, String> map = new HashMap<>(keys.size());
-    for (String key : keys) {
-      map.put(key.toLowerCase(Locale.ROOT), key);
-    }
-    return Collections.unmodifiableMap(map);
-  }
+  /**
+   * Read performance tuning options allowed via {@code SET spark.sql.lance.<key> = <value>}.
+   * Table-identity and query-specific options (such as {@code version}, {@code branch}, {@code
+   * tag}, and {@code full_text_query}) are intentionally excluded from session defaults.
+   */
+  static final Set<String> READ_SESSION_OPTION_LOWER_KEYS =
+      Collections.unmodifiableSet(
+          new HashSet<>(
+              Arrays.asList(
+                  CONFIG_PUSH_DOWN_FILTERS.toLowerCase(Locale.ROOT),
+                  CONFIG_BLOCK_SIZE.toLowerCase(Locale.ROOT),
+                  CONFIG_INDEX_CACHE_SIZE.toLowerCase(Locale.ROOT),
+                  CONFIG_METADATA_CACHE_SIZE.toLowerCase(Locale.ROOT),
+                  CONFIG_BATCH_SIZE.toLowerCase(Locale.ROOT),
+                  CONFIG_USE_SCALAR_INDEX.toLowerCase(Locale.ROOT),
+                  CONFIG_RUNTIME_FILTER_MAX_KEYS.toLowerCase(Locale.ROOT),
+                  CONFIG_RUNTIME_FILTER_MAX_BYTES.toLowerCase(Locale.ROOT),
+                  CONFIG_TOP_N_PUSH_DOWN.toLowerCase(Locale.ROOT),
+                  CONFIG_ARROW_BATCH_READS.toLowerCase(Locale.ROOT))));
 
   public static final String LANCE_FILE_SUFFIX = ".lance";
 
@@ -271,8 +219,7 @@ public class LanceSparkReadOptions implements Serializable {
    * @return a new LanceSparkReadOptions
    */
   public static LanceSparkReadOptions from(Map<String, String> properties) {
-    CaseInsensitiveStringMap ciProps = new CaseInsensitiveStringMap(properties);
-    String datasetUri = ciProps.get(CONFIG_DATASET_URI);
+    String datasetUri = properties.get(CONFIG_DATASET_URI);
     if (datasetUri == null) {
       throw new IllegalArgumentException("Missing required option: " + CONFIG_DATASET_URI);
     }
@@ -297,7 +244,7 @@ public class LanceSparkReadOptions implements Serializable {
    * @return a new LanceSparkReadOptions
    */
   public static LanceSparkReadOptions from(String datasetUri) {
-    return builder().datasetUri(datasetUri).fromOptions(Collections.emptyMap()).build();
+    return builder().datasetUri(datasetUri).build();
   }
 
   // ========== Helper methods ==========
@@ -323,19 +270,19 @@ public class LanceSparkReadOptions implements Serializable {
   }
 
   /**
-   * Extracts recognized {@code spark.sql.lance.<key>} session configurations from the active or
-   * default {@link SparkSession}, stripping any surrounding quotes added by Spark SQL {@code SET}.
+   * Extracts allowed {@code spark.sql.lance.<key>} tuning options (lowercased keys) from the active
+   * or default {@link SparkSession}, stripping surrounding quotes added by Spark SQL {@code SET}.
    */
-  public static Map<String, String> extractActiveSessionOptions() {
+  static Map<String, String> extractActiveSessionOptions(Set<String> allowedLowerKeys) {
+    Option<SparkSession> sessionOpt = SparkSession.getActiveSession();
+    if (sessionOpt.isEmpty()) {
+      sessionOpt = SparkSession.getDefaultSession();
+    }
+    if (sessionOpt.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    SparkSession spark = sessionOpt.get();
     try {
-      Option<SparkSession> sessionOpt = SparkSession.getActiveSession();
-      if (sessionOpt.isEmpty()) {
-        sessionOpt = SparkSession.getDefaultSession();
-      }
-      if (sessionOpt.isEmpty()) {
-        return Collections.emptyMap();
-      }
-      SparkSession spark = sessionOpt.get();
       if (spark.sparkContext().isStopped()) {
         return Collections.emptyMap();
       }
@@ -349,68 +296,28 @@ public class LanceSparkReadOptions implements Serializable {
             && confVal != null
             && confKey.regionMatches(
                 true, 0, SPARK_SESSION_CONFIG_PREFIX, 0, SPARK_SESSION_CONFIG_PREFIX.length())) {
-          String optName = confKey.substring(SPARK_SESSION_CONFIG_PREFIX.length());
-          String canonical = CANONICAL_SESSION_OPTION_KEYS.get(optName.toLowerCase(Locale.ROOT));
-          if (canonical != null) {
-            sessionOpts.put(canonical, stripSurroundingQuotes(confVal));
+          String lowerKey =
+              confKey.substring(SPARK_SESSION_CONFIG_PREFIX.length()).toLowerCase(Locale.ROOT);
+          if (allowedLowerKeys.contains(lowerKey)) {
+            sessionOpts.put(lowerKey, stripSurroundingQuotes(confVal));
           }
         }
       }
       return sessionOpts;
-    } catch (Exception e) {
+    } catch (IllegalStateException e) {
       return Collections.emptyMap();
     }
   }
 
-  /**
-   * Merges {@code overrides} into {@code target}, matching recognized connector option keys
-   * case-insensitively so that higher-precedence options replace lower-precedence entries
-   * regardless of key casing while preserving case-sensitive storage option keys.
-   */
-  static void mergeRecognizedOptions(
-      Map<String, String> target,
-      Map<String, String> overrides,
-      Set<String> recognizedLowerKeys,
-      boolean clearConflictingRefs) {
-    if (overrides == null || overrides.isEmpty()) {
+  static void putLowerKeys(Map<String, String> target, Map<String, String> source) {
+    if (source == null || source.isEmpty()) {
       return;
     }
-    if (clearConflictingRefs) {
-      boolean hasVersion = false;
-      boolean hasBranch = false;
-      boolean hasTag = false;
-      for (String key : overrides.keySet()) {
-        if (key == null) {
-          continue;
-        }
-        if (key.equalsIgnoreCase(CONFIG_VERSION)) {
-          hasVersion = true;
-        } else if (key.equalsIgnoreCase(CONFIG_BRANCH)) {
-          hasBranch = true;
-        } else if (key.equalsIgnoreCase(CONFIG_TAG)) {
-          hasTag = true;
-        }
-      }
-      int refCount = (hasVersion ? 1 : 0) + (hasBranch ? 1 : 0) + (hasTag ? 1 : 0);
-      Preconditions.checkArgument(refCount <= 1, "Specify only one of branch, tag, or version");
-      if (refCount == 1) {
-        target
-            .keySet()
-            .removeIf(
-                existing ->
-                    existing != null
-                        && (existing.equalsIgnoreCase(CONFIG_VERSION)
-                            || existing.equalsIgnoreCase(CONFIG_BRANCH)
-                            || existing.equalsIgnoreCase(CONFIG_TAG)));
-      }
-    }
-    for (Map.Entry<String, String> entry : overrides.entrySet()) {
+    for (Map.Entry<String, String> entry : source.entrySet()) {
       String key = entry.getKey();
-      String value = entry.getValue();
-      if (key != null && recognizedLowerKeys.contains(key.toLowerCase(Locale.ROOT))) {
-        target.keySet().removeIf(existing -> existing != null && existing.equalsIgnoreCase(key));
+      if (key != null) {
+        target.put(key.toLowerCase(Locale.ROOT), entry.getValue());
       }
-      target.put(key, value);
     }
   }
 
@@ -804,8 +711,9 @@ public class LanceSparkReadOptions implements Serializable {
      */
     public Builder fromOptions(Map<String, String> options) {
       this.storageOptions = new HashMap<>(options);
-      Map<String, String> effective = new HashMap<>(extractActiveSessionOptions());
-      mergeRecognizedOptions(effective, options, RECOGNIZED_READ_OPTION_LOWER_KEYS, true);
+      Map<String, String> effective =
+          new HashMap<>(extractActiveSessionOptions(READ_SESSION_OPTION_LOWER_KEYS));
+      putLowerKeys(effective, options);
       parseTypedFlags(effective);
       return this;
     }
@@ -825,15 +733,15 @@ public class LanceSparkReadOptions implements Serializable {
       // Merge storage options: catalog options are defaults, current options override
       Map<String, String> userOptions = new HashMap<>(this.storageOptions);
       Map<String, String> mergedStorage = new HashMap<>(catalogConfig.getStorageOptions());
-      mergeRecognizedOptions(mergedStorage, userOptions, RECOGNIZED_READ_OPTION_LOWER_KEYS, true);
+      mergedStorage.putAll(userOptions);
       this.storageOptions = mergedStorage;
       this.indexCacheBackend = catalogConfig.getIndexCacheBackend();
       this.metadataCacheBackend = catalogConfig.getMetadataCacheBackend();
 
-      Map<String, String> effective = new HashMap<>(catalogConfig.getStorageOptions());
-      mergeRecognizedOptions(
-          effective, extractActiveSessionOptions(), RECOGNIZED_READ_OPTION_LOWER_KEYS, true);
-      mergeRecognizedOptions(effective, userOptions, RECOGNIZED_READ_OPTION_LOWER_KEYS, true);
+      Map<String, String> effective = new HashMap<>();
+      putLowerKeys(effective, catalogConfig.getStorageOptions());
+      effective.putAll(extractActiveSessionOptions(READ_SESSION_OPTION_LOWER_KEYS));
+      putLowerKeys(effective, userOptions);
       parseTypedFlags(effective);
       return this;
     }

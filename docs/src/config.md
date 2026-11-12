@@ -75,16 +75,16 @@ and namespace-specific options:
 | `spark.sql.catalog.{name}.parent`           | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                             |
 | `spark.sql.catalog.{name}.parent_delimiter` | String | ✗        | Delimiter for parent prefix (default: `.`). See [Note on Namespace Levels](#note-on-namespace-levels).                           |
 
-## Session-Level Read and Write Options
+## Session-Level Tuning Options
 
-Read and write options (such as `batch_size`, `block_size`, `pushDownFilters`, `use_scalar_index`, `topN_push_down`, `executor_credential_refresh`, and `arrow_batch_reads`) can also be configured dynamically at the Spark session level under the `spark.sql.lance.` prefix:
+Read and write tuning options (such as `batch_size`, `block_size`, `pushDownFilters`, `use_scalar_index`, `topN_push_down`, `arrow_batch_reads`, `max_row_per_file`, and `max_batch_bytes`) can be configured dynamically at the Spark session level under the `spark.sql.lance.` prefix:
 
 ```sql
 SET spark.sql.lance.batch_size = 4096;
 SET spark.sql.lance.use_scalar_index = false;
 ```
 
-Surrounding single or double quotes in `SET` statements (for example, `SET spark.sql.lance.use_scalar_index = 'false'`) are stripped automatically. Session-level settings override catalog-level defaults (`spark.sql.catalog.{name}.*`), while explicit per-query `.option(...)` settings override session-level settings.
+Surrounding single or double quotes in `SET` statements (for example, `SET spark.sql.lance.use_scalar_index = 'false'`) are stripped automatically. Session-level tuning settings override catalog-level defaults (`spark.sql.catalog.{name}.*`), while explicit per-query `.option(...)` settings override session-level settings. Table-identity and write-mode options (such as `version`, `branch`, `tag`, `write_mode`, `file_format_version`, and `enable_stable_row_ids`) are not applied from session configuration.
 
 ## Distributed Vector Search
 

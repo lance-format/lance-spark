@@ -32,7 +32,7 @@ import java.util.Objects;
 import java.util.Set;
 
 import static org.lance.spark.LanceSparkReadOptions.extractActiveSessionOptions;
-import static org.lance.spark.LanceSparkReadOptions.mergeRecognizedOptions;
+import static org.lance.spark.LanceSparkReadOptions.putLowerKeys;
 import static org.lance.spark.LanceSparkReadOptions.stripSurroundingQuotes;
 
 /**
@@ -72,25 +72,24 @@ public class LanceSparkWriteOptions implements Serializable {
   public static final String CONFIG_MAX_BATCH_BYTES = "max_batch_bytes";
   public static final String CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD = "blob_pack_file_size_threshold";
 
-  private static final Set<String> RECOGNIZED_WRITE_OPTION_LOWER_KEYS =
+  /**
+   * Write performance tuning options allowed via {@code SET spark.sql.lance.<key> = <value>}.
+   * Operation and table-format options (such as {@code write_mode}, {@code file_format_version},
+   * {@code enable_stable_row_ids}, and {@code use_large_var_types}) are intentionally excluded from
+   * session defaults.
+   */
+  static final Set<String> WRITE_SESSION_OPTION_LOWER_KEYS =
       Collections.unmodifiableSet(
           new HashSet<>(
               Arrays.asList(
-                  CONFIG_DATASET_URI.toLowerCase(Locale.ROOT),
-                  CONFIG_WRITE_MODE.toLowerCase(Locale.ROOT),
+                  CONFIG_BATCH_SIZE.toLowerCase(Locale.ROOT),
+                  CONFIG_MAX_BATCH_BYTES.toLowerCase(Locale.ROOT),
                   CONFIG_MAX_ROWS_PER_FILE.toLowerCase(Locale.ROOT),
                   CONFIG_MAX_ROWS_PER_GROUP.toLowerCase(Locale.ROOT),
                   CONFIG_MAX_BYTES_PER_FILE.toLowerCase(Locale.ROOT),
-                  CONFIG_FILE_FORMAT_VERSION.toLowerCase(Locale.ROOT),
                   CONFIG_USE_QUEUED_WRITE_BUFFER.toLowerCase(Locale.ROOT),
                   CONFIG_QUEUE_DEPTH.toLowerCase(Locale.ROOT),
-                  CONFIG_BATCH_SIZE.toLowerCase(Locale.ROOT),
-                  CONFIG_ENABLE_STABLE_ROW_IDS.toLowerCase(Locale.ROOT),
-                  CONFIG_USE_LARGE_VAR_TYPES.toLowerCase(Locale.ROOT),
-                  CONFIG_MAX_BATCH_BYTES.toLowerCase(Locale.ROOT),
-                  CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD.toLowerCase(Locale.ROOT),
-                  LanceSparkReadOptions.CONFIG_BRANCH.toLowerCase(Locale.ROOT),
-                  LanceSparkReadOptions.CONFIG_TAG.toLowerCase(Locale.ROOT))));
+                  CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD.toLowerCase(Locale.ROOT))));
 
   private static final WriteMode DEFAULT_WRITE_MODE = WriteMode.APPEND;
   private static final boolean DEFAULT_USE_QUEUED_WRITE_BUFFER = false;
@@ -182,7 +181,7 @@ public class LanceSparkWriteOptions implements Serializable {
    * @return a new LanceSparkWriteOptions
    */
   public static LanceSparkWriteOptions from(String datasetUri) {
-    return builder().datasetUri(datasetUri).fromOptions(Collections.emptyMap()).build();
+    return builder().datasetUri(datasetUri).build();
   }
 
   // ========== Getters ==========
@@ -572,8 +571,9 @@ public class LanceSparkWriteOptions implements Serializable {
      */
     public Builder fromOptions(Map<String, String> options) {
       this.storageOptions = new HashMap<>(options);
-      Map<String, String> effective = new HashMap<>(extractActiveSessionOptions());
-      mergeRecognizedOptions(effective, options, RECOGNIZED_WRITE_OPTION_LOWER_KEYS, false);
+      Map<String, String> effective =
+          new HashMap<>(extractActiveSessionOptions(WRITE_SESSION_OPTION_LOWER_KEYS));
+      putLowerKeys(effective, options);
       parseTypedFlags(effective);
       return this;
     }
@@ -598,15 +598,15 @@ public class LanceSparkWriteOptions implements Serializable {
       // Merge storage options: catalog options are defaults, current options override
       Map<String, String> userOptions = new HashMap<>(this.storageOptions);
       Map<String, String> mergedStorage = new HashMap<>(catalogConfig.getStorageOptions());
-      mergeRecognizedOptions(mergedStorage, userOptions, RECOGNIZED_WRITE_OPTION_LOWER_KEYS, false);
+      mergedStorage.putAll(userOptions);
       this.storageOptions = mergedStorage;
       this.indexCacheBackend = catalogConfig.getIndexCacheBackend();
       this.metadataCacheBackend = catalogConfig.getMetadataCacheBackend();
 
-      Map<String, String> effective = new HashMap<>(catalogConfig.getStorageOptions());
-      mergeRecognizedOptions(
-          effective, extractActiveSessionOptions(), RECOGNIZED_WRITE_OPTION_LOWER_KEYS, false);
-      mergeRecognizedOptions(effective, userOptions, RECOGNIZED_WRITE_OPTION_LOWER_KEYS, false);
+      Map<String, String> effective = new HashMap<>();
+      putLowerKeys(effective, catalogConfig.getStorageOptions());
+      effective.putAll(extractActiveSessionOptions(WRITE_SESSION_OPTION_LOWER_KEYS));
+      putLowerKeys(effective, userOptions);
       parseTypedFlags(effective);
       return this;
     }
