@@ -66,9 +66,11 @@ public class Utils {
   }
 
   /**
-   * Strips a single pair of matching surrounding single ({@code '...'}) or double ({@code "..."})
-   * quotes after trimming outer whitespace. Spark SQL {@code SET key = 'value'} retains the
-   * surrounding quotes in the raw {@code SQLConf} value; unquoted values are returned unchanged.
+   * If {@code value} (ignoring leading and trailing whitespace) is enclosed in a matching pair of
+   * single ({@code '...'}) or double ({@code "..."}) quotes, strips that outer whitespace and quote
+   * pair and returns the inner content verbatim (preserving any inner whitespace). Otherwise
+   * returns {@code value} unchanged. Spark SQL {@code SET key = 'value'} retains surrounding quotes
+   * in the raw {@code SQLConf} value.
    */
   public static String stripSurroundingQuotes(String value) {
     if (value == null) {

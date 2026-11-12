@@ -273,6 +273,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     return new CaseInsensitiveStringMap(stripped);
   }
 
+  /** Returns the parsed catalog configuration for version-specific subclasses. */
   protected LanceSparkCatalogConfig getCatalogConfig() {
     return catalogConfig;
   }
