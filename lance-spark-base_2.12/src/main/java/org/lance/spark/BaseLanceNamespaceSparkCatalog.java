@@ -257,7 +257,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       this.singleLevelNs = Boolean.parseBoolean(options.get(CONFIG_SINGLE_LEVEL_NS));
     } else if ("rest".equals(impl)) {
       // For REST: auto-detect based on whether ListNamespaces works
-      this.singleLevelNs = determineSingleLevelNsForRest();
+      this.singleLevelNs = determineSingleLevelNsForRest(this.namespace, this.parentPrefix);
     } else {
       // Default: multi-level namespace mode (manifest mode)
       this.singleLevelNs = false;
@@ -1656,13 +1656,19 @@ public abstract class BaseLanceNamespaceSparkCatalog
   /**
    * Determines whether to use single-level mode for REST implementations by testing ListNamespaces.
    * If ListNamespaces fails, assumes flat namespace structure and enables single-level mode.
+   * Visible for testing.
    *
    * @return true if ListNamespaces fails (single-level mode), false otherwise
    */
-  private boolean determineSingleLevelNsForRest() {
+  static boolean determineSingleLevelNsForRest(
+      LanceNamespace namespace, Optional<List<String>> parentPrefix) {
     try {
       org.lance.namespace.model.ListNamespacesRequest request =
           new org.lance.namespace.model.ListNamespacesRequest();
+      // Add parent prefix to empty namespace (root)
+      if (parentPrefix.isPresent()) {
+        request.setId(parentPrefix.get());
+      }
       namespace.listNamespaces(request);
       return false;
     } catch (Exception e) {
