@@ -85,7 +85,71 @@ public abstract class BaseUpdateTableTest {
 
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
-  public void testTransactionPropertiesSql(boolean managedVersioning) throws Exception {
+  public void testTransactionPropertiesCreate(boolean managedVersioning) throws Exception {
+    String table = createTransactionPropertiesTable(managedVersioning);
+    assertTransactionProperties(Collections.singletonMap("request", "create"));
+    Assertions.assertEquals(2, spark.table(table).count());
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  public void testTransactionPropertiesUpdate(boolean managedVersioning) throws Exception {
+    String table = createTransactionPropertiesTable(managedVersioning);
+    Map<String, String> properties = new HashMap<>();
+    properties.put("RequestID", "Update-42");
+    properties.put("empty", "");
+    properties.put("", "");
+    properties.put("\u96ea", "\u00e9");
+    Map<String, String> expected = new HashMap<>(properties);
+    LanceSpark.executeSql(spark, "UPDATE " + table + " SET value = value + 1", properties);
+    properties.put("RequestID", "mutated");
+    assertTransactionProperties(expected);
+    Assertions.assertEquals(32, spark.sql("SELECT SUM(value) FROM " + table).first().getLong(0));
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  public void testTransactionPropertiesMatchedMerge(boolean managedVersioning) throws Exception {
+    String table = createTransactionPropertiesTable(managedVersioning);
+    LanceSpark.executeSql(
+        spark,
+        "MERGE INTO "
+            + table
+            + " target USING (SELECT 1 AS id, 99 AS value) source "
+            + "ON target.id = source.id WHEN MATCHED THEN UPDATE SET value = source.value",
+        Collections.singletonMap("RequestID", "Matched-Merge"));
+    assertTransactionProperties(Collections.singletonMap("RequestID", "Matched-Merge"));
+    Assertions.assertEquals(119, spark.sql("SELECT SUM(value) FROM " + table).first().getLong(0));
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  public void testTransactionPropertiesInsertOnlyMerge(boolean managedVersioning) throws Exception {
+    String table = createTransactionPropertiesTable(managedVersioning);
+    LanceSpark.executeSql(
+        spark,
+        "MERGE INTO "
+            + table
+            + " target USING (SELECT 3 AS id, 30 AS value) source "
+            + "ON target.id = source.id WHEN NOT MATCHED THEN INSERT *",
+        Collections.singletonMap("RequestID", "Insert-Merge"));
+    assertTransactionProperties(Collections.singletonMap("RequestID", "Insert-Merge"));
+    Assertions.assertEquals(3, spark.table(table).count());
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  public void testTransactionPropertiesDeleteAndReset(boolean managedVersioning) throws Exception {
+    String table = createTransactionPropertiesTable(managedVersioning);
+    LanceSpark.executeSql(
+        spark, "DELETE FROM " + table, Collections.singletonMap("RequestID", "Delete-43"));
+    Assertions.assertEquals(0, spark.table(table).count());
+    assertTransactionProperties(Collections.singletonMap("RequestID", "Delete-43"));
+    spark.sql("INSERT INTO " + table + " VALUES (3, 30)");
+    assertTransactionProperties(Collections.emptyMap());
+  }
+
+  private String createTransactionPropertiesTable(boolean managedVersioning) throws Exception {
     if (managedVersioning) {
       catalogName += "_managed";
       String catalogConfig = "spark.sql.catalog." + catalogName;
@@ -97,54 +161,19 @@ public abstract class BaseUpdateTableTest {
       spark.sql("CREATE NAMESPACE " + catalogName + ".default");
     }
     String table = catalogName + ".default.transaction_properties";
-    Map<String, String> createProperties = Collections.singletonMap("request", "create");
     LanceSpark.executeSql(
         spark,
         "CREATE TABLE "
             + table
             + " USING lance AS SELECT 1 AS id, 10 AS value UNION ALL SELECT 2, 20",
-        createProperties);
+        Collections.singletonMap("request", "create"));
     if (managedVersioning) {
       LanceDataset targetTable =
           (LanceDataset)
               catalog.loadTable(Identifier.of(new String[] {"default"}, "transaction_properties"));
       Assertions.assertTrue(targetTable.getManagedVersioning());
     }
-    assertTransactionProperties(createProperties);
-    Map<String, String> properties = new HashMap<>();
-    properties.put("RequestID", "Update-42");
-    properties.put("empty", "");
-    properties.put("", "");
-    properties.put("\u96ea", "\u00e9");
-    Map<String, String> expected = new HashMap<>(properties);
-    LanceSpark.executeSql(spark, "UPDATE " + table + " SET value = value + 1", properties);
-    properties.put("RequestID", "mutated");
-    assertTransactionProperties(expected);
-    Assertions.assertEquals(32, spark.sql("SELECT SUM(value) FROM " + table).first().getLong(0));
-    LanceSpark.executeSql(
-        spark,
-        "MERGE INTO "
-            + table
-            + " target USING (SELECT 1 AS id, 99 AS value) source "
-            + "ON target.id = source.id WHEN MATCHED THEN UPDATE SET value = source.value",
-        Collections.singletonMap("RequestID", "Matched-Merge"));
-    assertTransactionProperties(Collections.singletonMap("RequestID", "Matched-Merge"));
-    Assertions.assertEquals(120, spark.sql("SELECT SUM(value) FROM " + table).first().getLong(0));
-    LanceSpark.executeSql(
-        spark,
-        "MERGE INTO "
-            + table
-            + " target USING (SELECT 3 AS id, 30 AS value) source "
-            + "ON target.id = source.id WHEN NOT MATCHED THEN INSERT *",
-        Collections.singletonMap("RequestID", "Insert-Merge"));
-    assertTransactionProperties(Collections.singletonMap("RequestID", "Insert-Merge"));
-    Assertions.assertEquals(3, spark.table(table).count());
-    LanceSpark.executeSql(
-        spark, "DELETE FROM " + table, Collections.singletonMap("RequestID", "Delete-43"));
-    Assertions.assertEquals(0, spark.table(table).count());
-    assertTransactionProperties(Collections.singletonMap("RequestID", "Delete-43"));
-    spark.sql("INSERT INTO " + table + " VALUES (3, 30)");
-    assertTransactionProperties(Collections.emptyMap());
+    return table;
   }
 
   private void assertTransactionProperties(Map<String, String> expected) throws Exception {

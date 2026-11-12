@@ -17,6 +17,8 @@ import org.lance.WriteParams;
 import org.lance.namespace.LanceNamespace;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -38,6 +40,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** Tests for {@link LanceSparkWriteOptions}. */
 public class LanceSparkWriteOptionsTest {
 
+  private static final Map<String, String> TRANSACTION_PROPERTIES_OPTION =
+      Collections.singletonMap("TrAnSaCtIoN_PrOpErTiEs", "{\"RequestID\":\"Value\"}");
+
   private final String TEMP_URL = "file:///tmp/test";
 
   @Test
@@ -58,38 +63,35 @@ public class LanceSparkWriteOptionsTest {
         UnsupportedOperationException.class,
         () -> options.getTransactionProperties().put("another", "value"));
     assertEquals(options, options.toBuilder().build());
-    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-    try (ObjectOutputStream output = new ObjectOutputStream(bytes)) {
-      output.writeObject(options);
-    }
-    try (ObjectInputStream input =
-        new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
-      assertEquals(options, input.readObject());
-    }
+    assertEquals(options, TestUtils.roundTrip(options));
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "",
+        "null",
+        "[]",
+        "{\"key\":null}",
+        "{\"key\":1}",
+        "{\"key\":true}",
+        "{\"key\":{}}",
+        "{\"key\":[]}",
+        "{\"key\":\"one\",\"key\":\"two\"}",
+        "{\"key\":\"one\"} {}"
+      })
+  public void transactionPropertiesValidateWithoutCoercion(String invalid) {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            LanceSparkWriteOptions.builder()
+                .datasetUri(TEMP_URL)
+                .fromOptions(Collections.singletonMap("transaction_properties", invalid))
+                .build());
   }
 
   @Test
-  public void transactionPropertiesValidateWithoutCoercion() {
-    for (String invalid :
-        Arrays.asList(
-            "",
-            "null",
-            "[]",
-            "{\"key\":null}",
-            "{\"key\":1}",
-            "{\"key\":true}",
-            "{\"key\":{}}",
-            "{\"key\":[]}",
-            "{\"key\":\"one\",\"key\":\"two\"}",
-            "{\"key\":\"one\"} {}")) {
-      assertThrows(
-          IllegalArgumentException.class,
-          () ->
-              LanceSparkWriteOptions.builder()
-                  .datasetUri(TEMP_URL)
-                  .fromOptions(Collections.singletonMap("transaction_properties", invalid))
-                  .build());
-    }
+  public void transactionPropertiesRejectNullMapsAndValues() {
     assertThrows(
         IllegalArgumentException.class,
         () -> LanceSparkWriteOptions.builder().transactionProperties(null));
@@ -101,15 +103,13 @@ public class LanceSparkWriteOptionsTest {
   }
 
   @Test
-  public void transactionPropertiesAreWriteOnlyAndNotCatalogDefaults() {
-    Map<String, String> envelope =
-        Collections.singletonMap("TrAnSaCtIoN_PrOpErTiEs", "{\"RequestID\":\"Value\"}");
+  public void transactionPropertiesAreWriteOnly() {
     LanceSparkCatalogConfig catalog =
-        LanceSparkCatalogConfig.builder().storageOptions(envelope).build();
+        LanceSparkCatalogConfig.builder().storageOptions(TRANSACTION_PROPERTIES_OPTION).build();
     LanceSparkWriteOptions options =
         LanceSparkWriteOptions.builder()
             .datasetUri(TEMP_URL)
-            .fromOptions(envelope)
+            .fromOptions(TRANSACTION_PROPERTIES_OPTION)
             .withCatalogDefaults(catalog)
             .build();
     assertEquals(
@@ -119,10 +119,16 @@ public class LanceSparkWriteOptionsTest {
     assertTrue(
         LanceSparkReadOptions.builder()
             .datasetUri(TEMP_URL)
-            .storageOptions(envelope)
+            .storageOptions(TRANSACTION_PROPERTIES_OPTION)
             .build()
             .getStorageOptions()
             .isEmpty());
+  }
+
+  @Test
+  public void transactionPropertiesAreNotCatalogDefaults() {
+    LanceSparkCatalogConfig catalog =
+        LanceSparkCatalogConfig.builder().storageOptions(TRANSACTION_PROPERTIES_OPTION).build();
     assertTrue(
         LanceSparkWriteOptions.builder()
             .datasetUri(TEMP_URL)
@@ -130,13 +136,23 @@ public class LanceSparkWriteOptionsTest {
             .build()
             .getTransactionProperties()
             .isEmpty());
+  }
+
+  @Test
+  public void transactionPropertiesAreClearedWhenBuilderIsReused() {
     LanceSparkWriteOptions.Builder reused =
-        LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(envelope);
+        LanceSparkWriteOptions.builder()
+            .datasetUri(TEMP_URL)
+            .fromOptions(TRANSACTION_PROPERTIES_OPTION);
     LanceSparkWriteOptions captured = reused.build();
     assertTrue(
         reused.fromOptions(Collections.emptyMap()).build().getTransactionProperties().isEmpty());
     assertEquals(
         Collections.singletonMap("RequestID", "Value"), captured.getTransactionProperties());
+  }
+
+  @Test
+  public void emptyTransactionPropertiesAreAccepted() {
     assertTrue(
         LanceSparkWriteOptions.builder()
             .datasetUri(TEMP_URL)

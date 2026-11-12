@@ -50,6 +50,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.File;
 import java.nio.file.Path;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -145,18 +146,32 @@ public abstract class BaseSparkConnectorWriteTest {
     assertEquals(
         Collections.singletonMap("request", "overwrite"),
         TestUtils.readTransactionProperties(readOptions));
-    long version;
-    try (org.lance.Dataset dataset = Utils.openDatasetBuilder(readOptions).build()) {
-      version = dataset.version();
-    }
+  }
+
+  @Test
+  public void transactionPropertiesEmptyAppendDoesNotCommit(TestInfo testInfo) throws Exception {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
+    String table = "lance.`" + path + "`";
+    testData.writeTo(table).create();
+    long version = datasetVersion(path);
+
     testData
         .limit(0)
         .writeTo(table)
         .option("transaction_properties", "{\"request\":\"noop\"}")
         .append();
-    try (org.lance.Dataset dataset = Utils.openDatasetBuilder(readOptions).build()) {
-      assertEquals(version, dataset.version());
-    }
+    assertEquals(version, datasetVersion(path));
+  }
+
+  @Test
+  public void transactionPropertiesInvalidWritesDoNotCommit(TestInfo testInfo) throws Exception {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
+    String table = "lance.`" + path + "`";
+    testData.writeTo(table).create();
+    long version = datasetVersion(path);
+
     assertThrows(
         Exception.class,
         () ->
@@ -171,9 +186,17 @@ public abstract class BaseSparkConnectorWriteTest {
                 .writeTo(table)
                 .option("transaction_properties", "{\"request\":null}")
                 .replace());
-    try (org.lance.Dataset dataset = Utils.openDatasetBuilder(readOptions).build()) {
-      assertEquals(version, dataset.version());
-    }
+    assertEquals(version, datasetVersion(path));
+  }
+
+  @Test
+  public void transactionPropertiesEmptyOverwriteAndReset(TestInfo testInfo) throws Exception {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
+    String table = "lance.`" + path + "`";
+    LanceSparkReadOptions readOptions = LanceSparkReadOptions.from(path);
+    testData.writeTo(table).create();
+
     testData
         .limit(0)
         .writeTo(table)
@@ -212,24 +235,43 @@ public abstract class BaseSparkConnectorWriteTest {
           spark, operation + " TABLE " + table + " AS SELECT * FROM tmp_view", properties);
       assertEquals(properties, TestUtils.readTransactionProperties(readOptions));
       assertEquals(2, spark.table(table).count());
-      try (org.lance.Dataset dataset = Utils.openDatasetBuilder(readOptions).build()) {
-        assertEquals(expectedVersion++, dataset.version());
-      }
+      assertEquals(expectedVersion++, datasetVersion(path));
     }
+  }
+
+  @Test
+  public void transactionPropertiesSqlCreateOrReplaceNewTable(TestInfo testInfo) {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
     LanceSpark.executeSql(
         spark,
-        "CREATE OR REPLACE TABLE lance.`" + path + "_new` AS SELECT * FROM tmp_view",
+        "CREATE OR REPLACE TABLE lance.`" + path + "` AS SELECT * FROM tmp_view",
         Collections.singletonMap("request", "new-create-or-replace"));
     assertEquals(
         Collections.singletonMap("request", "new-create-or-replace"),
-        TestUtils.readTransactionProperties(LanceSparkReadOptions.from(path + "_new")));
+        TestUtils.readTransactionProperties(LanceSparkReadOptions.from(path)));
+  }
+
+  @Test
+  public void transactionPropertiesSqlEmptyCreate(TestInfo testInfo) {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
     LanceSpark.executeSql(
         spark,
-        "CREATE TABLE lance.`" + path + "_empty` AS SELECT * FROM tmp_view WHERE false",
+        "CREATE TABLE lance.`" + path + "` AS SELECT * FROM tmp_view WHERE false",
         Collections.singletonMap("request", "empty-ctas"));
     assertEquals(
         Collections.singletonMap("request", "empty-ctas"),
-        TestUtils.readTransactionProperties(LanceSparkReadOptions.from(path + "_empty")));
+        TestUtils.readTransactionProperties(LanceSparkReadOptions.from(path)));
+  }
+
+  @Test
+  public void transactionPropertiesSqlRejectsNonWritingStatements(TestInfo testInfo)
+      throws Exception {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
+    String table = "lance.`" + path + "`";
+    testData.writeTo(table).create();
     assertThrows(
         IllegalArgumentException.class,
         () -> LanceSpark.executeSql(spark, "SELECT * FROM " + table, Collections.emptyMap()));
@@ -241,13 +283,41 @@ public abstract class BaseSparkConnectorWriteTest {
         TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
     String table = "lance.`" + path + "`";
     testData.writeTo(table).create();
-    long initialVersion;
+    long initialVersion = datasetVersion(path);
+    String sourceView = "transaction_properties_concurrent_source";
+    createConcurrentAppendSource(sourceView);
+    Map<String, String> firstProperties =
+        new HashMap<>(Collections.singletonMap("request", "writer-a"));
+    firstProperties.put("only-a", "value-a");
+    Map<String, String> secondProperties =
+        new HashMap<>(Collections.singletonMap("request", "writer-b"));
+    secondProperties.put("only-b", "value-b");
+    Set<Map<String, String>> expectedProperties =
+        new HashSet<>(Arrays.asList(firstProperties, secondProperties));
+    try {
+      appendConcurrently(table, sourceView, firstProperties, secondProperties);
+      try (org.lance.Dataset dataset =
+          Utils.openDatasetBuilder(LanceSparkReadOptions.from(path)).build()) {
+        assertEquals(6, dataset.countRows());
+        List<Map<String, String>> committedProperties =
+            readTransactionPropertiesAfter(dataset, initialVersion);
+        assertEquals(2, committedProperties.size());
+        assertEquals(expectedProperties, new HashSet<>(committedProperties));
+      }
+    } finally {
+      spark.catalog().dropTempView(sourceView);
+    }
+  }
+
+  private static long datasetVersion(String path) {
     try (org.lance.Dataset dataset =
         Utils.openDatasetBuilder(LanceSparkReadOptions.from(path)).build()) {
-      initialVersion = dataset.version();
+      return dataset.version();
     }
+  }
+
+  private static void createConcurrentAppendSource(String sourceView) {
     concurrentWriteTasks = new CountDownLatch(2);
-    String sourceView = "transaction_properties_concurrent_source";
     // One task per write makes the barrier synchronize different writes, not source partitions.
     testData
         .coalesce(1)
@@ -267,18 +337,20 @@ public abstract class BaseSparkConnectorWriteTest {
                 .asNondeterministic()
                 .apply(col("id")))
         .createOrReplaceTempView(sourceView);
+  }
+
+  private static void appendConcurrently(
+      String table,
+      String sourceView,
+      Map<String, String> firstProperties,
+      Map<String, String> secondProperties)
+      throws Exception {
     String statement =
         "WITH source AS (SELECT * FROM "
             + sourceView
             + ") INSERT INTO "
             + table
             + " SELECT * FROM source";
-    Map<String, String> firstProperties =
-        new HashMap<>(Collections.singletonMap("request", "writer-a"));
-    firstProperties.put("only-a", "value-a");
-    Map<String, String> secondProperties =
-        new HashMap<>(Collections.singletonMap("request", "writer-b"));
-    secondProperties.put("only-b", "value-b");
     ExecutorService executor = Executors.newFixedThreadPool(2);
     try {
       List<Future<?>> writes =
@@ -288,33 +360,27 @@ public abstract class BaseSparkConnectorWriteTest {
       for (Future<?> write : writes) {
         write.get(60, TimeUnit.SECONDS);
       }
-      Set<Map<String, String>> committedProperties = new HashSet<>();
-      try (org.lance.Dataset dataset =
-          Utils.openDatasetBuilder(LanceSparkReadOptions.from(path)).build()) {
-        assertEquals(6, dataset.countRows());
-        List<Version> committedVersions =
-            dataset.listVersions().stream()
-                .filter(version -> version.getId() > initialVersion)
-                .collect(Collectors.toList());
-        assertEquals(2, committedVersions.size());
-        for (Version version : committedVersions) {
-          try (org.lance.Dataset historical = dataset.checkoutVersion(version.getId());
-              Transaction transaction =
-                  historical.readTransaction().orElseThrow(AssertionError::new)) {
-            committedProperties.add(
-                new HashMap<>(
-                    transaction.transactionProperties().orElseThrow(AssertionError::new)));
-          }
-        }
-      }
-      assertEquals(
-          new HashSet<>(Arrays.asList(firstProperties, secondProperties)), committedProperties);
     } finally {
       concurrentWriteTasks.countDown();
       concurrentWriteTasks.countDown();
       executor.shutdownNow();
-      spark.catalog().dropTempView(sourceView);
     }
+  }
+
+  private static List<Map<String, String>> readTransactionPropertiesAfter(
+      org.lance.Dataset dataset, long initialVersion) {
+    List<Map<String, String>> committedProperties = new ArrayList<>();
+    for (Version version : dataset.listVersions()) {
+      if (version.getId() > initialVersion) {
+        try (org.lance.Dataset historical = dataset.checkoutVersion(version.getId());
+            Transaction transaction =
+                historical.readTransaction().orElseThrow(AssertionError::new)) {
+          committedProperties.add(
+              new HashMap<>(transaction.transactionProperties().orElseThrow(AssertionError::new)));
+        }
+      }
+    }
+    return committedProperties;
   }
 
   @Test
