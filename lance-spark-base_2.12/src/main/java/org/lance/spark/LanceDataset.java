@@ -339,10 +339,7 @@ public class LanceDataset
   }
 
   private LanceSparkReadOptions mergeScanOptions(CaseInsensitiveStringMap scanMap) {
-    if (scanMap.isEmpty()
-        && LanceSparkReadOptions.extractActiveSessionOptions(
-                LanceSparkReadOptions.READ_SESSION_OPTION_LOWER_KEYS)
-            .isEmpty()) {
+    if (scanMap.isEmpty()) {
       return readOptions;
     }
     LanceRef tableRef = readOptions.getRef();
@@ -350,31 +347,21 @@ public class LanceDataset
         scanMap.containsKey(LanceSparkReadOptions.CONFIG_VERSION)
             || scanMap.containsKey(LanceSparkReadOptions.CONFIG_BRANCH)
             || scanMap.containsKey(LanceSparkReadOptions.CONFIG_TAG);
-    Map<String, String> baseStorage = new HashMap<>(readOptions.getStorageOptions());
+    Map<String, String> merged = new HashMap<>(readOptions.getStorageOptions());
     // Stored options can still hold reference keys. Strip them so fromOptions cannot
     // overwrite the table ref with a leftover key.
-    baseStorage
+    merged
         .keySet()
         .removeIf(
             key ->
                 key.equalsIgnoreCase(LanceSparkReadOptions.CONFIG_VERSION)
                     || key.equalsIgnoreCase(LanceSparkReadOptions.CONFIG_BRANCH)
                     || key.equalsIgnoreCase(LanceSparkReadOptions.CONFIG_TAG));
-    LanceSparkCatalogConfig baseCatalogDefaults =
-        LanceSparkCatalogConfig.builder()
-            .storageOptions(baseStorage)
-            .indexCacheBackend(readOptions.getIndexCacheBackend())
-            .metadataCacheBackend(readOptions.getMetadataCacheBackend())
-            .build();
+    merged.putAll(scanMap.asCaseSensitiveMap());
     LanceSparkReadOptions scanOptions =
-        LanceSparkReadOptions.builder()
-            .datasetUri(readOptions.getDatasetUri())
-            .namespace(readOptions.getNamespace())
-            .tableId(readOptions.getTableId())
-            .catalogName(readOptions.getCatalogName())
-            .ref(tableRef)
-            .fromOptions(scanMap.asCaseSensitiveMap())
-            .withCatalogDefaults(baseCatalogDefaults)
+        readOptions.toBuilder()
+            .storageOptions(merged)
+            .overrideTypedOptions(scanMap.asCaseSensitiveMap())
             .build();
     if (tableRef != null && scanSetsRef) {
       LanceRef scanRef = scanOptions.getRef();

@@ -119,7 +119,7 @@ public class LanceSparkReadOptions implements Serializable {
    * Table-identity and query-specific options (such as {@code version}, {@code branch}, {@code
    * tag}, and {@code full_text_query}) are intentionally excluded from session defaults.
    */
-  static final Set<String> READ_SESSION_OPTION_LOWER_KEYS =
+  private static final Set<String> READ_SESSION_OPTION_LOWER_KEYS =
       Collections.unmodifiableSet(
           new HashSet<>(
               Arrays.asList(
@@ -746,6 +746,17 @@ public class LanceSparkReadOptions implements Serializable {
       return this;
     }
 
+    /** Overrides only the typed flags explicitly present in {@code options}. */
+    Builder overrideTypedOptions(Map<String, String> options) {
+      if (options == null || options.isEmpty()) {
+        return this;
+      }
+      Map<String, String> lower = new HashMap<>();
+      putLowerKeys(lower, options);
+      parseTypedFlags(lower);
+      return this;
+    }
+
     /**
      * Applies typed-flag parsing for every known read option present in {@code opts}. Shared by
      * {@link #fromOptions(Map)} and {@link #withCatalogDefaults(LanceSparkCatalogConfig)} so that
@@ -773,9 +784,9 @@ public class LanceSparkReadOptions implements Serializable {
         this.ref =
             LanceRef.ofMain(Long.parseLong(stripSurroundingQuotes(ciOpts.get(CONFIG_VERSION))));
       } else if (ciOpts.containsKey(CONFIG_BRANCH)) {
-        this.ref = LanceRef.ofBranch(stripSurroundingQuotes(ciOpts.get(CONFIG_BRANCH)));
+        this.ref = LanceRef.ofBranch(ciOpts.get(CONFIG_BRANCH));
       } else if (ciOpts.containsKey(CONFIG_TAG)) {
-        this.ref = LanceRef.ofTag(stripSurroundingQuotes(ciOpts.get(CONFIG_TAG)));
+        this.ref = LanceRef.ofTag(ciOpts.get(CONFIG_TAG));
       }
       if (ciOpts.containsKey(CONFIG_INDEX_CACHE_SIZE)) {
         this.indexCacheSize =

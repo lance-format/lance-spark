@@ -14,8 +14,11 @@
 package org.lance.spark;
 
 import org.lance.ipc.FullTextQuery;
+import org.lance.spark.read.LanceInputPartition;
+import org.lance.spark.read.LanceScan;
 
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -619,6 +622,63 @@ public class LanceSparkReadOptionsSerializationTest {
               .build();
       Assertions.assertEquals(512, overriddenWrite.getBatchSize());
       Assertions.assertEquals(Integer.valueOf(2500), overriddenWrite.getMaxRowsPerFile());
+
+      // 3. LanceDataset.newScanBuilder preserves explicit table options and applies scan overrides
+      LanceSparkReadOptions explicitTableOpts =
+          LanceSparkReadOptions.from(
+              Collections.singletonMap(LanceSparkReadOptions.CONFIG_BATCH_SIZE, "2048"),
+              TestUtils.TestTable1Config.datasetUri);
+      LanceDataset explicitTable =
+          new LanceDataset(
+              explicitTableOpts,
+              TestUtils.TestTable1Config.schema,
+              Collections.emptyMap(),
+              null,
+              Collections.emptyMap(),
+              false,
+              null);
+      LanceScan emptyScanOnExplicit =
+          (LanceScan) explicitTable.newScanBuilder(CaseInsensitiveStringMap.empty()).build();
+      LanceInputPartition explicitPart =
+          (LanceInputPartition) emptyScanOnExplicit.planInputPartitions()[0];
+      Assertions.assertEquals(2048, explicitPart.getReadOptions().getBatchSize());
+
+      LanceSparkReadOptions catalogTableOpts =
+          LanceSparkReadOptions.builder()
+              .datasetUri(TestUtils.TestTable1Config.datasetUri)
+              .withCatalogDefaults(catalogConfig)
+              .build();
+      LanceDataset catalogTable =
+          new LanceDataset(
+              catalogTableOpts,
+              TestUtils.TestTable1Config.schema,
+              Collections.emptyMap(),
+              null,
+              Collections.emptyMap(),
+              false,
+              null);
+      LanceScan scanPreservingSessionBatch =
+          (LanceScan)
+              catalogTable
+                  .newScanBuilder(
+                      new CaseInsensitiveStringMap(
+                          Collections.singletonMap(
+                              LanceSparkReadOptions.CONFIG_PUSH_DOWN_FILTERS, "true")))
+                  .build();
+      LanceInputPartition catalogPart =
+          (LanceInputPartition) scanPreservingSessionBatch.planInputPartitions()[0];
+      Assertions.assertEquals(4096, catalogPart.getReadOptions().getBatchSize());
+      Assertions.assertTrue(catalogPart.getReadOptions().isPushDownFilters());
+
+      LanceScan scanOverridingBatch =
+          (LanceScan)
+              catalogTable
+                  .newScanBuilder(
+                      new CaseInsensitiveStringMap(Collections.singletonMap("BATCH_SIZE", "512")))
+                  .build();
+      LanceInputPartition overriddenPart =
+          (LanceInputPartition) scanOverridingBatch.planInputPartitions()[0];
+      Assertions.assertEquals(512, overriddenPart.getReadOptions().getBatchSize());
     } finally {
       spark.conf().unset("spark.sql.lance.batch_size");
       spark.conf().unset("spark.sql.lance.use_scalar_index");
