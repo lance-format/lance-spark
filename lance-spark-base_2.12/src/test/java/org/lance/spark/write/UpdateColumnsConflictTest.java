@@ -16,8 +16,10 @@ package org.lance.spark.write;
 import org.lance.Dataset;
 import org.lance.WriteParams;
 import org.lance.spark.LanceConstant;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
@@ -42,6 +44,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
@@ -103,7 +106,16 @@ public class UpdateColumnsConflictTest {
 
       UpdateColumnsBackfillBatchWrite updateWrite =
           new UpdateColumnsBackfillBatchWrite(
-              updateSchema, writeOptions, updateColumns, null, null, null, null, false);
+              updateSchema,
+              writeOptions.toBuilder()
+                  .transactionProperties(Collections.singletonMap("request", "failed-backfill"))
+                  .build(),
+              updateColumns,
+              null,
+              null,
+              null,
+              null,
+              false);
 
       // Simulate executor work: write updated column values
       DataWriterFactory factory = updateWrite.createBatchWriterFactory(() -> 1);
@@ -124,6 +136,12 @@ public class UpdateColumnsConflictTest {
       // Backfill commit with pinned readVersion=V2 must fail — V3 exists
       assertThrows(
           Exception.class, () -> updateWrite.commit(new WriterCommitMessage[] {updateMsg}));
+      LanceSparkReadOptions readOptions = LanceSparkReadOptions.from(datasetUri);
+      try (Dataset committed = Utils.openDatasetBuilder(readOptions).build()) {
+        assertEquals(3, committed.version());
+        assertEquals(4, committed.countRows());
+      }
+      assertEquals(Collections.emptyMap(), TestUtils.readTransactionProperties(readOptions));
     }
   }
 }

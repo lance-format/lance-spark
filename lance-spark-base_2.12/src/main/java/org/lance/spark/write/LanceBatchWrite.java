@@ -169,6 +169,9 @@ public class LanceBatchWrite implements BatchWrite {
             .collect(Collectors.toList());
 
     Schema arrowSchema = getCommitSchema();
+    if (stagedCommit != null) {
+      stagedCommit.setTransactionProperties(writeOptions.getTransactionProperties());
+    }
 
     // Lance-Java rejects empty fragments, so empty appends are a noop; empty overwrites truncate.
     if (fragments.isEmpty() && !isOverwrite()) {
@@ -236,7 +239,11 @@ public class LanceBatchWrite implements BatchWrite {
               .namespaceClientManagedVersioning(true);
         }
         try (Transaction txn =
-                new Transaction.Builder().readVersion(version).operation(operation).build();
+                new Transaction.Builder()
+                    .readVersion(version)
+                    .operation(operation)
+                    .transactionProperties(writeOptions.getTransactionProperties())
+                    .build();
             Dataset committed = commitBuilder.execute(txn)) {
           // auto-close txn and committed dataset
         }

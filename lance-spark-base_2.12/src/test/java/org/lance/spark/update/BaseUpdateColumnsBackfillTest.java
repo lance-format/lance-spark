@@ -15,6 +15,8 @@ package org.lance.spark.update;
 
 import org.lance.WriteParams;
 import org.lance.spark.LanceConstant;
+import org.lance.spark.LanceDataset;
+import org.lance.spark.LanceSpark;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
 import org.lance.spark.write.LanceBatchWrite;
@@ -30,6 +32,8 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
+import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.write.DataWriter;
 import org.apache.spark.sql.connector.write.DataWriterFactory;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
@@ -114,6 +118,27 @@ public abstract class BaseUpdateColumnsBackfillTest {
         String.format(
             "insert into %s (id, value, name) values (1, 10, 'one'), (2, 20, 'two'), (3, 30, 'three');",
             fullTable));
+  }
+
+  @Test
+  public void testTransactionPropertiesBackfill() throws Exception {
+    prepareDataset();
+    spark.sql(
+        "CREATE TEMPORARY VIEW properties_source AS SELECT _rowaddr, _fragid, 200 AS value FROM "
+            + fullTable
+            + " WHERE id = 2");
+    LanceSpark.executeSql(
+        spark,
+        "ALTER TABLE " + fullTable + " UPDATE COLUMNS value FROM properties_source",
+        Collections.singletonMap("request", "update-columns"));
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    LanceDataset table =
+        (LanceDataset) catalog.loadTable(Identifier.of(new String[] {"default"}, tableName));
+    assertEquals(
+        Collections.singletonMap("request", "update-columns"),
+        TestUtils.readTransactionProperties(table.readOptions()));
+    assertEquals(240, spark.sql("SELECT SUM(value) FROM " + fullTable).first().getLong(0));
   }
 
   @Test

@@ -33,7 +33,8 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
-public class LancePositionDeltaOperation implements RowLevelOperation, SupportsDelta {
+public class LancePositionDeltaOperation
+    implements RowLevelOperation, SupportsDelta, TransactionPropertiesOperation {
   private final Command command;
   private final StructType sparkSchema;
   private final LanceSparkReadOptions readOptions;
@@ -77,6 +78,7 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
         managedVersioning,
         fileFormatVersion,
         tableProperties,
+        Collections.emptyMap(),
         Collections.emptyMap());
   }
 
@@ -90,7 +92,8 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
       boolean managedVersioning,
       String fileFormatVersion,
       Map<String, String> tableProperties,
-      Map<String, BlobSourceContext> blobSourceContexts) {
+      Map<String, BlobSourceContext> blobSourceContexts,
+      Map<String, String> transactionProperties) {
     this.command = command;
     this.sparkSchema = sparkSchema;
     this.readOptions = readOptions;
@@ -101,6 +104,7 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
     this.fileFormatVersion = fileFormatVersion;
     this.tableProperties = tableProperties;
     this.blobSourceContexts = blobSourceContexts;
+    this.transactionProperties = TransactionProperties.snapshot(transactionProperties);
   }
 
   public LancePositionDeltaOperation withBlobSourceContexts(
@@ -115,7 +119,25 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
         managedVersioning,
         fileFormatVersion,
         tableProperties,
-        contexts);
+        contexts,
+        transactionProperties);
+  }
+
+  private final Map<String, String> transactionProperties;
+
+  public LancePositionDeltaOperation withTransactionProperties(Map<String, String> properties) {
+    return new LancePositionDeltaOperation(
+        command,
+        sparkSchema,
+        readOptions,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        managedVersioning,
+        fileFormatVersion,
+        tableProperties,
+        blobSourceContexts,
+        properties);
   }
 
   @Override
@@ -161,6 +183,9 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
       if (stableRowIds != null) {
         writeOptionsBuilder.enableStableRowIds(Boolean.parseBoolean(stableRowIds));
       }
+    }
+    if (!transactionProperties.isEmpty()) {
+      writeOptionsBuilder.transactionProperties(transactionProperties);
     }
     LanceSparkWriteOptions writeOptions = writeOptionsBuilder.build();
     Map<String, BlobSourceContext> contexts =
