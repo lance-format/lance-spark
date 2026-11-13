@@ -23,6 +23,8 @@ import org.lance.spark.internal.TransactionPropertiesWriteTable
 
 import java.util.{HashMap, Map => JMap}
 
+import scala.collection.JavaConverters._
+
 object LanceSqlExecution {
   def execute(
       spark: SparkSession,
@@ -64,7 +66,7 @@ object LanceSqlExecution {
       encodedProperties: String): LogicalPlan = {
     def withTransactionProperties(options: Map[String, String]): Map[String, String] = {
       require(
-        !options.keys.exists(_.equalsIgnoreCase(TransactionProperties.option)),
+        !options.keys.exists(TransactionProperties.isOption),
         "Specify transaction properties only once")
       options + (TransactionProperties.option -> encodedProperties)
     }
@@ -101,7 +103,7 @@ object LanceSqlExecution {
           case relation: DataSourceV2Relation if isLanceTarget(relation) =>
             val options = new HashMap[String, String](relation.options.asCaseSensitiveMap())
             require(
-              !relation.options.containsKey(TransactionProperties.option),
+              !options.keySet().asScala.exists(TransactionProperties.isOption),
               "Specify transaction properties only once")
             options.put(TransactionProperties.option, encodedProperties)
             boundOperation = true

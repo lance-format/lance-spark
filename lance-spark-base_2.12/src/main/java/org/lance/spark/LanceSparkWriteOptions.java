@@ -126,7 +126,7 @@ public class LanceSparkWriteOptions implements Serializable {
     this.maxBatchBytes = builder.maxBatchBytes;
     this.blobPackFileSizeThreshold = builder.blobPackFileSizeThreshold;
     this.storageOptions = new HashMap<>(builder.storageOptions);
-    this.storageOptions.keySet().removeIf(TransactionProperties.option()::equalsIgnoreCase);
+    this.storageOptions.keySet().removeIf(TransactionProperties::isOption);
     this.transactionProperties = builder.transactionProperties;
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
@@ -568,12 +568,9 @@ public class LanceSparkWriteOptions implements Serializable {
       Preconditions.checkArgument(
           !references.containsKey(LanceSparkReadOptions.CONFIG_TAG), "The tag option is read-only");
       this.storageOptions = new HashMap<>(options);
-      this.storageOptions.keySet().removeIf(TransactionProperties.option()::equalsIgnoreCase);
+      this.storageOptions.keySet().removeIf(TransactionProperties::isOption);
       this.transactionProperties = Collections.emptyMap();
-      if (references.containsKey(TransactionProperties.option())) {
-        transactionProperties(
-            TransactionProperties.decode(references.get(TransactionProperties.option())));
-      }
+      this.transactionProperties = TransactionProperties.fromOptions(options);
       if (options.containsKey(CONFIG_WRITE_MODE)) {
         this.writeMode = WriteMode.valueOf(options.get(CONFIG_WRITE_MODE).toUpperCase(Locale.ROOT));
       }
@@ -639,7 +636,7 @@ public class LanceSparkWriteOptions implements Serializable {
     public Builder withCatalogDefaults(LanceSparkCatalogConfig catalogConfig) {
       // Merge storage options: catalog options are defaults, current options override
       Map<String, String> merged = new HashMap<>(catalogConfig.getStorageOptions());
-      merged.keySet().removeIf(TransactionProperties.option()::equalsIgnoreCase);
+      merged.keySet().removeIf(TransactionProperties::isOption);
       merged.putAll(this.storageOptions);
       this.indexCacheBackend = catalogConfig.getIndexCacheBackend();
       this.metadataCacheBackend = catalogConfig.getMetadataCacheBackend();

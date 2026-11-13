@@ -2,8 +2,9 @@
 
 Add data to existing Lance tables using SQL or DataFrames.
 
-To attach metadata to the same commit, use the DataFrame `transaction_properties`
-write option or `LanceSpark.executeSql` for a SQL statement. See
+To attach metadata to the same commit, use DataFrame `transaction_properties.<key>`
+options, the JSON `transaction_properties` option, or `LanceSpark.executeSql` for
+a SQL statement. See
 [Per-write Transaction Properties](../../config.md#per-write-transaction-properties)
 for examples, validation and operation-isolation guarantees.
 

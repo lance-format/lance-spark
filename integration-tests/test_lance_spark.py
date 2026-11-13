@@ -2165,7 +2165,8 @@ class TestDMLInsert:
     """Test DML INSERT INTO operations."""
 
     @pytest.mark.rest_dir_compatible
-    def test_transaction_properties(self, spark, record_property):
+    @pytest.mark.parametrize("encoding", ["json", "prefixed"])
+    def test_transaction_properties(self, spark, record_property, encoding):
         jvm = spark._jvm
         namespace = spark.sparkContext._gateway.new_array(jvm.java.lang.String, 1)
         namespace[0] = "default"
@@ -2194,17 +2195,34 @@ class TestDMLInsert:
             finally:
                 dataset.close()
 
-        properties = {"RequestID": "create-\u96ea", "": ""}
-        spark.createDataFrame([(1,)], "id INT").writeTo(
+        writer = spark.createDataFrame([(1,)], "id INT").writeTo(
             "default.test_table"
-        ).using("lance").option(
-            "transaction_properties", json.dumps(properties)
-        ).create()
+        ).using("lance")
+        if encoding == "json":
+            properties = {"RequestID": "create-\u96ea", "": ""}
+            writer.option("transaction_properties", json.dumps(properties))
+        else:
+            properties = {"requestid": "create-\u96ea", "empty": ""}
+            writer.option("TrAnSaCtIoN_PrOpErTiEs.ReQuEsTiD", "create-\u96ea")
+            writer.option("transaction_properties.empty", "")
+        writer.create()
         record_property(
             "managed_versioning", catalog.loadTable(identifier).getManagedVersioning()
         )
         assert read_properties() == properties
         assert spark.table("default.test_table").count() == 1
+        with pytest.raises(Exception, match="not both"):
+            spark.createDataFrame([(1,)], "id INT").writeTo(
+                "default.mixed_properties"
+            ).using("lance").option(
+                "transaction_properties", "{}"
+            ).option(
+                "transaction_properties.request_id", "mixed"
+            ).create()
+        assert "mixed_properties" not in {
+            table.name for table in spark.catalog.listTables("default")
+        }
+        assert read_properties() == properties
         jvm.org.lance.spark.LanceSpark.executeSql(
             spark._jsparkSession,
             "DELETE FROM default.test_table",

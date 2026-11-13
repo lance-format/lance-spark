@@ -16,17 +16,48 @@ package org.lance.spark
 import com.fasterxml.jackson.core.JsonParser
 import com.fasterxml.jackson.databind.{DeserializationFeature, ObjectMapper}
 
-import java.util.{Collections, LinkedHashMap, Map => JMap}
+import java.util.{Collections, LinkedHashMap, Locale, Map => JMap}
 
 import scala.collection.JavaConverters._
 import scala.util.control.NonFatal
 
 object TransactionProperties {
   val option: String = LanceSparkWriteOptions.CONFIG_TRANSACTION_PROPERTIES
+  private val prefix = option + "."
 
   private val mapper = new ObjectMapper()
     .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
     .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+
+  def isOption(key: String): Boolean = {
+    if (key == null) return false
+    val normalized = key.toLowerCase(Locale.ROOT)
+    normalized == option || normalized.startsWith(prefix)
+  }
+
+  def fromOptions(options: JMap[String, String]): JMap[String, String] = {
+    val (encoded, prefixed) = options.asScala.toVector
+      .filter { case (key, _) => isOption(key) }
+      .partition { case (key, _) => key.equalsIgnoreCase(option) }
+    require(
+      encoded.isEmpty || prefixed.isEmpty,
+      "Use either transaction_properties or transaction_properties.<key>, not both")
+    require(encoded.size <= 1, "Specify transaction_properties only once")
+    if (encoded.nonEmpty) {
+      decode(encoded.head._2)
+    } else {
+      val properties = new LinkedHashMap[String, String]()
+      prefixed.foreach { case (key, value) =>
+        val name = key.substring(prefix.length).toLowerCase(Locale.ROOT)
+        require(name.nonEmpty, "Prefixed transaction properties require a non-empty property name")
+        require(
+          !properties.containsKey(name),
+          "Duplicate case-insensitive transaction property names")
+        properties.put(name, value)
+      }
+      snapshot(properties)
+    }
+  }
 
   def snapshot(properties: JMap[String, String]): JMap[String, String] = {
     require(properties != null, "Transaction properties must be a non-null string map")

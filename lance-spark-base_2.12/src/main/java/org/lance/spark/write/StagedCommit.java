@@ -101,7 +101,7 @@ public class StagedCommit {
     this.schema = schema;
     this.datasetUri = datasetUri;
     this.storageOptions = new HashMap<>(options.getStorageOptions());
-    this.storageOptions.keySet().removeIf(TransactionProperties.option()::equalsIgnoreCase);
+    this.storageOptions.keySet().removeIf(TransactionProperties::isOption);
     this.isNewTable = datasetUri != null;
     this.enableStableRowIds = options.isEnableStableRowIds();
     this.fileFormatVersion = options.getFileFormatVersion();

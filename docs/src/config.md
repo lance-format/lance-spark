@@ -61,8 +61,22 @@ The following features require the Lance Spark SQL extension to be enabled:
 
 ## Per-write Transaction Properties
 
-The optional `transaction_properties` write option accepts a JSON object whose keys
-and values are strings:
+Attach optional string properties to a write using prefixed options:
+
+```python
+df.writeTo("lance.default.events").option(
+    "transaction_properties.request_id", "example-42"
+).option(
+    "transaction_properties.application", "import"
+).append()
+```
+
+Prefixed property names must be non-empty and are normalized to lowercase,
+independently of the system locale, following Spark's case-insensitive option
+semantics. Values retain their case, Unicode and empty strings.
+
+Alternatively, pass a JSON object through `transaction_properties`. JSON property
+names preserve their exact case and may be empty:
 
 ```python
 df.writeTo("lance.default.events").option(
@@ -72,10 +86,13 @@ df.writeTo("lance.default.events").option(
 
 Properties are persisted in the same native transaction as the data change.
 They are not table properties, catalog defaults, storage options or read options.
-Option names are case-insensitive; property keys and values preserve their case,
-Unicode and empty strings. Malformed JSON, duplicate keys and non-string or null
-values are rejected before committing. Omitting the option or passing `{}` keeps
-existing metadata-free behavior; a no-op does not gain a metadata-only commit.
+Use one format per write: combining the JSON option and prefixed options is
+rejected, even if the JSON object is empty or the property names differ.
+Malformed JSON, duplicate JSON keys, ambiguous case-insensitive prefixed names,
+and non-string or null property values are rejected before committing. JSON values
+also retain their case, Unicode and empty strings. Omitting both forms or passing
+`{}` keeps existing metadata-free behavior; a no-op does not gain a metadata-only
+commit.
 
 For SQL, use the synchronous JVM API rather than a shared session setting:
 

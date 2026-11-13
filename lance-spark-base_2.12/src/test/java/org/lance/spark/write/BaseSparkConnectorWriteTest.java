@@ -149,6 +149,79 @@ public abstract class BaseSparkConnectorWriteTest {
   }
 
   @Test
+  public void transactionPropertiesPrefixedWrites(TestInfo testInfo) throws Exception {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
+    String table = "lance.`" + path + "`";
+    LanceSparkReadOptions readOptions = LanceSparkReadOptions.from(path);
+    String payload = "{\"NestedKey\":\"Mixed-Case-\u96ea\"}";
+    testData
+        .writeTo(table)
+        .option("TrAnSaCtIoN_PrOpErTiEs.ReQuEsT_ID", "create")
+        .option("transaction_properties.payload", payload)
+        .create();
+    Map<String, String> expected = new HashMap<>();
+    expected.put("request_id", "create");
+    expected.put("payload", payload);
+    assertEquals(expected, TestUtils.readTransactionProperties(readOptions));
+
+    testData.writeTo(table).option("transaction_properties.REQUEST_ID", "replace").replace();
+    assertEquals(
+        Collections.singletonMap("request_id", "replace"),
+        TestUtils.readTransactionProperties(readOptions));
+    testData
+        .write()
+        .format(LanceDataSource.name)
+        .mode(SaveMode.Append)
+        .option(LanceSparkReadOptions.CONFIG_DATASET_URI, path)
+        .option("TRANSACTION_PROPERTIES.Request_ID", "writer-v1")
+        .save();
+    assertEquals(
+        Collections.singletonMap("request_id", "writer-v1"),
+        TestUtils.readTransactionProperties(readOptions));
+
+    long version;
+    try (org.lance.Dataset dataset = Utils.openDatasetBuilder(readOptions).build()) {
+      version = dataset.version();
+    }
+    assertThrows(
+        Exception.class,
+        () ->
+            testData
+                .writeTo(table)
+                .option("transaction_properties", "{}")
+                .option("transaction_properties.request_id", "mixed")
+                .append());
+    assertThrows(
+        Exception.class,
+        () ->
+            testData
+                .writeTo(table)
+                .option("transaction_properties", "{}")
+                .option("transaction_properties.request_id", "mixed")
+                .replace());
+    try (org.lance.Dataset dataset = Utils.openDatasetBuilder(readOptions).build()) {
+      assertEquals(version, dataset.version());
+      assertEquals(4, dataset.countRows());
+    }
+    assertEquals(
+        Collections.singletonMap("request_id", "writer-v1"),
+        TestUtils.readTransactionProperties(readOptions));
+
+    testData
+        .writeTo(table)
+        .option("transaction_properties", "{\"RequestID\":\"upper\",\"requestid\":\"lower\"}")
+        .append();
+    expected.clear();
+    expected.put("RequestID", "upper");
+    expected.put("requestid", "lower");
+    assertEquals(expected, TestUtils.readTransactionProperties(readOptions));
+    testData.writeTo(table).append();
+    assertTrue(TestUtils.readTransactionProperties(readOptions).isEmpty());
+    assertEquals(8, spark.table(table).count());
+  }
+
+  @Test
   public void transactionPropertiesEmptyAppendDoesNotCommit(TestInfo testInfo) throws Exception {
     String path =
         TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());

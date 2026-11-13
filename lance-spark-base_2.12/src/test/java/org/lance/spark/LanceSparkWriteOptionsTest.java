@@ -18,6 +18,8 @@ import org.lance.namespace.LanceNamespace;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayInputStream;
@@ -29,6 +31,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -42,6 +45,16 @@ public class LanceSparkWriteOptionsTest {
 
   private static final Map<String, String> TRANSACTION_PROPERTIES_OPTION =
       Collections.singletonMap("TrAnSaCtIoN_PrOpErTiEs", "{\"RequestID\":\"Value\"}");
+  private static final Map<String, String> PREFIXED_TRANSACTION_PROPERTIES_OPTION =
+      Collections.singletonMap("TrAnSaCtIoN_PrOpErTiEs.ReQuEsTiD", "Value");
+
+  static Stream<Arguments> transactionPropertyOptions() {
+    return Stream.of(
+        Arguments.of(TRANSACTION_PROPERTIES_OPTION, Collections.singletonMap("RequestID", "Value")),
+        Arguments.of(
+            PREFIXED_TRANSACTION_PROPERTIES_OPTION,
+            Collections.singletonMap("requestid", "Value")));
+  }
 
   private final String TEMP_URL = "file:///tmp/test";
 
@@ -102,33 +115,41 @@ public class LanceSparkWriteOptionsTest {
         () -> LanceSparkWriteOptions.builder().transactionProperties(nullValue));
   }
 
-  @Test
-  public void transactionPropertiesAreWriteOnly() {
+  @ParameterizedTest
+  @MethodSource("transactionPropertyOptions")
+  public void transactionPropertiesAreWriteOnly(
+      Map<String, String> input, Map<String, String> expected) {
+    Map<String, String> defaults = new HashMap<>(TRANSACTION_PROPERTIES_OPTION);
+    defaults.putAll(PREFIXED_TRANSACTION_PROPERTIES_OPTION);
     LanceSparkCatalogConfig catalog =
-        LanceSparkCatalogConfig.builder().storageOptions(TRANSACTION_PROPERTIES_OPTION).build();
+        LanceSparkCatalogConfig.builder().storageOptions(defaults).build();
     LanceSparkWriteOptions options =
         LanceSparkWriteOptions.builder()
             .datasetUri(TEMP_URL)
-            .fromOptions(TRANSACTION_PROPERTIES_OPTION)
+            .fromOptions(input)
             .withCatalogDefaults(catalog)
             .build();
-    assertEquals(
-        Collections.singletonMap("RequestID", "Value"), options.getTransactionProperties());
+    assertEquals(expected, options.getTransactionProperties());
     assertTrue(options.getStorageOptions().isEmpty());
     assertTrue(options.toReadOptions().getStorageOptions().isEmpty());
     assertTrue(
         LanceSparkReadOptions.builder()
             .datasetUri(TEMP_URL)
-            .storageOptions(TRANSACTION_PROPERTIES_OPTION)
+            .storageOptions(input)
             .build()
             .getStorageOptions()
             .isEmpty());
+    assertEquals(
+        LanceSparkReadOptions.from(TEMP_URL),
+        LanceSparkReadOptions.builder().datasetUri(TEMP_URL).storageOptions(input).build());
   }
 
-  @Test
-  public void transactionPropertiesAreNotCatalogDefaults() {
+  @ParameterizedTest
+  @MethodSource("transactionPropertyOptions")
+  public void transactionPropertiesAreNotCatalogDefaults(
+      Map<String, String> input, Map<String, String> expected) {
     LanceSparkCatalogConfig catalog =
-        LanceSparkCatalogConfig.builder().storageOptions(TRANSACTION_PROPERTIES_OPTION).build();
+        LanceSparkCatalogConfig.builder().storageOptions(input).build();
     assertTrue(
         LanceSparkWriteOptions.builder()
             .datasetUri(TEMP_URL)
@@ -136,19 +157,121 @@ public class LanceSparkWriteOptionsTest {
             .build()
             .getTransactionProperties()
             .isEmpty());
-  }
-
-  @Test
-  public void transactionPropertiesAreClearedWhenBuilderIsReused() {
-    LanceSparkWriteOptions.Builder reused =
+    assertEquals(
+        expected,
         LanceSparkWriteOptions.builder()
             .datasetUri(TEMP_URL)
-            .fromOptions(TRANSACTION_PROPERTIES_OPTION);
+            .transactionProperties(expected)
+            .withCatalogDefaults(catalog)
+            .build()
+            .getTransactionProperties());
+  }
+
+  @ParameterizedTest
+  @MethodSource("transactionPropertyOptions")
+  public void transactionPropertiesAreClearedWhenBuilderIsReused(
+      Map<String, String> input, Map<String, String> expected) {
+    LanceSparkWriteOptions.Builder reused =
+        LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(input);
     LanceSparkWriteOptions captured = reused.build();
     assertTrue(
         reused.fromOptions(Collections.emptyMap()).build().getTransactionProperties().isEmpty());
+    assertEquals(expected, captured.getTransactionProperties());
+  }
+
+  @ParameterizedTest
+  @MethodSource("transactionPropertyOptions")
+  public void invalidTransactionPropertiesDoNotRetainThePreviousOperation(
+      Map<String, String> input, Map<String, String> expected) {
+    LanceSparkWriteOptions.Builder reused =
+        LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(input);
+    LanceSparkWriteOptions captured = reused.build();
+    Map<String, String> mixed = new HashMap<>(TRANSACTION_PROPERTIES_OPTION);
+    mixed.putAll(PREFIXED_TRANSACTION_PROPERTIES_OPTION);
+    assertThrows(IllegalArgumentException.class, () -> reused.fromOptions(mixed));
+    assertTrue(reused.build().getTransactionProperties().isEmpty());
+    assertEquals(expected, captured.getTransactionProperties());
+  }
+
+  @Test
+  public void prefixedTransactionPropertiesNormalizeNamesButPreserveValues() {
+    Locale previous = Locale.getDefault();
+    try {
+      Locale.setDefault(Locale.forLanguageTag("tr-TR"));
+      Map<String, String> input = new HashMap<>();
+      input.put("TRANSACTION_PROPERTIES.REQUEST_ID", "Mixed-Case-\u96ea");
+      input.put("transaction_properties.empty", "");
+      input.put("transaction_properties.payload", "{\"NestedKey\":\"Value\"}");
+      input.put("transaction_properties_extra", "storage-value");
+      LanceSparkWriteOptions options =
+          LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(input).build();
+      Map<String, String> expected = new HashMap<>();
+      expected.put("request_id", "Mixed-Case-\u96ea");
+      expected.put("empty", "");
+      expected.put("payload", "{\"NestedKey\":\"Value\"}");
+      assertEquals(expected, options.getTransactionProperties());
+      assertEquals(
+          Collections.singletonMap("transaction_properties_extra", "storage-value"),
+          options.getStorageOptions());
+      input.clear();
+      assertEquals(expected, options.getTransactionProperties());
+      assertThrows(
+          UnsupportedOperationException.class,
+          () -> options.getTransactionProperties().put("another", "value"));
+    } finally {
+      Locale.setDefault(previous);
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {"{}", "{\"request_id\":\"json\"}", "{\"different_key\":\"json\"}", "not-json"})
+  public void transactionPropertyFormatsCannotBeMixed(String encoded) {
+    Map<String, String> input = new HashMap<>();
+    input.put("TrAnSaCtIoN_PrOpErTiEs", encoded);
+    input.put("TRANSACTION_PROPERTIES.request_id", "prefix");
+    IllegalArgumentException error =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(input));
+    assertTrue(error.getMessage().contains("not both"));
+  }
+
+  @Test
+  public void prefixedTransactionPropertiesRejectMissingNamesNullValuesAndAliases() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            LanceSparkWriteOptions.builder()
+                .datasetUri(TEMP_URL)
+                .fromOptions(Collections.singletonMap("transaction_properties.", "value")));
+    Map<String, String> input = new HashMap<>();
+    input.put("transaction_properties.request_id", null);
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(input));
+    input.clear();
+    input.put("transaction_properties.RequestID", "one");
+    input.put("TRANSACTION_PROPERTIES.requestid", "two");
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(input));
+  }
+
+  @Test
+  public void jsonTransactionPropertiesKeepCaseDistinctNames() {
+    Map<String, String> expected = new HashMap<>();
+    expected.put("RequestID", "one");
+    expected.put("requestid", "two");
     assertEquals(
-        Collections.singletonMap("RequestID", "Value"), captured.getTransactionProperties());
+        expected,
+        LanceSparkWriteOptions.builder()
+            .datasetUri(TEMP_URL)
+            .fromOptions(
+                Collections.singletonMap(
+                    "transaction_properties", "{\"RequestID\":\"one\",\"requestid\":\"two\"}"))
+            .build()
+            .getTransactionProperties());
   }
 
   @Test
