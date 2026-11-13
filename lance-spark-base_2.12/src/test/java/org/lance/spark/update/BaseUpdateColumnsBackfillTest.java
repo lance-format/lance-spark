@@ -13,8 +13,12 @@
  */
 package org.lance.spark.update;
 
+import org.lance.Dataset;
+import org.lance.FragmentMetadata;
 import org.lance.WriteParams;
+import org.lance.operation.Update;
 import org.lance.spark.LanceConstant;
+import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
 import org.lance.spark.write.LanceBatchWrite;
@@ -43,11 +47,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -325,6 +331,53 @@ public abstract class BaseUpdateColumnsBackfillTest {
           originalMeta.get(i).getInt(2),
           newMeta.get(i).getInt(2),
           "Row " + i + " should preserve _fragid");
+    }
+  }
+
+  /**
+   * Fragments without a matched row must stay out of the committed Update: every listed fragment
+   * counts as rewritten for the updated columns, which drops it from their index coverage.
+   */
+  @Test
+  public void testUpdateCommitsOnlyMatchedFragments() {
+    prepareDataset();
+    spark.sql(String.format("insert into %s values (4, 40, 'four')", fullTable));
+    spark.sql(String.format("insert into %s values (5, 50, 'five')", fullTable));
+    int matchedFragmentId =
+        spark
+            .sql(String.format("select _fragid from %s where id = 4", fullTable))
+            .collectAsList()
+            .get(0)
+            .getInt(0);
+
+    spark.sql(
+        String.format(
+            "create temporary view update_source as "
+                + "select _rowaddr, _fragid, 400 as value from %s where id = 4",
+            fullTable));
+    spark.sql(String.format("alter table %s update columns value from update_source", fullTable));
+
+    // The directory namespace stores the table under a hash-prefixed directory.
+    File[] tableDirs = tempDir.toFile().listFiles((dir, name) -> name.endsWith("$" + tableName));
+    assertEquals(1, tableDirs.length);
+    try (Dataset dataset =
+        Dataset.open().allocator(LanceRuntime.allocator()).uri(tableDirs[0].getPath()).build()) {
+      assertTrue(dataset.getFragments().size() > 1);
+      Update update = (Update) dataset.readTransaction().get().operation();
+      assertEquals(
+          Collections.singletonList(matchedFragmentId),
+          update.updatedFragments().stream()
+              .map(FragmentMetadata::getId)
+              .collect(Collectors.toList()));
+    }
+
+    List<Row> results =
+        spark.sql(String.format("select id, value from %s order by id", fullTable)).collectAsList();
+    assertEquals(5, results.size());
+    int[] expectedValues = {10, 20, 30, 400, 50};
+    for (int i = 0; i < expectedValues.length; i++) {
+      assertEquals(i + 1, results.get(i).getInt(0));
+      assertEquals(expectedValues[i], results.get(i).getInt(1));
     }
   }
 

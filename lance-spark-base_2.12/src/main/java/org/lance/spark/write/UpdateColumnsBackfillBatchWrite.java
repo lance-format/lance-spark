@@ -47,7 +47,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -146,17 +145,10 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
       return;
     }
 
-    // Get fragments that were not updated (no matching rows in source)
-    Set<Integer> updatedFragmentIds =
-        updatedFragments.stream().map(FragmentMetadata::getId).collect(Collectors.toSet());
-
     try (Dataset dataset = Utils.openDatasetBuilder(writeOptions).build()) {
-      // Add unmodified fragments back
-      dataset.getFragments().stream()
-          .filter(f -> !updatedFragmentIds.contains(f.getId()))
-          .map(Fragment::metadata)
-          .forEach(updatedFragments::add);
-
+      // Only the fragments this write touched go into the Update: Lance keeps every other
+      // fragment as is, while each listed fragment counts as rewritten for fieldsModified,
+      // which drops it from the index coverage of those fields and widens the conflict set.
       // Commit update operation using CommitBuilder. Pass matched physical row offsets per
       // fragment so Lance can partially refresh _row_last_updated_at_version (stable row IDs).
       Update update =
