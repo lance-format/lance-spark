@@ -31,6 +31,10 @@ import org.apache.spark.sql.types.StructType;
  *   <li>{@code lance_multi_match(query, 'operator=AND', col1, col2, ...)} — explicit operator
  * </ul>
  *
+ * <p>The operator controls how query terms combine within each column (same meaning as in {@code
+ * lance_match}). The cross-column combination is always "any column matches": a row is returned
+ * when at least one column matches.
+ *
  * <p>When the second argument is a string literal starting with a recognized option key ({@code
  * operator=}), it is treated as an options string rather than a column name. All remaining
  * arguments are column names. Minimum arity is 3 (query + at least 2 columns without options, or
@@ -71,7 +75,9 @@ public final class LanceMultiMatchFunction implements UnboundFunction {
     return "Multi-column FTS search: "
         + "lance_multi_match(query, col1, col2, ...) -> BOOLEAN, or "
         + "lance_multi_match(query, 'operator=AND|OR', col1, col2, ...) -> BOOLEAN. "
-        + "Default operator is OR: a row is returned if any column matches. "
+        + "A row is returned if any column matches. The operator controls how query "
+        + "terms combine within each column, same as lance_match: whether all terms "
+        + "must match in the same column (AND) or any term (OR, default). "
         + "Pushes the predicate to the Lance FTS inverted index via LanceFtsPredicateRule.";
   }
 
