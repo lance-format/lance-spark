@@ -13,22 +13,32 @@
  */
 package org.lance.spark.read;
 
+import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
+import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.internal.ArrowBatchAdapter;
 import org.lance.spark.read.metric.LanceCustomMetrics;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
+import org.lance.spark.utils.BucketHashUtil;
 import org.lance.spark.utils.FullTextQueryUtils;
 import org.lance.spark.utils.Optional;
 
 import org.apache.arrow.util.Preconditions;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.connector.expressions.BucketTransform;
 import org.apache.spark.sql.connector.expressions.Expression;
+import org.apache.spark.sql.connector.expressions.FieldReference;
+import org.apache.spark.sql.connector.expressions.Literal;
+import org.apache.spark.sql.connector.expressions.NamedReference;
 import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
 import org.apache.spark.sql.connector.expressions.aggregate.CountStar;
+import org.apache.spark.sql.connector.expressions.filter.And;
+import org.apache.spark.sql.connector.expressions.filter.Not;
+import org.apache.spark.sql.connector.expressions.filter.Or;
 import org.apache.spark.sql.connector.expressions.filter.Predicate;
 import org.apache.spark.sql.connector.metric.CustomMetric;
 import org.apache.spark.sql.connector.read.Batch;
@@ -39,19 +49,30 @@ import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.read.Statistics;
 import org.apache.spark.sql.connector.read.SupportsReportPartitioning;
 import org.apache.spark.sql.connector.read.SupportsReportStatistics;
+import org.apache.spark.sql.connector.read.SupportsRuntimeV2Filtering;
 import org.apache.spark.sql.connector.read.partitioning.KeyGroupedPartitioning;
 import org.apache.spark.sql.connector.read.partitioning.Partitioning;
 import org.apache.spark.sql.connector.read.partitioning.UnknownPartitioning;
 import org.apache.spark.sql.internal.connector.SupportsMetadata;
+import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
+import org.apache.spark.unsafe.types.UTF8String;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import scala.collection.immutable.Map;
 
+import java.io.IOException;
+import java.io.ObjectInputStream;
 import java.io.Serializable;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -65,6 +86,7 @@ public class LanceScan
         SupportsMetadata,
         SupportsReportStatistics,
         SupportsReportPartitioning,
+        SupportsRuntimeV2Filtering,
         Serializable {
   private static final long serialVersionUID = 947284762748623947L;
   private static final Logger LOG = LoggerFactory.getLogger(LanceScan.class);
@@ -79,6 +101,15 @@ public class LanceScan
   private final Predicate[] pushedPredicates;
   private final LanceStatistics statistics;
   private final String scanId = UUID.randomUUID().toString();
+  private final java.util.Map<String, List<ZoneStats>> zonemapStats;
+  private final java.util.Map<String, Set<Integer>> uncoveredFragmentsByColumn;
+  private final NamedReference[] runtimeFilterAttributes;
+  private final List<Predicate> runtimePredicates = new ArrayList<>();
+  private final Set<String> runtimePredicateFingerprints = new LinkedHashSet<>();
+  private int runtimeFilterKeyCount;
+  private int runtimeFilterEstimatedBytes;
+  private int rejectedRuntimeFilterCount;
+  private transient Object runtimeFilterLock = new Object();
 
   /**
    * Pre-computed surviving fragment IDs from zonemap pruning in LanceScanBuilder. When non-null,
@@ -108,6 +139,8 @@ public class LanceScan
   /** Active Spark partition expression detected from sharding zonemap stats. */
   private final Expression activeShardingExpression;
 
+  private final String activeShardingColumn;
+
   /** Map from fragment ID to sharding key value. Null when no sharding is detected. */
   private final java.util.Map<Integer, Object> fragmentShardingKeys;
 
@@ -125,6 +158,21 @@ public class LanceScan
   /** The Arrow batches the scan can emit; see {@link #arrowBatchSchema()}. */
   private final ArrowBatchAdapter.Plan arrowBatchPlan;
 
+  /** True when the dataset has no stable row IDs, so {@code _rowid} equals {@code _rowaddr}. */
+  private final boolean rowIdIsRowAddress;
+
+  /**
+   * Largest stored value of each runtime filter column that Lance stores unsigned. Spark reads
+   * these columns as a wider signed type, so a join key can be negative or above this value. Such a
+   * key matches no row, and Lance rejects it as a literal for the column.
+   */
+  private final java.util.Map<String, Long> unsignedRuntimeKeyMax;
+
+  /**
+   * The constructor from before runtime filtering, kept so existing callers still compile. The scan
+   * advertises no runtime filter columns and treats {@code _rowid} as distinct from {@code
+   * _rowaddr}.
+   */
   public LanceScan(
       StructType schema,
       LanceSparkReadOptions readOptions,
@@ -165,6 +213,9 @@ public class LanceScan
   }
 
   /**
+   * The constructor from before runtime filtering, with an Arrow batch plan. The scan advertises no
+   * runtime filter columns and treats {@code _rowid} as distinct from {@code _rowaddr}.
+   *
    * @param arrowBatchPlan the Arrow batches the scan can emit (see {@link #arrowBatchSchema()}), or
    *     null if it has none
    */
@@ -186,6 +237,64 @@ public class LanceScan
       java.util.Map<String, String> initialStorageOptions,
       String namespaceImpl,
       java.util.Map<String, String> namespaceProperties,
+      ArrowBatchAdapter.Plan arrowBatchPlan) {
+    this(
+        schema,
+        readOptions,
+        whereConditions,
+        limit,
+        offset,
+        topNSortOrders,
+        pushedAggregation,
+        pushedPredicates,
+        statistics,
+        survivingFragmentIds,
+        null,
+        null,
+        null,
+        precomputedSplits,
+        precomputedFragmentRowCounts,
+        activeShardingExpression,
+        activeShardingExpression instanceof NamedReference
+            ? String.join(".", ((NamedReference) activeShardingExpression).fieldNames())
+            : null,
+        fragmentShardingKeys,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        false,
+        null,
+        arrowBatchPlan);
+  }
+
+  /**
+   * @param arrowBatchPlan the Arrow batches the scan can emit (see {@link #arrowBatchSchema()}), or
+   *     null if it has none
+   */
+  public LanceScan(
+      StructType schema,
+      LanceSparkReadOptions readOptions,
+      Optional<String> whereConditions,
+      Optional<Integer> limit,
+      Optional<Integer> offset,
+      Optional<List<ColumnOrdering>> topNSortOrders,
+      Optional<Aggregation> pushedAggregation,
+      Predicate[] pushedPredicates,
+      LanceStatistics statistics,
+      Set<Integer> survivingFragmentIds,
+      java.util.Map<String, List<ZoneStats>> zonemapStats,
+      java.util.Map<String, Set<Integer>> uncoveredFragmentsByColumn,
+      NamedReference[] runtimeFilterAttributes,
+      List<LanceSplit> precomputedSplits,
+      java.util.Map<Integer, Long> precomputedFragmentRowCounts,
+      Expression activeShardingExpression,
+      String activeShardingColumn,
+      java.util.Map<Integer, Object> fragmentShardingKeys,
+      java.util.Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      java.util.Map<String, String> namespaceProperties,
+      boolean rowIdIsRowAddress,
+      java.util.Map<String, Long> unsignedRuntimeKeyMax,
       ArrowBatchAdapter.Plan arrowBatchPlan) {
     this.schema = schema;
     this.arrowBatchPlan =
@@ -216,16 +325,27 @@ public class LanceScan
             : new Predicate[0];
     this.statistics = statistics;
     this.cachedSurvivingFragmentIds = survivingFragmentIds;
+    this.zonemapStats = zonemapStats != null ? zonemapStats : Collections.emptyMap();
+    this.uncoveredFragmentsByColumn =
+        uncoveredFragmentsByColumn != null ? uncoveredFragmentsByColumn : Collections.emptyMap();
+    this.runtimeFilterAttributes =
+        runtimeFilterAttributes != null
+            ? Arrays.copyOf(runtimeFilterAttributes, runtimeFilterAttributes.length)
+            : new NamedReference[0];
     this.precomputedSplits = precomputedSplits;
     this.precomputedFragmentRowCounts =
         precomputedFragmentRowCounts != null
             ? precomputedFragmentRowCounts
             : Collections.emptyMap();
     this.activeShardingExpression = activeShardingExpression;
+    this.activeShardingColumn = activeShardingColumn;
     this.fragmentShardingKeys = fragmentShardingKeys;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
+    this.rowIdIsRowAddress = rowIdIsRowAddress;
+    this.unsignedRuntimeKeyMax =
+        unsignedRuntimeKeyMax != null ? unsignedRuntimeKeyMax : Collections.emptyMap();
   }
 
   /**
@@ -285,14 +405,27 @@ public class LanceScan
             pushedPredicates,
             statistics,
             cachedSurvivingFragmentIds,
+            zonemapStats,
+            uncoveredFragmentsByColumn,
+            runtimeFilterAttributes,
             precomputedSplits,
             precomputedFragmentRowCounts,
             activeShardingExpression,
+            activeShardingColumn,
             fragmentShardingKeys,
             initialStorageOptions,
             namespaceImpl,
             namespaceProperties,
+            rowIdIsRowAddress,
+            unsignedRuntimeKeyMax,
             arrowBatchPlan);
+    synchronized (runtimeFilterLock) {
+      copy.runtimePredicates.addAll(runtimePredicates);
+      copy.runtimePredicateFingerprints.addAll(runtimePredicateFingerprints);
+      copy.runtimeFilterKeyCount = runtimeFilterKeyCount;
+      copy.runtimeFilterEstimatedBytes = runtimeFilterEstimatedBytes;
+      copy.rejectedRuntimeFilterCount = rejectedRuntimeFilterCount;
+    }
     // Planned partitions are the same, so the copy reports the same partitioning.
     copy.numPartitions = numPartitions;
     return copy;
@@ -305,20 +438,40 @@ public class LanceScan
 
   @Override
   public InputPartition[] planInputPartitions() {
+    Predicate[] runtimePredicatesSnapshot = runtimePredicatesSnapshot();
+    if (containsEmptyRuntimeIn(runtimePredicatesSnapshot)) {
+      this.numPartitions = 0;
+      return new InputPartition[0];
+    }
+    Predicate[] effectivePredicates = concatPredicates(pushedPredicates, runtimePredicatesSnapshot);
+
     // Splits and per-fragment row counts are pre-computed on the driver during
     // LanceScanBuilder.build() from the same Dataset handle that loaded manifest /
     // schema / zonemap stats. This avoids a second Dataset.open() at plan time.
     List<LanceSplit> prunedSplits =
-        pruneForPlanning(precomputedSplits, pushedPredicates, cachedSurvivingFragmentIds);
+        pruneForPlanning(
+            precomputedSplits, effectivePredicates, cachedSurvivingFragmentIds, rowIdIsRowAddress);
+
+    // Sharding keys are exact per-fragment values. Equality and IN predicates on the sharding
+    // source column can therefore remove fragments without consulting native index state.
+    prunedSplits = pruneByShardingFilters(prunedSplits, effectivePredicates);
+    prunedSplits = pruneByRuntimeZonemapStats(prunedSplits, runtimePredicatesSnapshot);
 
     // Limit-based split pruning: when a LIMIT is pushed down without filters or TopN sort,
     // use per-fragment row counts to plan only enough splits to satisfy the limit.
     // This avoids scheduling hundreds of unnecessary tasks. Correctness is guaranteed
     // because Spark still keeps a global CollectLimit on top (isPartiallyPushed = true).
-    prunedSplits = pruneByLimit(prunedSplits, precomputedFragmentRowCounts);
+    if (runtimePredicatesSnapshot.length == 0) {
+      prunedSplits = pruneByLimit(prunedSplits, precomputedFragmentRowCounts);
+    }
 
     // Capture as effectively final for use in lambda
     final List<LanceSplit> finalSplits = prunedSplits;
+    final DataType partitionKeyType = partitionKeyDataType();
+    final Optional<String> effectiveWhereCondition =
+        runtimePredicatesSnapshot.length == 0
+            ? whereConditions
+            : FilterPushDown.compileFiltersToSqlWhereClause(effectivePredicates);
 
     // readOptions is already pinned to the resolved version by LanceScanBuilder for
     // snapshot isolation across all workers.
@@ -332,7 +485,7 @@ public class LanceScan
                     int fragId = split.getFragments().get(0);
                     Object key = fragmentShardingKeys.get(fragId);
                     if (key != null) {
-                      partKeyRow = SparkLanceShardingUtils.partitionKeyRow(key);
+                      partKeyRow = SparkLanceShardingUtils.partitionKeyRow(key, partitionKeyType);
                     }
                   }
                   return new LanceInputPartition(
@@ -340,7 +493,7 @@ public class LanceScan
                       i,
                       split,
                       readOptions,
-                      whereConditions,
+                      effectiveWhereCondition,
                       limit,
                       offset,
                       topNSortOrders,
@@ -357,6 +510,24 @@ public class LanceScan
     return result;
   }
 
+  private DataType partitionKeyDataType() {
+    if (activeShardingExpression instanceof BucketTransform) {
+      return DataTypes.IntegerType;
+    }
+    if (!(activeShardingExpression instanceof NamedReference)) {
+      return DataTypes.StringType;
+    }
+    DataType type = schema;
+    for (String name : ((NamedReference) activeShardingExpression).fieldNames()) {
+      StructField field = type instanceof StructType ? findField((StructType) type, name) : null;
+      if (field == null) {
+        return DataTypes.StringType;
+      }
+      type = field.dataType();
+    }
+    return type;
+  }
+
   /**
    * Shared with {@link LanceScanBuilder#build()} so planning can tell, before the scan exists,
    * whether pruning leaves anything to read. An empty result means no fragment can match.
@@ -365,9 +536,13 @@ public class LanceScan
    *     not prune
    */
   static List<LanceSplit> pruneForPlanning(
-      List<LanceSplit> allSplits, Predicate[] pushedPredicates, Set<Integer> survivingFragmentIds) {
+      List<LanceSplit> allSplits,
+      Predicate[] pushedPredicates,
+      Set<Integer> survivingFragmentIds,
+      boolean rowIdIsRowAddress) {
     return pruneByZonemapStats(
-        pruneByRowAddrFilters(allSplits, pushedPredicates), survivingFragmentIds);
+        pruneByRowAddrFilters(allSplits, pushedPredicates, rowIdIsRowAddress),
+        survivingFragmentIds);
   }
 
   /**
@@ -384,9 +559,9 @@ public class LanceScan
    * returned.
    */
   private static List<LanceSplit> pruneByRowAddrFilters(
-      List<LanceSplit> allSplits, Predicate[] pushedPredicates) {
+      List<LanceSplit> allSplits, Predicate[] effectivePredicates, boolean rowIdIsRowAddress) {
     java.util.Optional<Set<Integer>> targetFragmentIds =
-        RowAddressFilterAnalyzer.extractTargetFragmentIds(pushedPredicates);
+        RowAddressFilterAnalyzer.extractTargetFragmentIds(effectivePredicates, rowIdIsRowAddress);
     if (!targetFragmentIds.isPresent()) {
       return allSplits;
     }
@@ -516,6 +691,360 @@ public class LanceScan
     return pruned;
   }
 
+  private List<LanceSplit> pruneByRuntimeZonemapStats(
+      List<LanceSplit> allSplits, Predicate[] runtimePredicatesSnapshot) {
+    if (runtimePredicatesSnapshot.length == 0 || zonemapStats.isEmpty()) {
+      return allSplits;
+    }
+    java.util.Optional<Set<Integer>> surviving =
+        ZonemapFragmentPruner.pruneFragments(
+            runtimePredicatesSnapshot, zonemapStats, uncoveredFragmentsByColumn);
+    if (!surviving.isPresent()) {
+      return allSplits;
+    }
+    Set<Integer> allowedIds = surviving.get();
+    return allSplits.stream()
+        .filter(split -> split.getFragments().stream().anyMatch(allowedIds::contains))
+        .collect(Collectors.toList());
+  }
+
+  static boolean supportsRuntimeFiltering(LanceSparkReadOptions readOptions) {
+    return isSpark41OrLater() && readOptions.isPushDownFilters();
+  }
+
+  @Override
+  public NamedReference[] filterAttributes() {
+    if (!supportsRuntimeFiltering(readOptions)) {
+      return new NamedReference[0];
+    }
+    return Arrays.copyOf(runtimeFilterAttributes, runtimeFilterAttributes.length);
+  }
+
+  @Override
+  public void filter(Predicate[] predicates) {
+    if (!supportsRuntimeFiltering(readOptions) || predicates == null || predicates.length == 0) {
+      return;
+    }
+
+    Set<String> advertisedColumns =
+        Arrays.stream(runtimeFilterAttributes)
+            .map(LanceScan::columnName)
+            .collect(Collectors.toSet());
+    synchronized (runtimeFilterLock) {
+      for (Predicate predicate : predicates) {
+        CanonicalRuntimePredicate canonical =
+            canonicalizeRuntimePredicate(predicate, advertisedColumns);
+        if (canonical == null) {
+          rejectedRuntimeFilterCount++;
+          LOG.debug("Ignoring unsupported Lance runtime predicate: {}", predicate);
+          continue;
+        }
+        if (runtimePredicateFingerprints.contains(canonical.fingerprint)) {
+          continue;
+        }
+        if (runtimeFilterKeyCount + canonical.keyCount > readOptions.getRuntimeFilterMaxKeys()
+            || runtimeFilterEstimatedBytes + canonical.estimatedBytes
+                > readOptions.getRuntimeFilterMaxBytes()) {
+          rejectedRuntimeFilterCount++;
+          LOG.warn(
+              "Ignoring Lance runtime predicate on '{}' because accumulated runtime filter size "
+                  + "would exceed maxKeys={} or maxBytes={}",
+              canonical.column,
+              readOptions.getRuntimeFilterMaxKeys(),
+              readOptions.getRuntimeFilterMaxBytes());
+          continue;
+        }
+        runtimePredicates.add(canonical.predicate);
+        runtimePredicateFingerprints.add(canonical.fingerprint);
+        runtimeFilterKeyCount += canonical.keyCount;
+        runtimeFilterEstimatedBytes += canonical.estimatedBytes;
+      }
+    }
+  }
+
+  /**
+   * Spark 4.2 adds this method to {@code SupportsRuntimeV2Filtering}. It intentionally has no
+   * {@code @Override} annotation so the common source also compiles against Spark 4.1 and older
+   * build dependencies.
+   */
+  public Predicate[] pushedPredicates() {
+    return runtimePredicatesSnapshot();
+  }
+
+  /**
+   * Lance accepts Spark's exact translated IN predicates directly, so a second 4.2
+   * PartitionPredicate pass is unnecessary.
+   */
+  public boolean supportsIterativePushdown() {
+    return false;
+  }
+
+  private Predicate[] runtimePredicatesSnapshot() {
+    synchronized (runtimeFilterLock) {
+      return runtimePredicates.toArray(new Predicate[0]);
+    }
+  }
+
+  private CanonicalRuntimePredicate canonicalizeRuntimePredicate(
+      Predicate predicate, Set<String> advertisedColumns) {
+    if (predicate == null || !"IN".equals(predicate.name())) {
+      return null;
+    }
+    Expression[] children = predicate.children();
+    if (children.length == 0 || !(children[0] instanceof NamedReference)) {
+      return null;
+    }
+    NamedReference reference = (NamedReference) children[0];
+    if (reference.fieldNames().length != 1) {
+      return null;
+    }
+    String column = columnName(reference);
+    if (!advertisedColumns.contains(column)) {
+      return null;
+    }
+
+    StructField field = findField(schema, column);
+    if (field == null) {
+      return null;
+    }
+
+    boolean rowIdentifier =
+        LanceConstant.ROW_ADDRESS.equals(column) || LanceConstant.ROW_ID.equals(column);
+    Long unsignedMax = unsignedRuntimeKeyMax.get(column);
+    List<Literal<?>> literals = new ArrayList<>();
+    Set<String> literalFingerprints = new LinkedHashSet<>();
+    int estimatedBytes = column.getBytes(StandardCharsets.UTF_8).length;
+    for (int i = 1; i < children.length; i++) {
+      if (!(children[i] instanceof Literal)) {
+        return null;
+      }
+      Literal<?> literal = (Literal<?>) children[i];
+      if (literal.value() == null) {
+        continue;
+      }
+      if (!runtimeLiteralMatchesField(field.dataType(), literal.dataType())) {
+        return null;
+      }
+      // A negative _rowid or _rowaddr is a valid UInt64 that Lance cannot compare as a literal,
+      // so the whole predicate is left to Spark rather than dropping a key that may match.
+      if (rowIdentifier && isNegative(literal.value())) {
+        return null;
+      }
+      if (unsignedMax != null && !withinUnsignedRange(literal.value(), unsignedMax)) {
+        continue;
+      }
+      String literalFingerprint = runtimeLiteralFingerprint(literal);
+      if (literalFingerprints.add(literalFingerprint)) {
+        literals.add(literal);
+        estimatedBytes += literalFingerprint.getBytes(StandardCharsets.UTF_8).length;
+      }
+    }
+
+    Expression[] canonicalChildren = new Expression[literals.size() + 1];
+    canonicalChildren[0] = FieldReference.column(column);
+    for (int i = 0; i < literals.size(); i++) {
+      canonicalChildren[i + 1] = literals.get(i);
+    }
+    Predicate canonical = new Predicate("IN", canonicalChildren);
+    String fingerprint = column + "|" + String.join("|", literalFingerprints);
+    return new CanonicalRuntimePredicate(
+        canonical, column, literals.size(), estimatedBytes, fingerprint);
+  }
+
+  private static StructField findField(StructType struct, String name) {
+    for (StructField field : struct.fields()) {
+      if (field.name().equals(name)) {
+        return field;
+      }
+    }
+    return null;
+  }
+
+  private static boolean runtimeLiteralMatchesField(DataType fieldType, DataType literalType) {
+    return literalType == DataTypes.NullType || fieldType.sameType(literalType);
+  }
+
+  private static boolean isNegative(Object value) {
+    return value instanceof Number && ((Number) value).longValue() < 0;
+  }
+
+  private static boolean withinUnsignedRange(Object value, long max) {
+    if (!(value instanceof Number)) {
+      return true;
+    }
+    long key = ((Number) value).longValue();
+    return key >= 0 && key <= max;
+  }
+
+  private static String runtimeLiteralFingerprint(Literal<?> literal) {
+    Object value = normalizeLiteral(literal.value());
+    return literal.dataType().sql() + ":" + value.getClass().getName() + ":" + value.toString();
+  }
+
+  private static boolean containsEmptyRuntimeIn(Predicate[] predicates) {
+    for (Predicate predicate : predicates) {
+      if ("IN".equals(predicate.name()) && predicate.children().length == 1) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private List<LanceSplit> pruneByShardingFilters(
+      List<LanceSplit> allSplits, Predicate[] effectivePredicates) {
+    if (activeShardingColumn == null
+        || activeShardingExpression == null
+        || fragmentShardingKeys == null) {
+      return allSplits;
+    }
+    java.util.Optional<Set<Object>> allowedKeys =
+        extractShardingKeys(effectivePredicates, activeShardingColumn);
+    if (!allowedKeys.isPresent()) {
+      return allSplits;
+    }
+
+    Set<Object> keys = allowedKeys.get();
+    return allSplits.stream()
+        .filter(
+            split ->
+                split.getFragments().stream()
+                    .anyMatch(
+                        fragmentId -> {
+                          if (!fragmentShardingKeys.containsKey(fragmentId)) {
+                            return true;
+                          }
+                          return keys.contains(fragmentShardingKeys.get(fragmentId));
+                        }))
+        .collect(Collectors.toList());
+  }
+
+  private java.util.Optional<Set<Object>> extractShardingKeys(
+      Predicate[] predicates, String shardingColumn) {
+    Set<Object> result = null;
+    for (Predicate predicate : predicates) {
+      java.util.Optional<Set<Object>> keys = analyzeShardingPredicate(predicate, shardingColumn);
+      if (keys.isPresent()) {
+        if (result == null) {
+          result = new HashSet<>(keys.get());
+        } else {
+          result.retainAll(keys.get());
+        }
+      }
+    }
+    return result == null
+        ? java.util.Optional.empty()
+        : java.util.Optional.of(Collections.unmodifiableSet(result));
+  }
+
+  private java.util.Optional<Set<Object>> analyzeShardingPredicate(
+      Predicate predicate, String shardingColumn) {
+    if (predicate instanceof And) {
+      java.util.Optional<Set<Object>> left =
+          analyzeShardingPredicate(((And) predicate).left(), shardingColumn);
+      java.util.Optional<Set<Object>> right =
+          analyzeShardingPredicate(((And) predicate).right(), shardingColumn);
+      if (left.isPresent() && right.isPresent()) {
+        Set<Object> intersection = new HashSet<>(left.get());
+        intersection.retainAll(right.get());
+        return java.util.Optional.of(intersection);
+      }
+      return left.isPresent() ? left : right;
+    }
+    if (predicate instanceof Or) {
+      java.util.Optional<Set<Object>> left =
+          analyzeShardingPredicate(((Or) predicate).left(), shardingColumn);
+      java.util.Optional<Set<Object>> right =
+          analyzeShardingPredicate(((Or) predicate).right(), shardingColumn);
+      if (left.isPresent() && right.isPresent()) {
+        Set<Object> union = new HashSet<>(left.get());
+        union.addAll(right.get());
+        return java.util.Optional.of(union);
+      }
+      return java.util.Optional.empty();
+    }
+    if (predicate instanceof Not) {
+      return java.util.Optional.empty();
+    }
+
+    Expression[] children = predicate.children();
+    if ((!"=".equals(predicate.name()) && !"IN".equals(predicate.name()))
+        || children.length == 0
+        || !(children[0] instanceof NamedReference)
+        || !shardingColumn.equals(columnName((NamedReference) children[0]))) {
+      return java.util.Optional.empty();
+    }
+
+    Set<Object> keys = new HashSet<>();
+    for (int i = 1; i < children.length; i++) {
+      if (!(children[i] instanceof Literal)) {
+        return java.util.Optional.empty();
+      }
+      Object value = ((Literal<?>) children[i]).value();
+      if (value != null) {
+        keys.add(toShardingKey(normalizeLiteral(value)));
+      }
+    }
+    return java.util.Optional.of(keys);
+  }
+
+  private Object toShardingKey(Object value) {
+    if (activeShardingExpression instanceof BucketTransform) {
+      Object buckets = ((BucketTransform) activeShardingExpression).numBuckets().value();
+      return BucketHashUtil.computeBucketIdFromValue(value, ((Number) buckets).intValue());
+    }
+    return value;
+  }
+
+  private static Object normalizeLiteral(Object value) {
+    if (value instanceof UTF8String) {
+      return value.toString();
+    }
+    if (value instanceof Byte || value instanceof Short || value instanceof Integer) {
+      return ((Number) value).longValue();
+    }
+    if (value instanceof Float) {
+      return ((Float) value).doubleValue();
+    }
+    return value;
+  }
+
+  private static Predicate[] concatPredicates(Predicate[] left, Predicate[] right) {
+    Predicate[] result = Arrays.copyOf(left, left.length + right.length);
+    System.arraycopy(right, 0, result, left.length, right.length);
+    return result;
+  }
+
+  private static String columnName(NamedReference reference) {
+    return String.join(".", reference.fieldNames());
+  }
+
+  private static boolean isSpark41OrLater() {
+    String[] components = org.apache.spark.package$.MODULE$.SPARK_VERSION().split("\\.");
+    if (components.length < 2) {
+      return false;
+    }
+    int major = Integer.parseInt(components[0]);
+    int minor = Integer.parseInt(components[1]);
+    return major > 4 || (major == 4 && minor >= 1);
+  }
+
+  private static final class CanonicalRuntimePredicate {
+    final Predicate predicate;
+    final String column;
+    final int keyCount;
+    final int estimatedBytes;
+    final String fingerprint;
+
+    CanonicalRuntimePredicate(
+        Predicate predicate, String column, int keyCount, int estimatedBytes, String fingerprint) {
+      this.predicate = predicate;
+      this.column = column;
+      this.keyCount = keyCount;
+      this.estimatedBytes = estimatedBytes;
+      this.fingerprint = fingerprint;
+    }
+  }
+
   /**
    * Reports the output partitioning to Spark's optimizer.
    *
@@ -529,9 +1058,8 @@ public class LanceScan
   @Override
   public Partitioning outputPartitioning() {
     if (activeShardingExpression != null && fragmentShardingKeys != null) {
-      int partCount = numPartitions >= 0 ? numPartitions : fragmentShardingKeys.size();
       Expression[] keys = new Expression[] {activeShardingExpression};
-      return new KeyGroupedPartitioning(keys, partCount);
+      return new KeyGroupedPartitioning(keys, fragmentShardingKeys.size());
     }
     return new UnknownPartitioning(numPartitions >= 0 ? numPartitions : 0);
   }
@@ -559,6 +1087,30 @@ public class LanceScan
     result = result.$plus(scala.Tuple2.apply("offset", offset.toString()));
     result = result.$plus(scala.Tuple2.apply("topNSortOrders", topNSortOrders.toString()));
     result = result.$plus(scala.Tuple2.apply("pushedAggregation", pushedAggregation.toString()));
+    result =
+        result.$plus(
+            scala.Tuple2.apply(
+                "originalFragmentCount", Integer.toString(precomputedSplits.size())));
+    result =
+        result.$plus(
+            scala.Tuple2.apply(
+                "numPartitions",
+                Integer.toString(numPartitions >= 0 ? numPartitions : precomputedSplits.size())));
+    synchronized (runtimeFilterLock) {
+      Set<String> runtimeFilterColumns = new LinkedHashSet<>();
+      for (Predicate predicate : runtimePredicates) {
+        runtimeFilterColumns.add(columnName((NamedReference) predicate.children()[0]));
+      }
+      result =
+          result.$plus(scala.Tuple2.apply("runtimeFilterColumns", runtimeFilterColumns.toString()));
+      result =
+          result.$plus(
+              scala.Tuple2.apply("runtimeFilterKeyCount", Integer.toString(runtimeFilterKeyCount)));
+      result =
+          result.$plus(
+              scala.Tuple2.apply(
+                  "rejectedRuntimeFilterCount", Integer.toString(rejectedRuntimeFilterCount)));
+    }
     if (readOptions.getFullTextQuery() != null) {
       result =
           result.$plus(
@@ -567,6 +1119,11 @@ public class LanceScan
                   FullTextQueryUtils.fullTextQueryToString(readOptions.getFullTextQuery())));
     }
     return result;
+  }
+
+  private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
+    in.defaultReadObject();
+    runtimeFilterLock = new Object();
   }
 
   @Override

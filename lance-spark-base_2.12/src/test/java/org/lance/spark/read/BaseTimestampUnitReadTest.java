@@ -13,21 +13,31 @@
  */
 package org.lance.spark.read;
 
+import org.lance.index.IndexOptions;
+import org.lance.index.IndexParams;
+import org.lance.index.IndexType;
+import org.lance.index.scalar.ScalarIndexParams;
 import org.lance.spark.LanceDataSource;
 import org.lance.spark.LanceRuntime;
+import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.vector.DateMilliVector;
+import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.TimeStampMilliTZVector;
 import org.apache.arrow.vector.TimeStampMilliVector;
 import org.apache.arrow.vector.TimeStampNanoTZVector;
 import org.apache.arrow.vector.TimeStampSecTZVector;
 import org.apache.arrow.vector.TimeStampSecVector;
+import org.apache.arrow.vector.TimeStampVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import org.apache.arrow.vector.ipc.ArrowStreamWriter;
+import org.apache.arrow.vector.types.DateUnit;
 import org.apache.arrow.vector.types.TimeUnit;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
@@ -47,9 +57,12 @@ import java.io.ByteArrayOutputStream;
 import java.nio.file.Path;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -103,6 +116,12 @@ public abstract class BaseTimestampUnitReadTest {
 
   private static void writeLanceDataset(String datasetUri, Schema arrowSchema, DataWriter writer)
       throws Exception {
+    writeLanceDataset(datasetUri, arrowSchema, writer, Integer.MAX_VALUE);
+  }
+
+  private static void writeLanceDataset(
+      String datasetUri, Schema arrowSchema, DataWriter writer, int maxRowsPerFile)
+      throws Exception {
     BufferAllocator allocator = LanceRuntime.allocator();
     try (VectorSchemaRoot root = VectorSchemaRoot.create(arrowSchema, allocator)) {
       root.allocateNew();
@@ -120,7 +139,11 @@ public abstract class BaseTimestampUnitReadTest {
               new ArrowStreamReader(new ByteArrayInputStream(baos.toByteArray()), allocator);
           ArrowArrayStream arrowStream = ArrowArrayStream.allocateNew(allocator)) {
         Data.exportArrayStream(allocator, reader, arrowStream);
-        org.lance.Dataset.write().stream(arrowStream).uri(datasetUri).execute().close();
+        org.lance.Dataset.write().stream(arrowStream)
+            .uri(datasetUri)
+            .maxRowsPerFile(maxRowsPerFile)
+            .execute()
+            .close();
       }
     }
   }
@@ -340,5 +363,124 @@ public abstract class BaseTimestampUnitReadTest {
     assertEquals(2, rows.size());
     assertEquals(Timestamp.from(Instant.ofEpochSecond(TS1_SECONDS)), rows.get(0).getTimestamp(1));
     assertTrue(rows.get(1).isNullAt(1));
+  }
+
+  // ---- Zonemap pruning on non-microsecond units ----
+
+  @Test
+  public void testZonemapPruningTimestampSecond() throws Exception {
+    assertZonemapPruning(
+        "zm_ts_sec",
+        new ArrowType.Timestamp(TimeUnit.SECOND, "UTC"),
+        TS1_SECONDS,
+        TS2_SECONDS,
+        timestampLiteral(TS1_SECONDS),
+        timestampLiteral(TS2_SECONDS));
+  }
+
+  @Test
+  public void testZonemapPruningTimestampMilli() throws Exception {
+    assertZonemapPruning(
+        "zm_ts_milli",
+        new ArrowType.Timestamp(TimeUnit.MILLISECOND, "UTC"),
+        TS1_MILLIS,
+        TS2_MILLIS,
+        timestampLiteral(TS1_SECONDS),
+        timestampLiteral(TS2_SECONDS));
+  }
+
+  @Test
+  public void testZonemapPruningTimestampNano() throws Exception {
+    assertZonemapPruning(
+        "zm_ts_nano",
+        new ArrowType.Timestamp(TimeUnit.NANOSECOND, "UTC"),
+        TS1_NANOS,
+        TS2_NANOS,
+        timestampLiteral(TS1_SECONDS),
+        timestampLiteral(TS2_SECONDS));
+  }
+
+  @Test
+  public void testZonemapPruningDateMilli() throws Exception {
+    long day1 = LocalDate.of(2024, 6, 15).toEpochDay();
+    long day2 = 1L;
+    assertZonemapPruning(
+        "zm_date_milli",
+        new ArrowType.Date(DateUnit.MILLISECOND),
+        day1 * 86_400_000L,
+        day2 * 86_400_000L,
+        "DATE '" + LocalDate.ofEpochDay(day1) + "'",
+        "DATE '" + LocalDate.ofEpochDay(day2) + "'");
+  }
+
+  /**
+   * Writes rows (id=1, v=raw1) and (id=2, v=raw2) into separate fragments, builds a zonemap index
+   * on v, and checks that filters on v return the right rows while pruning the other fragment.
+   */
+  private static void assertZonemapPruning(
+      String name, ArrowType type, long raw1, long raw2, String literal1, String literal2)
+      throws Exception {
+    String uri = tempDir.resolve(name + ".lance").toString();
+    Schema schema =
+        new Schema(
+            Arrays.asList(
+                new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
+                new Field("v", FieldType.nullable(type), null)));
+    writeLanceDataset(
+        uri,
+        schema,
+        root -> {
+          ((IntVector) root.getVector("id")).setSafe(0, 1);
+          ((IntVector) root.getVector("id")).setSafe(1, 2);
+          setRaw(root.getVector("v"), 0, raw1);
+          setRaw(root.getVector("v"), 1, raw2);
+        },
+        1);
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(uri)).build()) {
+      IndexParams params =
+          IndexParams.builder()
+              .setScalarIndexParams(ScalarIndexParams.create("zonemap", "{}"))
+              .build();
+      dataset.createIndex(
+          IndexOptions.builder(Collections.singletonList("v"), IndexType.ZONEMAP, params)
+              .replace(true)
+              .build());
+    }
+
+    spark.read().format(LanceDataSource.name).load(uri).createOrReplaceTempView(name);
+    assertQuery(name, "v = " + literal1, Collections.singletonList(1), 1);
+    assertQuery(name, "v = " + literal2, Collections.singletonList(2), 1);
+    assertQuery(name, "v IN (" + literal1 + ", " + literal2 + ")", Arrays.asList(1, 2), 2);
+    assertQuery(name, "v > " + literal2, Collections.singletonList(1), 1);
+    assertQuery(name, "v < " + literal1, Collections.singletonList(2), 1);
+  }
+
+  private static void assertQuery(
+      String view, String predicate, List<Integer> expectedIds, int expectedPartitions) {
+    Dataset<Row> df = spark.sql("SELECT id FROM " + view + " WHERE " + predicate + " ORDER BY id");
+    List<Integer> ids = new ArrayList<>();
+    for (Row row : df.collectAsList()) {
+      ids.add(row.getInt(0));
+    }
+    assertEquals(expectedIds, ids, predicate);
+    assertEquals(
+        expectedPartitions,
+        spark.sql("SELECT id FROM " + view + " WHERE " + predicate).rdd().getNumPartitions(),
+        "fragments scanned for " + predicate);
+  }
+
+  private static void setRaw(FieldVector vector, int index, long raw) {
+    if (vector instanceof TimeStampVector) {
+      ((TimeStampVector) vector).setSafe(index, raw);
+    } else {
+      ((DateMilliVector) vector).setSafe(index, raw);
+    }
+  }
+
+  private static String timestampLiteral(long epochSeconds) {
+    return "TIMESTAMP '"
+        + LocalDateTime.ofEpochSecond(epochSeconds, 0, ZoneOffset.UTC).toString().replace('T', ' ')
+        + "'";
   }
 }
