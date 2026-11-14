@@ -82,7 +82,7 @@ SELECT * FROM lance.db.documents WHERE lance_match_phrase(body, 'deep networks',
 
 ## lance_multi_match
 
-Search across multiple FTS-indexed columns with a single query. A row matches if **any** column matches, regardless of the operator. The `operator` option controls how query terms combine **within each column** (same meaning as in [`lance_match`](#lance_match)): whether all terms must match in the same column (AND) or any term (OR, default).
+Search across multiple FTS-indexed columns with a single query. A row matches if **any** column matches. The `operator` controls whether all terms must match within that column (AND) or any term can match (OR, default).
 
 ```sql
 lance_multi_match(query, col1, col2, ...)

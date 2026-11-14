@@ -4078,14 +4078,7 @@ class TestDQLFullTextSearch:
         assert 6 in ids
 
     def test_lance_multi_match_and_operator(self, spark):
-        """operator=AND is a term-level operator, not a cross-column one.
-
-        All query terms must appear in at least one single column; the
-        cross-column combination stays "any column matches". Terms split
-        across columns do not satisfy AND.
-        """
-        # Positive: body of rows 1, 4, 6 contains both 'apache' and 'spark'
-        # (rows 1 and 4 also contain 'spark' in title — matching one column suffices).
+        """operator=AND requires all query terms within one column, not one hit per column."""
         rows = spark.sql(
             "SELECT id FROM default.fts_docs "
             "WHERE lance_multi_match('apache spark', 'operator=AND', title, body)"
@@ -4093,8 +4086,6 @@ class TestDQLFullTextSearch:
         ids = sorted([r.id for r in rows])
         assert ids == [1, 4, 6]
 
-        # Terms split across columns do not satisfy AND: in row 1 'introduction'
-        # appears only in title and 'apache' only in body.
         rows = spark.sql(
             "SELECT id FROM default.fts_docs "
             "WHERE lance_multi_match('introduction apache', 'operator=AND', title, body)"
@@ -4102,9 +4093,6 @@ class TestDQLFullTextSearch:
         ids = sorted([r.id for r in rows])
         assert ids == []
 
-        # Under OR (default) the split row does match: row 1 has 'introduction'
-        # in title and 'apache' in body. Rows 4 and 6 also match — their body
-        # contains 'apache' (a single hit column suffices under OR).
         rows = spark.sql(
             "SELECT id FROM default.fts_docs "
             "WHERE lance_multi_match('introduction apache', title, body)"

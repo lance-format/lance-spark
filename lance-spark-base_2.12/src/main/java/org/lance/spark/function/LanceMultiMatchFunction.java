@@ -37,9 +37,9 @@ import org.apache.spark.sql.types.StructType;
  *
  * <p>When the second argument is a string literal starting with a recognized option key ({@code
  * operator=}), it is treated as an options string rather than a column name. All remaining
- * arguments are column names. Minimum arity is 3 (query + at least 2 columns without options, or
- * query + options + at least 1 column). Option parsing and column extraction happen in {@code
- * LanceFtsPredicateRule} — {@code bind()} only validates arity and assigns types.
+ * arguments are column names; at least two columns are required, with or without options. Option
+ * parsing and column extraction happen in {@code LanceFtsPredicateRule} — {@code bind()} only
+ * validates arity and assigns types.
  *
  * <p>Returns {@code BooleanType} so Spark treats it as a valid filter predicate. {@code
  * produceResult} always throws — the predicate must be intercepted by {@code LanceFtsPredicateRule}
@@ -75,9 +75,8 @@ public final class LanceMultiMatchFunction implements UnboundFunction {
     return "Multi-column FTS search: "
         + "lance_multi_match(query, col1, col2, ...) -> BOOLEAN, or "
         + "lance_multi_match(query, 'operator=AND|OR', col1, col2, ...) -> BOOLEAN. "
-        + "A row is returned if any column matches. The operator controls how query "
-        + "terms combine within each column, same as lance_match: whether all terms "
-        + "must match in the same column (AND) or any term (OR, default). "
+        + "A row matches if any column matches. AND requires all terms within one "
+        + "column and OR matches any term (default). "
         + "Pushes the predicate to the Lance FTS inverted index via LanceFtsPredicateRule.";
   }
 
