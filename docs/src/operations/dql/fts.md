@@ -82,7 +82,7 @@ SELECT * FROM lance.db.documents WHERE lance_match_phrase(body, 'deep networks',
 
 ## lance_multi_match
 
-Search across multiple FTS-indexed columns with a single query. A row matches if **any** column matches (OR, default) or **all** columns match (AND).
+Search across multiple FTS-indexed columns with a single query. A row matches if **any** column matches. The `operator` controls whether all terms must match within that column (AND) or any term can match (OR, default).
 
 ```sql
 lance_multi_match(query, col1, col2, ...)
@@ -106,7 +106,7 @@ When the second argument is a string literal containing `=` with a recognized op
 SELECT * FROM lance.db.documents
 WHERE lance_multi_match('machine learning', title, body);
 
--- AND operator — row must match in all columns
+-- AND operator — a single column must contain ALL query terms.
 SELECT * FROM lance.db.documents
 WHERE lance_multi_match('machine learning', 'operator=AND', title, body);
 ```
