@@ -4077,6 +4077,29 @@ class TestDQLFullTextSearch:
         assert 4 in ids
         assert 6 in ids
 
+    def test_lance_multi_match_and_operator(self, spark):
+        """operator=AND requires all query terms within one column, not one hit per column."""
+        rows = spark.sql(
+            "SELECT id FROM default.fts_docs "
+            "WHERE lance_multi_match('apache spark', 'operator=AND', title, body)"
+        ).collect()
+        ids = sorted([r.id for r in rows])
+        assert ids == [1, 4, 6]
+
+        rows = spark.sql(
+            "SELECT id FROM default.fts_docs "
+            "WHERE lance_multi_match('introduction apache', 'operator=AND', title, body)"
+        ).collect()
+        ids = sorted([r.id for r in rows])
+        assert ids == []
+
+        rows = spark.sql(
+            "SELECT id FROM default.fts_docs "
+            "WHERE lance_multi_match('introduction apache', title, body)"
+        ).collect()
+        ids = sorted([r.id for r in rows])
+        assert ids == [1, 4, 6]
+
     def test_show_functions_lists_fts(self, spark):
         """SHOW FUNCTIONS returns all three FTS function names."""
         functions = spark.sql("SHOW FUNCTIONS").collect()
