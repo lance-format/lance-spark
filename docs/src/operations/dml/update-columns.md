@@ -54,3 +54,9 @@ ALTER TABLE users UPDATE COLUMNS value, name FROM update_source;
 | Write amplification | Rewrites affected rows | Column-level update only | Rewrites affected rows |
 | Preserves `_rowaddr` | No | Yes | No |
 | Batch update support | No | Yes | No |
+
+## Memory Behavior
+
+Updates use the same [fragment-ordered, batched write path](add-columns.md#memory-behavior)
+as `ADD COLUMNS FROM`. Spark can spill the input sort, but the native join can still retain
+all incoming values for one fragment; Arrow batching does not bound total native memory.

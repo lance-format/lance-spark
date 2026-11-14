@@ -31,6 +31,17 @@ No table rewrite, no data movement—just a new column that is instantly queryab
     Because we use `_rowaddr` and `_fragid` to address the target dataset's rows for the new column's data,
     the temporary view should contain `_rowaddr` and `_fragid`.
 
+## Memory Behavior
+
+Spark clusters and sorts the input by `_fragid`, using its spillable sort when necessary.
+Each task finishes one fragment before processing the next and sends its rows to Lance in
+multiple Arrow batches. This avoids accumulating all of a fragment's strings or binary values
+in a single Arrow buffer with 32-bit offsets.
+
+This does not make native backfills constant-memory: Lance's hash join can still retain all
+incoming values for the current fragment. Allow sufficient executor memory overhead for that
+fragment and the number of concurrent writer tasks.
+
 ## Adding a Blob v2 Column
 
 To add a blob v2 column, create the target table with Lance file format version `2.2` or higher,
