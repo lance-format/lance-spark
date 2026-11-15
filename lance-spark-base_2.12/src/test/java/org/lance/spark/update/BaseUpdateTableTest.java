@@ -13,13 +13,20 @@
  */
 package org.lance.spark.update;
 
+import org.lance.spark.LanceDataset;
+import org.lance.spark.LanceSpark;
+import org.lance.spark.TestUtils;
+
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -74,6 +81,106 @@ public abstract class BaseUpdateTableTest {
     Map<String, String> configs = new HashMap<>();
     configs.put("root", tempDir.toString());
     return configs;
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  public void testTransactionPropertiesCreate(boolean managedVersioning) throws Exception {
+    String table = createTransactionPropertiesTable(managedVersioning);
+    assertTransactionProperties(Collections.singletonMap("request", "create"));
+    Assertions.assertEquals(2, spark.table(table).count());
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  public void testTransactionPropertiesUpdate(boolean managedVersioning) throws Exception {
+    String table = createTransactionPropertiesTable(managedVersioning);
+    Map<String, String> properties = new HashMap<>();
+    properties.put("RequestID", "Update-42");
+    properties.put("empty", "");
+    properties.put("", "");
+    properties.put("\u96ea", "\u00e9");
+    Map<String, String> expected = new HashMap<>(properties);
+    LanceSpark.executeSql(spark, "UPDATE " + table + " SET value = value + 1", properties);
+    properties.put("RequestID", "mutated");
+    assertTransactionProperties(expected);
+    Assertions.assertEquals(32, spark.sql("SELECT SUM(value) FROM " + table).first().getLong(0));
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  public void testTransactionPropertiesMatchedMerge(boolean managedVersioning) throws Exception {
+    String table = createTransactionPropertiesTable(managedVersioning);
+    LanceSpark.executeSql(
+        spark,
+        "MERGE INTO "
+            + table
+            + " target USING (SELECT 1 AS id, 99 AS value) source "
+            + "ON target.id = source.id WHEN MATCHED THEN UPDATE SET value = source.value",
+        Collections.singletonMap("RequestID", "Matched-Merge"));
+    assertTransactionProperties(Collections.singletonMap("RequestID", "Matched-Merge"));
+    Assertions.assertEquals(119, spark.sql("SELECT SUM(value) FROM " + table).first().getLong(0));
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  public void testTransactionPropertiesInsertOnlyMerge(boolean managedVersioning) throws Exception {
+    String table = createTransactionPropertiesTable(managedVersioning);
+    LanceSpark.executeSql(
+        spark,
+        "MERGE INTO "
+            + table
+            + " target USING (SELECT 3 AS id, 30 AS value) source "
+            + "ON target.id = source.id WHEN NOT MATCHED THEN INSERT *",
+        Collections.singletonMap("RequestID", "Insert-Merge"));
+    assertTransactionProperties(Collections.singletonMap("RequestID", "Insert-Merge"));
+    Assertions.assertEquals(3, spark.table(table).count());
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  public void testTransactionPropertiesDeleteAndReset(boolean managedVersioning) throws Exception {
+    String table = createTransactionPropertiesTable(managedVersioning);
+    LanceSpark.executeSql(
+        spark, "DELETE FROM " + table, Collections.singletonMap("RequestID", "Delete-43"));
+    Assertions.assertEquals(0, spark.table(table).count());
+    assertTransactionProperties(Collections.singletonMap("RequestID", "Delete-43"));
+    spark.sql("INSERT INTO " + table + " VALUES (3, 30)");
+    assertTransactionProperties(Collections.emptyMap());
+  }
+
+  private String createTransactionPropertiesTable(boolean managedVersioning) throws Exception {
+    if (managedVersioning) {
+      catalogName += "_managed";
+      String catalogConfig = "spark.sql.catalog." + catalogName;
+      spark.conf().set(catalogConfig, "org.lance.spark.LanceNamespaceSparkCatalog");
+      spark.conf().set(catalogConfig + ".impl", "dir");
+      spark.conf().set(catalogConfig + ".root", tempDir.resolve("managed").toString());
+      spark.conf().set(catalogConfig + ".table_version_tracking_enabled", "true");
+      catalog = (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+      spark.sql("CREATE NAMESPACE " + catalogName + ".default");
+    }
+    String table = catalogName + ".default.transaction_properties";
+    LanceSpark.executeSql(
+        spark,
+        "CREATE TABLE "
+            + table
+            + " USING lance AS SELECT 1 AS id, 10 AS value UNION ALL SELECT 2, 20",
+        Collections.singletonMap("request", "create"));
+    if (managedVersioning) {
+      LanceDataset targetTable =
+          (LanceDataset)
+              catalog.loadTable(Identifier.of(new String[] {"default"}, "transaction_properties"));
+      Assertions.assertTrue(targetTable.getManagedVersioning());
+    }
+    return table;
+  }
+
+  private void assertTransactionProperties(Map<String, String> expected) throws Exception {
+    LanceDataset table =
+        (LanceDataset)
+            catalog.loadTable(Identifier.of(new String[] {"default"}, "transaction_properties"));
+    Assertions.assertEquals(expected, TestUtils.readTransactionProperties(table.readOptions()));
   }
 
   @Test
