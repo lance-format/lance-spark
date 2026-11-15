@@ -333,4 +333,24 @@ public class FilterPushDownTest {
     assertTrue(FilterPushDown.referencesAny(onPayload, Collections.singleton("payload")));
     assertFalse(FilterPushDown.referencesAny(onPayload, Collections.singleton("id")));
   }
+
+  @Test
+  public void testNonFiniteFloatingPointLiteralsAreNotPushed() {
+    for (Object value :
+        new Object[] {
+          Double.NaN,
+          Double.POSITIVE_INFINITY,
+          Double.NEGATIVE_INFINITY,
+          Float.NaN,
+          Float.POSITIVE_INFINITY,
+          Float.NEGATIVE_INFINITY
+        }) {
+      assertFalse(FilterPushDown.isPredicateSupported(TestPredicates.eq("x", value)), "= " + value);
+      assertFalse(FilterPushDown.isPredicateSupported(TestPredicates.gt("x", value)), "> " + value);
+      assertFalse(
+          FilterPushDown.isPredicateSupported(TestPredicates.in("x", 1.5, value)), "IN " + value);
+    }
+    assertTrue(FilterPushDown.isPredicateSupported(TestPredicates.eq("x", 1.5)));
+    assertTrue(FilterPushDown.isPredicateSupported(TestPredicates.eq("x", 1.5f)));
+  }
 }
