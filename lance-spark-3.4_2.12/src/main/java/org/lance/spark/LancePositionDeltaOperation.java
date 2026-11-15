@@ -26,10 +26,12 @@ import org.apache.spark.sql.connector.write.SupportsDelta;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
-public class LancePositionDeltaOperation implements RowLevelOperation, SupportsDelta {
+public class LancePositionDeltaOperation
+    implements RowLevelOperation, SupportsDelta, TransactionPropertiesOperation {
   private final Command command;
   private final StructType sparkSchema;
   private final LanceSparkReadOptions readOptions;
@@ -50,6 +52,7 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
   private final String fileFormatVersion;
 
   private final Map<String, String> tableProperties;
+  private final Map<String, String> transactionProperties;
 
   public LancePositionDeltaOperation(
       Command command,
@@ -61,6 +64,30 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
       boolean managedVersioning,
       String fileFormatVersion,
       Map<String, String> tableProperties) {
+    this(
+        command,
+        sparkSchema,
+        readOptions,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        managedVersioning,
+        fileFormatVersion,
+        tableProperties,
+        Collections.emptyMap());
+  }
+
+  private LancePositionDeltaOperation(
+      Command command,
+      StructType sparkSchema,
+      LanceSparkReadOptions readOptions,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      boolean managedVersioning,
+      String fileFormatVersion,
+      Map<String, String> tableProperties,
+      Map<String, String> transactionProperties) {
     this.command = command;
     this.sparkSchema = sparkSchema;
     this.readOptions = readOptions;
@@ -70,6 +97,22 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
     this.managedVersioning = managedVersioning;
     this.fileFormatVersion = fileFormatVersion;
     this.tableProperties = tableProperties;
+    this.transactionProperties = TransactionProperties.snapshot(transactionProperties);
+  }
+
+  @Override
+  public LancePositionDeltaOperation withTransactionProperties(Map<String, String> properties) {
+    return new LancePositionDeltaOperation(
+        command,
+        sparkSchema,
+        readOptions,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        managedVersioning,
+        fileFormatVersion,
+        tableProperties,
+        properties);
   }
 
   @Override
@@ -114,6 +157,9 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
       if (stableRowIds != null) {
         writeOptionsBuilder.enableStableRowIds(Boolean.parseBoolean(stableRowIds));
       }
+    }
+    if (!transactionProperties.isEmpty()) {
+      writeOptionsBuilder.transactionProperties(transactionProperties);
     }
     LanceSparkWriteOptions writeOptions = writeOptionsBuilder.build();
     return new SparkPositionDeltaWriteBuilder(

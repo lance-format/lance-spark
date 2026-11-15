@@ -181,7 +181,11 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
             .namespaceClientManagedVersioning(true);
       }
       try (Transaction txn =
-              new Transaction.Builder().readVersion(version).operation(merge).build();
+              new Transaction.Builder()
+                  .readVersion(version)
+                  .operation(merge)
+                  .transactionProperties(writeOptions.getTransactionProperties())
+                  .build();
           Dataset committed = commitBuilder.execute(txn)) {
         // auto-close txn and committed dataset
       }
