@@ -17,6 +17,7 @@ import org.lance.WriteParams;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.write.AbstractBackfillWriter;
 import org.lance.spark.write.AddColumnsBackfillBatchWrite;
 import org.lance.spark.write.LanceBatchWrite;
 
@@ -331,5 +332,68 @@ public abstract class BaseAddColumnsBackfillTest {
       assertThrows(
           Exception.class, () -> backfillWrite.commit(new WriterCommitMessage[] {backfillMsg}));
     }
+  }
+
+  private static final int FLUSH_FRAGMENTS = 4;
+  private static final int FLUSH_ROWS_PER_FRAGMENT = 10;
+
+  /**
+   * Writes {@link #FLUSH_FRAGMENTS} fragments, then adds a column from a source whose single
+   * partition alternates between fragments, so a single write task receives all of them
+   * interleaved.
+   */
+  private void addInterleavedAndCheck() {
+    spark.conf().set("spark.sql.shuffle.partitions", "1");
+    spark.conf().set("spark.sql.adaptive.enabled", "false");
+    spark.sql(String.format("create table %s (id int, text string) using lance", fullTable));
+    // Each insert writes its own fragment.
+    for (int f = 0; f < FLUSH_FRAGMENTS; f++) {
+      spark.sql(
+          String.format(
+              "insert into %s select cast(id as int), cast(id as string) "
+                  + "from range(%d, %d) distribute by 1",
+              fullTable, f * FLUSH_ROWS_PER_FRAGMENT, (f + 1) * FLUSH_ROWS_PER_FRAGMENT));
+    }
+    spark.sql(
+        String.format(
+            "create or replace temporary view add_source as "
+                + "select * from (select _rowaddr, _fragid, id * 100 as new_col from %s) "
+                + "distribute by 1 sort by new_col %% %d, new_col",
+            fullTable, FLUSH_ROWS_PER_FRAGMENT * 100));
+    spark.sql(String.format("alter table %s add columns new_col from add_source", fullTable));
+
+    List<Row> rows =
+        spark
+            .sql(String.format("select id, text, new_col, _fragid from %s order by id", fullTable))
+            .collectAsList();
+    assertEquals(FLUSH_FRAGMENTS * FLUSH_ROWS_PER_FRAGMENT, rows.size());
+    for (Row row : rows) {
+      assertEquals(String.valueOf(row.getInt(0)), row.getString(1));
+      assertEquals(row.getInt(0) * 100, row.getInt(2));
+    }
+    assertEquals(FLUSH_FRAGMENTS, rows.stream().map(r -> r.getInt(3)).distinct().count());
+  }
+
+  @Test
+  public void testFlushEagerly() {
+    spark.conf().set(AbstractBackfillWriter.FLUSH_EAGERLY_ENABLED_CONF, "true");
+    addInterleavedAndCheck();
+  }
+
+  @Test
+  public void testFlushEagerlyAndAsync() {
+    spark.conf().set(AbstractBackfillWriter.FLUSH_EAGERLY_ENABLED_CONF, "true");
+    spark.conf().set(AbstractBackfillWriter.FLUSH_ASYNC_ENABLED_CONF, "true");
+    spark
+        .conf()
+        .set(AbstractBackfillWriter.FLUSH_ASYNC_POOL_SIZE_CONF, String.valueOf(FLUSH_FRAGMENTS));
+    addInterleavedAndCheck();
+  }
+
+  @Test
+  public void testFlushAsyncOnCommit() {
+    spark.conf().set(AbstractBackfillWriter.FLUSH_ASYNC_ENABLED_CONF, "true");
+    spark.conf().set(AbstractBackfillWriter.FLUSH_ASYNC_POOL_SIZE_CONF, "2");
+    addInterleavedAndCheck();
   }
 }

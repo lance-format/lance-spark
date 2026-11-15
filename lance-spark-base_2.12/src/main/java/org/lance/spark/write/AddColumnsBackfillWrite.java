@@ -49,6 +49,7 @@ public class AddColumnsBackfillWrite implements Write, RequiresDistributionAndOr
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
   private final boolean managedVersioning;
+  private final boolean flushEagerly;
 
   AddColumnsBackfillWrite(
       StructType schema,
@@ -67,6 +68,7 @@ public class AddColumnsBackfillWrite implements Write, RequiresDistributionAndOr
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
     this.managedVersioning = managedVersioning;
+    this.flushEagerly = AbstractBackfillWriter.isFlushEagerlyEnabled();
   }
 
   @Override
@@ -95,7 +97,7 @@ public class AddColumnsBackfillWrite implements Write, RequiresDistributionAndOr
 
   @Override
   public SortOrder[] requiredOrdering() {
-    return new SortOrder[0];
+    return AbstractBackfillWriter.requiredOrdering(flushEagerly);
   }
 
   /** Task commit. */

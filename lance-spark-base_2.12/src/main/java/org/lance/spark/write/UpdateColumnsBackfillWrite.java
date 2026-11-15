@@ -55,6 +55,7 @@ public class UpdateColumnsBackfillWrite implements Write, RequiresDistributionAn
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
   private final boolean managedVersioning;
+  private final boolean flushEagerly;
 
   UpdateColumnsBackfillWrite(
       StructType schema,
@@ -73,6 +74,7 @@ public class UpdateColumnsBackfillWrite implements Write, RequiresDistributionAn
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
     this.managedVersioning = managedVersioning;
+    this.flushEagerly = AbstractBackfillWriter.isFlushEagerlyEnabled();
   }
 
   @Override
@@ -101,7 +103,7 @@ public class UpdateColumnsBackfillWrite implements Write, RequiresDistributionAn
 
   @Override
   public SortOrder[] requiredOrdering() {
-    return new SortOrder[0];
+    return AbstractBackfillWriter.requiredOrdering(flushEagerly);
   }
 
   /** Write builder for UPDATE COLUMNS FROM command. */

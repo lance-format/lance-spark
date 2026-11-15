@@ -752,3 +752,24 @@ df.writeTo("lance.ns.users") \
 
 Setting only `file_format_version` does not enable blob encoding. Without
 `<column>.lance.encoding = blob`, the column is written as plain `BINARY`.
+
+## Backfill Columns
+
+By default, a write task of [ADD COLUMNS FROM](operations/dml/add-columns.md) or
+[UPDATE COLUMNS FROM](operations/dml/update-columns.md) buffers the source rows of every fragment it
+receives and flushes them one by one when the task commits. These session settings bound that
+memory and speed up the flush:
+
+| Spark Configuration                              | Default | Description                                                                                                                                           |
+|--------------------------------------------------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `spark.sql.lance.backfill.flush_eagerly.enabled` | `false` | Sort the rows of each task by `_fragid` and flush each fragment as soon as the next one starts, so a task buffers the rows of one fragment at a time. |
+| `spark.sql.lance.backfill.flush_async.enabled`   | `false` | Flush fragments on a thread pool of the writer instead of the task thread.                                                                            |
+| `spark.sql.lance.backfill.flush_async.pool_size` | `4`     | Maximum number of fragments a writer flushes at the same time. Must be positive when `flush_async.enabled` is `true`.                                 |
+
+With both flush eagerly and flush async enabled, a task buffers the rows of at most `pool_size + 1`
+fragments. A single fragment's source rows are still held in memory while it is merged or updated.
+
+```sql
+SET spark.sql.lance.backfill.flush_eagerly.enabled=true;
+SET spark.sql.lance.backfill.flush_async.enabled=true;
+```

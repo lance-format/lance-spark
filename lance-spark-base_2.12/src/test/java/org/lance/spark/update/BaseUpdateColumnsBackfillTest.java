@@ -17,6 +17,7 @@ import org.lance.WriteParams;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.write.AbstractBackfillWriter;
 import org.lance.spark.write.LanceBatchWrite;
 import org.lance.spark.write.UpdateColumnsBackfillBatchWrite;
 
@@ -450,6 +451,175 @@ public abstract class BaseUpdateColumnsBackfillTest {
 
       assertThrows(
           Exception.class, () -> updateWrite.commit(new WriterCommitMessage[] {updateMsg}));
+    }
+  }
+
+  private static final int FLUSH_FRAGMENTS = 4;
+  private static final int FLUSH_ROWS_PER_FRAGMENT = 10;
+
+  /**
+   * Writes {@link #FLUSH_FRAGMENTS} fragments and makes a single write task receive all of them,
+   * interleaved: the source alternates between fragments, so without the required sort a writer
+   * flushing eagerly would see a fragment again after flushing it.
+   */
+  private void prepareInterleavedUpdate() {
+    spark.conf().set("spark.sql.shuffle.partitions", "1");
+    spark.conf().set("spark.sql.adaptive.enabled", "false");
+    spark.sql(
+        String.format("create table %s (id int, value int, name string) using lance", fullTable));
+    // Each insert writes its own fragment.
+    for (int f = 0; f < FLUSH_FRAGMENTS; f++) {
+      spark.sql(
+          String.format(
+              "insert into %s select cast(id as int), cast(id as int), cast(id as string) "
+                  + "from range(%d, %d) distribute by 1",
+              fullTable, f * FLUSH_ROWS_PER_FRAGMENT, (f + 1) * FLUSH_ROWS_PER_FRAGMENT));
+    }
+    assertEquals(FLUSH_FRAGMENTS, fragmentCount());
+    spark.sql(
+        String.format(
+            "create or replace temporary view update_source as "
+                + "select * from (select _rowaddr, _fragid, value * 100 as value from %s) "
+                + "distribute by 1 sort by value %% %d, value",
+            fullTable, FLUSH_ROWS_PER_FRAGMENT * 100));
+  }
+
+  private void updateInterleavedAndCheck() {
+    prepareInterleavedUpdate();
+    spark.sql(String.format("alter table %s update columns value from update_source", fullTable));
+
+    List<Row> rows =
+        spark
+            .sql(String.format("select id, value, name from %s order by id", fullTable))
+            .collectAsList();
+    assertEquals(FLUSH_FRAGMENTS * FLUSH_ROWS_PER_FRAGMENT, rows.size());
+    for (Row row : rows) {
+      assertEquals(row.getInt(0) * 100, row.getInt(1));
+      assertEquals(String.valueOf(row.getInt(0)), row.getString(2));
+    }
+    assertEquals(FLUSH_FRAGMENTS, fragmentCount());
+  }
+
+  private int fragmentCount() {
+    return (int)
+        spark
+            .sql(String.format("select count(distinct _fragid) from %s", fullTable))
+            .first()
+            .getLong(0);
+  }
+
+  private void enableFlushAsync(int poolSize) {
+    spark.conf().set(AbstractBackfillWriter.FLUSH_ASYNC_ENABLED_CONF, "true");
+    spark.conf().set(AbstractBackfillWriter.FLUSH_ASYNC_POOL_SIZE_CONF, String.valueOf(poolSize));
+  }
+
+  @Test
+  public void testUpdateInterleavedFragmentsInOneTask() {
+    updateInterleavedAndCheck();
+  }
+
+  @Test
+  public void testFlushEagerly() {
+    spark.conf().set(AbstractBackfillWriter.FLUSH_EAGERLY_ENABLED_CONF, "true");
+    updateInterleavedAndCheck();
+  }
+
+  @Test
+  public void testFlushEagerlyAndAsync() {
+    spark.conf().set(AbstractBackfillWriter.FLUSH_EAGERLY_ENABLED_CONF, "true");
+    enableFlushAsync(FLUSH_FRAGMENTS);
+    updateInterleavedAndCheck();
+  }
+
+  @Test
+  public void testFlushAsyncOnCommit() {
+    enableFlushAsync(2);
+    updateInterleavedAndCheck();
+  }
+
+  @Test
+  public void testFlushAsyncPoolSizeIgnoredWhenDisabled() {
+    spark.conf().set(AbstractBackfillWriter.FLUSH_ASYNC_POOL_SIZE_CONF, "0");
+    updateInterleavedAndCheck();
+  }
+
+  @Test
+  public void testInvalidFlushAsyncPoolSize() {
+    prepareInterleavedUpdate();
+    enableFlushAsync(0);
+    Exception e =
+        assertThrows(
+            Exception.class,
+            () ->
+                spark.sql(
+                    String.format(
+                        "alter table %s update columns value from update_source", fullTable)));
+    assertTrue(
+        String.valueOf(e.getMessage()).contains(AbstractBackfillWriter.FLUSH_ASYNC_POOL_SIZE_CONF),
+        String.valueOf(e.getMessage()));
+  }
+
+  /** A writer flushing eagerly rejects a fragment that comes back after it was flushed. */
+  @Test
+  public void testFlushEagerlyRejectsFragmentAfterFlush(TestInfo testInfo) throws Exception {
+    String datasetUri =
+        TestUtils.getDatasetUri(tempDir.toString(), testInfo.getTestMethod().get().getName());
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Schema schema =
+          new Schema(
+              Arrays.asList(
+                  new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
+                  new Field("value", FieldType.nullable(new ArrowType.Int(32, true)), null)));
+      org.lance.Dataset.create(allocator, datasetUri, schema, new WriteParams.Builder().build())
+          .close();
+      LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
+      LanceBatchWrite initialWrite =
+          new LanceBatchWrite(
+              LanceArrowUtils.fromArrowSchema(schema),
+              writeOptions,
+              false,
+              null,
+              null,
+              null,
+              null,
+              false,
+              null);
+      WriterCommitMessage initialMsg;
+      try (DataWriter<InternalRow> writer =
+          initialWrite.createBatchWriterFactory(() -> 1).createWriter(0, 0)) {
+        for (int i = 0; i < 2; i++) {
+          writer.write(new GenericInternalRow(new Object[] {i, i}));
+        }
+        initialMsg = writer.commit();
+      }
+      initialWrite.commit(new WriterCommitMessage[] {initialMsg});
+
+      StructType updateSchema =
+          new StructType()
+              .add(LanceConstant.ROW_ADDRESS, DataTypes.LongType, false)
+              .add(LanceConstant.FRAGMENT_ID, DataTypes.IntegerType, false)
+              .add("value", DataTypes.IntegerType, true);
+      // Fragment 1 does not exist; it is never flushed since the write fails first.
+      try (DataWriter<InternalRow> writer =
+          new UpdateColumnsBackfillBatchWrite.UpdateColumnsWriter(
+              writeOptions,
+              updateSchema,
+              Collections.singletonList("value"),
+              null,
+              null,
+              null,
+              null,
+              true,
+              false,
+              AbstractBackfillWriter.DEFAULT_FLUSH_ASYNC_POOL_SIZE)) {
+        writer.write(new GenericInternalRow(new Object[] {0L, 0, 100}));
+        writer.write(new GenericInternalRow(new Object[] {1L << 32, 1, 200}));
+        IllegalStateException e =
+            assertThrows(
+                IllegalStateException.class,
+                () -> writer.write(new GenericInternalRow(new Object[] {1L, 0, 300})));
+        assertTrue(e.getMessage().contains("sorted by _fragid"), e.getMessage());
+      }
     }
   }
 }

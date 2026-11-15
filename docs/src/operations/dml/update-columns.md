@@ -45,6 +45,19 @@ ALTER TABLE users UPDATE COLUMNS value, name FROM update_source;
     The source must contain `_rowaddr` and `_fragid` columns to address the target dataset's rows.
     The columns specified in the `UPDATE COLUMNS` clause must already exist in the target table.
 
+## Memory and Flush Settings
+
+Each write task buffers the source rows of the fragments it updates. For wide columns or many
+fragments per task, enable flushing each fragment eagerly, and optionally on a thread pool:
+
+```sql
+SET spark.sql.lance.backfill.flush_eagerly.enabled=true;
+SET spark.sql.lance.backfill.flush_async.enabled=true;
+SET spark.sql.lance.backfill.flush_async.pool_size=4;
+```
+
+See [Backfill Columns](../../config.md#backfill-columns) for details.
+
 ## Comparison with Other Operations
 
 | Feature | UPDATE SET | UPDATE COLUMNS FROM | MERGE INTO |

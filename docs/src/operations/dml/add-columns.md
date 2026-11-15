@@ -31,6 +31,19 @@ No table rewrite, no data movement—just a new column that is instantly queryab
     Because we use `_rowaddr` and `_fragid` to address the target dataset's rows for the new column's data,
     the temporary view should contain `_rowaddr` and `_fragid`.
 
+## Memory and Flush Settings
+
+Each write task buffers the source rows of the fragments it adds columns to. For wide columns or many
+fragments per task, enable flushing each fragment eagerly, and optionally on a thread pool:
+
+```sql
+SET spark.sql.lance.backfill.flush_eagerly.enabled=true;
+SET spark.sql.lance.backfill.flush_async.enabled=true;
+SET spark.sql.lance.backfill.flush_async.pool_size=4;
+```
+
+See [Backfill Columns](../../config.md#backfill-columns) for details.
+
 ## Adding a Blob v2 Column
 
 To add a blob v2 column, create the target table with Lance file format version `2.2` or higher,

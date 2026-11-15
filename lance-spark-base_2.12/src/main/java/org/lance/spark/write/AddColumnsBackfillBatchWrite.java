@@ -73,6 +73,9 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
   private final boolean managedVersioning;
+  private final boolean flushEagerly;
+  private final boolean flushAsync;
+  private final int flushAsyncPoolSize;
 
   public AddColumnsBackfillBatchWrite(
       StructType schema,
@@ -94,6 +97,12 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
     this.managedVersioning = managedVersioning;
+    this.flushEagerly = AbstractBackfillWriter.isFlushEagerlyEnabled();
+    this.flushAsync = AbstractBackfillWriter.isFlushAsyncEnabled();
+    this.flushAsyncPoolSize =
+        flushAsync
+            ? AbstractBackfillWriter.flushAsyncPoolSize()
+            : AbstractBackfillWriter.DEFAULT_FLUSH_ASYNC_POOL_SIZE;
   }
 
   @Override
@@ -105,7 +114,10 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
-        tableId);
+        tableId,
+        flushEagerly,
+        flushAsync,
+        flushAsyncPoolSize);
   }
 
   @Override
@@ -199,7 +211,10 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
         Map<String, String> initialStorageOptions,
         String namespaceImpl,
         Map<String, String> namespaceProperties,
-        List<String> tableId) {
+        List<String> tableId,
+        boolean dataFragIdOrdered,
+        boolean flushAsync,
+        int flushAsyncPoolSize) {
       super(
           writeOptions,
           schema,
@@ -207,7 +222,10 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
           initialStorageOptions,
           namespaceImpl,
           namespaceProperties,
-          tableId);
+          tableId,
+          dataFragIdOrdered,
+          flushAsync,
+          flushAsyncPoolSize);
     }
 
     @Override
@@ -217,8 +235,11 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
               stream,
               LanceDataset.ROW_ADDRESS_COLUMN.name(),
               LanceDataset.ROW_ADDRESS_COLUMN.name());
-      fragments.add(result.getFragmentMetadata());
-      mergedSchema = result.getSchema().asArrowSchema();
+      // Fragments may be processed concurrently when flushing asynchronously.
+      synchronized (this) {
+        fragments.add(result.getFragmentMetadata());
+        mergedSchema = result.getSchema().asArrowSchema();
+      }
     }
 
     @Override
@@ -243,6 +264,9 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
 
     private final Map<String, String> namespaceProperties;
     private final List<String> tableId;
+    private final boolean dataFragIdOrdered;
+    private final boolean flushAsync;
+    private final int flushAsyncPoolSize;
 
     protected AddColumnsWriterFactory(
         StructType schema,
@@ -251,7 +275,10 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
         Map<String, String> initialStorageOptions,
         String namespaceImpl,
         Map<String, String> namespaceProperties,
-        List<String> tableId) {
+        List<String> tableId,
+        boolean dataFragIdOrdered,
+        boolean flushAsync,
+        int flushAsyncPoolSize) {
       // Everything passed to writer factory should be serializable
       this.schema = schema;
       this.writeOptions = writeOptions;
@@ -260,6 +287,9 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
       this.namespaceImpl = namespaceImpl;
       this.namespaceProperties = namespaceProperties;
       this.tableId = tableId;
+      this.dataFragIdOrdered = dataFragIdOrdered;
+      this.flushAsync = flushAsync;
+      this.flushAsyncPoolSize = flushAsyncPoolSize;
     }
 
     @Override
@@ -273,7 +303,10 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
           initialStorageOptions,
           namespaceImpl,
           namespaceProperties,
-          tableId);
+          tableId,
+          dataFragIdOrdered,
+          flushAsync,
+          flushAsyncPoolSize);
     }
   }
 
