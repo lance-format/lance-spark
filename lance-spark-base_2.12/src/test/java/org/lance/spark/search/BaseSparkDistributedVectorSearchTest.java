@@ -13,6 +13,8 @@
  */
 package org.lance.spark.search;
 
+import org.lance.spark.LanceSparkSQLProperties;
+
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.junit.jupiter.api.AfterEach;
@@ -97,10 +99,10 @@ public abstract class BaseSparkDistributedVectorSearchTest {
             + fullName
             + "', array(0.0, 0.0, 0.0, 0.0), 5) ORDER BY _distance, id";
 
-    spark.conf().set("spark.sql.lance.search.distributed.enabled", "false");
+    spark.conf().set(LanceSparkSQLProperties.SEARCH_DISTRIBUTED_ENABLED, "false");
     List<Row> single = new ArrayList<>(spark.sql(sql).collectAsList());
 
-    spark.conf().set("spark.sql.lance.search.distributed.enabled", "true");
+    spark.conf().set(LanceSparkSQLProperties.SEARCH_DISTRIBUTED_ENABLED, "true");
     List<Row> distributed = new ArrayList<>(spark.sql(sql).collectAsList());
 
     Comparator<Row> byIdThenDist =
@@ -124,7 +126,7 @@ public abstract class BaseSparkDistributedVectorSearchTest {
   @Test
   void distributedReturnsExactlyKRows() {
     String fullName = createFiveFragmentTable();
-    spark.conf().set("spark.sql.lance.search.distributed.enabled", "true");
+    spark.conf().set(LanceSparkSQLProperties.SEARCH_DISTRIBUTED_ENABLED, "true");
     List<Row> rows =
         spark
             .sql("SELECT id FROM VECTOR_SEARCH('" + fullName + "', array(0.0, 0.0, 0.0, 0.0), 3)")
@@ -135,7 +137,7 @@ public abstract class BaseSparkDistributedVectorSearchTest {
   @Test
   void distributedKLargerThanRowsReturnsAllRows() {
     String fullName = createFiveFragmentTable();
-    spark.conf().set("spark.sql.lance.search.distributed.enabled", "true");
+    spark.conf().set(LanceSparkSQLProperties.SEARCH_DISTRIBUTED_ENABLED, "true");
     List<Row> rows =
         spark
             .sql("SELECT id FROM VECTOR_SEARCH('" + fullName + "', array(0.0, 0.0, 0.0, 0.0), 100)")
@@ -151,7 +153,7 @@ public abstract class BaseSparkDistributedVectorSearchTest {
             + fullName
             + " (id INT NOT NULL, vector ARRAY<FLOAT> NOT NULL) USING lance "
             + "TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '4')");
-    spark.conf().set("spark.sql.lance.search.distributed.enabled", "true");
+    spark.conf().set(LanceSparkSQLProperties.SEARCH_DISTRIBUTED_ENABLED, "true");
     List<Row> rows =
         spark
             .sql("SELECT id FROM VECTOR_SEARCH('" + fullName + "', array(0.0, 0.0, 0.0, 0.0), 5)")
@@ -162,7 +164,7 @@ public abstract class BaseSparkDistributedVectorSearchTest {
   @Test
   void distributedNearestRowIsClosest() {
     String fullName = createFiveFragmentTable();
-    spark.conf().set("spark.sql.lance.search.distributed.enabled", "true");
+    spark.conf().set(LanceSparkSQLProperties.SEARCH_DISTRIBUTED_ENABLED, "true");
     List<Row> rows =
         spark
             .sql(
@@ -187,13 +189,13 @@ public abstract class BaseSparkDistributedVectorSearchTest {
             + "', query_vector => array(0.0, 0.0, 0.0, 0.0), k => 5, "
             + "lower_bound => 0.5, upper_bound => 5.0)";
 
-    spark.conf().set("spark.sql.lance.search.distributed.enabled", "false");
+    spark.conf().set(LanceSparkSQLProperties.SEARCH_DISTRIBUTED_ENABLED, "false");
     List<Row> rows = spark.sql(sql).collectAsList();
     assertEquals(1, rows.size());
     assertEquals(1, rows.get(0).getInt(0));
     assertEquals(4.0f, rows.get(0).getFloat(1), 1e-4f);
 
-    spark.conf().set("spark.sql.lance.search.distributed.enabled", "true");
+    spark.conf().set(LanceSparkSQLProperties.SEARCH_DISTRIBUTED_ENABLED, "true");
     Exception error = assertThrows(Exception.class, () -> spark.sql(sql).collectAsList());
     assertTrue(
         rootMessage(error)
@@ -215,7 +217,7 @@ public abstract class BaseSparkDistributedVectorSearchTest {
     // Namespace execution defaults to prefilter=false: it takes the top 1 (id 0), then applies
     // the filter, so nothing comes back. This is the semantics a distributed plan cannot offer,
     // because a fragment-restricted scan has to prefilter.
-    spark.conf().set("spark.sql.lance.search.distributed.enabled", "false");
+    spark.conf().set(LanceSparkSQLProperties.SEARCH_DISTRIBUTED_ENABLED, "false");
     assertEquals(
         0,
         spark.sql(filtered + ")").collectAsList().size(),
@@ -223,7 +225,7 @@ public abstract class BaseSparkDistributedVectorSearchTest {
 
     // Silently prefiltering instead would return id 4 here, so the query is rejected until the
     // user says which semantics they want.
-    spark.conf().set("spark.sql.lance.search.distributed.enabled", "true");
+    spark.conf().set(LanceSparkSQLProperties.SEARCH_DISTRIBUTED_ENABLED, "true");
     Exception error =
         assertThrows(Exception.class, () -> spark.sql(filtered + ")").collectAsList());
     assertTrue(rootMessage(error).contains("requires prefilter=true"), rootMessage(error));
@@ -263,7 +265,7 @@ public abstract class BaseSparkDistributedVectorSearchTest {
         "SELECT id FROM VECTOR_SEARCH(table => '"
             + fullName
             + "', query_vector => array(0.0, 0.0, 0.0, 0.0), k => 5";
-    spark.conf().set("spark.sql.lance.search.distributed.enabled", "true");
+    spark.conf().set(LanceSparkSQLProperties.SEARCH_DISTRIBUTED_ENABLED, "true");
 
     List<Integer> firstPage = idsOf(page + ")");
     List<Integer> secondPage = idsOf(page + ", offset => 5)");

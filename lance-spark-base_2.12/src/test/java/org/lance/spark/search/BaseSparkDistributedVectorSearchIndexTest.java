@@ -26,6 +26,7 @@ import org.lance.index.vector.VectorIndexParams;
 import org.lance.index.vector.VectorTrainer;
 import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceRuntime;
+import org.lance.spark.LanceSparkSQLProperties;
 import org.lance.spark.search.LanceSearchQuery.SearchType;
 import org.lance.spark.utils.VectorUtils;
 
@@ -1004,7 +1005,9 @@ public abstract class BaseSparkDistributedVectorSearchIndexTest {
   }
 
   private List<Row> collect(String sql, boolean distributed) {
-    spark.conf().set("spark.sql.lance.search.distributed.enabled", String.valueOf(distributed));
+    spark
+        .conf()
+        .set(LanceSparkSQLProperties.SEARCH_DISTRIBUTED_ENABLED, String.valueOf(distributed));
     return spark.sql(sql).collectAsList();
   }
 
