@@ -60,7 +60,7 @@ import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** End-to-end Spark 4.1+ join-generated dynamic partition pruning tests. */
+/** End-to-end join-generated dynamic partition pruning tests. */
 public abstract class BaseLanceRuntimeFilteringIntegrationTest {
   private static final int ROWS_PER_KEY = 3;
 

@@ -709,7 +709,7 @@ public class LanceScan
   }
 
   static boolean supportsRuntimeFiltering(LanceSparkReadOptions readOptions) {
-    return isSpark41OrLater() && readOptions.isPushDownFilters();
+    return readOptions.isPushDownFilters();
   }
 
   @Override
@@ -1016,16 +1016,6 @@ public class LanceScan
 
   private static String columnName(NamedReference reference) {
     return String.join(".", reference.fieldNames());
-  }
-
-  private static boolean isSpark41OrLater() {
-    String[] components = org.apache.spark.package$.MODULE$.SPARK_VERSION().split("\\.");
-    if (components.length < 2) {
-      return false;
-    }
-    int major = Integer.parseInt(components[0]);
-    int minor = Integer.parseInt(components[1]);
-    return major > 4 || (major == 4 && minor >= 1);
   }
 
   private static final class CanonicalRuntimePredicate {
