@@ -726,6 +726,12 @@ version columns are exposed as signed 64-bit integers.
 Native vectors may be reused on `next()`, while converted vectors are released. Consumers must
 copy or transfer data they need to keep before advancing.
 
+By default the batches are allocated under Spark's root allocator. An engine that accounts for the
+Arrow memory it holds can have them allocated from its own allocator instead with
+`LanceRuntime.setArrowBatchAllocatorProvider`: a reader asks the provider for its allocator on the
+task's thread when it is created, and builds every batch there, so the engine takes the vectors
+without copying or moving their memory between allocators.
+
 ## Memory Configuration
 
 Lance Spark uses Arrow for data transfer between native code and Spark, and maintains caches for improved performance.
@@ -737,7 +743,7 @@ Set via environment variable `LANCE_ALLOCATOR_SIZE` (default: unlimited).
 Controls the maximum memory allocation for Arrow buffers used in data transfer between Lance native code and Spark.
 [Arrow batch reads](#arrow-batch-reads) allocate their buffers from a child of Spark's root allocator instead, so
 that a consumer under that root can take them without copying. `LANCE_ALLOCATOR_SIZE` caps that allocator too, as a
-separate budget.
+separate budget, but not an allocator a consumer supplies with `LanceRuntime.setArrowBatchAllocatorProvider`.
 
 | Environment Variable   | Default          | Description                              |
 |------------------------|------------------|------------------------------------------|
