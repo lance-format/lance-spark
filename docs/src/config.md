@@ -730,7 +730,10 @@ By default the batches are allocated under Spark's root allocator. An engine tha
 Arrow memory it holds can have them allocated from its own allocator instead with
 `LanceRuntime.setArrowBatchAllocatorProvider`: a reader asks the provider for its allocator on the
 task's thread when it is created, and builds every batch there, so the engine takes the vectors
-without copying or moving their memory between allocators.
+without copying or moving their memory between allocators. If that allocator refuses memory, the
+read fails, and Arrow Java up to 19.0.0 can leak the batch being imported
+([apache/arrow-java#1239](https://github.com/apache/arrow-java/issues/1239),
+[apache/arrow-java#1491](https://github.com/apache/arrow-java/issues/1491)).
 
 ## Memory Configuration
 

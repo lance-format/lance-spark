@@ -100,7 +100,9 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
               ? arrowBatchAllocator
               : LanceRuntime.arrowBatchReadAllocator();
       return new LanceFragmentColumnarBatchScanner(
-          fragmentScanner, importArrowStream(fragmentScanner, allocator), allocator);
+          fragmentScanner,
+          importArrowStream(allocator, fragmentScanner::exportArrowStream),
+          allocator);
     } catch (RuntimeException | Error e) {
       try {
         fragmentScanner.close();
@@ -122,15 +124,48 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
    * copying and can keep them after the reader closes; or the consumer's own allocator ({@link
    * LanceRuntime#setArrowBatchAllocatorProvider}). Their memory, including the imported C structs,
    * is released with the last reference to it.
+   *
+   * <p>A consumer's allocator may refuse memory part way. The exported stream is released if the
+   * import fails before taking it, and the schema is read before any batch, so that a refused
+   * schema struct does not strand a batch (apache/arrow-java#1491).
    */
-  private static ArrowReader importArrowStream(
-      LanceFragmentScanner fragmentScanner, BufferAllocator allocator) {
+  public static ArrowReader importArrowStream(BufferAllocator allocator, StreamExport export) {
     try (ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator)) {
-      fragmentScanner.exportArrowStream(stream.memoryAddress());
-      return Data.importArrayStream(allocator, stream);
+      export.exportTo(stream.memoryAddress());
+      ArrowReader reader;
+      try {
+        reader = Data.importArrayStream(allocator, stream);
+      } catch (RuntimeException | Error e) {
+        // The import takes the stream only once it allocated its own struct.
+        try {
+          if (stream.snapshot().release != 0) {
+            stream.release();
+          }
+        } catch (Throwable releaseError) {
+          e.addSuppressed(releaseError);
+        }
+        throw e;
+      }
+      try {
+        reader.getVectorSchemaRoot();
+      } catch (IOException | RuntimeException | Error e) {
+        try {
+          reader.close();
+        } catch (Throwable closeError) {
+          e.addSuppressed(closeError);
+        }
+        throw e;
+      }
+      return reader;
     } catch (IOException e) {
       throw new UncheckedIOException(e);
     }
+  }
+
+  /** Exports an Arrow C stream into the struct at an address, e.g. a native scan's. */
+  @FunctionalInterface
+  public interface StreamExport {
+    void exportTo(long streamAddress) throws IOException;
   }
 
   public boolean loadNextBatch() throws IOException {

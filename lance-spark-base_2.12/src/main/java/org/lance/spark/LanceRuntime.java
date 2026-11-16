@@ -239,6 +239,11 @@ public final class LanceRuntime {
    * The consumer then owns the batches without copying or transferring them. The allocator must
    * stay open until the reader is closed and the consumer has released the batches.
    *
+   * <p>If the allocator refuses memory, the read fails. Arrow Java up to 19.0.0 then leaks the
+   * batch being imported when the refusal comes while importing its buffers
+   * (apache/arrow-java#1239, fixed after 19.0.0) or the struct the batch moves into
+   * (apache/arrow-java#1491).
+   *
    * <p>With no provider, or one that returns null, readers use {@link #arrowBatchAllocator()}.
    *
    * @param provider the allocator of the current task's Arrow batch reads, or null

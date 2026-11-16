@@ -899,4 +899,57 @@ public abstract class BaseArrowBatchReadTest {
       LanceRuntime.setArrowBatchAllocatorProvider(null);
     }
   }
+
+  /**
+   * Spark jobs over Arrow batch reads, one of them stopped early by a limit, build their batches in
+   * the provided allocator and release them all when their tasks end.
+   */
+  @Test
+  public void sparkJobsReleaseTheProvidedAllocator() throws Exception {
+    String uri = writeSparkDataset("provided-jobs");
+    Function<Boolean, Dataset<Row>> scan =
+        arrowBatches ->
+            spark
+                .read()
+                .format(LanceDataSource.name)
+                .option(LanceSparkReadOptions.CONFIG_ARROW_BATCH_READS, arrowBatches.toString())
+                .option(LanceSparkReadOptions.CONFIG_BATCH_SIZE, "4")
+                .load(uri)
+                .select("id", "vec", "_fragid");
+    List<Row> expected = scan.apply(false).orderBy("id").collectAsList();
+    CountingListener listener = new CountingListener();
+    try (BufferAllocator consumer =
+        ArrowUtils.rootAllocator().newChildAllocator("consumer", listener, 0, Long.MAX_VALUE)) {
+      LanceRuntime.setArrowBatchAllocatorProvider(() -> consumer);
+      try {
+        assertEquals(expected, scan.apply(true).orderBy("id").collectAsList());
+        assertEquals(3, scan.apply(true).limit(3).collectAsList().size());
+      } finally {
+        LanceRuntime.setArrowBatchAllocatorProvider(null);
+      }
+      assertTrue(listener.reserved.get() > 0, "no batch was built in the provided allocator");
+      assertEquals(0, consumer.getAllocatedMemory());
+    }
+    assertEquals(listener.reserved.get(), listener.released.get());
+  }
+
+  /** Reads without Arrow batches, including a pushed-down count, never ask the provider. */
+  @Test
+  public void readsWithoutArrowBatchesNeverAskTheProvider() throws Exception {
+    String uri = writeSparkDataset("unasked");
+    AtomicLong asked = new AtomicLong();
+    LanceRuntime.setArrowBatchAllocatorProvider(
+        () -> {
+          asked.incrementAndGet();
+          throw new IllegalStateException("the provider was asked");
+        });
+    try {
+      assertEquals(20, read(uri, false).select("id", "vec").collectAsList().size());
+      assertEquals(20, read(uri, false).count());
+      assertEquals(20, read(uri, true).count());
+    } finally {
+      LanceRuntime.setArrowBatchAllocatorProvider(null);
+    }
+    assertEquals(0, asked.get());
+  }
 }
