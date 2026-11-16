@@ -16,7 +16,9 @@ package org.lance.spark;
 import org.apache.spark.sql.Row;
 import org.junit.jupiter.api.Test;
 
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -58,15 +60,21 @@ public abstract class BaseBlobV2RowLevelCopyTest extends AbstractBlobV2CopyTest 
     createV2BlobTagTarget(fqTgt);
     insertTagRow(fqTgt, 1, targetBlob, "a");
     try {
-      spark.sql(
+      Map<String, String> properties = Collections.singletonMap("request", "blob-update");
+      LanceSpark.executeSql(
+          spark,
           "MERGE INTO "
               + fqTgt
               + " t USING "
               + fqSrc
               + " s ON t.id = s.id"
-              + " WHEN MATCHED THEN UPDATE SET t.data = s.data");
+              + " WHEN MATCHED THEN UPDATE SET t.data = s.data",
+          properties);
 
       assertTargetBlobBytes(datasetUriOf(tgt), rowAddressesOf(fqTgt), new byte[][] {sourceBlob});
+      assertEquals(
+          properties,
+          TestUtils.readTransactionProperties(LanceSparkReadOptions.from(datasetUriOf(tgt))));
     } finally {
       spark.sql("DROP TABLE IF EXISTS " + fqSrc);
       spark.sql("DROP TABLE IF EXISTS " + fqTgt);
@@ -85,17 +93,23 @@ public abstract class BaseBlobV2RowLevelCopyTest extends AbstractBlobV2CopyTest 
     createV2BlobTagTarget(fqTgt);
     insertTagRow(fqTgt, 1, existingBlob, "a");
     try {
-      spark.sql(
+      Map<String, String> properties = Collections.singletonMap("request", "blob-insert-only");
+      LanceSpark.executeSql(
+          spark,
           "MERGE INTO "
               + fqTgt
               + " t USING "
               + fqSrc
               + " s ON t.id = s.id"
-              + " WHEN NOT MATCHED THEN INSERT (id, data, tag) VALUES (s.id, s.data, 'n')");
+              + " WHEN NOT MATCHED THEN INSERT (id, data, tag) VALUES (s.id, s.data, 'n')",
+          properties);
 
       assertEquals(2, spark.sql("SELECT * FROM " + fqTgt).count());
       assertTargetBlobBytes(
           datasetUriOf(tgt), rowAddressesOf(fqTgt), new byte[][] {existingBlob, insertedBlob});
+      assertEquals(
+          properties,
+          TestUtils.readTransactionProperties(LanceSparkReadOptions.from(datasetUriOf(tgt))));
     } finally {
       spark.sql("DROP TABLE IF EXISTS " + fqSrc);
       spark.sql("DROP TABLE IF EXISTS " + fqTgt);
@@ -115,17 +129,23 @@ public abstract class BaseBlobV2RowLevelCopyTest extends AbstractBlobV2CopyTest 
     createV2BlobTagTarget(fqTgt);
     insertTagRow(fqTgt, 1, originalBlob, "a");
     try {
-      spark.sql(
+      Map<String, String> properties = Collections.singletonMap("request", "blob-mixed-merge");
+      LanceSpark.executeSql(
+          spark,
           "MERGE INTO "
               + fqTgt
               + " t USING "
               + fqSrc
               + " s ON t.id = s.id"
               + " WHEN MATCHED THEN UPDATE SET t.data = s.data"
-              + " WHEN NOT MATCHED THEN INSERT (id, data, tag) VALUES (s.id, s.data, 'n')");
+              + " WHEN NOT MATCHED THEN INSERT (id, data, tag) VALUES (s.id, s.data, 'n')",
+          properties);
 
       assertTargetBlobBytes(
           datasetUriOf(tgt), rowAddressesOf(fqTgt), new byte[][] {updatedBlob, insertedBlob});
+      assertEquals(
+          properties,
+          TestUtils.readTransactionProperties(LanceSparkReadOptions.from(datasetUriOf(tgt))));
     } finally {
       spark.sql("DROP TABLE IF EXISTS " + fqSrc);
       spark.sql("DROP TABLE IF EXISTS " + fqTgt);
