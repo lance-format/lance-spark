@@ -230,10 +230,11 @@ public class BlobUtilsTest {
             });
     assertTrue(BlobUtils.containsBlobV2SparkField(nestedSpark));
     assertFalse(BlobUtils.containsBlobV2SparkField(v1OnlySpark));
-    assertEquals("2.2", BlobUtils.resolveWriteFileFormatVersion(nestedSpark, "2.1"));
-    assertEquals("2.3", BlobUtils.resolveWriteFileFormatVersion(nestedSpark, "2.3"));
-    assertEquals("2.1", BlobUtils.resolveWriteFileFormatVersion(v1OnlySpark, "2.1"));
-    assertEquals("0.1", BlobUtils.resolveWriteFileFormatVersion(nestedSpark, "0.1"));
+    assertEquals(Collections.singleton("nested.data"), BlobUtils.blobV2FieldPaths(nestedSpark));
+    assertEquals("2.2", FileFormatVersionResolver.resolveForDataFiles(nestedSpark, "2.1"));
+    assertEquals("2.3", FileFormatVersionResolver.resolveForDataFiles(nestedSpark, "2.3"));
+    assertEquals("2.1", FileFormatVersionResolver.resolveForDataFiles(v1OnlySpark, "2.1"));
+    assertEquals("0.1", FileFormatVersionResolver.resolveForDataFiles(nestedSpark, "0.1"));
 
     Field nestedBlobArrow =
         new Field(

@@ -470,8 +470,7 @@ public class LanceDataset
     // Use table's file format version if not explicitly set in write options
     if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)
         && fileFormatVersion != null) {
-      writeOptionsBuilder.fileFormatVersion(
-          BlobUtils.resolveWriteFileFormatVersion(sparkSchema, fileFormatVersion));
+      writeOptionsBuilder.fallbackFileFormatVersion(sparkSchema, fileFormatVersion);
     }
     if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS)
         && tableProperties.containsKey(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS)) {

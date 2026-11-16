@@ -18,10 +18,10 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
 import org.apache.spark.sql.catalyst.plans.logical.{LanceNamedArgument, OptimizeOutputType}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
-import org.lance.DataStorageVersion
+import org.lance.Dataset
 import org.lance.compaction.{Compaction, CompactionOptions, CompactionTask, RewriteResult}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceSparkReadOptions}
-import org.lance.spark.utils.{BlobUtils, Utils}
+import org.lance.spark.utils.{FileFormatVersionResolver, Utils}
 
 import scala.collection.JavaConverters._
 
@@ -32,7 +32,7 @@ case class OptimizeExec(
 
   override def output: Seq[Attribute] = OptimizeOutputType.SCHEMA
 
-  private def buildOptions(upgradeToBlobV2Version: Boolean): CompactionOptions = {
+  private def buildOptions(dataset: Dataset): CompactionOptions = {
     val builder = CompactionOptions.builder()
     val argsMap = args.map(t => (t.name, t)).toMap
 
@@ -48,9 +48,8 @@ case class OptimizeExec(
     argsMap.get("batch_size").map(t => builder.withBatchSize(longArg(t)))
     argsMap.get("defer_index_remap").map(t => builder.withDeferIndexRemap(booleanArg(t)))
     argsMap.get("max_source_fragments").map(t => builder.withMaxSourceFragments(longArg(t)))
-    if (upgradeToBlobV2Version) {
-      builder.withDataStorageVersion(DataStorageVersion.V2_2)
-    }
+    FileFormatVersionResolver.resolveForCompaction(dataset).ifPresent(v =>
+      builder.withDataStorageVersion(v))
 
     builder.build()
   }
@@ -103,11 +102,7 @@ case class OptimizeExec(
         .initialStorageOptions(initialStorageOpts.map(_.asJava).orNull)
         .build()
       try {
-        val upgradeToBlobV2Version =
-          !dataset.getConfig.containsKey("lance.compaction.data_storage_version") &&
-            BlobUtils.containsBlobV2ArrowField(dataset.getSchema) &&
-            BlobUtils.isV2FormatBelowBlobV2(dataset.getLanceFileFormatVersion)
-        val resolvedOptions = buildOptions(upgradeToBlobV2Version)
+        val resolvedOptions = buildOptions(dataset)
         (resolvedOptions, Compaction.planCompaction(dataset, resolvedOptions).getCompactionTasks)
       } finally {
         dataset.close()

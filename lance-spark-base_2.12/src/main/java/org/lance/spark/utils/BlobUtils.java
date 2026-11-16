@@ -409,20 +409,39 @@ public class BlobUtils {
   }
 
   /**
-   * Resolves the default write file format version for an existing dataset when no explicit {@code
-   * file_format_version} option is set.
-   *
-   * <p>Promoting a legacy blob column to blob v2 in the manifest leaves the dataset's default
-   * {@code data_storage_version} unchanged (for example {@code 2.1}), while Spark writes blob v2
-   * columns as blob v2 structs that require {@value #MIN_BLOB_V2_FILE_FORMAT_VERSION} or newer.
+   * Dot-separated paths of all blob v2 fields in {@code schema}, including fields nested inside
+   * structs, arrays, or maps.
    */
-  public static String resolveWriteFileFormatVersion(
-      StructType schema, String defaultFileFormatVersion) {
-    if (defaultFileFormatVersion != null
-        && isV2FormatBelowBlobV2(defaultFileFormatVersion)
-        && containsBlobV2SparkField(schema)) {
-      return MIN_BLOB_V2_FILE_FORMAT_VERSION;
+  public static Set<String> blobV2FieldPaths(StructType schema) {
+    Set<String> paths = new HashSet<>();
+    collectBlobV2FieldPaths(schema, "", paths);
+    return paths;
+  }
+
+  private static void collectBlobV2FieldPaths(StructType schema, String prefix, Set<String> paths) {
+    if (schema == null) {
+      return;
     }
-    return defaultFileFormatVersion;
+    for (StructField field : schema.fields()) {
+      String path = prefix.isEmpty() ? field.name() : prefix + "." + field.name();
+      if (isBlobV2SparkField(field)) {
+        paths.add(path);
+      } else {
+        collectBlobV2DataTypePaths(field.dataType(), path, paths);
+      }
+    }
+  }
+
+  private static void collectBlobV2DataTypePaths(
+      DataType dataType, String prefix, Set<String> paths) {
+    if (dataType instanceof StructType) {
+      collectBlobV2FieldPaths((StructType) dataType, prefix, paths);
+    } else if (dataType instanceof ArrayType) {
+      collectBlobV2DataTypePaths(((ArrayType) dataType).elementType(), prefix + ".element", paths);
+    } else if (dataType instanceof MapType) {
+      MapType mapType = (MapType) dataType;
+      collectBlobV2DataTypePaths(mapType.keyType(), prefix + ".key", paths);
+      collectBlobV2DataTypePaths(mapType.valueType(), prefix + ".value", paths);
+    }
   }
 }

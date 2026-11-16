@@ -14,7 +14,6 @@
 package org.lance.spark;
 
 import org.lance.spark.read.LanceScanBuilder;
-import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.write.SparkPositionDeltaWriteBuilder;
 
 import org.apache.spark.sql.connector.expressions.Expressions;
@@ -149,8 +148,7 @@ public class LancePositionDeltaOperation
     // Use the table's file format version unless the options set one explicitly.
     if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)
         && fileFormatVersion != null) {
-      writeOptionsBuilder.fileFormatVersion(
-          BlobUtils.resolveWriteFileFormatVersion(sparkSchema, fileFormatVersion));
+      writeOptionsBuilder.fallbackFileFormatVersion(sparkSchema, fileFormatVersion);
     }
     if (tableProperties != null
         && !mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS)) {
