@@ -78,14 +78,18 @@ Rename a table to a different namespace:
 ALTER TABLE ns1.users RENAME TO ns2.new_users;
 ```
 
+The target name is resolved relative to the catalog, so do not prefix it with
+the catalog name.
+
 !!! note
-Rename is only supported when using a namespace-based catalog (`impl=rest`).
-Directory-based catalogs do not support table renames.
+    Rename requires a namespace-based catalog. Directory catalogs support rename
+    only in manifest mode, and not for root-level tables. Path-based tables
+    cannot be renamed.
 
 ## Error Behavior
 
 | Scenario | Error |
 |----------|-------|
 | Source table does not exist | `TABLE_OR_VIEW_NOT_FOUND` |
-| Target table name already exists | `TABLE_ALREADY_EXISTS` |
-| Directory-based catalog | `UnsupportedOperationException` |
+| Target table name already exists | `TABLE_OR_VIEW_ALREADY_EXISTS` |
+| Catalog or table does not support rename | `UnsupportedOperationException` |

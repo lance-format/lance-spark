@@ -17,6 +17,7 @@ import org.lance.Transaction;
 import org.lance.Version;
 import org.lance.WriteParams;
 import org.lance.spark.LanceDataSource;
+import org.lance.spark.LanceIdentifier;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSpark;
 import org.lance.spark.LanceSparkReadOptions;
@@ -38,6 +39,10 @@ import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.api.java.UDF1;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException;
+import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.StagingTableCatalog;
+import org.apache.spark.sql.connector.catalog.TableCatalog;
+import org.apache.spark.sql.connector.expressions.Transform;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
@@ -492,6 +497,46 @@ public abstract class BaseSparkConnectorWriteTest {
                   TestUtils.getDatasetUri(dbPath.toString(), datasetName))
               .save();
         });
+  }
+
+  @Test
+  public void pathBasedCatalogPreservesStorageConfigurationErrors(TestInfo testInfo) {
+    String location =
+        "oss://lance-spark-typed-exceptions/" + testInfo.getTestMethod().get().getName() + ".lance";
+    TableCatalog catalog = (TableCatalog) spark.sessionState().catalogManager().catalog("lance");
+    Identifier ident = new LanceIdentifier(location);
+    StructType schema = new StructType().add("id", DataTypes.IntegerType, false);
+
+    IllegalArgumentException createError =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> catalog.createTable(ident, schema, new Transform[0], Collections.emptyMap()));
+    assertTrue(
+        createError.getMessage().contains("OSS endpoint is required"),
+        () -> "Unexpected create error: " + createError.getMessage());
+
+    IllegalArgumentException existsError =
+        assertThrows(IllegalArgumentException.class, () -> catalog.tableExists(ident));
+    assertTrue(
+        existsError.getMessage().contains("OSS endpoint is required"),
+        () -> "Unexpected tableExists error: " + existsError.getMessage());
+
+    IllegalArgumentException loadError =
+        assertThrows(IllegalArgumentException.class, () -> catalog.loadTable(ident));
+    assertTrue(
+        loadError.getMessage().contains("OSS endpoint is required"),
+        () -> "Unexpected load error: " + loadError.getMessage());
+
+    StagingTableCatalog stagingCatalog = (StagingTableCatalog) catalog;
+    IllegalArgumentException replaceError =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                stagingCatalog.stageReplace(
+                    ident, schema, new Transform[0], Collections.emptyMap()));
+    assertTrue(
+        replaceError.getMessage().contains("OSS endpoint is required"),
+        () -> "Unexpected replace error: " + replaceError.getMessage());
   }
 
   @Test

@@ -1057,8 +1057,9 @@ public abstract class SparkLanceNamespaceTestBase {
     spark.sql("CREATE TABLE " + fullOld + " (id BIGINT NOT NULL, name STRING)");
     spark.sql("INSERT INTO " + fullOld + " VALUES (1, 'test')");
 
-    // Rename
-    spark.sql("ALTER TABLE " + fullOld + " RENAME TO " + fullNew);
+    // Spark passes the RENAME TO target to the catalog unresolved, so it must be written
+    // relative to the catalog; a catalog prefix would be taken as a namespace level.
+    spark.sql("ALTER TABLE " + fullOld + " RENAME TO default." + newName);
 
     // Verify new table exists and has data
     Dataset<Row> result = spark.sql("SELECT * FROM " + fullNew);
@@ -1115,9 +1116,9 @@ public abstract class SparkLanceNamespaceTestBase {
         assertThrows(
             AnalysisException.class,
             () -> {
-              spark.sql("ALTER TABLE " + full1 + " RENAME TO " + full2);
+              spark.sql("ALTER TABLE " + full1 + " RENAME TO default." + name2);
             });
-    assertEquals("TABLE_ALREADY_EXISTS", ex.getErrorClass());
+    assertEquals("TABLE_OR_VIEW_ALREADY_EXISTS", ex.getErrorClass());
   }
 
   @Test
