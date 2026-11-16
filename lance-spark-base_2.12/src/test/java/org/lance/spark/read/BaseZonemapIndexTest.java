@@ -13,6 +13,7 @@
  */
 package org.lance.spark.read;
 
+import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -21,6 +22,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Collections;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -82,6 +84,18 @@ public abstract class BaseZonemapIndexTest {
     // Verify index was created
     long count = spark.sql("SELECT * FROM " + table).count();
     assertEquals(3, count);
+  }
+
+  @Test
+  public void testZonemapWithoutBoundsKeepsMatchingRows() {
+    // Lance reports no zone bounds for decimals; such zones must not be treated as all-null.
+    String table = catalogName + ".default.zm_dec_" + UUID.randomUUID().toString().replace("-", "");
+    spark.sql(String.format("CREATE TABLE %s (id INT, x DECIMAL(10,2)) USING lance", table));
+    spark.sql(String.format("INSERT INTO %s VALUES (1, 1.23), (2, 4.56)", table));
+    spark.sql(String.format("ALTER TABLE %s CREATE INDEX x_zm USING zonemap (x)", table));
+    assertEquals(
+        Collections.singletonList(RowFactory.create(1)),
+        spark.sql(String.format("SELECT id FROM %s WHERE x = 1.23", table)).collectAsList());
   }
 
   @Test

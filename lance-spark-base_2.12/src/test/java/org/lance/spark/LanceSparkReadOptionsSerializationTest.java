@@ -253,6 +253,40 @@ public class LanceSparkReadOptionsSerializationTest {
   }
 
   @Test
+  public void testRuntimeFilterGuardrailDefaultsAndOverrides() {
+    LanceSparkReadOptions defaults =
+        LanceSparkReadOptions.builder().datasetUri("s3://bucket/path").build();
+    Assertions.assertEquals(100_000, defaults.getRuntimeFilterMaxKeys());
+    Assertions.assertEquals(4_194_304, defaults.getRuntimeFilterMaxBytes());
+
+    Map<String, String> configured = new HashMap<>();
+    configured.put(LanceSparkReadOptions.CONFIG_RUNTIME_FILTER_MAX_KEYS, "25");
+    configured.put(LanceSparkReadOptions.CONFIG_RUNTIME_FILTER_MAX_BYTES, "4096");
+    LanceSparkReadOptions overrides = LanceSparkReadOptions.from(configured, "s3://bucket/path");
+    Assertions.assertEquals(25, overrides.getRuntimeFilterMaxKeys());
+    Assertions.assertEquals(4096, overrides.getRuntimeFilterMaxBytes());
+
+    LanceSparkReadOptions pinned = overrides.withRef(LanceRef.ofMain(3));
+    Assertions.assertEquals(25, pinned.getRuntimeFilterMaxKeys());
+    Assertions.assertEquals(4096, pinned.getRuntimeFilterMaxBytes());
+  }
+
+  @Test
+  public void testRuntimeFilterGuardrailsMustBePositive() {
+    Map<String, String> invalidKeys =
+        Collections.singletonMap(LanceSparkReadOptions.CONFIG_RUNTIME_FILTER_MAX_KEYS, "0");
+    Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () -> LanceSparkReadOptions.from(invalidKeys, "s3://bucket/path"));
+
+    Map<String, String> invalidBytes =
+        Collections.singletonMap(LanceSparkReadOptions.CONFIG_RUNTIME_FILTER_MAX_BYTES, "-1");
+    Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () -> LanceSparkReadOptions.from(invalidBytes, "s3://bucket/path"));
+  }
+
+  @Test
   public void testExecutorCredentialRefreshParsedFromOptions() {
     LanceSparkReadOptions optionsFalse =
         LanceSparkReadOptions.from(

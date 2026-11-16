@@ -15,6 +15,7 @@ package org.lance.spark;
 
 import org.lance.Dataset;
 import org.lance.memwal.ShardingSpec;
+import org.lance.spark.internal.TransactionPropertiesWriteTable;
 import org.lance.spark.read.LanceScanBuilder;
 import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.BlobUtils;
@@ -32,7 +33,6 @@ import org.apache.spark.sql.connector.catalog.MetadataColumn;
 import org.apache.spark.sql.connector.catalog.StagedTable;
 import org.apache.spark.sql.connector.catalog.SupportsMetadataColumns;
 import org.apache.spark.sql.connector.catalog.SupportsRead;
-import org.apache.spark.sql.connector.catalog.SupportsWrite;
 import org.apache.spark.sql.connector.catalog.Table;
 import org.apache.spark.sql.connector.catalog.TableCapability;
 import org.apache.spark.sql.connector.read.ScanBuilder;
@@ -58,7 +58,7 @@ import java.util.stream.Collectors;
 
 /** Lance Spark Dataset. */
 public class LanceDataset
-    implements SupportsRead, SupportsWrite, SupportsMetadataColumns, StagedTable {
+    implements SupportsRead, TransactionPropertiesWriteTable, SupportsMetadataColumns, StagedTable {
 
   private static final Logger LOG = LoggerFactory.getLogger(LanceDataset.class);
 
