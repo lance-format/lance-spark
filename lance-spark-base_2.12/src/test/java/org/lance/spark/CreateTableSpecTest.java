@@ -277,30 +277,38 @@ public class CreateTableSpecTest {
   @Test
   public void replacePreservesDatasetDefaultWhileUpgradingBlobV2Fragments() {
     CreateTableSpec topLevel =
-        CreateTableSpec.resolveForReplace(blobV2QuerySchema(), Collections.emptyMap(), "2.1");
+        CreateTableSpec.resolveForReplace(blobV2QuerySchema(), Collections.emptyMap(), null, "2.1");
     assertNull(topLevel.fileFormatVersion());
     assertEquals(BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION, topLevel.fragmentFileFormatVersion());
 
     CreateTableSpec nested =
-        CreateTableSpec.resolveForReplace(nestedBlobV2QuerySchema(), Collections.emptyMap(), "2.1");
+        CreateTableSpec.resolveForReplace(
+            nestedBlobV2QuerySchema(), Collections.emptyMap(), null, "2.1");
     assertNull(nested.fileFormatVersion());
     assertEquals(BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION, nested.fragmentFileFormatVersion());
 
     CreateTableSpec plainLegacy =
-        CreateTableSpec.resolveForReplace(SCHEMA, Collections.emptyMap(), "0.1");
+        CreateTableSpec.resolveForReplace(SCHEMA, Collections.emptyMap(), null, "0.1");
     assertNull(plainLegacy.fileFormatVersion());
     assertEquals("0.1", plainLegacy.fragmentFileFormatVersion());
 
+    CreateTableSpec propertyDrivenBlob =
+        CreateTableSpec.resolveForReplace(
+            SCHEMA, props("data.lance.encoding", "blob"), null, "2.1");
+    assertEquals(BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION, propertyDrivenBlob.fileFormatVersion());
+    assertTrue(BlobUtils.isBlobV2SparkField(propertyDrivenBlob.schema().apply("data")));
+
     CreateTableSpec explicitOverride =
         CreateTableSpec.resolveForReplace(
-            blobV2QuerySchema(), props("file_format_version", "2.2"), "2.1");
+            blobV2QuerySchema(), props("file_format_version", "2.2"), null, "2.1");
     assertEquals("2.2", explicitOverride.fileFormatVersion());
     assertEquals("2.2", explicitOverride.fragmentFileFormatVersion());
 
     assertThrows(
         IllegalArgumentException.class,
         () ->
-            CreateTableSpec.resolveForReplace(blobV2QuerySchema(), Collections.emptyMap(), "0.1"));
+            CreateTableSpec.resolveForReplace(
+                blobV2QuerySchema(), Collections.emptyMap(), null, "0.1"));
   }
 
   private static StructType nestedBlobV2QuerySchema() {

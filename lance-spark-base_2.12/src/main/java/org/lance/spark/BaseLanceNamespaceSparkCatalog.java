@@ -174,11 +174,14 @@ public abstract class BaseLanceNamespaceSparkCatalog
   }
 
   /** Replace-time schema and file format version resolution for an existing dataset. */
-  private static CreateTableSpec resolveReplaceSpec(
+  private CreateTableSpec resolveReplaceSpec(
       StructType schema, Map<String, String> properties, Dataset existingDataset) {
     try {
       return CreateTableSpec.resolveForReplace(
-          schema, properties, existingDataset.getLanceFileFormatVersion());
+          schema,
+          properties,
+          catalogConfig.getFileFormatVersion(),
+          existingDataset.getLanceFileFormatVersion());
     } catch (RuntimeException e) {
       existingDataset.close();
       throw e;

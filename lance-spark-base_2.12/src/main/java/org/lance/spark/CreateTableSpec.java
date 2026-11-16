@@ -86,18 +86,23 @@ public final class CreateTableSpec {
    * existing table ({@code REPLACE TABLE} or {@code CREATE OR REPLACE TABLE} on an existing
    * dataset).
    *
-   * <p>Unlike {@link #resolve}, replacing an existing table preserves the dataset's manifest
-   * default {@code file_format_version} ({@link #fileFormatVersion()} returns {@code null}) unless
-   * {@code tableProperties} explicitly sets {@code file_format_version}, while {@link
-   * #fragmentFileFormatVersion()} still upgrades data-file writes when required by the schema (for
-   * example, a promoted {@code 2.1} table containing Blob v2 fields).
+   * <p>When {@code tableProperties} explicitly sets {@code file_format_version}, requests a new
+   * blob column via {@code <column>.lance.encoding = 'blob'}, or a {@code catalogDefaultVersion} is
+   * configured, create-time resolution applies ({@link #resolve}). Otherwise, replacing an existing
+   * table preserves the dataset's manifest default {@code file_format_version} ({@link
+   * #fileFormatVersion()} returns {@code null}) while {@link #fragmentFileFormatVersion()} still
+   * upgrades data-file writes when required by the schema (for example, a promoted {@code 2.1}
+   * table containing Blob v2 fields).
    */
   public static CreateTableSpec resolveForReplace(
-      StructType sparkSchema, Map<String, String> tableProperties, String existingDatasetVersion) {
-    String explicitTableVersion =
-        tableProperties.get(LanceSparkCatalogConfig.TABLE_OPT_FILE_FORMAT_VERSION);
-    if (explicitTableVersion != null) {
-      return resolve(sparkSchema, tableProperties, null);
+      StructType sparkSchema,
+      Map<String, String> tableProperties,
+      String catalogDefaultVersion,
+      String existingDatasetVersion) {
+    if (tableProperties.containsKey(LanceSparkCatalogConfig.TABLE_OPT_FILE_FORMAT_VERSION)
+        || catalogDefaultVersion != null
+        || BlobUtils.requestsBlobEncoding(tableProperties)) {
+      return resolve(sparkSchema, tableProperties, catalogDefaultVersion);
     }
 
     String initialFragmentVersion =
