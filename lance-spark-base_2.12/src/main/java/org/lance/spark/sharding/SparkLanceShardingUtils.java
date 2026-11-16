@@ -43,7 +43,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -138,6 +137,10 @@ public final class SparkLanceShardingUtils {
    * <p>Only stats for live fragments participate. Every live fragment must be covered and all of
    * its zones must resolve to one key; otherwise the scan cannot safely advertise key-grouped
    * partitioning.
+   *
+   * <p>Zones are grouped by fragment in one pass, so the cost is linear in the number of zones. A
+   * per-fragment scan of the whole zone list costs fragments times zones, which for hundreds of
+   * thousands of fragments keeps the driver planning for hours.
    */
   public static Optional<Map<Integer, Object>> detectFragmentKeys(
       ShardingField field,
@@ -150,25 +153,23 @@ public final class SparkLanceShardingUtils {
       return Optional.empty();
     }
 
-    List<ZoneStats> liveZones = new ArrayList<>();
-    Set<Integer> coveredFragmentIds = new HashSet<>();
+    Map<Integer, List<ZoneStats>> zonesByFragment = new HashMap<>();
     for (ZoneStats zone : zones) {
       if (liveFragmentIds.contains(zone.getFragmentId())) {
-        liveZones.add(zone);
-        coveredFragmentIds.add(zone.getFragmentId());
+        zonesByFragment.computeIfAbsent(zone.getFragmentId(), id -> new ArrayList<>()).add(zone);
       }
     }
-    if (!coveredFragmentIds.equals(liveFragmentIds)) {
+    if (!zonesByFragment.keySet().equals(liveFragmentIds)) {
       return Optional.empty();
     }
 
     Map<Integer, Object> result = new HashMap<>();
-    for (int fragmentId : liveFragmentIds) {
-      Optional<Object> key = fragmentKeyFromZones(field, schema, liveZones, fragmentId);
+    for (Map.Entry<Integer, List<ZoneStats>> fragment : zonesByFragment.entrySet()) {
+      Optional<Object> key = fragmentKeyFromZones(field, schema, fragment.getValue());
       if (!key.isPresent()) {
         return Optional.empty();
       }
-      result.put(fragmentId, key.get());
+      result.put(fragment.getKey(), key.get());
     }
     return Optional.of(result);
   }
@@ -273,13 +274,11 @@ public final class SparkLanceShardingUtils {
             + ". Lance supports bucket(N, col) and identity(col).");
   }
 
+  /** The key all of one fragment's zones resolve to, if they resolve to exactly one. */
   private static Optional<Object> fragmentKeyFromZones(
-      ShardingField field, LanceSchema schema, List<ZoneStats> zones, int fragmentId) {
+      ShardingField field, LanceSchema schema, List<ZoneStats> fragmentZones) {
     Comparable<?> value = null;
-    for (ZoneStats zone : zones) {
-      if (zone.getFragmentId() != fragmentId) {
-        continue;
-      }
+    for (ZoneStats zone : fragmentZones) {
       Comparable<?> min = zone.getMin();
       Comparable<?> max = zone.getMax();
       if (min == null || max == null || !min.equals(max)) {
