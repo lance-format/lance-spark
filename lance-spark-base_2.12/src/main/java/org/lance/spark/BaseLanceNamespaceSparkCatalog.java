@@ -42,6 +42,7 @@ import org.lance.spark.function.LanceMatchFunction;
 import org.lance.spark.function.LanceMultiMatchFunction;
 import org.lance.spark.function.LancePhraseFunction;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
+import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.SchemaConverter;
 import org.lance.spark.utils.Utils;
@@ -1317,7 +1318,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
     // Use specified file format version, or fall back to existing table's version
     if (fileFormatVersion == null) {
-      fileFormatVersion = ds.getLanceFileFormatVersion();
+      fileFormatVersion =
+          BlobUtils.resolveWriteFileFormatVersion(processedSchema, ds.getLanceFileFormatVersion());
     }
     final StagedCommitOptions commitOptions =
         StagedCommitOptions.of(
@@ -1367,7 +1369,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     // Use specified file format version, or fall back to existing table's version
     if (fileFormatVersion == null) {
-      fileFormatVersion = ds.getLanceFileFormatVersion();
+      fileFormatVersion =
+          BlobUtils.resolveWriteFileFormatVersion(processedSchema, ds.getLanceFileFormatVersion());
     }
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     final StagedCommitOptions commitOptions =
@@ -1456,7 +1459,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
     if (exists) {
       Dataset ds = Utils.openDatasetBuilder(readOptions).build();
       if (fileFormatVersion == null) {
-        fileFormatVersion = ds.getLanceFileFormatVersion();
+        fileFormatVersion =
+            BlobUtils.resolveWriteFileFormatVersion(
+                processedSchema, ds.getLanceFileFormatVersion());
       }
       final StagedCommitOptions commitOptions =
           StagedCommitOptions.of(
@@ -1513,7 +1518,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
     if (exists) {
       Dataset ds = Utils.openDatasetBuilder(readOptions).build();
       if (fileFormatVersion == null) {
-        fileFormatVersion = ds.getLanceFileFormatVersion();
+        fileFormatVersion =
+            BlobUtils.resolveWriteFileFormatVersion(
+                processedSchema, ds.getLanceFileFormatVersion());
       }
       final StagedCommitOptions commitOptions =
           StagedCommitOptions.pathBased(
@@ -1746,11 +1753,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
       boolean managedVersioning,
       List<String> tableIdList,
       boolean protectSchema) {
-    if (!managedVersioning && !protectSchema) {
-      dataset.updateConfig(config);
-      return;
-    }
-
     UpdateMap updateMap = UpdateMap.builder().updates(config).replace(true).build();
     UpdateConfig.Builder updateConfig = UpdateConfig.builder().configUpdates(updateMap);
     if (protectSchema) {

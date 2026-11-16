@@ -223,10 +223,10 @@ public class Utils {
         builder.setBlockSize(blockSize);
       }
       if (indexCacheSize != null) {
-        builder.setIndexCacheSize(indexCacheSize);
+        builder.setIndexCacheSizeBytes(indexCacheSize * 20L * 1024 * 1024);
       }
       if (metadataCacheSize != null) {
-        builder.setMetadataCacheSize(metadataCacheSize);
+        builder.setMetadataCacheSizeBytes(metadataCacheSize * 4L * 1024 * 1024);
       }
 
       return open(builder.build());

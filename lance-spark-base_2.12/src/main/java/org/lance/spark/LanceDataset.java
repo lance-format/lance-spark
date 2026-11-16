@@ -470,7 +470,8 @@ public class LanceDataset
     // Use table's file format version if not explicitly set in write options
     if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)
         && fileFormatVersion != null) {
-      writeOptionsBuilder.fileFormatVersion(fileFormatVersion);
+      writeOptionsBuilder.fileFormatVersion(
+          BlobUtils.resolveWriteFileFormatVersion(sparkSchema, fileFormatVersion));
     }
     if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS)
         && tableProperties.containsKey(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS)) {
@@ -530,7 +531,7 @@ public class LanceDataset
 
     if (stagedCommit != null) {
       builder.setStagedCommit(stagedCommit);
-      // Set write mode to OVERWRITE so that Fragment.create() infers schema from the
+      // Set write mode to OVERWRITE so that Fragment.write() infers schema from the
       // arrow stream rather than validating against the existing dataset schema. This
       // allows replacing a table with a different schema.
       builder.truncate();

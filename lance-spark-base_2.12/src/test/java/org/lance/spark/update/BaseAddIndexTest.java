@@ -1187,6 +1187,57 @@ public abstract class BaseAddIndexTest {
   }
 
   @Test
+  public void testCreateBTreeIndexWithRangeModeAndStableRowIds() {
+    spark.sql(
+        String.format(
+            "create table %s (id int, text string) using lance "
+                + "tblproperties ('enable_stable_row_ids' = 'true')",
+            fullTable));
+    spark.sql(
+        String.format(
+            "insert into %s values (0, 'v0'), (1, 'v1'), (2, 'v2'), (3, 'v3'), (4, 'v4')",
+            fullTable));
+    spark.sql(
+        String.format(
+            "insert into %s values (5, 'v5'), (6, 'v6'), (7, 'v7'), (8, 'v8'), (9, 'v9')",
+            fullTable));
+    // Compact into a new fragment so every surviving row has _rowid != _rowaddr.
+    spark
+        .sql(String.format("optimize %s with (target_rows_per_fragment = 1000)", fullTable))
+        .collect();
+    long differingRows =
+        spark
+            .sql(String.format("select count(*) from %s where _rowid <> _rowaddr", fullTable))
+            .first()
+            .getLong(0);
+    Assertions.assertEquals(10L, differingRows, "Expected all rows to have _rowid != _rowaddr");
+
+    spark
+        .sql(
+            String.format(
+                "alter table %s create index idx_srid_range using btree (id) "
+                    + "with (build_mode='range', rows_per_range=4)",
+                fullTable))
+        .collect();
+    checkIndex("idx_srid_range");
+
+    List<Row> pointRows =
+        spark.sql(String.format("select id, text from %s where id = 7", fullTable)).collectAsList();
+    Assertions.assertEquals(1, pointRows.size());
+    Assertions.assertEquals(7, pointRows.get(0).getInt(0));
+    Assertions.assertEquals("v7", pointRows.get(0).getString(1));
+
+    List<Row> rangeRows =
+        spark
+            .sql(
+                String.format("select id from %s where id >= 3 and id <= 8 order by id", fullTable))
+            .collectAsList();
+    Assertions.assertEquals(
+        Arrays.asList(3, 4, 5, 6, 7, 8),
+        rangeRows.stream().map(row -> row.getInt(0)).collect(Collectors.toList()));
+  }
+
+  @Test
   public void testRepeatedCreateBTreeRangeIndex() {
     prepareDataset();
 

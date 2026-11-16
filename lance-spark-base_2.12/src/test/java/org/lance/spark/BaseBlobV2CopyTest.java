@@ -14,11 +14,17 @@
 package org.lance.spark;
 
 import org.lance.spark.utils.BlobUtils;
+import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.MetadataBuilder;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -886,6 +892,124 @@ public abstract class BaseBlobV2CopyTest extends AbstractBlobV2CopyTest {
       assertTargetBlobBytes(datasetUriOf(tgt), rowAddressesOf(fqTgt), blobs);
     } finally {
       spark.sql("DROP TABLE IF EXISTS " + fqSrc);
+      spark.sql("DROP TABLE IF EXISTS " + fqTgt);
+    }
+  }
+
+  @Test
+  public void promotedBlobV2TableAtFormat21_supportsDefaultAppendAndCompaction() throws Exception {
+    String tgt = "v2_prom_top_" + System.currentTimeMillis();
+    String fqTgt = fq(tgt);
+    byte[] blob1 = deterministicBlob(181, 32);
+    byte[] blob2 = deterministicBlob(182, 32);
+    byte[] blob3 = deterministicBlob(183, 32);
+    spark.sql(
+        "CREATE TABLE "
+            + fqTgt
+            + " (id INT NOT NULL, data BINARY) USING lance TBLPROPERTIES ("
+            + "'data.lance.encoding' = 'blob', 'file_format_version' = '2.1')");
+    try {
+      spark
+          .createDataFrame(Collections.singletonList(row(1, blob1)), idDataBinarySchema())
+          .coalesce(1)
+          .writeTo(fqTgt)
+          .append();
+      spark
+          .createDataFrame(Collections.singletonList(row(2, blob2)), idDataBinarySchema())
+          .coalesce(1)
+          .writeTo(fqTgt)
+          .option("file_format_version", "2.2")
+          .append();
+
+      String uri = datasetUriOf(tgt);
+      assertTrue(BlobUtils.hasBlobV2Fields(spark.table(fqTgt).schema()));
+      try (org.lance.Dataset ds =
+          Utils.openDatasetBuilder(LanceSparkReadOptions.from(uri)).build()) {
+        assertEquals("2.1", ds.getLanceFileFormatVersion());
+      }
+
+      spark
+          .createDataFrame(Collections.singletonList(row(3, blob3)), idDataBinarySchema())
+          .coalesce(1)
+          .writeTo(fqTgt)
+          .append();
+
+      Row opt = spark.sql("OPTIMIZE " + fqTgt + " WITH (target_rows_per_fragment = 1000)").first();
+      assertTrue(
+          opt.getAs("fragments_removed") != null && opt.<Long>getAs("fragments_removed") > 0);
+      try (org.lance.Dataset ds =
+          Utils.openDatasetBuilder(LanceSparkReadOptions.from(uri)).build()) {
+        assertEquals("2.1", ds.getLanceFileFormatVersion());
+      }
+      assertTargetBlobBytes(uri, rowAddressesOf(fqTgt), new byte[][] {blob1, blob2, blob3});
+    } finally {
+      spark.sql("DROP TABLE IF EXISTS " + fqTgt);
+    }
+  }
+
+  @Test
+  public void promotedNestedBlobV2TableAtFormat21_supportsDefaultAppendAndCompaction()
+      throws Exception {
+    String tgt = "v2_prom_nested_" + System.currentTimeMillis();
+    String fqTgt = fq(tgt);
+    byte[] blob1 = deterministicBlob(191, 32);
+    byte[] blob2 = deterministicBlob(192, 32);
+    byte[] blob3 = deterministicBlob(193, 32);
+    Metadata v1BlobMeta =
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build();
+    StructType nestedV1Schema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.IntegerType, false),
+              DataTypes.createStructField(
+                  "payload",
+                  new StructType(
+                      new StructField[] {
+                        new StructField("data", DataTypes.BinaryType, true, v1BlobMeta)
+                      }),
+                  true)
+            });
+    try {
+      spark
+          .createDataFrame(
+              Collections.singletonList(RowFactory.create(1, RowFactory.create((Object) blob1))),
+              nestedV1Schema)
+          .coalesce(1)
+          .writeTo(fqTgt)
+          .using("lance")
+          .tableProperty("file_format_version", "2.1")
+          .create();
+      spark
+          .createDataFrame(
+              Collections.singletonList(RowFactory.create(2, RowFactory.create((Object) blob2))),
+              spark.table(fqTgt).schema())
+          .coalesce(1)
+          .writeTo(fqTgt)
+          .option("file_format_version", "2.2")
+          .append();
+
+      String uri = datasetUriOf(tgt);
+      assertTrue(BlobUtils.containsBlobV2SparkField(spark.table(fqTgt).schema()));
+      try (org.lance.Dataset ds =
+          Utils.openDatasetBuilder(LanceSparkReadOptions.from(uri)).build()) {
+        assertEquals("2.1", ds.getLanceFileFormatVersion());
+      }
+
+      spark
+          .createDataFrame(
+              Collections.singletonList(RowFactory.create(3, RowFactory.create((Object) blob3))),
+              spark.table(fqTgt).schema())
+          .coalesce(1)
+          .writeTo(fqTgt)
+          .append();
+
+      Row opt = spark.sql("OPTIMIZE " + fqTgt + " WITH (target_rows_per_fragment = 1000)").first();
+      assertTrue(opt.<Long>getAs("fragments_removed") > 0);
+      assertTargetBlobBytes(
+          uri, rowAddressesOf(fqTgt), "payload.data", new byte[][] {blob1, blob2, blob3});
+    } finally {
       spark.sql("DROP TABLE IF EXISTS " + fqTgt);
     }
   }
