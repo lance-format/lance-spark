@@ -15,6 +15,8 @@ package org.lance.spark;
 
 import org.lance.CommitBuilder;
 import org.lance.Dataset;
+import org.lance.DatasetAlreadyExistsException;
+import org.lance.DatasetNotFoundException;
 import org.lance.Transaction;
 import org.lance.WriteDatasetBuilder;
 import org.lance.WriteParams;
@@ -576,7 +578,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
             datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
     try (Dataset dataset = Utils.openDatasetBuilder(readOptions).build()) {
       return true;
-    } catch (Exception e) {
+    } catch (DatasetNotFoundException e) {
       return false;
     }
   }
@@ -878,7 +880,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
           persistTableProperties(dataset, propertiesToPersist, false, null);
         }
       }
-    } catch (IllegalArgumentException e) {
+    } catch (DatasetAlreadyExistsException e) {
       throw new TableAlreadyExistsException(ident);
     }
     return createDataset(
@@ -912,7 +914,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
             new ExistingDataset(
                 LanceArrowUtils.fromArrowSchema(ds.getSchema()), ds.getLanceFileFormatVersion()));
       }
-    } catch (IllegalArgumentException e) {
+    } catch (DatasetNotFoundException e) {
       return Optional.empty();
     }
   }
@@ -1361,7 +1363,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     Dataset ds;
     try {
       ds = Utils.openDatasetBuilder(readOptions).build();
-    } catch (Exception e) {
+    } catch (DatasetNotFoundException e) {
       throw new NoSuchTableException(ident);
     }
 
@@ -1901,7 +1903,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         ref =
             Optional.of(
                 LanceRef.ofMain(Utils.findVersion(dataset.listVersions(), timestamp.get())));
-      } catch (IllegalArgumentException e) {
+      } catch (DatasetNotFoundException e) {
         throw new NoSuchTableException(ident);
       }
     }
@@ -1918,7 +1920,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       fileFormatVersion = dataset.getLanceFileFormatVersion();
       tableProperties = dataset.getConfig();
       readOptions = pinLoadedBranch(readOptions, dataset);
-    } catch (IllegalArgumentException e) {
+    } catch (DatasetNotFoundException e) {
       throw new NoSuchTableException(ident);
     }
 
