@@ -17,6 +17,7 @@ import org.lance.spark.LanceConstant;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.JsonUtils;
 
+import org.apache.arrow.vector.types.DateUnit;
 import org.apache.arrow.vector.types.FloatingPointPrecision;
 import org.apache.arrow.vector.types.TimeUnit;
 import org.apache.arrow.vector.types.pojo.ArrowType;
@@ -127,21 +128,60 @@ public class ArrowBatchAdapterTest {
     assertTrue(plan.schema().getFields().isEmpty());
   }
 
+  /**
+   * Types Spark's ArrowColumnVector does not read become the types it reads as the declared Spark
+   * types, at any depth: unsigned integers, Float16, fixed-size binaries, LargeLists, and dates and
+   * timestamps in other units.
+   */
   @Test
-  public void typesSparkDoesNotReadAsDeclaredHaveNoArrowBatchForm() {
-    for (Field unsupported :
-        Arrays.asList(
-            field("u", new ArrowType.Int(32, false)),
+  public void typesSparkDoesNotReadBecomeTypesItReads() {
+    ArrowType half = new ArrowType.FloatingPoint(FloatingPointPrecision.HALF);
+    ArrowBatchAdapter.Plan plan =
+        planWholeDataset(
+            field("u8", new ArrowType.Int(8, false)),
+            field("u16", new ArrowType.Int(16, false)),
+            field("u32", new ArrowType.Int(32, false)),
+            field("u64", new ArrowType.Int(64, false)),
+            field("f16", half),
             field("fsb", new ArrowType.FixedSizeBinary(16)),
+            field("dms", new ArrowType.Date(DateUnit.MILLISECOND)),
+            field("s", new ArrowType.Timestamp(TimeUnit.SECOND, "UTC")),
             field("ns", new ArrowType.Timestamp(TimeUnit.NANOSECOND, null)),
-            field("doc", ArrowType.Struct.INSTANCE, field("u", new ArrowType.Int(64, false))))) {
-      ArrowBatchAdapter.Plan plan = planWholeDataset(unsupported);
-      assertFalse(plan.isSupported(), unsupported.toString());
-      assertTrue(
-          plan.unsupportedReason().startsWith("column " + unsupported.getName() + ": "),
-          plan.unsupportedReason());
-      assertThrows(IllegalStateException.class, plan::schema);
-    }
+            field("big", ArrowType.LargeList.INSTANCE, field("item", new ArrowType.Int(32, true))),
+            vector("hvec", 4, half),
+            vector("bvec", 4, new ArrowType.Int(8, false)),
+            field("doc", ArrowType.Struct.INSTANCE, field("u", new ArrowType.Int(64, false))));
+    assertTrue(plan.isSupported(), plan.unsupportedReason());
+    Schema schema = plan.schema();
+    assertEquals(new ArrowType.Int(16, true), schema.findField("u8").getType());
+    assertEquals(new ArrowType.Int(32, true), schema.findField("u16").getType());
+    assertEquals(new ArrowType.Int(64, true), schema.findField("u32").getType());
+    assertEquals(new ArrowType.Int(64, true), schema.findField("u64").getType());
+    assertEquals(FLOAT, schema.findField("f16").getType());
+    assertEquals(ArrowType.Binary.INSTANCE, schema.findField("fsb").getType());
+    assertEquals(new ArrowType.Date(DateUnit.DAY), schema.findField("dms").getType());
+    assertEquals(
+        new ArrowType.Timestamp(TimeUnit.MICROSECOND, "UTC"), schema.findField("s").getType());
+    assertEquals(
+        new ArrowType.Timestamp(TimeUnit.MICROSECOND, null), schema.findField("ns").getType());
+    assertEquals(ArrowType.List.INSTANCE, schema.findField("big").getType());
+    assertEquals(FLOAT, schema.findField("hvec").getChildren().get(0).getType());
+    assertEquals(
+        new ArrowType.Int(16, true), schema.findField("bvec").getChildren().get(0).getType());
+    assertEquals(
+        new ArrowType.Int(64, true), schema.findField("doc").getChildren().get(0).getType());
+  }
+
+  /**
+   * A type the Spark reader rescales but Spark's ArrowColumnVector does not read stays unsupported.
+   */
+  @Test
+  public void typesWithoutABatchTypeHaveNoArrowBatchForm() {
+    Field time = field("t", new ArrowType.Time(TimeUnit.MILLISECOND, 32));
+    ArrowBatchAdapter.Plan plan = planWholeDataset(time);
+    assertFalse(plan.isSupported());
+    assertTrue(plan.unsupportedReason().startsWith("column t: "), plan.unsupportedReason());
+    assertThrows(IllegalStateException.class, plan::schema);
   }
 
   /**
