@@ -14,8 +14,6 @@
 package org.lance.spark.search;
 
 import org.lance.namespace.DirectoryNamespace;
-import org.lance.namespace.model.QueryTableRequest;
-import org.lance.namespace.model.QueryTableResponse;
 import org.lance.spark.LanceSparkSQLProperties;
 
 import org.apache.spark.sql.Row;
@@ -193,16 +191,5 @@ public abstract class BaseSparkDistributedFullTextSearchTest {
       root = root.getCause();
     }
     return String.valueOf(root.getMessage());
-  }
-
-  public static class QueryUnavailableNamespace extends DirectoryNamespace {
-    static final String ERROR_MESSAGE = "queryTable is not implemented";
-
-    public QueryUnavailableNamespace() {}
-
-    @Override
-    public QueryTableResponse queryTable(QueryTableRequest request) {
-      throw new IllegalStateException(ERROR_MESSAGE);
-    }
   }
 }

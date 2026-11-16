@@ -13,7 +13,9 @@
  */
 package org.lance.spark;
 
+import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.internal.SQLConf;
+import scala.Option;
 
 public final class LanceSparkSQLProperties {
 
@@ -23,10 +25,17 @@ public final class LanceSparkSQLProperties {
   public static final boolean SEARCH_DISTRIBUTED_ENABLED_DEFAULT = false;
 
   public static boolean isSearchDistributedEnabled() {
-    String value =
-        SQLConf.get()
-            .getConfString(
-                SEARCH_DISTRIBUTED_ENABLED, String.valueOf(SEARCH_DISTRIBUTED_ENABLED_DEFAULT));
-    return Boolean.parseBoolean(value);
+    return Boolean.parseBoolean(
+        getConf(SEARCH_DISTRIBUTED_ENABLED, String.valueOf(SEARCH_DISTRIBUTED_ENABLED_DEFAULT)));
+  }
+
+  public static String getConf(String key, String defaultValue) {
+    Option<SparkSession> session = SparkSession.getActiveSession();
+    if (session.isEmpty()) {
+      session = SparkSession.getDefaultSession();
+    }
+    return session.isDefined()
+        ? session.get().conf().get(key, defaultValue)
+        : SQLConf.get().getConfString(key, defaultValue);
   }
 }

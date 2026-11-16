@@ -67,9 +67,10 @@ The result includes the requested table columns and a nullable `_distance` float
 ## Execution
 
 By default, Spark plans `VECTOR_SEARCH` with one input partition and calls the Lance namespace
-`queryTable` API. When `spark.sql.lance.search.distributed.enabled=true`, Spark instead opens the
-dataset from its executors, searches vector-index segments and uncovered fragments in parallel,
-and globally merges their candidates. The merge sorts by the distance each task reported, so each
+`queryTable` API. When `spark.sql.lance.search.distributed.enabled=true` (see
+[Distributed Search](../../config.md#distributed-search)), Spark instead opens the dataset from its
+executors, searches vector-index segments and uncovered fragments in parallel, and globally merges
+their candidates. The merge sorts by the distance each task reported, so each
 task returns only its own top `num_results + offset` rows: a row outside a task's local top k
 cannot enter the global top k. `nprobes` and `refine_factor` apply per task.
 

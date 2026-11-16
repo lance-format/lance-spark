@@ -136,14 +136,14 @@ ORDER BY _score DESC;
 If the table has a stored column named `_score`, Spark resolves `_score` to that data column instead. It remains visible in `SELECT *` and supports ordinary reads, filters, and ordering without FTS. Full-text search, including `SEARCH` and `HYBRID_SEARCH`, rejects tables with a stored `_score` column of any type, even when the column is not projected. Rename the stored column to use FTS and access relevance scores.
 
 !!! note "Ranked retrieval depends on the scan path"
-    On a query-capable namespace, such as the directory namespace, a single `ORDER BY _score DESC LIMIT k` can push the generated relevance-score top-k into `queryTable`. Spark retains a final sort and limit. Ascending or multi-key ordering and residual filters do not use this optimization.
+    On a query-capable namespace, such as the directory namespace, and with `spark.sql.lance.search.distributed.enabled` off (its default), a single `ORDER BY _score DESC LIMIT k` can push the generated relevance-score top-k into `queryTable`. Spark retains a final sort and limit. Ascending or multi-key ordering and residual filters do not use this optimization. Enabling the flag forces the local per-fragment scan, which has no top-k push (see [Distributed Search](../../config.md#distributed-search)).
 
     Pushed scalar filters are evaluated before namespace top-k selection. Filters on `_score` remain in Spark, so they prevent top-k pushdown.
 
     Local per-fragment scans return all matching rows; Spark sorts and limits them. Pushed ranked retrieval for this path remains a future extension.
 
 !!! note "Index coverage affects relevance scores"
-    As of Lance 14.0.3, partially indexed data can produce different scores or rankings before and after index optimization, even when the data and query are unchanged ([Lance issue #9058](https://github.com/lance-format/lance/issues/9058)). Run `ALTER TABLE lance.db.documents OPTIMIZE INDEX fts_body` after appends and use a fully indexed snapshot when relying on score thresholds or corpus-relative ranking.
+    As of Lance 14.0.3, partially indexed data can produce different scores or rankings before and after index optimization, even when the data and query are unchanged ([Lance issue #9058](https://github.com/lance-format/lance/issues/9058)). Run `ALTER TABLE lance.db.documents OPTIMIZE INDEX fts_body` after appends and use a fully indexed snapshot when relying on score thresholds or corpus-relative ranking. Enabling `spark.sql.lance.search.distributed.enabled` can change scores the same way on a query-capable namespace: rows appended after indexing can score lower with the flag on, because each Spark task scores over the committed index segments it sees (see [Distributed Search](../../config.md#distributed-search)).
 
 !!! warning "Rebuild existing FTS indexes when upgrading to Lance 14+"
     Lance 14 updated stop-word lists for English and other Latin-script languages. `OPTIMIZE INDEX` merges segments without re-tokenizing existing postings, so rebuild pre-14 FTS indexes with `ALTER TABLE ... CREATE INDEX <name> USING fts (...)` when stop-word filtering (`remove_stop_words = true`) is enabled.
