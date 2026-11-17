@@ -16,8 +16,10 @@ package org.lance.spark;
 import org.lance.WriteParams;
 import org.lance.WriteParams.WriteMode;
 import org.lance.namespace.LanceNamespace;
+import org.lance.spark.utils.FileFormatVersionResolver;
 
 import com.google.common.base.Preconditions;
+import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
 import java.io.Serializable;
@@ -82,6 +84,7 @@ public class LanceSparkWriteOptions implements Serializable {
   private final Integer maxRowsPerGroup;
   private final Long maxBytesPerFile;
   private final String fileFormatVersion;
+  private final String fallbackFileFormatVersion;
   private final boolean useQueuedWriteBuffer;
   private final int queueDepth;
   private final int batchSize;
@@ -118,6 +121,7 @@ public class LanceSparkWriteOptions implements Serializable {
     this.maxRowsPerGroup = builder.maxRowsPerGroup;
     this.maxBytesPerFile = builder.maxBytesPerFile;
     this.fileFormatVersion = builder.fileFormatVersion;
+    this.fallbackFileFormatVersion = builder.fallbackFileFormatVersion;
     this.useQueuedWriteBuffer = builder.useQueuedWriteBuffer;
     this.queueDepth = builder.queueDepth;
     this.batchSize = builder.batchSize;
@@ -185,6 +189,16 @@ public class LanceSparkWriteOptions implements Serializable {
   }
 
   public String getFileFormatVersion() {
+    return fileFormatVersion != null ? fileFormatVersion : fallbackFileFormatVersion;
+  }
+
+  /**
+   * Returns the file format version explicitly requested via write options (or {@link
+   * Builder#fileFormatVersion(String)}), or {@code null} when inherited from the existing dataset.
+   * Committers pass only this explicit value to {@code CommitBuilder.storageFormat(...)} so
+   * overwrites and replaces do not mutate an existing dataset's default version unintentionally.
+   */
+  public String getExplicitFileFormatVersion() {
     return fileFormatVersion;
   }
 
@@ -259,6 +273,7 @@ public class LanceSparkWriteOptions implements Serializable {
         .maxRowsPerGroup(maxRowsPerGroup)
         .maxBytesPerFile(maxBytesPerFile)
         .fileFormatVersion(fileFormatVersion)
+        .fallbackFileFormatVersion(fallbackFileFormatVersion)
         .useQueuedWriteBuffer(useQueuedWriteBuffer)
         .queueDepth(queueDepth)
         .batchSize(batchSize)
@@ -350,8 +365,9 @@ public class LanceSparkWriteOptions implements Serializable {
     if (maxBytesPerFile != null) {
       builder.withMaxBytesPerFile(maxBytesPerFile);
     }
-    if (fileFormatVersion != null) {
-      builder.withDataStorageVersion(fileFormatVersion);
+    String dataStorageVersion = getFileFormatVersion();
+    if (dataStorageVersion != null) {
+      builder.withDataStorageVersion(dataStorageVersion);
     }
     if (enableStableRowIds != null) {
       builder.withEnableStableRowIds(enableStableRowIds);
@@ -382,6 +398,7 @@ public class LanceSparkWriteOptions implements Serializable {
         && Objects.equals(maxRowsPerGroup, that.maxRowsPerGroup)
         && Objects.equals(maxBytesPerFile, that.maxBytesPerFile)
         && Objects.equals(fileFormatVersion, that.fileFormatVersion)
+        && Objects.equals(fallbackFileFormatVersion, that.fallbackFileFormatVersion)
         && Objects.equals(enableStableRowIds, that.enableStableRowIds)
         && Objects.equals(blobPackFileSizeThreshold, that.blobPackFileSizeThreshold)
         && Objects.equals(storageOptions, that.storageOptions)
@@ -402,6 +419,7 @@ public class LanceSparkWriteOptions implements Serializable {
         maxRowsPerGroup,
         maxBytesPerFile,
         fileFormatVersion,
+        fallbackFileFormatVersion,
         useQueuedWriteBuffer,
         queueDepth,
         batchSize,
@@ -426,6 +444,7 @@ public class LanceSparkWriteOptions implements Serializable {
     private Integer maxRowsPerGroup;
     private Long maxBytesPerFile;
     private String fileFormatVersion;
+    private String fallbackFileFormatVersion;
     private boolean useQueuedWriteBuffer = DEFAULT_USE_QUEUED_WRITE_BUFFER;
     private int queueDepth = DEFAULT_QUEUE_DEPTH;
     private int batchSize = DEFAULT_BATCH_SIZE;
@@ -476,6 +495,22 @@ public class LanceSparkWriteOptions implements Serializable {
 
     public Builder fileFormatVersion(String fileFormatVersion) {
       this.fileFormatVersion = fileFormatVersion;
+      return this;
+    }
+
+    /**
+     * Sets the dataset-derived data-file format version used when no explicit {@code
+     * file_format_version} write option is supplied. Upgrades incompatible defaults via {@link
+     * FileFormatVersionResolver} without marking the version as an explicit manifest override.
+     */
+    public Builder fallbackFileFormatVersion(StructType schema, String tableFileFormatVersion) {
+      this.fallbackFileFormatVersion =
+          FileFormatVersionResolver.resolveForDataFiles(schema, tableFileFormatVersion);
+      return this;
+    }
+
+    private Builder fallbackFileFormatVersion(String fallbackFileFormatVersion) {
+      this.fallbackFileFormatVersion = fallbackFileFormatVersion;
       return this;
     }
 

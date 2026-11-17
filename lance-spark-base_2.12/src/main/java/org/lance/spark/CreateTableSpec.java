@@ -14,6 +14,7 @@
 package org.lance.spark;
 
 import org.lance.spark.utils.BlobUtils;
+import org.lance.spark.utils.FileFormatVersionResolver;
 import org.lance.spark.utils.SchemaConverter;
 
 import org.apache.spark.sql.types.StructType;
@@ -46,10 +47,13 @@ public final class CreateTableSpec {
 
   private final StructType schema;
   private final String fileFormatVersion;
+  private final String fragmentFileFormatVersion;
 
-  private CreateTableSpec(StructType schema, String fileFormatVersion) {
+  private CreateTableSpec(
+      StructType schema, String fileFormatVersion, String fragmentFileFormatVersion) {
     this.schema = schema;
     this.fileFormatVersion = fileFormatVersion;
+    this.fragmentFileFormatVersion = fragmentFileFormatVersion;
   }
 
   /**
@@ -74,7 +78,55 @@ public final class CreateTableSpec {
         resolveVersion(sparkSchema, blobEncodingRequested, tableVersion, catalogDefaultVersion);
     StructType schema =
         SchemaConverter.processSchemaWithProperties(sparkSchema, tableProperties, resolved);
-    return new CreateTableSpec(schema, resolved);
+    return new CreateTableSpec(schema, resolved, resolved);
+  }
+
+  /**
+   * Resolves the schema, commit storage format, and fragment write version when replacing an
+   * existing table ({@code REPLACE TABLE} or {@code CREATE OR REPLACE TABLE} on an existing
+   * dataset).
+   *
+   * <p>When {@code tableProperties} explicitly sets {@code file_format_version}, requests a new
+   * blob column via {@code <column>.lance.encoding = 'blob'}, or a {@code catalogDefaultVersion} is
+   * configured, create-time resolution applies ({@link #resolve}). Otherwise, replacing an existing
+   * table preserves the dataset's manifest default {@code file_format_version} ({@link
+   * #fileFormatVersion()} returns {@code null}) while {@link #fragmentFileFormatVersion()} still
+   * upgrades data-file writes when required by the schema (for example, a promoted {@code 2.1}
+   * table containing Blob v2 fields).
+   */
+  public static CreateTableSpec resolveForReplace(
+      StructType sparkSchema,
+      Map<String, String> tableProperties,
+      String catalogDefaultVersion,
+      String existingDatasetVersion) {
+    if (tableProperties.containsKey(LanceSparkCatalogConfig.TABLE_OPT_FILE_FORMAT_VERSION)
+        || catalogDefaultVersion != null
+        || BlobUtils.requestsBlobEncoding(tableProperties)) {
+      return resolve(sparkSchema, tableProperties, catalogDefaultVersion);
+    }
+
+    String initialFragmentVersion =
+        FileFormatVersionResolver.resolveForDataFiles(sparkSchema, existingDatasetVersion);
+    StructType processed =
+        SchemaConverter.processSchemaWithProperties(
+            sparkSchema, tableProperties, initialFragmentVersion);
+    if (BlobUtils.hasBlobV1Fields(processed) && BlobUtils.containsBlobV2SparkField(processed)) {
+      throw mixedBlobEncodingsException(processed);
+    }
+    String fragmentVersion =
+        FileFormatVersionResolver.resolveForDataFiles(processed, existingDatasetVersion);
+    if (BlobUtils.containsBlobV2SparkField(processed)
+        && fragmentVersion != null
+        && !BlobUtils.fileFormatSupportsBlobV2(fragmentVersion)) {
+      throw new IllegalArgumentException(
+          "Blob v2 columns require Lance file_format_version "
+              + BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION
+              + " or newer, which cannot be written into an existing table with"
+              + " file_format_version '"
+              + existingDatasetVersion
+              + "' without specifying file_format_version.");
+    }
+    return new CreateTableSpec(processed, null, fragmentVersion);
   }
 
   private static String resolveVersion(
@@ -84,7 +136,7 @@ public final class CreateTableSpec {
       String catalogDefaultVersion) {
     boolean schemaHasBlobV1 = BlobUtils.hasBlobV1Fields(schema);
 
-    if (!BlobUtils.hasBlobV2Fields(schema)) {
+    if (!BlobUtils.containsBlobV2SparkField(schema)) {
       String requested = tableVersion != null ? tableVersion : catalogDefaultVersion;
 
       if (schemaHasBlobV1) {
@@ -104,16 +156,8 @@ public final class CreateTableSpec {
 
     if (schemaHasBlobV1) {
       // Blob v2 columns force the version to 2.2 or newer, which cannot store the v1 columns in
-      // the same schema. Lance would reject the write; say why here instead.
-      throw new IllegalArgumentException(
-          "Schema mixes legacy (v1) blob columns "
-              + BlobUtils.blobV1ColumnNames(schema)
-              + " with blob v2 columns "
-              + BlobUtils.blobV2ColumnNames(schema)
-              + ". Blob v2 requires file_format_version "
-              + BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION
-              + " or newer, which cannot store v1 blob columns. Create the table with one blob"
-              + " encoding, converting the v1 columns first if they should become blob v2.");
+      // the same schema. Say why here instead of letting Lance convert them to blob v2.
+      throw mixedBlobEncodingsException(schema);
     }
 
     if (tableVersion != null) {
@@ -144,6 +188,18 @@ public final class CreateTableSpec {
     return BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION;
   }
 
+  private static IllegalArgumentException mixedBlobEncodingsException(StructType schema) {
+    return new IllegalArgumentException(
+        "Schema mixes legacy (v1) blob columns "
+            + BlobUtils.blobV1ColumnNames(schema)
+            + " with blob v2 columns "
+            + BlobUtils.blobV2FieldPaths(schema)
+            + ". Blob v2 requires file_format_version "
+            + BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION
+            + " or newer, which cannot store v1 blob columns. Create the table with one blob"
+            + " encoding, converting the v1 columns first if they should become blob v2.");
+  }
+
   /**
    * Resolves the version for a schema that already carries legacy (v1) blob metadata, typically a
    * schema read back from an existing v1 table and reused for a new one.
@@ -158,11 +214,9 @@ public final class CreateTableSpec {
         throw new IllegalArgumentException(
             "Schema carries legacy (v1) blob columns "
                 + BlobUtils.blobV1ColumnNames(schema)
-                + ", which Lance rejects from file_format_version "
-                + BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION
-                + " on. Requested file_format_version '"
+                + ". Requested file_format_version '"
                 + tableVersion
-                + "' cannot store them. Use "
+                + "' would store them as blob v2. Use "
                 + BlobUtils.MAX_BLOB_V1_FILE_FORMAT_VERSION
                 + " or older, or rebuild the column as blob v2.");
       }
@@ -190,5 +244,13 @@ public final class CreateTableSpec {
   /** The file format version to create the dataset with, or null to let Lance pick its default. */
   public String fileFormatVersion() {
     return fileFormatVersion;
+  }
+
+  /**
+   * The physical data-file format version for fragments written by this staged operation when no
+   * write-time {@code file_format_version} option overrides it.
+   */
+  public String fragmentFileFormatVersion() {
+    return fragmentFileFormatVersion;
   }
 }
