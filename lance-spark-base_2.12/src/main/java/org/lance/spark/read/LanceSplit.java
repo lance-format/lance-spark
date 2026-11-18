@@ -47,7 +47,10 @@ public class LanceSplit implements Serializable {
   }
 
   /**
-   * Physical row slices selected for this split. An empty list means scan the full fragment list.
+   * Physical row slices selected for this split, interpreted against the pinned dataset snapshot.
+   * The selection is independent of the index or planning strategy that produced it. An empty list
+   * means scan the full fragment list; it does not represent an empty selection. Deletions do not
+   * shift these physical offsets.
    */
   public List<FragmentSlice> getFragmentSlices() {
     return fragmentSlices == null ? Collections.emptyList() : fragmentSlices;

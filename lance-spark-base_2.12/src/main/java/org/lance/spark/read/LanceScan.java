@@ -117,12 +117,11 @@ public class LanceScan
    */
   private final Set<Integer> cachedSurvivingFragmentIds;
 
-  private final ZonemapScanPlan zonemapScanPlan;
-
   /**
    * Splits pre-computed on the driver during {@link LanceScanBuilder#build()}. Each entry is one
-   * fragment. Built from a single {@code Dataset} handle that was already opened for manifest /
-   * schema / zonemap loading, so no second {@code Dataset.open()} is needed at {@link
+   * fragment and may already carry a physical row selection, independent of its planning source.
+   * Built from a single {@code Dataset} handle that was already opened for manifest / schema /
+   * zonemap loading, so no second {@code Dataset.open()} is needed at {@link
    * #planInputPartitions()} time.
    */
   private final List<LanceSplit> precomputedSplits;
@@ -266,8 +265,7 @@ public class LanceScan
         namespaceProperties,
         false,
         null,
-        arrowBatchPlan,
-        null);
+        arrowBatchPlan);
   }
 
   /**
@@ -298,8 +296,7 @@ public class LanceScan
       java.util.Map<String, String> namespaceProperties,
       boolean rowIdIsRowAddress,
       java.util.Map<String, Long> unsignedRuntimeKeyMax,
-      ArrowBatchAdapter.Plan arrowBatchPlan,
-      ZonemapScanPlan zonemapScanPlan) {
+      ArrowBatchAdapter.Plan arrowBatchPlan) {
     this.schema = schema;
     this.arrowBatchPlan =
         arrowBatchPlan != null
@@ -329,7 +326,6 @@ public class LanceScan
             : new Predicate[0];
     this.statistics = statistics;
     this.cachedSurvivingFragmentIds = survivingFragmentIds;
-    this.zonemapScanPlan = zonemapScanPlan;
     this.zonemapStats = zonemapStats != null ? zonemapStats : Collections.emptyMap();
     this.uncoveredFragmentsByColumn =
         uncoveredFragmentsByColumn != null ? uncoveredFragmentsByColumn : Collections.emptyMap();
@@ -423,8 +419,7 @@ public class LanceScan
             namespaceProperties,
             rowIdIsRowAddress,
             unsignedRuntimeKeyMax,
-            arrowBatchPlan,
-            zonemapScanPlan);
+            arrowBatchPlan);
     synchronized (runtimeFilterLock) {
       copy.runtimePredicates.addAll(runtimePredicates);
       copy.runtimePredicateFingerprints.addAll(runtimePredicateFingerprints);
@@ -457,21 +452,6 @@ public class LanceScan
     List<LanceSplit> prunedSplits =
         pruneForPlanning(
             precomputedSplits, effectivePredicates, cachedSurvivingFragmentIds, rowIdIsRowAddress);
-
-    if (zonemapScanPlan != null) {
-      List<LanceSplit> slicedSplits = new java.util.ArrayList<>(prunedSplits.size());
-      for (LanceSplit split : prunedSplits) {
-        if (split.getFragments().size() == 1) {
-          int fragmentId = split.getFragments().get(0);
-          if (!zonemapScanPlan.scansFullFragment(fragmentId)) {
-            split =
-                new LanceSplit(split.getFragments(), zonemapScanPlan.getFragmentSlices(fragmentId));
-          }
-        }
-        slicedSplits.add(split);
-      }
-      prunedSplits = slicedSplits;
-    }
 
     // Sharding keys are exact per-fragment values. Equality and IN predicates on the sharding
     // source column can therefore remove fragments without consulting native index state.

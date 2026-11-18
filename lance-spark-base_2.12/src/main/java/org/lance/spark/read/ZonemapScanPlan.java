@@ -15,7 +15,6 @@ package org.lance.spark.read;
 
 import org.lance.ipc.FragmentSlice;
 
-import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -24,9 +23,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/** Driver-side zonemap result describing full-fragment scans and physical fragment slices. */
-final class ZonemapScanPlan implements Serializable {
-  private static final long serialVersionUID = 1L;
+/** Builder-local zonemap result; prepared LanceSplit selections are passed to the scan. */
+final class ZonemapScanPlan {
 
   private final Set<Integer> fullScanFragments;
   private final Map<Integer, List<FragmentSlice>> slicesByFragment;

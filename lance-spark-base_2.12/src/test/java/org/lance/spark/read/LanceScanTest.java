@@ -43,7 +43,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -153,17 +152,18 @@ public class LanceScanTest {
   }
 
   @Test
-  public void testZonemapPlanAttachesSlicesAndDisablesFullFragmentLimitPruning() {
+  public void testPrecomputedSlicesSurvivePlanningAndDisableFullFragmentLimitPruning() {
     List<LanceSplit> splits =
         java.util.Arrays.asList(
-            new LanceSplit(Collections.singletonList(0)),
-            new LanceSplit(Collections.singletonList(1)));
+            new LanceSplit(
+                Collections.singletonList(0),
+                Collections.singletonList(new FragmentSlice(0, 10, 1))),
+            new LanceSplit(
+                Collections.singletonList(1),
+                Collections.singletonList(new FragmentSlice(1, 20, 1))));
     Map<Integer, Long> rowCounts = new HashMap<>();
     rowCounts.put(0, 100L);
     rowCounts.put(1, 100L);
-    Map<Integer, List<FragmentSlice>> slices = new HashMap<>();
-    slices.put(0, Collections.singletonList(new FragmentSlice(0, 10, 1)));
-    slices.put(1, Collections.singletonList(new FragmentSlice(1, 20, 1)));
 
     LanceScan scan =
         new LanceScan(
@@ -190,8 +190,7 @@ public class LanceScanTest {
             Collections.emptyMap(),
             false,
             null,
-            null,
-            new ZonemapScanPlan(Set.of(), slices));
+            null);
 
     InputPartition[] partitions = scan.planInputPartitions();
     assertEquals(2, partitions.length, "slice scans must not use full-fragment rows for LIMIT");
@@ -281,7 +280,6 @@ public class LanceScanTest {
             Collections.emptyMap(),
             true,
             null,
-            null,
             null);
 
     // Plan partitions to set numPartitions
@@ -342,7 +340,6 @@ public class LanceScanTest {
             null,
             Collections.emptyMap(),
             true,
-            null,
             null,
             null);
 
@@ -431,7 +428,6 @@ public class LanceScanTest {
             null,
             Collections.emptyMap(),
             true,
-            null,
             null,
             null);
 

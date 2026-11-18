@@ -27,6 +27,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import scala.collection.JavaConverters;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -141,6 +142,13 @@ public abstract class BaseZonemapIndexTest {
         .coalesce(1)
         .writeTo(table)
         .append();
+    // A second fragment is fully pruned, while the first retains one physical slice.
+    spark
+        .range(12, 16)
+        .selectExpr("cast(id as int) AS id", "concat('v', id) AS payload")
+        .coalesce(1)
+        .writeTo(table)
+        .append();
     spark.sql(
         String.format(
             "ALTER TABLE %s CREATE INDEX id_zm USING zonemap (id) WITH (rows_per_zone=4)", table));
@@ -157,8 +165,12 @@ public abstract class BaseZonemapIndexTest {
     builder.pushPredicates(
         new Predicate[] {TestPredicates.gte("id", 4L), TestPredicates.lt("id", 8L)});
     LanceScan scan = (LanceScan) builder.build();
+    assertEquals("2", JavaConverters.mapAsJavaMap(scan.getMetaData()).get("originalFragmentCount"));
+    assertEquals("2", JavaConverters.mapAsJavaMap(scan.getMetaData()).get("numPartitions"));
     InputPartition[] partitions = scan.planInputPartitions();
     assertEquals(1, partitions.length);
+    assertEquals("2", JavaConverters.mapAsJavaMap(scan.getMetaData()).get("originalFragmentCount"));
+    assertEquals("1", JavaConverters.mapAsJavaMap(scan.getMetaData()).get("numPartitions"));
     LanceSplit split = ((LanceInputPartition) partitions[0]).getLanceSplit();
     assertEquals(1, split.getFragments().size());
     assertEquals(

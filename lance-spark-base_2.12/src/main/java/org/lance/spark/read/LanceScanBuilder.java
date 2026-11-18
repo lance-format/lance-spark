@@ -326,12 +326,33 @@ public class LanceScanBuilder
         }
       }
 
+      // Materialize row selections while the builder still owns the zonemap plan. Keep every
+      // original split in order: survivingFragmentIds drives pruning below and in LanceScan,
+      // while originalFragmentCount must still describe the dataset before pruning.
+      List<LanceSplit> precomputedSplits = scanPlan.getSplits();
+      if (zonemapScanPlan != null) {
+        List<LanceSplit> slicedSplits = new ArrayList<>(precomputedSplits.size());
+        for (LanceSplit split : precomputedSplits) {
+          if (split.getFragments().size() == 1) {
+            int fragmentId = split.getFragments().get(0);
+            if (survivingFragmentIds.contains(fragmentId)
+                && !zonemapScanPlan.scansFullFragment(fragmentId)) {
+              split =
+                  new LanceSplit(
+                      split.getFragments(), zonemapScanPlan.getFragmentSlices(fragmentId));
+            }
+          }
+          slicedSplits.add(split);
+        }
+        precomputedSplits = slicedSplits;
+      }
+
       // Spark re-runs a partially pushed COUNT(*) as SUM over this scan's per-partition counts, so
       // a scan that plans no partition leaves SUM with zero rows and it yields NULL instead of 0.
       // Answering 0 is safe here: pruning never drops a fragment that could match.
       if (isPushedCountStar()
           && LanceScan.pruneForPlanning(
-                  scanPlan.getSplits(), pushedPredicates, survivingFragmentIds, rowIdIsRowAddress)
+                  precomputedSplits, pushedPredicates, survivingFragmentIds, rowIdIsRowAddress)
               .isEmpty()) {
         LOG.debug("All fragments pruned for a pushed COUNT(*); resolving the count to 0 locally");
         setLocalCount(0L);
@@ -402,7 +423,7 @@ public class LanceScanBuilder
               .sorted()
               .map(FieldReference::column)
               .toArray(NamedReference[]::new),
-          scanPlan.getSplits(),
+          precomputedSplits,
           scanPlan.getFragmentRowCounts(),
           activeShardingExpression,
           activeShardingColumn,
@@ -412,8 +433,7 @@ public class LanceScanBuilder
           namespaceProperties,
           rowIdIsRowAddress,
           unsignedRuntimeKeyMax(runtimeFilterColumns, dataset.getSchema()),
-          arrowBatchPlan,
-          zonemapScanPlan);
+          arrowBatchPlan);
     } finally {
       closeLazyDataset();
     }

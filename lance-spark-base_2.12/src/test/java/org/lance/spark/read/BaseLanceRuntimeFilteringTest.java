@@ -14,6 +14,7 @@
 package org.lance.spark.read;
 
 import org.lance.index.scalar.ZoneStats;
+import org.lance.ipc.FragmentSlice;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 import org.lance.spark.utils.BucketHashUtil;
@@ -219,6 +220,52 @@ public abstract class BaseLanceRuntimeFilteringTest {
       assertTrue(where.contains("x IN (150,250)"));
       assertTrue(where.contains("AND"));
     }
+  }
+
+  @Test
+  public void testRuntimePruningPreservesPrecomputedSlices() {
+    LanceSplit selectedSplit =
+        new LanceSplit(
+            Collections.singletonList(0), Collections.singletonList(new FragmentSlice(0, 10, 10)));
+    List<LanceSplit> splits =
+        Arrays.asList(
+            selectedSplit,
+            new LanceSplit(Collections.singletonList(1)),
+            new LanceSplit(Collections.singletonList(2)));
+    LanceScan scan =
+        new LanceScan(
+            SCHEMA,
+            options(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            new Predicate[0],
+            null,
+            null,
+            defaultStats(),
+            Collections.emptyMap(),
+            new NamedReference[] {FieldReference.column("x")},
+            splits,
+            Map.of(0, 100L, 1, 100L, 2, 100L),
+            null,
+            null,
+            null,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            true,
+            null,
+            null);
+    assertEquals(3, scan.planInputPartitions().length);
+
+    scan.filter(new Predicate[] {TestPredicates.in("x", 15)});
+    InputPartition[] partitions = scan.planInputPartitions();
+    assertArrayEquals(new int[] {0}, fragmentIds(partitions));
+    assertEquals(
+        Collections.singletonList(new FragmentSlice(0, 10, 10)),
+        ((LanceInputPartition) partitions[0]).getLanceSplit().getFragmentSlices());
   }
 
   @Test
@@ -447,7 +494,6 @@ public abstract class BaseLanceRuntimeFilteringTest {
         null,
         Collections.emptyMap(),
         true,
-        null,
         null,
         null);
   }
