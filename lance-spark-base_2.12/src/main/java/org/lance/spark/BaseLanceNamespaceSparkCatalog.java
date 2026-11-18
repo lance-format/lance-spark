@@ -1902,6 +1902,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
                 LanceRef.ofMain(Utils.findVersion(dataset.listVersions(), timestamp.get())));
       } catch (IllegalArgumentException e) {
         throw new NoSuchTableException(ident);
+      } catch (Exception e) {
+        if (looksLikeStorageAuthFailure(e)) {
+          throw describePathAccessError(datasetUri, e);
+        }
+        throw e;
       }
     }
 
@@ -1919,8 +1924,13 @@ public abstract class BaseLanceNamespaceSparkCatalog
       readOptions = pinLoadedBranch(readOptions, dataset);
     } catch (IllegalArgumentException e) {
       throw new NoSuchTableException(ident);
-    } catch (RuntimeException e) {
-      throw describePathAccessError(datasetUri, e);
+    } catch (Exception e) {
+      // The native open throws java.io.IOException for storage errors without declaring it, so
+      // catch Exception; anything that is not an auth failure is rethrown unchanged.
+      if (looksLikeStorageAuthFailure(e)) {
+        throw describePathAccessError(datasetUri, e);
+      }
+      throw e;
     }
 
     return createDataset(
@@ -1929,7 +1939,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   // Substrings (matched case-insensitively) that indicate a native open failed on storage
   // authentication/authorization rather than on a missing or corrupt dataset. Best-effort: a miss
-  // simply yields the raw native error, i.e. today's behavior.
+  // simply yields the raw native error, i.e. today's behavior. HTTP status codes are matched by
+  // their reason phrase, not by number: native messages also carry ports and timings (e.g. "in
+  // 403.5µs"), so a bare "403" would match unrelated errors.
   private static final String[] STORAGE_AUTH_ERROR_MARKERS = {
     "identity/oauth2/token",
     "token request",
@@ -1939,9 +1951,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
     "authoriz",
     "forbidden",
     "access denied",
+    "accessdenied",
     "signaturedoesnotmatch",
     "invalidaccesskeyid",
-    "403",
   };
 
   /**
@@ -1967,8 +1979,9 @@ public abstract class BaseLanceNamespaceSparkCatalog
   }
 
   /**
-   * Enriches a native open failure on path-based access with actionable guidance when it looks like
-   * a storage authentication error, and returns it unchanged otherwise.
+   * Wraps a native open failure on path-based access that {@link #looksLikeStorageAuthFailure}
+   * classified as a storage authentication error, adding actionable guidance and keeping {@code
+   * error} as the cause.
    *
    * <p>Path-based access ({@code spark.read.format("lance").load(uri)}) routes through {@code
    * SupportsCatalogOptions}, which forwards only the table identifier to the catalog — never the
@@ -1977,10 +1990,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
    * default credential chain, surfacing a confusing error far from the real cause (e.g. an Azure
    * MSI/IMDS token request failure). This points the user at the supported alternatives.
    */
-  static RuntimeException describePathAccessError(String datasetUri, RuntimeException error) {
-    if (!looksLikeStorageAuthFailure(error)) {
-      return error;
-    }
+  static IllegalStateException describePathAccessError(String datasetUri, Exception error) {
     return new IllegalStateException(
         "Failed to open Lance dataset at "
             + datasetUri

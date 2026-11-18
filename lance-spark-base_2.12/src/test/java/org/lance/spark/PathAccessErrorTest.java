@@ -15,6 +15,8 @@ package org.lance.spark;
 
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -91,9 +93,32 @@ public class PathAccessErrorTest {
   }
 
   @Test
-  public void passesThroughNonAuthErrorUnchanged() {
-    RuntimeException cause = new RuntimeException("Not a Lance dataset");
-    RuntimeException result = BaseLanceNamespaceSparkCatalog.describePathAccessError(URI, cause);
-    assertSame(cause, result, "non-auth failures must be returned unchanged");
+  public void detectsNativeS3AccessDenied() {
+    assertTrue(
+        BaseLanceNamespaceSparkCatalog.looksLikeStorageAuthFailure(
+            new IOException(nativeS3Error("403 Forbidden", "AccessDenied", "1.2ms"))));
+  }
+
+  /** Native messages carry ports and timings, which must not read as an HTTP 403. */
+  @Test
+  public void ignoresStatusLikeNumbersInPortsAndTimings() {
+    assertFalse(
+        BaseLanceNamespaceSparkCatalog.looksLikeStorageAuthFailure(
+            new IOException(nativeS3Error("404 Not Found", "NoSuchKey", "403.583\u00b5s"))));
+    assertFalse(
+        BaseLanceNamespaceSparkCatalog.looksLikeStorageAuthFailure(
+            new IOException(nativeS3Error("400 Bad Request", "InvalidRequest", "1.2ms"))));
+  }
+
+  /** The shape of a native S3 error from the object store, on port 54031. */
+  private static String nativeS3Error(String status, String code, String elapsed) {
+    return "LanceError(IO): Generic S3 error: Error performing list request: Error performing GET "
+        + "http://127.0.0.1:54031/bucket?list-type=2&prefix=t.lance%2F_versions%2F in "
+        + elapsed
+        + " - Server returned non-2xx status code: "
+        + status
+        + ": <Error><Code>"
+        + code
+        + "</Code><Message>m</Message></Error>";
   }
 }
