@@ -16,6 +16,7 @@ package org.lance.spark.utils;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
@@ -199,6 +200,59 @@ public class BlobUtilsTest {
     // Lance parses versions against a closed set, so these do not name a newer format at all.
     assertFalse(BlobUtils.knownToRejectBlobV1("2.4"));
     assertFalse(BlobUtils.knownToRejectBlobV1("3.0"));
+  }
+
+  @Test
+  public void isV2FormatBelowBlobV2MatchesTwoZeroAndTwoOneOnly() {
+    assertTrue(BlobUtils.isV2FormatBelowBlobV2("2.0"));
+    assertTrue(BlobUtils.isV2FormatBelowBlobV2("2.1"));
+    assertTrue(BlobUtils.isV2FormatBelowBlobV2(" 2.1 "));
+    assertFalse(BlobUtils.isV2FormatBelowBlobV2("0.1"));
+    assertFalse(BlobUtils.isV2FormatBelowBlobV2("legacy"));
+    assertFalse(BlobUtils.isV2FormatBelowBlobV2("2.2"));
+    assertFalse(BlobUtils.isV2FormatBelowBlobV2("stable"));
+    assertFalse(BlobUtils.isV2FormatBelowBlobV2(null));
+  }
+
+  @Test
+  public void containsBlobV2DetectsNestedSparkAndArrowFields() {
+    StructType nestedSpark =
+        new StructType(
+            new StructField[] {
+              field("id", DataTypes.IntegerType),
+              field("nested", new StructType(new StructField[] {blobV2Field("data")})),
+            });
+    StructType v1OnlySpark =
+        new StructType(
+            new StructField[] {
+              field("id", DataTypes.IntegerType),
+              field("nested", new StructType(new StructField[] {blobV1Field("data")})),
+            });
+    assertTrue(BlobUtils.containsBlobV2SparkField(nestedSpark));
+    assertFalse(BlobUtils.containsBlobV2SparkField(v1OnlySpark));
+    assertEquals(Collections.singleton("nested.data"), BlobUtils.blobV2FieldPaths(nestedSpark));
+    assertEquals("2.2", FileFormatVersionResolver.resolveForDataFiles(nestedSpark, "2.1"));
+    assertEquals("2.3", FileFormatVersionResolver.resolveForDataFiles(nestedSpark, "2.3"));
+    assertEquals("2.1", FileFormatVersionResolver.resolveForDataFiles(v1OnlySpark, "2.1"));
+    assertEquals("0.1", FileFormatVersionResolver.resolveForDataFiles(nestedSpark, "0.1"));
+
+    Field nestedBlobArrow =
+        new Field(
+            "payload",
+            FieldType.nullable(ArrowType.Struct.INSTANCE),
+            Collections.singletonList(
+                arrowField(BlobUtils.ARROW_EXTENSION_NAME_KEY, BlobUtils.ARROW_EXTENSION_BLOB_V2)));
+    Field nestedV1Arrow =
+        new Field(
+            "payload",
+            FieldType.nullable(ArrowType.Struct.INSTANCE),
+            Collections.singletonList(
+                arrowField(
+                    BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)));
+    assertTrue(
+        BlobUtils.containsBlobV2ArrowField(new Schema(Collections.singletonList(nestedBlobArrow))));
+    assertFalse(
+        BlobUtils.containsBlobV2ArrowField(new Schema(Collections.singletonList(nestedV1Arrow))));
   }
 
   private static StructField blobV1Field(String name) {

@@ -189,9 +189,9 @@ public class LanceBatchWrite implements BatchWrite {
       if (enableStableRowIds != null) {
         stagedCommit.setEnableStableRowIds(enableStableRowIds);
       }
-      String fileFormatVersion = writeOptions.getFileFormatVersion();
-      if (fileFormatVersion != null) {
-        stagedCommit.setFileFormatVersion(fileFormatVersion);
+      String explicitFileFormatVersion = writeOptions.getExplicitFileFormatVersion();
+      if (explicitFileFormatVersion != null) {
+        stagedCommit.setFileFormatVersion(explicitFileFormatVersion);
       }
       // For a path-based staged create, StagedCommit only has the catalog's static storage
       // options at this point. Merge in write-time and namespace-vended options now so
@@ -219,9 +219,9 @@ public class LanceBatchWrite implements BatchWrite {
                 .writeParams(
                     LanceRuntime.mergeStorageOptions(
                         writeOptions.getStorageOptions(), initialStorageOptions));
-        String fileFormatVersion = writeOptions.getFileFormatVersion();
-        if (fileFormatVersion != null) {
-          commitBuilder.storageFormat(fileFormatVersion);
+        String explicitFileFormatVersion = writeOptions.getExplicitFileFormatVersion();
+        if (explicitFileFormatVersion != null) {
+          commitBuilder.storageFormat(explicitFileFormatVersion);
         }
         // When enableStableRowIds is null (user didn't pass the option),
         // lance-core auto-inherits the flag from the existing manifest.
@@ -309,7 +309,7 @@ public class LanceBatchWrite implements BatchWrite {
   private String effectiveFileFormatVersion() {
     String version = writeOptions.getFileFormatVersion();
     if (version == null && stagedCommit != null) {
-      version = stagedCommit.getFileFormatVersion();
+      version = stagedCommit.getFragmentFileFormatVersion();
     }
     return version;
   }

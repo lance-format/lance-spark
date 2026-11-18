@@ -14,7 +14,6 @@
 package org.lance.spark.write;
 
 import org.lance.Dataset;
-import org.lance.WriteParams;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.LanceSparkWriteOptions;
@@ -76,8 +75,7 @@ public class UpdateColumnsConflictTest {
 
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
       // Create dataset with (id, value) rows
-      Dataset.create(allocator, datasetUri, ARROW_SCHEMA, new WriteParams.Builder().build())
-          .close();
+      Dataset.write().allocator(allocator).uri(datasetUri).schema(ARROW_SCHEMA).execute().close();
 
       LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
       StructType dataSchema = LanceArrowUtils.fromArrowSchema(ARROW_SCHEMA);
@@ -129,7 +127,7 @@ public class UpdateColumnsConflictTest {
       }
 
       // Concurrent DELETE advances dataset to V3
-      try (Dataset ds = Dataset.open(datasetUri, allocator)) {
+      try (Dataset ds = Dataset.open().uri(datasetUri).allocator(allocator).build()) {
         ds.delete("id = 2");
       }
 

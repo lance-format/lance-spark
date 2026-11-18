@@ -256,6 +256,53 @@ public abstract class BaseBlobV2RowLevelCopyTest extends AbstractBlobV2CopyTest 
     }
   }
 
+  @Test
+  public void testUpdateAndMergeOnPromotedFormat21BlobTable() throws Exception {
+    String src = "v2_rl_prom_src_" + System.currentTimeMillis();
+    String tgt = "v2_rl_prom_tgt_" + System.currentTimeMillis();
+    String fqSrc = fq(src);
+    String fqTgt = fq(tgt);
+    byte[] blob1 = deterministicBlob(165, 16);
+    byte[] blob2 = deterministicBlob(166, 16);
+    byte[] blob2Updated = deterministicBlob(167, 16);
+    byte[] blob3 = deterministicBlob(168, 16);
+    createV2BlobSource(fqSrc, row(2, blob2Updated), row(3, blob3));
+    spark.sql(
+        "CREATE TABLE "
+            + fqTgt
+            + " (id INT NOT NULL, data BINARY, tag STRING) USING lance TBLPROPERTIES ("
+            + "'data.lance.encoding' = 'blob', 'file_format_version' = '2.1')");
+    try {
+      insertTagRow(fqTgt, 1, blob1, "a");
+      spark
+          .sql("SELECT 2 AS id, " + hex(blob2) + " AS data, 'b' AS tag")
+          .writeTo(fqTgt)
+          .option("file_format_version", "2.2")
+          .append();
+
+      spark.sql("UPDATE " + fqTgt + " SET tag = 'z' WHERE id = 1");
+      spark.sql(
+          "MERGE INTO "
+              + fqTgt
+              + " t USING "
+              + fqSrc
+              + " s ON t.id = s.id"
+              + " WHEN MATCHED THEN UPDATE SET t.data = s.data"
+              + " WHEN NOT MATCHED THEN INSERT (id, data, tag) VALUES (s.id, s.data, 'm')");
+
+      List<Row> rows = spark.sql("SELECT id, tag FROM " + fqTgt + " ORDER BY id").collectAsList();
+      assertEquals(3, rows.size());
+      assertEquals("z", rows.get(0).getString(1));
+      assertEquals("b", rows.get(1).getString(1));
+      assertEquals("m", rows.get(2).getString(1));
+      assertTargetBlobBytes(
+          datasetUriOf(tgt), rowAddressesOf(fqTgt), new byte[][] {blob1, blob2Updated, blob3});
+    } finally {
+      spark.sql("DROP TABLE IF EXISTS " + fqSrc);
+      spark.sql("DROP TABLE IF EXISTS " + fqTgt);
+    }
+  }
+
   private static String hex(byte[] bytes) {
     StringBuilder sb = new StringBuilder("X'");
     for (byte b : bytes) {
