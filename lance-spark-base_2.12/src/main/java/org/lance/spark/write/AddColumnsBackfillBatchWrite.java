@@ -168,9 +168,9 @@ public class AddColumnsBackfillBatchWrite implements BatchWrite {
               .writeParams(
                   LanceRuntime.mergeStorageOptions(
                       writeOptions.getStorageOptions(), initialStorageOptions));
-      String fileFormatVersion = writeOptions.getFileFormatVersion();
-      if (fileFormatVersion != null) {
-        commitBuilder.storageFormat(fileFormatVersion);
+      String explicitFileFormatVersion = writeOptions.getExplicitFileFormatVersion();
+      if (explicitFileFormatVersion != null) {
+        commitBuilder.storageFormat(explicitFileFormatVersion);
       }
       if (managedVersioning) {
         LanceNamespace namespace =
