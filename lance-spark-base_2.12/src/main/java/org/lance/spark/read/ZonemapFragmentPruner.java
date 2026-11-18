@@ -673,24 +673,20 @@ public final class ZonemapFragmentPruner {
       return zone.getNullCount() < zone.getZoneLength();
     }
 
-    try {
-      switch (type) {
-        case EQUALS:
-          return target.compareTo(min) >= 0 && target.compareTo(max) <= 0;
-        case LESS_THAN:
-          return min.compareTo(target) < 0;
-        case LESS_THAN_OR_EQUAL:
-          return min.compareTo(target) <= 0;
-        case GREATER_THAN:
-          return max.compareTo(target) > 0;
-        case GREATER_THAN_OR_EQUAL:
-          return max.compareTo(target) >= 0;
-        default:
-          return true;
-      }
-    } catch (ClassCastException e) {
-      LOG.warn("Type mismatch in zonemap comparison, skipping pruning for zone", e);
-      return true;
+    // Let matchingRanges fall back for the whole fragment when the types cannot be compared.
+    switch (type) {
+      case EQUALS:
+        return target.compareTo(min) >= 0 && target.compareTo(max) <= 0;
+      case LESS_THAN:
+        return min.compareTo(target) < 0;
+      case LESS_THAN_OR_EQUAL:
+        return min.compareTo(target) <= 0;
+      case GREATER_THAN:
+        return max.compareTo(target) > 0;
+      case GREATER_THAN_OR_EQUAL:
+        return max.compareTo(target) >= 0;
+      default:
+        return true;
     }
   }
 
