@@ -159,6 +159,11 @@ Create a zonemap index and specify the approximate number of rows per zone:
     ALTER TABLE lance.db.users CREATE INDEX idx_id_zonemap USING zonemap (id) WITH (rows_per_zone = 2048);
     ```
 
+For ordinary scans and scan-based `COUNT(*)`, zonemaps can also prune physical row ranges
+within a fragment. `rows_per_zone` controls the approximate size of these zones; the original
+filter still checks the selected rows. This reduces the ranges read while retaining one Spark
+task per surviving fragment. Legacy V1 storage and full-text search use fragment pruning only.
+
 ### Bitmap
 
 Use `bitmap` for columns with a relatively small number of distinct values.

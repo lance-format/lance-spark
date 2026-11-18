@@ -27,6 +27,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import scala.collection.JavaConverters;
 
 import java.io.IOException;
@@ -314,36 +316,59 @@ public abstract class BaseZonemapIndexTest {
     assertEquals(8L, spark.sql("SELECT count(*) FROM " + table + predicate).first().getLong(0));
   }
 
-  @Test
-  public void testZonemapSliceOffsetsAreNotCompactedByDeletion() throws Exception {
-    String table =
-        catalogName + ".default.zm_delete_" + UUID.randomUUID().toString().replace("-", "");
-
-    spark.sql(String.format("CREATE TABLE %s (id INT) USING lance", table));
-    spark.range(12).selectExpr("cast(id as int) AS id").coalesce(1).writeTo(table).append();
-    spark.sql(
-        String.format(
-            "ALTER TABLE %s CREATE INDEX id_zm USING zonemap (id) WITH (rows_per_zone=4)", table));
-    spark.sql(String.format("DELETE FROM %s WHERE id = 1", table));
-
-    assertEquals(1, spark.sql(String.format("SELECT * FROM %s WHERE id = 4", table)).count());
-  }
-
-  @Test
-  public void testZonemapPhysicalSlicesWithStableRowIds() throws Exception {
-    String table =
-        catalogName + ".default.zm_stable_" + UUID.randomUUID().toString().replace("-", "");
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  public void testZonemapSliceOffsetsAreNotCompactedByDeletion(boolean stableRowIds)
+      throws Exception {
+    String tableName = "zm_delete_" + UUID.randomUUID().toString().replace("-", "");
+    String table = catalogName + ".default." + tableName;
 
     spark.sql(
         String.format(
             "CREATE TABLE %s (id INT) USING lance "
-                + "TBLPROPERTIES ('enable_stable_row_ids'='true')",
-            table));
+                + "TBLPROPERTIES ('enable_stable_row_ids'='%s')",
+            table, stableRowIds));
     spark.range(12).selectExpr("cast(id as int) AS id").coalesce(1).writeTo(table).append();
     spark.sql(
         String.format(
             "ALTER TABLE %s CREATE INDEX id_zm USING zonemap (id) WITH (rows_per_zone=4)", table));
+    // Delete before and within the selected zone. Its physical offsets must remain [4, 8).
+    spark.sql(String.format("DELETE FROM %s WHERE id IN (1, 6)", table));
 
-    assertEquals(1, spark.sql(String.format("SELECT * FROM %s WHERE id = 8", table)).count());
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            spark.table(table).schema(),
+            LanceSparkReadOptions.builder()
+                .datasetUri(rootPath.resolve(tableName + ".lance").toString())
+                .build(),
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+    builder.pushPredicates(
+        new Predicate[] {TestPredicates.gte("id", 4L), TestPredicates.lt("id", 8L)});
+    LanceScan scan = (LanceScan) builder.build();
+    InputPartition[] partitions = scan.planInputPartitions();
+    assertEquals(1, partitions.length);
+    LanceSplit split = ((LanceInputPartition) partitions[0]).getLanceSplit();
+    assertEquals(
+        Collections.singletonList(new FragmentSlice(split.getFragments().get(0), 4, 4)),
+        split.getFragmentSlices());
+
+    List<Integer> ids =
+        spark
+            .sql(String.format("SELECT id FROM %s WHERE id >= 4 AND id < 8", table))
+            .collectAsList()
+            .stream()
+            .map(row -> row.getInt(0))
+            .sorted()
+            .collect(Collectors.toList());
+    // Keeping the zone's final row catches offsets incorrectly compacted after deletion.
+    assertEquals(Arrays.asList(4, 5, 7), ids);
+    assertEquals(
+        3L,
+        spark
+            .sql(String.format("SELECT count(*) FROM %s WHERE id >= 4 AND id < 8", table))
+            .first()
+            .getLong(0));
   }
 }
