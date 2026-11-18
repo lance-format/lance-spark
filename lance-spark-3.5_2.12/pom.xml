@@ -44,6 +44,11 @@
                     <groupId>javax.servlet</groupId>
                     <artifactId>servlet-api</artifactId>
                 </exclusion>
+                <!-- Use the commons-codec version provided by Spark. -->
+                <exclusion>
+                    <groupId>commons-codec</groupId>
+                    <artifactId>commons-codec</artifactId>
+                </exclusion>
                 <!-- Use Spark's Log4j instead of Hive's older transitive version. -->
                 <exclusion>
                     <groupId>org.apache.logging.log4j</groupId>
