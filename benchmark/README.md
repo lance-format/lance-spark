@@ -38,6 +38,11 @@ ROWS=65536 PAYLOAD_BYTES=64 ROWS_PER_ZONE=4096 \
   ./benchmark/scripts/run-fragment-slice-benchmark.sh
 ```
 
+Existing data is reused only when its row count, fragment count, payload width, and zone size
+match the requested workload. To check payload validation, rerun the smoke workload above with
+`PAYLOAD_BYTES=256 REGENERATE=false`: it must fail with a payload-width mismatch and request
+`--regenerate`, rather than measure the previous 64-byte workload.
+
 Configuration is provided through environment variables:
 
 | Variable | Default | Description |

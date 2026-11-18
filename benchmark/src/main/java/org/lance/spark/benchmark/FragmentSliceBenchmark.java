@@ -150,7 +150,7 @@ public final class FragmentSliceBenchmark {
         .collectAsList();
   }
 
-  private static void validateDataset(org.lance.Dataset dataset, Config config) {
+  private static void validateDataset(org.lance.Dataset dataset, Config config) throws Exception {
     long actualRows = dataset.countRows();
     if (actualRows != config.rows) {
       throw new IllegalStateException(
@@ -164,6 +164,29 @@ public final class FragmentSliceBenchmark {
     if (fragments.size() != 1) {
       throw new IllegalStateException(
           "FragmentSlice benchmark requires exactly one fragment, found " + fragments.size());
+    }
+    // Generated payloads have a uniform width; one projected row detects a stale workload.
+    try (LanceScanner scanner =
+            dataset.newScan(
+                new ScanOptions.Builder()
+                    .columns(Collections.singletonList("payload"))
+                    .limit(1L)
+                    .build());
+        ArrowReader reader = scanner.scanBatches()) {
+      if (!reader.loadNextBatch() || reader.getVectorSchemaRoot().getRowCount() == 0) {
+        throw new IllegalStateException("Existing benchmark dataset has no payload row");
+      }
+      Object payload = reader.getVectorSchemaRoot().getVector("payload").getObject(0);
+      int actualPayloadBytes =
+          payload == null ? 0 : payload.toString().getBytes(StandardCharsets.UTF_8).length;
+      if (actualPayloadBytes != config.payloadBytes) {
+        throw new IllegalStateException(
+            String.format(
+                Locale.ROOT,
+                "Existing benchmark dataset has %d-byte payloads, expected %d; rerun with --regenerate",
+                actualPayloadBytes,
+                config.payloadBytes));
+      }
     }
   }
 
