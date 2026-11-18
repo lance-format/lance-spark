@@ -19,10 +19,15 @@ import org.apache.spark.sql.SparkSession;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class TestHiveNamespaceConfiguration {
   @Test
   public void testHadoopConfigurationAndCatalogOverride() {
+    // This test source is shared with modules that do not include the Hive test dependencies.
+    assumeTrue(
+        getClass().getClassLoader().getResource("org/lance/namespace/hive2/Hive2Namespace.class")
+            != null);
     SparkSession spark =
         SparkSession.builder()
             .master("local")
