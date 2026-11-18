@@ -24,10 +24,10 @@ import java.lang.reflect.{InvocationTargetException, Method}
 /**
  * Builds and modifies Catalyst nodes without binding to their exact constructor signature.
  *
- * Spark adds fields to Catalyst case classes between releases, and vendor runtimes such as
- * Databricks add their own. A compiled `copy(...)`, constructor or companion factory call binds to
- * the exact JVM signature of the Spark build it was compiled against and fails with
- * `NoSuchMethodError` on any runtime whose class has a different shape. Lance code must therefore
+ * Spark releases and distributions can add fields to Catalyst case classes. A compiled `copy(...)`,
+ * constructor or companion factory call binds to the exact JVM signature of the Spark build it was
+ * compiled against and can fail with `NoSuchMethodError` when the runtime class has a different
+ * shape. Lance code must therefore
  * modify Spark tree nodes through [[CatalystCompat.TreeNodeArgs.withArg]] and construct the nodes
  * listed here through their factories.
  */

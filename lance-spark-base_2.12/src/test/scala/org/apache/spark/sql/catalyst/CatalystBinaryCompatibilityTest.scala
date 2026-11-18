@@ -26,8 +26,8 @@ import scala.collection.mutable.ArrayBuffer
 
 /**
  * Fails when Lance bytecode binds to the exact signature of a Spark Catalyst node, which breaks on
- * runtimes whose Catalyst classes have a different shape (newer Spark releases, Databricks). See
- * [[CatalystCompat]] for the replacements.
+ * runtimes whose Catalyst classes have a different shape. See [[CatalystCompat]] for the
+ * replacements.
  */
 class CatalystBinaryCompatibilityTest {
 
