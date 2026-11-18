@@ -664,8 +664,8 @@ public final class ZonemapFragmentPruner {
   private static boolean zoneMatchesComparison(
       ZoneStats zone, Comparable<Object> target, ComparisonType type) {
 
-    Comparable<Object> min = (Comparable<Object>) zone.getMin();
-    Comparable<Object> max = (Comparable<Object>) zone.getMax();
+    Comparable<Object> min = (Comparable<Object>) normalizeLiteral(zone.getMin());
+    Comparable<Object> max = (Comparable<Object>) normalizeLiteral(zone.getMax());
 
     // Missing bounds mean either an all-null zone, which no comparison matches, or a type whose
     // bounds Lance does not report (e.g. decimals), which may match anything.
@@ -700,12 +700,13 @@ public final class ZonemapFragmentPruner {
    * materializes {@code ZoneStats.min/max} with every integer width boxed as {@code Long} and every
    * floating-point width as {@code Double}. Widen narrow Java boxed primitives (Byte / Short /
    * Integer / Float) to match — otherwise an Integer literal against a Long zone bound would throw
-   * {@code ClassCastException} from {@code Comparable.compareTo}. Also normalizes {@code
-   * UTF8String} → {@code String} for the same reason.
+   * {@code ClassCastException} from {@code Comparable.compareTo}. Also normalizes {@code String} →
+   * {@code UTF8String} so string comparisons use Spark's UTF-8 binary ordering, including
+   * supplementary Unicode characters.
    */
   private static Object normalizeLiteral(Object value) {
-    if (value instanceof UTF8String) {
-      return value.toString();
+    if (value instanceof String) {
+      return UTF8String.fromString((String) value);
     }
     if (value instanceof Byte || value instanceof Short || value instanceof Integer) {
       return ((Number) value).longValue();

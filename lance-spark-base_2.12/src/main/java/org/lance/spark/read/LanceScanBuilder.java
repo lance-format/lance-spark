@@ -317,10 +317,10 @@ public class LanceScanBuilder
                 .orElse(null);
         if (zonemapScanPlan != null) {
           survivingFragmentIds = zonemapScanPlan.getSurvivingFragmentIds();
-          // Lance does not yet support combining physical fragment slices with full-text search.
-          // Keep the safe fragment-level pruning result, but do not attach intra-fragment ranges
-          // to local FTS scanners (including the scan-based COUNT(*) path).
-          if (readOptions.getFullTextQuery() != null) {
+          // Lance does not support physical slices on legacy storage or with full-text search.
+          // Keep safe fragment-level pruning for both ordinary reads and scan-based COUNT(*).
+          if (readOptions.getFullTextQuery() != null
+              || "0.1".equals(dataset.getLanceFileFormatVersion())) {
             zonemapScanPlan = ZonemapScanPlan.fullFragments(survivingFragmentIds);
           }
         }

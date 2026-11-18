@@ -15,6 +15,7 @@ package org.lance.spark.read;
 
 import org.lance.ipc.FragmentSlice;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.utils.Optional;
 
 import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
@@ -172,9 +173,27 @@ public abstract class BaseZonemapIndexTest {
       assertEquals(
           split.getFragmentSlices(),
           ((LanceInputPartition) readerPartitions[0]).getLanceSplit().getFragmentSlices());
+      // Exercise the reader's slice contract independently of the residual predicate.
+      LanceInputPartition sliced = (LanceInputPartition) readerPartitions[0];
+      LanceInputPartition unfilteredSlice =
+          new LanceInputPartition(
+              sliced.getSchema(),
+              sliced.getPartitionId(),
+              sliced.getLanceSplit(),
+              sliced.getReadOptions(),
+              Optional.empty(),
+              sliced.getLimit(),
+              sliced.getOffset(),
+              sliced.getTopNSortOrders(),
+              sliced.getPushedAggregation(),
+              sliced.getScanId(),
+              sliced.getInitialStorageOptions(),
+              sliced.getNamespaceImpl(),
+              sliced.getNamespaceProperties(),
+              null);
       List<Integer> readIds = new ArrayList<>();
       try (PartitionReader<ColumnarBatch> reader =
-          readerScan.createReaderFactory().createColumnarReader(readerPartitions[0])) {
+          readerScan.createReaderFactory().createColumnarReader(unfilteredSlice)) {
         while (reader.next()) {
           ColumnarBatch batch = reader.get();
           for (int row = 0; row < batch.numRows(); row++) {
@@ -183,6 +202,12 @@ public abstract class BaseZonemapIndexTest {
         }
       }
       assertEquals(Arrays.asList(4, 5, 6, 7), readIds);
+      try (LanceCountStarPartitionReader reader =
+          new LanceCountStarPartitionReader(unfilteredSlice)) {
+        assertTrue(reader.next());
+        assertEquals(4L, reader.get().column(0).getLong(0));
+        assertFalse(reader.next());
+      }
     }
 
     List<Integer> ids =
@@ -201,6 +226,80 @@ public abstract class BaseZonemapIndexTest {
             .first()
             .getLong(0);
     assertEquals(4, count);
+  }
+
+  @Test
+  public void testLegacyZonemapFallsBackToFullFragment() {
+    String tableName = "zm_legacy_" + UUID.randomUUID().toString().replace("-", "");
+    String table = catalogName + ".default." + tableName;
+    String uri = rootPath.resolve(tableName + ".lance").toString();
+    spark
+        .range(12)
+        .coalesce(1)
+        .write()
+        .format("lance")
+        .option("file_format_version", "0.1")
+        .save(uri);
+    spark.sql(
+        String.format(
+            "ALTER TABLE %s CREATE INDEX id_zm USING zonemap (id) WITH (rows_per_zone=4)", table));
+
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            spark.table(table).schema(),
+            LanceSparkReadOptions.from(uri),
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+    builder.pushPredicates(
+        new Predicate[] {TestPredicates.gte("id", 4L), TestPredicates.lt("id", 8L)});
+    InputPartition[] partitions = ((LanceScan) builder.build()).planInputPartitions();
+    assertEquals(1, partitions.length);
+    assertTrue(((LanceInputPartition) partitions[0]).getLanceSplit().getFragmentSlices().isEmpty());
+    assertEquals(
+        Arrays.asList(
+            RowFactory.create(4L),
+            RowFactory.create(5L),
+            RowFactory.create(6L),
+            RowFactory.create(7L)),
+        spark
+            .sql("SELECT id FROM " + table + " WHERE id >= 4 AND id < 8 ORDER BY id")
+            .collectAsList());
+    assertEquals(
+        4L,
+        spark
+            .sql("SELECT count(*) FROM " + table + " WHERE id >= 4 AND id < 8")
+            .first()
+            .getLong(0));
+  }
+
+  @Test
+  public void testZonemapStringRangesUseUtf8Ordering() {
+    String tableName = "zm_utf8_" + UUID.randomUUID().toString().replace("-", "");
+    String table = catalogName + ".default." + tableName;
+    spark
+        .range(8)
+        .selectExpr("id", "CASE WHEN id < 4 THEN '\uD800\uDC00' ELSE '\uF000' END AS s")
+        .coalesce(1)
+        .write()
+        .format("lance")
+        .save(rootPath.resolve(tableName + ".lance").toString());
+    spark.sql(
+        String.format(
+            "ALTER TABLE %s CREATE INDEX s_zm USING zonemap (s) WITH (rows_per_zone=4)", table));
+    String predicate = " WHERE s > '\uE000'";
+    assertEquals(
+        Arrays.asList(
+            RowFactory.create(0L),
+            RowFactory.create(1L),
+            RowFactory.create(2L),
+            RowFactory.create(3L),
+            RowFactory.create(4L),
+            RowFactory.create(5L),
+            RowFactory.create(6L),
+            RowFactory.create(7L)),
+        spark.sql("SELECT id FROM " + table + predicate + " ORDER BY id").collectAsList());
+    assertEquals(8L, spark.sql("SELECT count(*) FROM " + table + predicate).first().getLong(0));
   }
 
   @Test

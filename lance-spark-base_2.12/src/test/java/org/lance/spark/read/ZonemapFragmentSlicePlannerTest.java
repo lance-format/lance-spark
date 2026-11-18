@@ -18,6 +18,9 @@ import org.lance.ipc.FragmentSlice;
 
 import org.apache.spark.sql.connector.expressions.filter.Predicate;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -30,12 +33,40 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class ZonemapFragmentSlicePlannerTest {
+
+  @ParameterizedTest
+  @MethodSource("utf8StringPredicates")
+  public void testStringRangesUseUtf8Ordering(Predicate predicate, long expectedRows) {
+    Map<String, List<ZoneStats>> stats = new HashMap<>();
+    // These are valid UTF-8 bounds but reverse Java's UTF-16 order at the upper bound.
+    stats.put(
+        "s",
+        Arrays.asList(
+            new ZoneStats(0, 0, 4, "\uE000", "\uD800\uDC00", 0),
+            new ZoneStats(0, 4, 4, "\uF000", "\uF000", 0)));
+    ZonemapScanPlan plan =
+        plan(new Predicate[] {predicate}, stats, Collections.emptyMap(), Set.of(0));
+    assertEquals(
+        Collections.singletonList(new FragmentSlice(0, 0, expectedRows)),
+        plan.getFragmentSlices(0));
+  }
+
+  private static Stream<Arguments> utf8StringPredicates() {
+    return Stream.of(
+        Arguments.of(TestPredicates.eq("s", "\uF000"), 8L),
+        Arguments.of(TestPredicates.in("s", "\uF000"), 8L),
+        Arguments.of(TestPredicates.lt("s", "\uD800\uDC00"), 8L),
+        Arguments.of(TestPredicates.lte("s", "\uF000"), 8L),
+        Arguments.of(TestPredicates.gt("s", "\uF000"), 4L),
+        Arguments.of(TestPredicates.gte("s", "\uD800\uDC00"), 4L));
+  }
 
   @Test
   public void testPlansAndMergesMatchingPhysicalZones() {
