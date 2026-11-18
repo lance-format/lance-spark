@@ -605,7 +605,10 @@ public final class LanceRuntime {
                 }
               });
         }
-        namespace.getClass().getMethod("setHadoopConf", Configuration.class).invoke(namespace, conf);
+        namespace
+            .getClass()
+            .getMethod("setHadoopConf", Configuration.class)
+            .invoke(namespace, conf);
         namespace.initialize(namespaceProperties, allocator());
         return namespace;
       } catch (ReflectiveOperationException e) {

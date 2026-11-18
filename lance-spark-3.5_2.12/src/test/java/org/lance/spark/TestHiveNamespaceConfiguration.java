@@ -32,15 +32,18 @@ public class TestHiveNamespaceConfiguration {
             .config("spark.sql.catalog.inherited.impl", "hive2")
             .config("spark.sql.catalog.override", "org.lance.spark.LanceNamespaceSparkCatalog")
             .config("spark.sql.catalog.override.impl", "hive2")
-            .config("spark.sql.catalog.override.hadoop.hive.metastore.uris", "thrift://catalog:9083")
+            .config(
+                "spark.sql.catalog.override.hadoop.hive.metastore.uris", "thrift://catalog:9083")
             .getOrCreate();
     try {
       for (String name : new String[] {"inherited", "override"}) {
         BaseLanceNamespaceSparkCatalog catalog =
             (BaseLanceNamespaceSparkCatalog) spark.sessionState().catalogManager().catalog(name);
-        String expected = name.equals("inherited") ? "thrift://global:9083" : "thrift://catalog:9083";
+        String expected =
+            name.equals("inherited") ? "thrift://global:9083" : "thrift://catalog:9083";
         LanceNamespace namespace =
-            LanceRuntime.getOrCreateNamespace(catalog.getNamespaceImpl(), catalog.getNamespaceProperties());
+            LanceRuntime.getOrCreateNamespace(
+                catalog.getNamespaceImpl(), catalog.getNamespaceProperties());
         assertTrue(namespace.namespaceId().contains(expected), namespace.namespaceId());
       }
     } finally {
