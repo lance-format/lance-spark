@@ -27,6 +27,11 @@
                     <groupId>org.apache.hive</groupId>
                     <artifactId>hive-exec</artifactId>
                 </exclusion>
+                <!-- Use Spark's Log4j instead of Hive's older transitive version. -->
+                <exclusion>
+                    <groupId>org.apache.logging.log4j</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
             </exclusions>
         </dependency>
         <dependency>
