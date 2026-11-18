@@ -30,7 +30,8 @@ import org.apache.spark.sql.catalyst.expressions.Attribute
 case class UpdateColumnsBackfill(
     table: LogicalPlan,
     columnNames: Seq[String],
-    source: LogicalPlan) extends Command {
+    source: LogicalPlan,
+    writeOptions: Map[String, String] = Map.empty) extends Command {
 
   override def children: Seq[LogicalPlan] = Seq(table, source)
 

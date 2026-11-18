@@ -191,11 +191,17 @@ LANCE_SPARK_START_REST_DIR = os.environ.get("LANCE_SPARK_START_REST_DIR", "").lo
     "true",
     "yes",
 )
+_TEST_DIR = os.path.dirname(os.path.abspath(__file__))
+LANCE_SPARK_DATA_ROOT = os.environ.get(
+    "LANCE_SPARK_DATA_ROOT",
+    os.path.join(_TEST_DIR, ".data"),
+)
 LANCE_SPARK_REST_DIR_ROOT = os.environ.get(
     "LANCE_SPARK_REST_DIR_ROOT",
-    "/home/lance/rest-data",
+    os.path.join(_TEST_DIR, ".rest-data"),
 )
-LANCE_SPARK_REST_DIR_PORT = int(os.environ.get("LANCE_SPARK_REST_DIR_PORT", "10024"))
+LANCE_SPARK_JARS = os.environ.get("LANCE_SPARK_JARS")
+LANCE_SPARK_REST_DIR_PORT = int(os.environ.get("LANCE_SPARK_REST_DIR_PORT") or "10024")
 AWS_S3_BUCKET_NAME = os.environ.get("AWS_S3_BUCKET_NAME")
 AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
 AWS_GLUE_CATALOG_ID = os.environ.get("AWS_GLUE_CATALOG_ID")
@@ -234,7 +240,7 @@ def spark(request):
     Parameterized across storage backends so the full test suite runs against
     each one:
 
-    - **local** – local filesystem at ``/home/lance/data``
+    - **local** – local filesystem at ``LANCE_SPARK_DATA_ROOT`` (default ``integration-tests/.data``)
     - **azurite** – Azure Blob Storage via the Azurite emulator
     - **minio** – S3-compatible storage via the MinIO emulator
     - **lancedb** – LanceDB Cloud via REST API (requires ``LANCEDB_DB`` and
@@ -250,6 +256,9 @@ def spark(request):
     builder = (
         SparkSession.builder
         .appName("LanceSparkTests")
+        .master("local[2]")
+        .config("spark.ui.enabled", "false")
+        .config("spark.driver.host", "127.0.0.1")
         .config(
             f"spark.sql.catalog.{CATALOG}",
             "org.lance.spark.LanceNamespaceSparkCatalog",
@@ -267,6 +276,8 @@ def spark(request):
             "moka://?capacity=8388608",
         )
     )
+    if LANCE_SPARK_JARS:
+        builder = builder.config("spark.jars", LANCE_SPARK_JARS)
 
     if backend == "lancedb":
         uri = LANCEDB_HOST_OVERRIDE or (
@@ -339,8 +350,9 @@ def spark(request):
         builder = builder.config(f"spark.sql.catalog.{CATALOG}.impl", "dir")
 
         if backend == "local":
+            os.makedirs(LANCE_SPARK_DATA_ROOT, exist_ok=True)
             builder = builder.config(
-                f"spark.sql.catalog.{CATALOG}.root", "/home/lance/data",
+                f"spark.sql.catalog.{CATALOG}.root", LANCE_SPARK_DATA_ROOT,
             )
         elif backend == "azurite":
             az = request.getfixturevalue("azurite")
@@ -391,7 +403,15 @@ def rest_dir_namespace():
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or LANCE_SPARK_REST_DIR_PORT
     log_path = "/tmp/lance-rest-dir-namespace.log"
-    classpath = "/home/lance/tests:/opt/spark/jars/*"
+    test_dir = os.path.dirname(os.path.abspath(__file__))
+    spark_home = os.environ.get("SPARK_HOME")
+    if not spark_home:
+        raise RuntimeError("SPARK_HOME is required to start the REST directory namespace")
+    extra_jars = LANCE_SPARK_JARS.replace(",", ":") + ":" if LANCE_SPARK_JARS else ""
+    classpath = os.environ.get(
+        "LANCE_SPARK_REST_CLASSPATH",
+        f"{test_dir}:{extra_jars}{spark_home}/jars/*",
+    )
 
     with open(log_path, "w", encoding="utf-8") as log:
         proc = subprocess.Popen(
@@ -455,6 +475,7 @@ def cleanup_tables(spark):
     spark.sql("DROP TABLE IF EXISTS default.employees PURGE")
     spark.sql("DROP TABLE IF EXISTS default.test_blob_v2 PURGE")
     spark.sql("DROP TABLE IF EXISTS default.test_blob_v2_bad_insert PURGE")
+    spark.sql("DROP TABLE IF EXISTS default.fts_docs PURGE")
     # TODO - reenable once `tableExists` works on Spark 4.0
     #spark.catalog.dropTempView("source") if spark.catalog.tableExists("source") else None
     #spark.catalog.dropTempView("tmp_view") if spark.catalog.tableExists("tmp_view") else None
@@ -468,6 +489,7 @@ def cleanup_tables(spark):
     spark.sql("DROP TABLE IF EXISTS default.employees PURGE")
     spark.sql("DROP TABLE IF EXISTS default.test_blob_v2 PURGE")
     spark.sql("DROP TABLE IF EXISTS default.test_blob_v2_bad_insert PURGE")
+    spark.sql("DROP TABLE IF EXISTS default.fts_docs PURGE")
     # TODO - reenable once `tableExists` works on Spark 4.0
     #spark.catalog.dropTempView("source") if spark.catalog.tableExists("source") else None
     #spark.catalog.dropTempView("tmp_view") if spark.catalog.tableExists("tmp_view") else None

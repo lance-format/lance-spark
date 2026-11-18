@@ -22,11 +22,11 @@ import java.io.IOException;
 import java.util.Iterator;
 
 public class LanceSearchRowPartitionReader implements PartitionReader<InternalRow> {
-  private final LanceSearchColumnarPartitionReader reader;
+  private final PartitionReader<ColumnarBatch> reader;
   private Iterator<InternalRow> currentRows;
   private InternalRow currentRecord;
 
-  public LanceSearchRowPartitionReader(LanceSearchColumnarPartitionReader reader) {
+  public LanceSearchRowPartitionReader(PartitionReader<ColumnarBatch> reader) {
     this.reader = reader;
   }
 
@@ -36,7 +36,8 @@ public class LanceSearchRowPartitionReader implements PartitionReader<InternalRo
       currentRecord = currentRows.next();
       return true;
     }
-    if (reader.next()) {
+    // An empty batch means "nothing in this one", not end of stream.
+    while (reader.next()) {
       ColumnarBatch currentBatch = reader.get();
       currentRows = currentBatch.rowIterator();
       if (currentRows != null && currentRows.hasNext()) {

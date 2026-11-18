@@ -47,24 +47,17 @@ public class LanceStatistics implements Statistics, Serializable {
     this.sizeInBytes = sizeInBytes;
   }
 
-  /**
-   * Estimate post-pruning statistics by scaling full-table stats by the ratio of surviving
-   * fragments. This enables Spark's JoinSelection to pick BroadcastHashJoin when the post-pruning
-   * size is below the broadcast threshold, rather than defaulting to SortMergeJoin + SPJ.
-   *
-   * @param totalRows total rows in the dataset
-   * @param totalFilesSize total file size in bytes
-   * @param totalFragments total number of fragments in the dataset
-   * @param survivingFragments number of fragments that survive zonemap pruning
-   * @return scaled statistics, or full-table statistics if scaling is not applicable
-   */
-  public static LanceStatistics estimatePostPruning(
-      long totalRows, long totalFilesSize, long totalFragments, int survivingFragments) {
-    if (totalFragments <= 0 || survivingFragments >= totalFragments) {
+  /** Estimates post-pruning statistics using exact surviving rows and row-weighted bytes. */
+  static LanceStatistics estimatePostPruningByRows(
+      long totalRows, long totalFilesSize, long survivingRows) {
+    if (totalRows <= 0 || survivingRows >= totalRows) {
       return new LanceStatistics(totalRows, totalFilesSize);
     }
-    double ratio = (double) survivingFragments / totalFragments;
-    return new LanceStatistics((long) (totalRows * ratio), (long) (totalFilesSize * ratio));
+    if (survivingRows <= 0) {
+      return new LanceStatistics(0, 0);
+    }
+    double ratio = (double) survivingRows / totalRows;
+    return new LanceStatistics(survivingRows, (long) (totalFilesSize * ratio));
   }
 
   /**

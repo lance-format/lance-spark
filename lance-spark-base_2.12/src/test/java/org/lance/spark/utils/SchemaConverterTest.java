@@ -16,13 +16,17 @@ package org.lance.spark.utils;
 import com.google.common.collect.ImmutableMap;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -631,13 +635,40 @@ public class SchemaConverterTest {
   }
 
   @Test
-  public void testBlobEncodingAtNamedFileFormatVersionResolvesToBlobV1() {
-    assertBlobV1Field(blobSchemaWithVersion("stable").apply("data"));
+  public void testBlobEncodingAtStableFileFormatVersionResolvesToBlobV2() {
+    assertBlobV2Field(blobSchemaWithVersion("stable").apply("data"));
+  }
+
+  @Test
+  public void testBlobEncodingAtLegacyFileFormatVersionResolvesToBlobV1() {
+    assertBlobV1Field(blobSchemaWithVersion("legacy").apply("data"));
   }
 
   @Test
   public void testBlobEncodingAtMalformedFileFormatVersionResolvesToBlobV1() {
     assertBlobV1Field(blobSchemaWithVersion("2.x").apply("data"));
+  }
+
+  @Test
+  public void testBlobEncodingDropsStaleV1MarkerWhenResolvingToBlobV2() {
+    // Both markers on one field would describe a column Lance cannot store.
+    Metadata v1 =
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build();
+    StructType schema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.IntegerType, false),
+              new StructField("data", DataTypes.BinaryType, true, v1),
+            });
+    Map<String, String> properties = ImmutableMap.of("data.lance.encoding", "blob");
+
+    StructField field =
+        SchemaConverter.processSchemaWithProperties(schema, properties, "2.2").apply("data");
+
+    assertTrue(BlobUtils.isBlobV2SparkField(field));
+    assertFalse(field.metadata().contains(BlobUtils.LANCE_ENCODING_BLOB_KEY));
   }
 
   private static StructType blobSchemaWithVersion(String fileFormatVersion) {
@@ -674,5 +705,61 @@ public class SchemaConverterTest {
     assertTrue(
         e.getMessage().contains(expectedFragment),
         () -> "expected message to contain '" + expectedFragment + "': " + e.getMessage());
+  }
+
+  @Test
+  public void testUnsignedIntTypesFollowTheDestinationTable() {
+    Field entries =
+        new Field(
+            "entries",
+            FieldType.notNullable(ArrowType.Struct.INSTANCE),
+            Arrays.asList(
+                new Field("key", FieldType.notNullable(new ArrowType.Int(16, false)), null),
+                intField("value", 32, false)));
+    Schema destination =
+        new Schema(
+            Arrays.asList(
+                intField("u8", 8, false),
+                intField("u16", 16, false),
+                intField("u32", 32, false),
+                intField("u64", 64, false),
+                intField("i64", 64, true),
+                new Field(
+                    "s",
+                    FieldType.nullable(ArrowType.Struct.INSTANCE),
+                    Collections.singletonList(intField("u", 32, false))),
+                new Field(
+                    "a",
+                    FieldType.nullable(ArrowType.List.INSTANCE),
+                    Collections.singletonList(intField("element", 8, false))),
+                new Field(
+                    "m",
+                    FieldType.nullable(new ArrowType.Map(false)),
+                    Collections.singletonList(entries))));
+    StructType read = LanceArrowUtils.fromArrowSchema(destination);
+
+    Schema newTable = LanceArrowUtils.toArrowSchema(read, "UTC", true);
+    assertEquals(new ArrowType.Int(16, true), newTable.findField("u8").getType());
+    assertEquals(new ArrowType.Int(32, true), newTable.findField("u16").getType());
+    assertEquals(new ArrowType.Int(64, true), newTable.findField("u32").getType());
+    assertEquals(new ArrowType.Int(64, true), newTable.findField("u64").getType());
+
+    StructType write = LanceArrowUtils.markUnsignedForWrite(read, destination);
+    assertEquals(destination, LanceArrowUtils.toArrowSchema(write, "UTC", true));
+
+    StructType widened =
+        new StructType().add("u8", DataTypes.IntegerType).add("u16", DataTypes.LongType);
+    Schema widenedWrite =
+        LanceArrowUtils.toArrowSchema(
+            LanceArrowUtils.markUnsignedForWrite(widened, destination), "UTC", true);
+    assertEquals(new ArrowType.Int(32, true), widenedWrite.findField("u8").getType());
+    assertEquals(new ArrowType.Int(64, true), widenedWrite.findField("u16").getType());
+  }
+
+  private static Field intField(String name, int bitWidth, boolean signed) {
+    return new Field(
+        name,
+        new FieldType(true, new ArrowType.Int(bitWidth, signed), null, null),
+        Collections.emptyList());
   }
 }

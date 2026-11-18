@@ -13,22 +13,27 @@
  */
 package org.lance.spark;
 
+import org.lance.Dataset;
 import org.lance.memwal.ShardingSpec;
+import org.lance.spark.internal.TransactionPropertiesWriteTable;
 import org.lance.spark.read.LanceScanBuilder;
 import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.BlobUtils;
+import org.lance.spark.utils.Utils;
+import org.lance.spark.utils.VectorUtils;
 import org.lance.spark.write.AddColumnsBackfillWrite;
 import org.lance.spark.write.LanceWriteSchemaValidator;
 import org.lance.spark.write.SparkWrite;
 import org.lance.spark.write.StagedCommit;
 import org.lance.spark.write.UpdateColumnsBackfillWrite;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
 import org.apache.spark.sql.connector.catalog.MetadataColumn;
 import org.apache.spark.sql.connector.catalog.StagedTable;
 import org.apache.spark.sql.connector.catalog.SupportsMetadataColumns;
 import org.apache.spark.sql.connector.catalog.SupportsRead;
-import org.apache.spark.sql.connector.catalog.SupportsWrite;
+import org.apache.spark.sql.connector.catalog.Table;
 import org.apache.spark.sql.connector.catalog.TableCapability;
 import org.apache.spark.sql.connector.read.ScanBuilder;
 import org.apache.spark.sql.connector.write.LogicalWriteInfo;
@@ -38,6 +43,7 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
+import org.apache.spark.sql.util.LanceArrowUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -52,9 +58,12 @@ import java.util.stream.Collectors;
 
 /** Lance Spark Dataset. */
 public class LanceDataset
-    implements SupportsRead, SupportsWrite, SupportsMetadataColumns, StagedTable {
+    implements SupportsRead, TransactionPropertiesWriteTable, SupportsMetadataColumns, StagedTable {
 
   private static final Logger LOG = LoggerFactory.getLogger(LanceDataset.class);
+
+  private static final Set<TableCapability> READ_ONLY_CAPABILITIES =
+      ImmutableSet.of(TableCapability.BATCH_READ);
 
   private static final Set<TableCapability> CAPABILITIES =
       ImmutableSet.of(
@@ -149,10 +158,10 @@ public class LanceDataset
       };
 
   /**
-   * Relevance score, auto-projected by Lance only when a full-text query is active on the scan.
+   * BM25 relevance score, explicitly projected when a full-text query is active on the scan.
    * Advertised unconditionally because {@code metadataColumns()} is consulted by the analyzer
-   * before the query is known to contain FTS; selecting it without a full-text search yields an
-   * empty scan result for this column rather than a plan-time error (validation is a follow-up).
+   * before the query is known to contain FTS; selecting it without a full-text search raises {@code
+   * IllegalArgumentException} at scan-build time with a clear diagnostic message.
    */
   public static final MetadataColumn SCORE_COLUMN =
       new MetadataColumn() {
@@ -306,30 +315,76 @@ public class LanceDataset
   }
 
   @Override
-  public ScanBuilder newScanBuilder(CaseInsensitiveStringMap caseInsensitiveStringMap) {
-    // Merge scan-time options with the existing read options
-    LanceSparkReadOptions scanOptions = readOptions;
-    if (!caseInsensitiveStringMap.isEmpty()) {
-      Map<String, String> mergedOptions = new HashMap<>(readOptions.getStorageOptions());
-      mergedOptions.putAll(caseInsensitiveStringMap.asCaseSensitiveMap());
-      scanOptions =
-          LanceSparkReadOptions.builder()
-              .datasetUri(readOptions.getDatasetUri())
-              .namespace(readOptions.getNamespace())
-              .tableId(readOptions.getTableId())
-              .catalogName(readOptions.getCatalogName())
-              .indexCacheBackend(readOptions.getIndexCacheBackend())
-              .metadataCacheBackend(readOptions.getMetadataCacheBackend())
-              .fromOptions(mergedOptions)
-              .build();
+  public ScanBuilder newScanBuilder(CaseInsensitiveStringMap scanMap) {
+    LanceSparkReadOptions scanOptions = mergeScanOptions(scanMap);
+    StructType scanSchema = sparkSchema;
+    LanceRef scanRef = scanOptions.getRef();
+    if (scanRef != null && (scanRef.isBranchOrTag() || scanRef.getVersionNumber().isPresent())) {
+      try (Dataset dataset =
+          Utils.openDatasetBuilder(scanOptions)
+              .initialStorageOptions(initialStorageOptions)
+              .runtimeNamespace(namespaceImpl, namespaceProperties, readOptions.getTableId())
+              .build()) {
+        scanOptions = scanOptions.withRef(Utils.pinOpenedRef(dataset, scanRef));
+        scanSchema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
+      }
     }
     return new LanceScanBuilder(
-        sparkSchema,
+        scanSchema,
         scanOptions,
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
         shardingSpec);
+  }
+
+  private LanceSparkReadOptions mergeScanOptions(CaseInsensitiveStringMap scanMap) {
+    if (scanMap.isEmpty()) {
+      return readOptions;
+    }
+    LanceRef tableRef = readOptions.getRef();
+    boolean scanSetsRef =
+        scanMap.containsKey(LanceSparkReadOptions.CONFIG_VERSION)
+            || scanMap.containsKey(LanceSparkReadOptions.CONFIG_BRANCH)
+            || scanMap.containsKey(LanceSparkReadOptions.CONFIG_TAG);
+    Map<String, String> merged = new HashMap<>(readOptions.getStorageOptions());
+    // Stored options can still hold reference keys. Strip them so fromOptions cannot
+    // overwrite the table ref with a leftover key.
+    merged
+        .keySet()
+        .removeIf(
+            key ->
+                key.equalsIgnoreCase(LanceSparkReadOptions.CONFIG_VERSION)
+                    || key.equalsIgnoreCase(LanceSparkReadOptions.CONFIG_BRANCH)
+                    || key.equalsIgnoreCase(LanceSparkReadOptions.CONFIG_TAG));
+    merged.putAll(scanMap.asCaseSensitiveMap());
+    LanceSparkReadOptions scanOptions =
+        LanceSparkReadOptions.builder()
+            .datasetUri(readOptions.getDatasetUri())
+            .namespace(readOptions.getNamespace())
+            .tableId(readOptions.getTableId())
+            .catalogName(readOptions.getCatalogName())
+            .indexCacheBackend(readOptions.getIndexCacheBackend())
+            .metadataCacheBackend(readOptions.getMetadataCacheBackend())
+            .ref(tableRef)
+            .fromOptions(merged)
+            .build();
+    if (tableRef != null && scanSetsRef) {
+      LanceRef scanRef = scanOptions.getRef();
+      if (sameNamedBranch(tableRef, scanRef)) {
+        return scanOptions.withRef(tableRef);
+      }
+      Preconditions.checkArgument(
+          tableRef.equals(scanRef), "Cannot combine " + tableRef + " with " + scanRef);
+    }
+    return scanOptions;
+  }
+
+  private static boolean sameNamedBranch(LanceRef tableRef, LanceRef scanRef) {
+    return tableRef.isBranch()
+        && scanRef != null
+        && scanRef.isBranch()
+        && tableRef.getBranchName().equals(scanRef.getBranchName());
   }
 
   @Override
@@ -349,16 +404,48 @@ public class LanceDataset
     // physical URI is invisible to DESCRIBE EXTENDED and to any tooling that relies on it.
     Map<String, String> props = new HashMap<>(tableProperties);
     props.put("location", readOptions.getDatasetUri());
+    // Schema dimensions take precedence over stored config.
+    for (StructField field : sparkSchema.fields()) {
+      if (VectorUtils.shouldBeFixedSizeList(field.dataType(), field.metadata())) {
+        props.put(
+            VectorUtils.createVectorSizePropertyKey(field.name()),
+            Long.toString(field.metadata().getLong(VectorUtils.ARROW_FIXED_SIZE_LIST_SIZE_KEY)));
+      }
+    }
     return props;
   }
 
   @Override
   public Set<TableCapability> capabilities() {
+    if (isBranchOrTag()) {
+      return READ_ONLY_CAPABILITIES;
+    }
     return BlobUtils.hasBlobV2Fields(sparkSchema) ? CAPABILITIES_WITH_BLOB_V2 : CAPABILITIES;
+  }
+
+  public static LanceDataset requireWritable(Table table, String command) {
+    if (!(table instanceof LanceDataset)) {
+      throw new UnsupportedOperationException(command + " only supports LanceDataset");
+    }
+    LanceDataset dataset = (LanceDataset) table;
+    dataset.ensureWritable();
+    return dataset;
+  }
+
+  protected void ensureWritable() {
+    if (isBranchOrTag()) {
+      throw new UnsupportedOperationException(
+          "Writes are not supported for " + readOptions.getRef());
+    }
+  }
+
+  private boolean isBranchOrTag() {
+    return readOptions.getRef() != null && readOptions.getRef().isBranchOrTag();
   }
 
   @Override
   public WriteBuilder newWriteBuilder(LogicalWriteInfo logicalWriteInfo) {
+    ensureWritable();
     if (capabilities().contains(TableCapability.ACCEPT_ANY_SCHEMA)) {
       LanceWriteSchemaValidator.validate(sparkSchema, logicalWriteInfo.schema());
     }
@@ -383,7 +470,7 @@ public class LanceDataset
     // Use table's file format version if not explicitly set in write options
     if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)
         && fileFormatVersion != null) {
-      writeOptionsBuilder.fileFormatVersion(fileFormatVersion);
+      writeOptionsBuilder.fallbackFileFormatVersion(sparkSchema, fileFormatVersion);
     }
     if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS)
         && tableProperties.containsKey(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS)) {
@@ -407,7 +494,8 @@ public class LanceDataset
           initialStorageOptions,
           namespaceImpl,
           namespaceProperties,
-          readOptions.getTableId());
+          readOptions.getTableId(),
+          managedVersioning);
     }
 
     List<String> updateColumns =
@@ -424,7 +512,8 @@ public class LanceDataset
           initialStorageOptions,
           namespaceImpl,
           namespaceProperties,
-          readOptions.getTableId());
+          readOptions.getTableId(),
+          managedVersioning);
     }
 
     SparkWrite.SparkWriteBuilder builder =
@@ -441,7 +530,7 @@ public class LanceDataset
 
     if (stagedCommit != null) {
       builder.setStagedCommit(stagedCommit);
-      // Set write mode to OVERWRITE so that Fragment.create() infers schema from the
+      // Set write mode to OVERWRITE so that Fragment.write() infers schema from the
       // arrow stream rather than validating against the existing dataset schema. This
       // allows replacing a table with a different schema.
       builder.truncate();

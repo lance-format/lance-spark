@@ -22,14 +22,19 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -82,8 +87,9 @@ public abstract class BaseSparkSearchTableFunctionTest {
 
   @Test
   @Disabled(
-      "SEARCH now routes to queryTable, which ignores structured_query until lance-core dir.rs"
-          + " adds structured support (re-enable after the lance-core bump).")
+      "SEARCH takes queryTable's structuredQuery branch (fullTextQueryJson), which lance-core"
+          + " dir.rs does not yet honor; the stringQuery branch used by HYBRID_SEARCH on the same"
+          + " queryTable path works. Re-enable after the lance-core bump adds structured support.")
   public void testSearchTableFunction() {
     String fullName = createFtsTable();
 
@@ -184,6 +190,76 @@ public abstract class BaseSparkSearchTableFunctionTest {
     assertEquals(java.util.Arrays.asList(0.0f, 0.0f, 0.0f, 0.0f), defaultRow.getList(2));
   }
 
+  @ParameterizedTest
+  @ValueSource(booleans = {true, false})
+  public void testHybridSearchPrefilterAppliesToBothSides(boolean prefilter) {
+    Assumptions.assumeTrue(supportsNamedArguments());
+    String fullName = fullTableName("hybrid_prefilter");
+    spark.sql(
+        "CREATE TABLE "
+            + fullName
+            + " (id INT NOT NULL, body STRING, vector ARRAY<FLOAT> NOT NULL) USING lance"
+            + " TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '4')");
+    spark.sql(
+        "INSERT INTO "
+            + fullName
+            + " SELECT CAST(id AS INT), CASE WHEN id >= 190"
+            + " THEN concat('lance ', repeat('padding ', CAST(id - 189 AS INT)))"
+            + " ELSE 'lance lance lance' END,"
+            + " array(CAST(id AS FLOAT), CAST(id AS FLOAT), CAST(id AS FLOAT), CAST(id AS FLOAT))"
+            + " FROM range(200)");
+    createFtsIndex(fullName);
+    List<Row> rows =
+        spark
+            .sql(
+                "SELECT id, _score FROM HYBRID_SEARCH("
+                    + "table => '"
+                    + fullName
+                    + "', "
+                    + "query_vector => array(0.0, 0.0, 0.0, 0.0), query => 'lance', "
+                    + "search_columns => array('body'), columns => array('id'), "
+                    + "num_results => 5, candidates => 5, filter => 'id >= 190', "
+                    + "prefilter => "
+                    + prefilter
+                    + ") ORDER BY id")
+            .collectAsList();
+    assertEquals(
+        prefilter ? Arrays.asList(190, 191, 192, 193, 194) : Collections.emptyList(),
+        rows.stream().map(row -> row.getInt(0)).collect(Collectors.toList()));
+    for (Row row : rows) {
+      assertFalse(row.isNullAt(1));
+      assertTrue(row.getFloat(1) > 0.0f);
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"FLOAT", "STRING"})
+  public void testFullTextSearchRejectsStoredScore(String scoreType) {
+    String fullName = fullTableName("stored_score");
+    spark.sql(
+        "CREATE TABLE "
+            + fullName
+            + " (id INT, body STRING, vector ARRAY<FLOAT>, _score "
+            + scoreType
+            + ") USING lance"
+            + " TBLPROPERTIES ('vector.arrow.fixed-size-list.size' = '4')");
+    String hybridQuery =
+        "SELECT id FROM HYBRID_SEARCH('" + fullName + "', array(0.0, 0.0, 0.0, 0.0), 'lance', 5)";
+    String searchQuery =
+        "SELECT id FROM SEARCH(table => '"
+            + fullName
+            + "', query => 'lance', search_columns => array('body'))";
+    String[] queries =
+        supportsNamedArguments()
+            ? new String[] {hybridQuery, searchQuery}
+            : new String[] {hybridQuery};
+    for (String query : queries) {
+      Exception failure = assertThrows(Exception.class, () -> spark.sql(query).collectAsList());
+      assertTrue(getDeepMessage(failure).contains("stored '_score' column"));
+      assertTrue(getDeepMessage(failure).contains("Rename the stored column"));
+    }
+  }
+
   @Test
   public void testVectorSearchRequiresQueryVector() {
     Assumptions.assumeTrue(supportsNamedArguments());
@@ -205,15 +281,9 @@ public abstract class BaseSparkSearchTableFunctionTest {
   }
 
   @Test
-  @Disabled(
-      "Mixes VECTOR_SEARCH/HYBRID_SEARCH (still working) with SEARCH, which now routes to"
-          + " queryTable and fails until lance-core dir.rs supports structured_query. TODO: split"
-          + " the SEARCH assertions into a separate case so vector/hybrid named-args stay covered.")
-  public void testNamedArguments() {
+  public void testVectorSearchNamedArguments() {
     Assumptions.assumeTrue(supportsNamedArguments());
     String vectorTable = createVectorTable();
-    String ftsTable = createFtsTable();
-    String hybridTable = createHybridTable();
 
     List<Row> vectorRows =
         spark
@@ -281,6 +351,49 @@ public abstract class BaseSparkSearchTableFunctionTest {
     assertEquals(0, vectorRowId.getInt(0));
     assertEquals(0.0f, vectorRowId.getFloat(1), 0.001f);
     assertTrue(vectorRowId.getLong(2) >= 0);
+  }
+
+  @Test
+  public void testHybridSearchNamedArguments() {
+    Assumptions.assumeTrue(supportsNamedArguments());
+    String hybridTable = createHybridTable();
+
+    Dataset<Row> hybridWithRowId =
+        spark.sql(
+            "SELECT * FROM HYBRID_SEARCH("
+                + "table => '"
+                + hybridTable
+                + "', "
+                + "query_vector => array(0.0, 0.0, 0.0, 0.0), "
+                + "query => 'lance', "
+                + "vector_column => 'vector', "
+                + "search_columns => array('body'), "
+                + "columns => array('ID'), "
+                + "num_results => 2, "
+                + "candidates => 3, "
+                + "rrf_k => 1.0, "
+                + "with_row_id => true) "
+                + "ORDER BY _relevance_score DESC, id");
+    assertEquals(
+        java.util.Arrays.asList("id", "_distance", "_score", "_relevance_score", "_rowid"),
+        java.util.Arrays.asList(hybridWithRowId.columns()));
+    List<Row> hybridRows = hybridWithRowId.collectAsList();
+    assertEquals(2, hybridRows.size());
+    assertEquals(1, hybridRows.get(0).getInt(0));
+    assertEquals(0.0f, hybridRows.get(0).getFloat(1), 0.001f);
+    assertTrue(hybridRows.get(0).getFloat(2) > 0.0f);
+    assertTrue(hybridRows.get(0).getFloat(3) > hybridRows.get(1).getFloat(3));
+    assertTrue(hybridRows.get(0).getLong(4) >= 0);
+  }
+
+  @Test
+  @Disabled(
+      "SEARCH takes queryTable's structuredQuery branch (fullTextQueryJson), which lance-core"
+          + " dir.rs does not yet honor; the stringQuery branch used by HYBRID_SEARCH on the same"
+          + " queryTable path works. Re-enable after the lance-core bump adds structured support.")
+  public void testSearchNamedArguments() {
+    Assumptions.assumeTrue(supportsNamedArguments());
+    String ftsTable = createFtsTable();
 
     List<Row> searchRows =
         spark
@@ -346,33 +459,6 @@ public abstract class BaseSparkSearchTableFunctionTest {
     assertTrue(searchRowId.getInt(0) == 1 || searchRowId.getInt(0) == 3);
     assertTrue(searchRowId.getFloat(1) > 0.0f);
     assertTrue(searchRowId.getLong(2) >= 0);
-
-    Dataset<Row> hybridWithRowId =
-        spark.sql(
-            "SELECT * FROM HYBRID_SEARCH("
-                + "table => '"
-                + hybridTable
-                + "', "
-                + "query_vector => array(0.0, 0.0, 0.0, 0.0), "
-                + "query => 'lance', "
-                + "vector_column => 'vector', "
-                + "search_columns => array('body'), "
-                + "columns => array('ID'), "
-                + "num_results => 2, "
-                + "candidates => 3, "
-                + "rrf_k => 1.0, "
-                + "with_row_id => true) "
-                + "ORDER BY _relevance_score DESC, id");
-    assertEquals(
-        java.util.Arrays.asList("id", "_distance", "_score", "_relevance_score", "_rowid"),
-        java.util.Arrays.asList(hybridWithRowId.columns()));
-    List<Row> hybridRows = hybridWithRowId.collectAsList();
-    assertEquals(2, hybridRows.size());
-    assertEquals(1, hybridRows.get(0).getInt(0));
-    assertEquals(0.0f, hybridRows.get(0).getFloat(1), 0.001f);
-    assertTrue(hybridRows.get(0).getFloat(2) > 0.0f);
-    assertTrue(hybridRows.get(0).getFloat(3) > hybridRows.get(1).getFloat(3));
-    assertTrue(hybridRows.get(0).getLong(4) >= 0);
   }
 
   private String createVectorTable() {
@@ -402,18 +488,7 @@ public abstract class BaseSparkSearchTableFunctionTest {
             + "(1, 'lance vector search'), "
             + "(2, 'spark connector table function'), "
             + "(3, 'lance full text search')");
-    spark.sql(
-        "ALTER TABLE "
-            + fullName
-            + " CREATE INDEX body_fts USING fts (body) WITH ("
-            + "base_tokenizer='simple', "
-            + "language='English', "
-            + "max_token_length=40, "
-            + "lower_case=true, "
-            + "stem=false, "
-            + "remove_stop_words=false, "
-            + "ascii_folding=false, "
-            + "with_position=true)");
+    createFtsIndex(fullName);
     return fullName;
   }
 
@@ -431,6 +506,11 @@ public abstract class BaseSparkSearchTableFunctionTest {
             + "(1, 'lance vector search', array(0.0, 0.0, 0.0, 0.0)), "
             + "(2, 'spark connector table function', array(1.0, 1.0, 1.0, 1.0)), "
             + "(3, 'lance full text search', array(10.0, 10.0, 10.0, 10.0))");
+    createFtsIndex(fullName);
+    return fullName;
+  }
+
+  private void createFtsIndex(String fullName) {
     spark.sql(
         "ALTER TABLE "
             + fullName
@@ -443,7 +523,6 @@ public abstract class BaseSparkSearchTableFunctionTest {
             + "remove_stop_words=false, "
             + "ascii_folding=false, "
             + "with_position=true)");
-    return fullName;
   }
 
   private String fullTableName(String prefix) {

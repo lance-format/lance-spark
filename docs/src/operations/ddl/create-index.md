@@ -38,6 +38,8 @@ The following index methods are supported:
 
 The `CREATE INDEX` command supports options via the `WITH` clause to control index creation. These options are specific to the chosen index method.
 
+Option names are case-insensitive: `WITH (TRAIN = false)` and `WITH (train = false)` are the same option.
+
 ### Common Options
 
 These options apply to all index methods:
@@ -51,9 +53,14 @@ These options apply to all index methods:
 The distributed build used by `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`,
 `rtree`, `fts` (or `inverted`), and `btree` with `build_mode = 'fragment'` supports:
 
-| Option         | Type    | Description                                                                                                                                                                                                 |
-|----------------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `num_segments` | Integer | Target number of parallel build tasks (upper bound; clamped to fragment count when larger). Each task covers a contiguous batch of fragments. Defaults to `min(fragment_count, spark.default.parallelism)`. |
+| Option         | Type    | Description                                                                                                                                                                                                                        |
+|----------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `num_segments` | Integer | Number of parallel build tasks, and so of index segments created (clamped to fragment count when larger). Each task takes a contiguous run of fragments, and the runs are chosen so the heaviest task is as light as any contiguous split allows. Defaults to `min(fragment_count, spark.default.parallelism)`. |
+
+Contiguous coverage matters beyond parallelism: [OPTIMIZE](./optimize.md) can only group fragments
+that the identical set of index segments covers. Interleaved segments leave it nothing to coalesce at
+all, while contiguous ones let it coalesce within each segment's run. A segment boundary is still a
+boundary, so `num_segments` also bounds how far compaction can get.
 
 ### ZoneMap Options
 
@@ -70,8 +77,10 @@ For the `btree` method, the following options are supported:
 | Option           | Type   | Description                                                                                                                                                                                              |
 |------------------|--------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `zone_size`      | Long   | The number of rows per zone in the B-tree index.                                                                                                                                                         |
-| `build_mode`     | String | Index building mode: 'fragment' builds indexes in parallel by fragment; 'range' sorts data by indexed columns first, then partitions and builds indexes in parallel by partition. Default is 'fragment'. |
-| `rows_per_range` | Long   | The number of rows per range when built using range mode. Default is 1000000.                                                                                                                            |
+| `build_mode`     | String | Index building mode: 'fragment' builds indexes in parallel by fragment; 'range' repartitions by fragment id, sorts each partition by the indexed column, and builds indexes in parallel by partition. Default is 'fragment'. |
+
+`build_mode = 'range'` partitions on fragment id so each partition holds whole fragments, and takes
+its partition count from the fragment count. Range width is not configurable.
 
 
 ### FTS / Inverted Options
@@ -259,12 +268,12 @@ to scanning the data until it is populated. There are two ways to populate it:
     ALTER TABLE lance.db.users CREATE INDEX idx_id USING zonemap (id);
     ```
 
-- **Incremental build through the SDK:** when only some fragments are unindexed (for example after
-  appending data to an already-built index), `Dataset.optimizeIndices` indexes just the unindexed
-  fragments. This currently runs on a single node:
+- **Incremental maintenance:** when only some fragments are unindexed (for example after appending
+  data to an already-built index), [`OPTIMIZE INDEX`](optimize-index.md) indexes the uncovered
+  fragments. This currently runs on the Spark driver:
 
-    ```java
-    dataset.optimizeIndices(OptimizeOptions.builder().build());
+    ```sql
+    ALTER TABLE lance.db.users OPTIMIZE INDEX idx_id;
     ```
 
 `train = false` is supported for all index methods. Because deferred index creation does not build
@@ -305,4 +314,4 @@ The `CREATE INDEX` command operates as follows:
 - **Index Methods**: The `zonemap`, `bitmap`, `label_list`, `ngram`, `bloomfilter`, `rtree`, `btree`, and `fts` (or `inverted`) methods are supported for index creation.
 - **Indexed Column Count**: All supported index methods currently support exactly one indexed column.
 - **Index Replacement**: If you create an index with the same name as an existing one, the old index will be replaced by the new one.
-- **Deferred Training**: With `train = false` the index is registered empty and is populated later, either by re-running `CREATE INDEX` (a full distributed build that replaces the empty index) or, for incremental coverage of newly appended fragments, by `Dataset.optimizeIndices` in the SDK. The SQL `OPTIMIZE` command compacts fragments and does not train deferred indexes.
+- **Deferred Training**: With `train = false` the index is registered empty and is populated later, either by re-running `CREATE INDEX` (a full distributed build that replaces the empty index) or through `ALTER TABLE ... OPTIMIZE INDEX` for driver-side incremental maintenance. The table-level `OPTIMIZE` command compacts fragments and does not train deferred indexes.

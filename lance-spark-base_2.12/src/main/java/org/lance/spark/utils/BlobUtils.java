@@ -13,14 +13,24 @@
  */
 package org.lance.spark.utils;
 
+import org.lance.spark.LanceConstant;
+
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.types.ArrayType;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.MapType;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.unsafe.types.UTF8String;
 
+import java.util.Arrays;
 import java.util.HashSet;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 public class BlobUtils {
@@ -33,6 +43,34 @@ public class BlobUtils {
 
   /** Lowest Lance file format version that can store blob v2 columns. */
   public static final String MIN_BLOB_V2_FILE_FORMAT_VERSION = "2.2";
+
+  /**
+   * Highest version that still stores the legacy (v1) blob encoding; from {@link
+   * #MIN_BLOB_V2_FILE_FORMAT_VERSION} on, Lance writes {@link #LANCE_ENCODING_BLOB_KEY} as blob v2.
+   */
+  public static final String MAX_BLOB_V1_FILE_FORMAT_VERSION = "2.1";
+
+  /**
+   * Lance file format release selectors that resolve to a concrete version supporting blob v2.
+   * Lance never persists these; it resolves them when the file is written.
+   */
+  private static final Set<String> BLOB_V2_CAPABLE_SELECTORS =
+      new HashSet<>(Arrays.asList("stable", "next"));
+
+  /**
+   * Versions Lance recognizes that cannot store the legacy (v1) blob encoding. Lance parses
+   * versions against a closed set, so an unrecognized string such as {@code 2.4} is not a newer
+   * format but a parse failure, and is left for Lance to report rather than rejected here. Only
+   * this side needs listing: it grows with each Lance release, while the v1-capable side is closed
+   * at {@link #MAX_BLOB_V1_FILE_FORMAT_VERSION}.
+   */
+  private static final Set<String> KNOWN_BLOB_V2_VERSIONS =
+      new HashSet<>(Arrays.asList("2.2", "2.3", "stable", "next"));
+
+  /** Table property that requests a blob encoding: {@code <column>.lance.encoding = 'blob'}. */
+  public static final String BLOB_ENCODING_PROPERTY_SUFFIX = ".lance.encoding";
+
+  public static final String BLOB_ENCODING_PROPERTY_VALUE = "blob";
 
   /**
    * Spark struct type for a Lance blob v2 descriptor: {@code kind, position, size, blob_id,
@@ -92,20 +130,16 @@ public class BlobUtils {
    * @return true if the field is a blob field, false otherwise
    */
   public static boolean isBlobSparkField(StructField field) {
-    if (field == null) {
+    return field != null && isBlobSparkMetadata(field.metadata());
+  }
+
+  /** Returns true when {@code metadata} carries the legacy (v1) blob marker. */
+  public static boolean isBlobSparkMetadata(Metadata metadata) {
+    if (metadata == null || !metadata.contains(LANCE_ENCODING_BLOB_KEY)) {
       return false;
     }
 
-    if (field.metadata() == null) {
-      return false;
-    }
-
-    if (!field.metadata().contains(LANCE_ENCODING_BLOB_KEY)) {
-      return false;
-    }
-
-    String value = field.metadata().getString(LANCE_ENCODING_BLOB_KEY);
-    return LANCE_ENCODING_BLOB_VALUE.equalsIgnoreCase(value);
+    return LANCE_ENCODING_BLOB_VALUE.equalsIgnoreCase(metadata.getString(LANCE_ENCODING_BLOB_KEY));
   }
 
   /**
@@ -130,6 +164,18 @@ public class BlobUtils {
 
     String value = metadata.get(LANCE_ENCODING_BLOB_KEY);
     return LANCE_ENCODING_BLOB_VALUE.equalsIgnoreCase(value);
+  }
+
+  /**
+   * Returns true when lance-core reads Arrow field {@code field} as a blob, v1 or v2, as its {@code
+   * Field::is_blob} does: {@link #LANCE_ENCODING_BLOB_KEY} with any value, or the {@link
+   * #ARROW_EXTENSION_BLOB_V2} extension. Lance does so at any depth, also inside a struct or list.
+   */
+  public static boolean isLanceBlobArrowField(org.apache.arrow.vector.types.pojo.Field field) {
+    Map<String, String> metadata = field == null ? null : field.getMetadata();
+    return metadata != null
+        && (metadata.containsKey(LANCE_ENCODING_BLOB_KEY)
+            || ARROW_EXTENSION_BLOB_V2.equals(metadata.get(ARROW_EXTENSION_NAME_KEY)));
   }
 
   /** Returns true when a Spark field carries the lance-core blob v2 Arrow extension. */
@@ -163,6 +209,39 @@ public class BlobUtils {
   }
 
   /**
+   * Names of the legacy (v1) blob columns in {@code schema}, identified by {@link
+   * #LANCE_ENCODING_BLOB_KEY}.
+   */
+  public static Set<String> blobV1ColumnNames(StructType schema) {
+    Set<String> names = new HashSet<>();
+    for (StructField field : schema.fields()) {
+      if (isBlobSparkField(field)) {
+        names.add(field.name());
+      }
+    }
+    return names;
+  }
+
+  /** Returns true if any field in {@code schema} carries legacy (v1) blob metadata. */
+  public static boolean hasBlobV1Fields(StructType schema) {
+    return !blobV1ColumnNames(schema).isEmpty();
+  }
+
+  /**
+   * Returns the base column name of a blob v1 {@code <column>__blob_pos} or {@code
+   * <column>__blob_size} virtual column, or null if {@code name} is not such a virtual column.
+   */
+  public static String blobV1VirtualColumnBaseName(String name) {
+    if (name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)) {
+      return name.substring(0, name.length() - LanceConstant.BLOB_POSITION_SUFFIX.length());
+    }
+    if (name.endsWith(LanceConstant.BLOB_SIZE_SUFFIX)) {
+      return name.substring(0, name.length() - LanceConstant.BLOB_SIZE_SUFFIX.length());
+    }
+    return null;
+  }
+
+  /**
    * Returns true for blob columns in the Spark read schema, v1 or v2. Drives {@code _rowaddr} and
    * the unloaded-blob read path in the scan.
    */
@@ -190,17 +269,69 @@ public class BlobUtils {
   }
 
   /**
-   * True when {@code fileFormatVersion} is numeric {@code major[.minor]} of {@value
-   * #MIN_BLOB_V2_FILE_FORMAT_VERSION} or newer.
+   * True when {@code fileFormatVersion} is known not to store legacy (v1) blob columns.
+   * Deliberately narrower than {@link #fileFormatSupportsBlobV2(String)}, which picks the metadata
+   * to write and so errs towards v2; this one gates an up-front failure.
+   */
+  public static boolean knownToRejectBlobV1(String fileFormatVersion) {
+    if (fileFormatVersion == null) {
+      return false;
+    }
+    return KNOWN_BLOB_V2_VERSIONS.contains(fileFormatVersion.trim().toLowerCase(Locale.ROOT));
+  }
+
+  /**
+   * True when {@code tableProperties} asks for a blob column via {@code <column>.lance.encoding =
+   * 'blob'}. Checked before the schema is processed, because the blob metadata that {@code
+   * SchemaConverter} attaches depends on the version resolved from this.
+   */
+  public static boolean requestsBlobEncoding(Map<String, String> tableProperties) {
+    if (tableProperties == null) {
+      return false;
+    }
+    for (Map.Entry<String, String> entry : tableProperties.entrySet()) {
+      if (entry.getKey() != null
+          && entry.getKey().endsWith(BLOB_ENCODING_PROPERTY_SUFFIX)
+          && BLOB_ENCODING_PROPERTY_VALUE.equalsIgnoreCase(entry.getValue())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * True when {@code fileFormatVersion} resolves to {@value #MIN_BLOB_V2_FILE_FORMAT_VERSION} or
+   * newer, either as a numeric {@code major[.minor]} or as one of Lance's release selectors.
    *
-   * <p>Null, named aliases like {@code stable}, and malformed strings return false. Lance validates
-   * version strings at dataset creation.
+   * <p>Null, {@code legacy}, and malformed strings return false. Lance validates version strings at
+   * dataset creation.
    *
    * <p>TODO: delegate to {@code LanceFileFormatVersion.isAtLeast()} in lance-core once version
-   * aliases are exposed to Java. Local parsing is conservative while {@code stable} resolves below
-   * 2.2.
+   * aliases are exposed to Java.
    */
   public static boolean fileFormatSupportsBlobV2(String fileFormatVersion) {
+    if (fileFormatVersion == null) {
+      return false;
+    }
+    String trimmed = fileFormatVersion.trim();
+    if (BLOB_V2_CAPABLE_SELECTORS.contains(trimmed.toLowerCase(Locale.ROOT))) {
+      return true;
+    }
+    String[] parts = trimmed.split("\\.");
+    try {
+      int major = Integer.parseInt(parts.length > 0 ? parts[0] : "");
+      int minor = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
+      return major > 2 || (major == 2 && minor >= 2);
+    } catch (NumberFormatException e) {
+      return false;
+    }
+  }
+
+  /**
+   * True when {@code fileFormatVersion} is an exact V2 format older than {@value
+   * #MIN_BLOB_V2_FILE_FORMAT_VERSION} (that is, {@code 2.0} or {@code 2.1}).
+   */
+  public static boolean isV2FormatBelowBlobV2(String fileFormatVersion) {
     if (fileFormatVersion == null) {
       return false;
     }
@@ -208,9 +339,109 @@ public class BlobUtils {
     try {
       int major = Integer.parseInt(parts.length > 0 ? parts[0] : "");
       int minor = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
-      return major > 2 || (major == 2 && minor >= 2);
+      return major == 2 && minor >= 0 && minor < 2;
     } catch (NumberFormatException e) {
       return false;
+    }
+  }
+
+  /**
+   * Returns true if {@code schema} contains any blob v2 field at top-level or nested inside a
+   * struct, array, or map.
+   */
+  public static boolean containsBlobV2SparkField(StructType schema) {
+    if (schema == null) {
+      return false;
+    }
+    for (StructField field : schema.fields()) {
+      if (isBlobV2SparkField(field) || containsBlobV2SparkDataType(field.dataType())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean containsBlobV2SparkDataType(DataType dataType) {
+    if (dataType instanceof StructType) {
+      return containsBlobV2SparkField((StructType) dataType);
+    }
+    if (dataType instanceof ArrayType) {
+      return containsBlobV2SparkDataType(((ArrayType) dataType).elementType());
+    }
+    if (dataType instanceof MapType) {
+      MapType mapType = (MapType) dataType;
+      return containsBlobV2SparkDataType(mapType.keyType())
+          || containsBlobV2SparkDataType(mapType.valueType());
+    }
+    return false;
+  }
+
+  /** Returns true if Arrow {@code schema} contains any blob v2 field at any nesting depth. */
+  public static boolean containsBlobV2ArrowField(Schema schema) {
+    if (schema == null || schema.getFields() == null) {
+      return false;
+    }
+    for (Field field : schema.getFields()) {
+      if (containsBlobV2ArrowField(field)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean containsBlobV2ArrowField(Field field) {
+    if (field == null) {
+      return false;
+    }
+    Map<String, String> metadata = field.getMetadata();
+    if (metadata != null
+        && ARROW_EXTENSION_BLOB_V2.equals(metadata.get(ARROW_EXTENSION_NAME_KEY))) {
+      return true;
+    }
+    if (field.getChildren() != null) {
+      for (Field child : field.getChildren()) {
+        if (containsBlobV2ArrowField(child)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Dot-separated paths of all blob v2 fields in {@code schema}, including fields nested inside
+   * structs, arrays, or maps.
+   */
+  public static Set<String> blobV2FieldPaths(StructType schema) {
+    Set<String> paths = new HashSet<>();
+    collectBlobV2FieldPaths(schema, "", paths);
+    return paths;
+  }
+
+  private static void collectBlobV2FieldPaths(StructType schema, String prefix, Set<String> paths) {
+    if (schema == null) {
+      return;
+    }
+    for (StructField field : schema.fields()) {
+      String path = prefix.isEmpty() ? field.name() : prefix + "." + field.name();
+      if (isBlobV2SparkField(field)) {
+        paths.add(path);
+      } else {
+        collectBlobV2DataTypePaths(field.dataType(), path, paths);
+      }
+    }
+  }
+
+  private static void collectBlobV2DataTypePaths(
+      DataType dataType, String prefix, Set<String> paths) {
+    if (dataType instanceof StructType) {
+      collectBlobV2FieldPaths((StructType) dataType, prefix, paths);
+    } else if (dataType instanceof ArrayType) {
+      collectBlobV2DataTypePaths(((ArrayType) dataType).elementType(), prefix + ".element", paths);
+    } else if (dataType instanceof MapType) {
+      MapType mapType = (MapType) dataType;
+      collectBlobV2DataTypePaths(mapType.keyType(), prefix + ".key", paths);
+      collectBlobV2DataTypePaths(mapType.valueType(), prefix + ".value", paths);
     }
   }
 }

@@ -17,6 +17,8 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -29,52 +31,47 @@ public class LanceStatisticsTest {
     assertEquals(50000, stats.sizeInBytes().getAsLong());
   }
 
-  @Test
-  public void testEstimatePostPruningScalesCorrectly() {
-    // 10 fragments, 3 survive → 30% of totals
-    LanceStatistics stats = LanceStatistics.estimatePostPruning(1000, 10000, 10, 3);
-    assertEquals(300, stats.numRows().getAsLong());
-    assertEquals(3000, stats.sizeInBytes().getAsLong());
+  @ParameterizedTest(name = "{index}: totalRows={0}, survivingRows={2}")
+  @CsvSource({
+    "1000020, 10000200, 20, 20, 200",
+    "0, 128, 0, 0, 128",
+    "100, 1000, 0, 0, 0",
+    "100, 1000, 100, 100, 1000"
+  })
+  public void testEstimatePostPruningByRows(
+      long totalRows,
+      long totalFilesSize,
+      long survivingRows,
+      long expectedRows,
+      long expectedSize) {
+    LanceStatistics stats =
+        LanceStatistics.estimatePostPruningByRows(totalRows, totalFilesSize, survivingRows);
+
+    assertEquals(expectedRows, stats.numRows().getAsLong());
+    assertEquals(expectedSize, stats.sizeInBytes().getAsLong());
   }
 
   @Test
-  public void testEstimatePostPruningSingleSurviveOfMany() {
-    // 100 fragments, 1 survives → 1% of totals
-    LanceStatistics stats = LanceStatistics.estimatePostPruning(10000, 100000, 100, 1);
+  public void testProjectionAppliesAfterRowWeightedPruning() {
+    LanceStatistics postPruning = LanceStatistics.estimatePostPruningByRows(1_000, 10_000, 100);
+    StructType full =
+        new StructType(
+            new StructField[] {
+              new StructField("a", DataTypes.LongType, true, null),
+              new StructField("b", DataTypes.LongType, true, null)
+            });
+    StructType projected =
+        new StructType(new StructField[] {new StructField("a", DataTypes.LongType, true, null)});
+
+    LanceStatistics stats =
+        LanceStatistics.estimateProjected(
+            postPruning.numRows().getAsLong(),
+            postPruning.sizeInBytes().getAsLong(),
+            full,
+            projected);
+
     assertEquals(100, stats.numRows().getAsLong());
-    assertEquals(1000, stats.sizeInBytes().getAsLong());
-  }
-
-  @Test
-  public void testEstimatePostPruningAllSurvive() {
-    // All fragments survive → full-table stats
-    LanceStatistics stats = LanceStatistics.estimatePostPruning(1000, 50000, 10, 10);
-    assertEquals(1000, stats.numRows().getAsLong());
-    assertEquals(50000, stats.sizeInBytes().getAsLong());
-  }
-
-  @Test
-  public void testEstimatePostPruningMoreThanTotalSurvive() {
-    // Edge case: surviving > total (shouldn't happen, but be safe) → full-table stats
-    LanceStatistics stats = LanceStatistics.estimatePostPruning(1000, 50000, 10, 15);
-    assertEquals(1000, stats.numRows().getAsLong());
-    assertEquals(50000, stats.sizeInBytes().getAsLong());
-  }
-
-  @Test
-  public void testEstimatePostPruningZeroSurvive() {
-    // Zero fragments survive → zero stats
-    LanceStatistics stats = LanceStatistics.estimatePostPruning(1000, 50000, 10, 0);
-    assertEquals(0, stats.numRows().getAsLong());
-    assertEquals(0, stats.sizeInBytes().getAsLong());
-  }
-
-  @Test
-  public void testEstimatePostPruningZeroTotalFragments() {
-    // Edge case: zero total fragments → returns full-table stats (guard against division by zero)
-    LanceStatistics stats = LanceStatistics.estimatePostPruning(1000, 50000, 0, 0);
-    assertEquals(1000, stats.numRows().getAsLong());
-    assertEquals(50000, stats.sizeInBytes().getAsLong());
+    assertEquals(500, stats.sizeInBytes().getAsLong());
   }
 
   @Test

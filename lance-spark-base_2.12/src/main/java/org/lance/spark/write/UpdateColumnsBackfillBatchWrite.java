@@ -19,8 +19,10 @@ import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.Transaction;
 import org.lance.fragment.FragmentUpdateResult;
+import org.lance.namespace.LanceNamespace;
 import org.lance.operation.Update;
 import org.lance.spark.LanceDataset;
+import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.utils.Utils;
@@ -33,6 +35,7 @@ import org.apache.spark.sql.connector.write.DataWriterFactory;
 import org.apache.spark.sql.connector.write.PhysicalWriteInfo;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -73,6 +76,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
 
   private final Map<String, String> namespaceProperties;
   private final List<String> tableId;
+  private final boolean managedVersioning;
 
   public UpdateColumnsBackfillBatchWrite(
       StructType schema,
@@ -81,18 +85,19 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
       Map<String, String> initialStorageOptions,
       String namespaceImpl,
       Map<String, String> namespaceProperties,
-      List<String> tableId) {
-    this.schema = schema;
+      List<String> tableId,
+      boolean managedVersioning) {
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
-      this.writeOptions = writeOptions.withVersion(ds.version());
-      logger.debug(
-          "Resolved dataset version for UPDATE COLUMNS: {}", this.writeOptions.getVersion());
+      this.schema = LanceArrowUtils.markUnsignedForWrite(schema, ds.getSchema());
+      this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
+      logger.debug("Resolved dataset ref for UPDATE COLUMNS: {}", this.writeOptions.getRef());
     }
     this.updateColumns = updateColumns;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
     this.namespaceProperties = namespaceProperties;
     this.tableId = tableId;
+    this.managedVersioning = managedVersioning;
   }
 
   @Override
@@ -163,19 +168,33 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
               .build();
       long version =
           Objects.requireNonNull(
-              writeOptions.getVersion(),
-              "version must be set (resolved in UpdateColumnsBackfillBatchWrite constructor)");
+                  writeOptions.getRef(),
+                  "ref must be set (resolved in UpdateColumnsBackfillBatchWrite constructor)")
+              .getVersionNumber()
+              .get();
       CommitBuilder commitBuilder =
           new CommitBuilder(dataset)
               .writeParams(
                   LanceRuntime.mergeStorageOptions(
                       writeOptions.getStorageOptions(), initialStorageOptions));
-      String fileFormatVersion = writeOptions.getFileFormatVersion();
-      if (fileFormatVersion != null) {
-        commitBuilder.storageFormat(fileFormatVersion);
+      String explicitFileFormatVersion = writeOptions.getExplicitFileFormatVersion();
+      if (explicitFileFormatVersion != null) {
+        commitBuilder.storageFormat(explicitFileFormatVersion);
+      }
+      if (managedVersioning) {
+        LanceNamespace namespace =
+            LanceRuntime.getOrCreateNamespace(namespaceImpl, namespaceProperties);
+        commitBuilder
+            .namespaceClient(namespace)
+            .tableId(tableId)
+            .namespaceClientManagedVersioning(true);
       }
       try (Transaction txn =
-              new Transaction.Builder().readVersion(version).operation(update).build();
+              new Transaction.Builder()
+                  .readVersion(version)
+                  .operation(update)
+                  .transactionProperties(writeOptions.getTransactionProperties())
+                  .build();
           Dataset committed = commitBuilder.execute(txn)) {
         // auto-close txn and committed dataset
       }

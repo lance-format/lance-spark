@@ -19,13 +19,13 @@ import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
 import org.lance.ipc.ScanStats;
 import org.lance.spark.LanceConstant;
-import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.vector.ipc.ArrowReader;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
@@ -41,16 +41,9 @@ public class LanceFragmentScanner implements AutoCloseable {
   private final Dataset dataset;
   private final LanceScanner scanner;
   private final int fragmentId;
-  private final boolean withFragmentId;
   private final LanceInputPartition inputPartition;
   private final long datasetOpenTimeNs;
   private final long scannerCreateTimeNs;
-
-  /**
-   * Whether the scanner requested _rowaddr for blob reference support. When true, the _rowaddr
-   * column in the Arrow batch was implicitly added and should be stripped from user-visible output.
-   */
-  private final boolean withRowAddrForBlobs;
 
   /** The names of blob columns in the projected schema. */
   private final Set<String> blobColumnNames;
@@ -59,20 +52,16 @@ public class LanceFragmentScanner implements AutoCloseable {
       Dataset dataset,
       LanceScanner scanner,
       int fragmentId,
-      boolean withFragmentId,
       LanceInputPartition inputPartition,
       long datasetOpenTimeNs,
       long scannerCreateTimeNs,
-      boolean withRowAddrForBlobs,
       Set<String> blobColumnNames) {
     this.dataset = dataset;
     this.scanner = scanner;
     this.fragmentId = fragmentId;
-    this.withFragmentId = withFragmentId;
     this.inputPartition = inputPartition;
     this.datasetOpenTimeNs = datasetOpenTimeNs;
     this.scannerCreateTimeNs = scannerCreateTimeNs;
-    this.withRowAddrForBlobs = withRowAddrForBlobs;
     this.blobColumnNames = blobColumnNames;
   }
 
@@ -81,15 +70,6 @@ public class LanceFragmentScanner implements AutoCloseable {
     LanceScanner lanceScanner = null;
     try {
       LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
-      if (inputPartition.getNamespaceImpl() != null && readOptions.isExecutorCredentialRefresh()) {
-        if (LanceRuntime.useNamespaceOnWorkers(inputPartition.getNamespaceImpl())) {
-          readOptions.setNamespace(
-              LanceRuntime.getOrCreateNamespace(
-                  inputPartition.getNamespaceImpl(), inputPartition.getNamespaceProperties()));
-        } else {
-          readOptions.setNamespace(null);
-        }
-      }
       long dsOpenStart = System.nanoTime();
       dataset =
           Utils.openDatasetBuilder(readOptions)
@@ -101,7 +81,7 @@ public class LanceFragmentScanner implements AutoCloseable {
         throw new IllegalStateException(
             String.format(
                 "Fragment %d not found in dataset at %s (version=%s)",
-                fragmentId, readOptions.getDatasetUri(), readOptions.getVersion()));
+                fragmentId, readOptions.getDatasetUri(), readOptions.getRef()));
       }
       ScanOptions.Builder scanOptions = new ScanOptions.Builder();
 
@@ -110,6 +90,10 @@ public class LanceFragmentScanner implements AutoCloseable {
       boolean hasBlobColumns = !blobColumnNames.isEmpty();
 
       List<String> projectedColumns = getColumnNames(scanSchema);
+      if (readOptions.getFullTextQuery() != null
+          && Arrays.stream(scanSchema.fields()).anyMatch(Utils::isScoreMetadataColumn)) {
+        projectedColumns.add(LanceConstant.SCORE);
+      }
       if (projectedColumns.isEmpty() && scanSchema.isEmpty()) {
         scanOptions.withRowId(true);
       }
@@ -119,7 +103,6 @@ public class LanceFragmentScanner implements AutoCloseable {
 
       // Request _rowaddr when blob columns are present so we can build blob references.
       boolean userRequestedRowAddr = hasField(scanSchema, LanceConstant.ROW_ADDRESS);
-      boolean withRowAddrForBlobs = hasBlobColumns && !userRequestedRowAddr;
       if (hasBlobColumns || userRequestedRowAddr) {
         scanOptions.withRowAddress(true);
       }
@@ -131,6 +114,8 @@ public class LanceFragmentScanner implements AutoCloseable {
       scanOptions.batchSize(readOptions.getBatchSize());
       if (readOptions.getFullTextQuery() != null) {
         scanOptions.fullTextQuery(readOptions.getFullTextQuery());
+        scanOptions.prefilter(true);
+        scanOptions.disableScoringAutoprojection(true);
       }
       scanOptions.useScalarIndex(readOptions.isUseScalarIndex());
       if (inputPartition.getLimit().isPresent()) {
@@ -146,7 +131,6 @@ public class LanceFragmentScanner implements AutoCloseable {
       // Collect scan stats
       scanOptions.collectStats(true);
 
-      boolean withFragmentId = scanSchema.getFieldIndex(LanceConstant.FRAGMENT_ID).nonEmpty();
       long scanCreateStart = System.nanoTime();
       lanceScanner = fragment.newScan(scanOptions.build());
       long scanCreateTimeNs = System.nanoTime() - scanCreateStart;
@@ -154,11 +138,9 @@ public class LanceFragmentScanner implements AutoCloseable {
           dataset,
           lanceScanner,
           fragmentId,
-          withFragmentId,
           inputPartition,
           dsOpenTimeNs,
           scanCreateTimeNs,
-          withRowAddrForBlobs,
           blobColumnNames);
     } catch (Throwable throwable) {
       if (lanceScanner != null) {
@@ -184,6 +166,27 @@ public class LanceFragmentScanner implements AutoCloseable {
    */
   public ArrowReader getArrowReader() {
     return scanner.scanBatches();
+  }
+
+  /**
+   * Exports this fragment scan into a caller-owned Arrow C Data Interface stream. The Lance native
+   * side populates the {@code ArrowArrayStream} at {@code streamAddress} directly, so only the
+   * C-struct address crosses the JVM/native boundary. The caller owns the stream and must close it
+   * (which releases the native scan via the stream's release callback); the scanner and dataset
+   * held by this object are released separately by {@link #close()}.
+   *
+   * @param streamAddress the memory address of a freshly-allocated, empty {@code ArrowArrayStream}
+   */
+  public void exportArrowStream(long streamAddress) throws IOException {
+    scanner.exportArrowStream(streamAddress);
+  }
+
+  /**
+   * @return the Arrow schema the native scan produces, including row IDs or addresses requested
+   *     internally for empty projections and blob references
+   */
+  public Schema schema() {
+    return scanner.schema();
   }
 
   @Override
@@ -225,10 +228,6 @@ public class LanceFragmentScanner implements AutoCloseable {
     return fragmentId;
   }
 
-  public boolean withFragmentId() {
-    return withFragmentId;
-  }
-
   public LanceInputPartition getInputPartition() {
     return inputPartition;
   }
@@ -239,11 +238,6 @@ public class LanceFragmentScanner implements AutoCloseable {
 
   public long getScannerCreateTimeNs() {
     return scannerCreateTimeNs;
-  }
-
-  /** Whether the scanner implicitly requested _rowaddr for blob reference support. */
-  public boolean isWithRowAddrForBlobs() {
-    return withRowAddrForBlobs;
   }
 
   /** Returns the blob column names in the projected schema. */
@@ -274,6 +268,7 @@ public class LanceFragmentScanner implements AutoCloseable {
 
     List<String> columns =
         Arrays.stream(schema.fields())
+            .filter(field -> !Utils.isScoreMetadataColumn(field))
             .map(StructField::name)
             .filter(
                 name ->
@@ -282,10 +277,17 @@ public class LanceFragmentScanner implements AutoCloseable {
                         && !name.equals(LanceConstant.ROW_ADDRESS)
                         && !name.equals(LanceConstant.ROW_CREATED_AT_VERSION)
                         && !name.equals(LanceConstant.ROW_LAST_UPDATED_AT_VERSION)
-                        && !name.equals(LanceConstant.SCORE)
                         && !name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)
                         && !name.endsWith(LanceConstant.BLOB_SIZE_SUFFIX))
             .collect(Collectors.toList());
+    // Blob v1 virtual columns are derived from their base blob column, so scan the base column even
+    // when the query only projects the virtual columns.
+    for (StructField field : schema.fields()) {
+      String baseName = BlobUtils.blobV1VirtualColumnBaseName(field.name());
+      if (baseName != null && !columns.contains(baseName)) {
+        columns.add(baseName);
+      }
+    }
     if (schemaFields.contains(LanceConstant.ROW_LAST_UPDATED_AT_VERSION)) {
       columns.add(LanceConstant.ROW_LAST_UPDATED_AT_VERSION);
     }

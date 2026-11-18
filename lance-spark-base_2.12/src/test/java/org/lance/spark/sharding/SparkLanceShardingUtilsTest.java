@@ -13,16 +13,22 @@
  */
 package org.lance.spark.sharding;
 
+import org.lance.index.scalar.ZoneStats;
 import org.lance.memwal.ShardingField;
 import org.lance.memwal.ShardingSpec;
 
 import org.apache.spark.sql.connector.expressions.Expressions;
 import org.apache.spark.sql.connector.expressions.FieldReference;
+import org.apache.spark.sql.connector.expressions.NamedReference;
 import org.apache.spark.sql.connector.expressions.Transform;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -95,6 +101,32 @@ public class SparkLanceShardingUtilsTest {
   }
 
   @Test
+  public void testNestedShardingColumnKeepsFieldPath() {
+    String[] path = new String[] {"parent", "child"};
+    ShardingField identity =
+        SparkLanceShardingUtils.fromSparkTransforms(
+                new Transform[] {Expressions.identity("parent.child")})
+            .fields()
+            .get(0);
+    assertArrayEquals(
+        path,
+        ((NamedReference) SparkLanceShardingUtils.toSparkExpression(identity, null)).fieldNames());
+    assertArrayEquals(path, SparkLanceShardingUtils.toClusteringRef(identity, null).fieldNames());
+    assertArrayEquals(
+        path,
+        ((NamedReference) SparkLanceShardingUtils.toSortOrder(identity, null).expression())
+            .fieldNames());
+
+    ShardingField bucket =
+        SparkLanceShardingUtils.fromSparkTransforms(
+                new Transform[] {Expressions.bucket(4, "parent.child")})
+            .fields()
+            .get(0);
+    Transform transform = (Transform) SparkLanceShardingUtils.toSparkExpression(bucket, null);
+    assertArrayEquals(path, transform.references()[0].fieldNames());
+  }
+
+  @Test
   public void testSourceIdBackedFieldRequiresLanceSchema() {
     ShardingField field =
         new ShardingField(
@@ -110,5 +142,90 @@ public class SparkLanceShardingUtilsTest {
             IllegalArgumentException.class,
             () -> SparkLanceShardingUtils.toSparkExpression(field, null));
     assertTrue(error.getMessage().contains("requires Lance schema"));
+  }
+
+  @Test
+  public void testDetectFragmentKeysRequiresFullLiveCoverage() {
+    ShardingField field =
+        SparkLanceShardingUtils.fromSparkTransforms(
+                new Transform[] {Expressions.identity("region")})
+            .fields()
+            .get(0);
+    List<ZoneStats> zones =
+        Arrays.asList(
+            new ZoneStats(0, 0, 10, "east", "east", 0), new ZoneStats(1, 0, 10, "west", "west", 0));
+
+    Optional<Map<Integer, Object>> keys =
+        SparkLanceShardingUtils.detectFragmentKeys(field, null, zones, Set.of(0, 1));
+
+    assertTrue(keys.isPresent());
+    assertEquals(Map.of(0, "east", 1, "west"), keys.get());
+  }
+
+  @Test
+  public void testDetectFragmentKeysRejectsPartialLiveCoverage() {
+    ShardingField field =
+        SparkLanceShardingUtils.fromSparkTransforms(
+                new Transform[] {Expressions.identity("region")})
+            .fields()
+            .get(0);
+    List<ZoneStats> zones = Collections.singletonList(new ZoneStats(0, 0, 10, "east", "east", 0));
+
+    Optional<Map<Integer, Object>> keys =
+        SparkLanceShardingUtils.detectFragmentKeys(field, null, zones, Set.of(0, 1));
+
+    assertFalse(keys.isPresent());
+  }
+
+  @Test
+  public void testDetectFragmentKeysIgnoresRetiredFragmentStats() {
+    ShardingField field =
+        SparkLanceShardingUtils.fromSparkTransforms(
+                new Transform[] {Expressions.identity("region")})
+            .fields()
+            .get(0);
+    List<ZoneStats> zones =
+        Arrays.asList(
+            new ZoneStats(0, 0, 10, "east", "east", 0),
+            new ZoneStats(9, 0, 10, "retired", "retired", 0));
+
+    Optional<Map<Integer, Object>> keys =
+        SparkLanceShardingUtils.detectFragmentKeys(field, null, zones, Set.of(0));
+
+    assertTrue(keys.isPresent());
+    assertEquals(Collections.singletonMap(0, "east"), keys.get());
+  }
+
+  @Test
+  public void testDetectFragmentKeysRejectsRangeWithinFragment() {
+    ShardingField field =
+        SparkLanceShardingUtils.fromSparkTransforms(
+                new Transform[] {Expressions.identity("region")})
+            .fields()
+            .get(0);
+    List<ZoneStats> zones = Collections.singletonList(new ZoneStats(0, 0, 10, "east", "west", 0));
+
+    Optional<Map<Integer, Object>> keys =
+        SparkLanceShardingUtils.detectFragmentKeys(field, null, zones, Set.of(0));
+
+    assertFalse(keys.isPresent());
+  }
+
+  @Test
+  public void testDetectFragmentKeysRejectsDifferentZoneValuesWithinFragment() {
+    ShardingField field =
+        SparkLanceShardingUtils.fromSparkTransforms(
+                new Transform[] {Expressions.identity("region")})
+            .fields()
+            .get(0);
+    List<ZoneStats> zones =
+        Arrays.asList(
+            new ZoneStats(0, 0, 10, "east", "east", 0),
+            new ZoneStats(0, 10, 10, "west", "west", 0));
+
+    Optional<Map<Integer, Object>> keys =
+        SparkLanceShardingUtils.detectFragmentKeys(field, null, zones, Set.of(0));
+
+    assertFalse(keys.isPresent());
   }
 }

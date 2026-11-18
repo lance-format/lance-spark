@@ -21,11 +21,13 @@ import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
 import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.Utils;
+import org.lance.spark.write.metric.LanceWriteMetrics;
 
 import org.apache.spark.sql.connector.distributions.Distribution;
 import org.apache.spark.sql.connector.distributions.Distributions;
 import org.apache.spark.sql.connector.expressions.NamedReference;
 import org.apache.spark.sql.connector.expressions.SortOrder;
+import org.apache.spark.sql.connector.metric.CustomMetric;
 import org.apache.spark.sql.connector.write.BatchWrite;
 import org.apache.spark.sql.connector.write.RequiresDistributionAndOrdering;
 import org.apache.spark.sql.connector.write.SupportsTruncate;
@@ -145,6 +147,11 @@ public class SparkWrite implements Write, RequiresDistributionAndOrdering {
     return SparkLanceShardingUtils.fields(spec).stream()
         .map(field -> SparkLanceShardingUtils.toSortOrder(field, cachedLanceSchema))
         .toArray(SortOrder[]::new);
+  }
+
+  @Override
+  public CustomMetric[] supportedCustomMetrics() {
+    return LanceWriteMetrics.allMetrics();
   }
 
   @Override

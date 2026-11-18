@@ -14,17 +14,24 @@
 package org.lance.spark;
 
 import org.lance.spark.utils.BlobUtils;
+import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.MetadataBuilder;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+import static org.apache.spark.sql.functions.lit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -483,7 +490,7 @@ public abstract class BaseBlobV2CopyTest extends AbstractBlobV2CopyTest {
         .createDataFrame(Collections.singletonList(row(1, newBytes)), idDataBinarySchema())
         .coalesce(1)
         .writeTo(fqSrc)
-        .overwrite(org.apache.spark.sql.functions.lit(true));
+        .overwrite(lit(true));
     createV2BlobTable(fqTgt);
     try {
       spark.sql(
@@ -544,7 +551,7 @@ public abstract class BaseBlobV2CopyTest extends AbstractBlobV2CopyTest {
     createV2BlobSource(fqSrc, row(1, blobs[0]));
     createV2BlobSource(fqTgt, row(9, deterministicBlob(114, 16)));
     try {
-      spark.table(fqSrc).writeTo(fqTgt).overwrite(org.apache.spark.sql.functions.lit(true));
+      spark.table(fqSrc).writeTo(fqTgt).overwrite(lit(true));
       assertEquals(1, spark.sql("SELECT * FROM " + fqTgt).count());
       assertTargetBlobBytes(datasetUriOf(tgt), rowAddressesOf(fqTgt), blobs);
     } finally {
@@ -840,6 +847,10 @@ public abstract class BaseBlobV2CopyTest extends AbstractBlobV2CopyTest {
     }
   }
 
+  /**
+   * Covers the release selector path: `stable` resolves to 2.2, so the source is a blob v2 table.
+   * Dedicated v1 source coverage lives in {@link #v1BlobSourceIntoV2Target_copiesBlobBytes()}.
+   */
   @Test
   public void namedVersionSourceIntoV2Target_copiesBlobBytes() throws Exception {
     String src = "v2_e2e_namedver_src_" + System.currentTimeMillis();
@@ -883,6 +894,246 @@ public abstract class BaseBlobV2CopyTest extends AbstractBlobV2CopyTest {
     } finally {
       spark.sql("DROP TABLE IF EXISTS " + fqSrc);
       spark.sql("DROP TABLE IF EXISTS " + fqTgt);
+    }
+  }
+
+  @Test
+  public void promotedBlobV2TableAtFormat21_supportsDefaultAppendOverwriteReplaceAndCompaction()
+      throws Exception {
+    String tgt = "v2_prom_top_" + System.currentTimeMillis();
+    String src = "v2_prom_top_src_" + System.currentTimeMillis();
+    String fqTgt = fq(tgt);
+    String fqSrc = fq(src);
+    byte[] blob1 = deterministicBlob(181, 32);
+    byte[] blob2 = deterministicBlob(182, 32);
+    byte[] blob3 = deterministicBlob(183, 32);
+    byte[] blob4 = deterministicBlob(184, 32);
+    byte[] blob5 = deterministicBlob(185, 32);
+    byte[] blob6 = deterministicBlob(186, 32);
+    createV2BlobSource(fqSrc, row(5, blob5), row(6, blob6));
+    spark.sql(
+        "CREATE TABLE "
+            + fqTgt
+            + " (id INT NOT NULL, data BINARY) USING lance TBLPROPERTIES ("
+            + "'data.lance.encoding' = 'blob', 'file_format_version' = '2.1')");
+    try {
+      spark
+          .createDataFrame(Collections.singletonList(row(1, blob1)), idDataBinarySchema())
+          .coalesce(1)
+          .writeTo(fqTgt)
+          .append();
+      spark
+          .createDataFrame(Collections.singletonList(row(2, blob2)), idDataBinarySchema())
+          .coalesce(1)
+          .writeTo(fqTgt)
+          .option("file_format_version", "2.2")
+          .append();
+
+      String uri = datasetUriOf(tgt);
+      assertTrue(BlobUtils.hasBlobV2Fields(spark.table(fqTgt).schema()));
+      assertDatasetDefaultFormatVersion("2.1", uri);
+
+      spark
+          .createDataFrame(Collections.singletonList(row(3, blob3)), idDataBinarySchema())
+          .coalesce(1)
+          .writeTo(fqTgt)
+          .append();
+
+      Row opt = spark.sql("OPTIMIZE " + fqTgt + " WITH (target_rows_per_fragment = 1000)").first();
+      assertTrue(
+          opt.getAs("fragments_removed") != null && opt.<Long>getAs("fragments_removed") > 0);
+      assertDatasetDefaultFormatVersion("2.1", uri);
+      assertAllPhysicalDataFilesAtVersion(2, 2, uri);
+      assertTargetBlobBytes(uri, rowAddressesOf(fqTgt), new byte[][] {blob1, blob2, blob3});
+
+      // INSERT OVERWRITE (non-empty) writes 2.2 fragments while keeping dataset default at 2.1.
+      spark
+          .createDataFrame(Collections.singletonList(row(4, blob4)), idDataBinarySchema())
+          .coalesce(1)
+          .writeTo(fqTgt)
+          .overwrite(lit(true));
+      assertDatasetDefaultFormatVersion("2.1", uri);
+      assertAllPhysicalDataFilesAtVersion(2, 2, uri);
+      assertTargetBlobBytes(uri, rowAddressesOf(fqTgt), new byte[][] {blob4});
+
+      // Empty INSERT OVERWRITE truncates without bumping dataset default from 2.1 to 2.2.
+      spark.sql("INSERT OVERWRITE " + fqTgt + " SELECT id, data FROM " + fqSrc + " WHERE 1 = 0");
+      assertEquals(0L, spark.table(fqTgt).count());
+      assertDatasetDefaultFormatVersion("2.1", uri);
+
+      // REPLACE TABLE and CREATE OR REPLACE TABLE without explicit file_format_version keep 2.1.
+      spark.sql(
+          "REPLACE TABLE "
+              + fqTgt
+              + " USING lance AS SELECT id, data FROM "
+              + fqSrc
+              + " WHERE id = 5");
+      assertDatasetDefaultFormatVersion("2.1", uri);
+      assertAllPhysicalDataFilesAtVersion(2, 2, uri);
+      assertTargetBlobBytes(uri, rowAddressesOf(fqTgt), new byte[][] {blob5});
+
+      spark.sql(
+          "CREATE OR REPLACE TABLE "
+              + fqTgt
+              + " USING lance AS SELECT id, data FROM "
+              + fqSrc
+              + " WHERE id = 6");
+      assertDatasetDefaultFormatVersion("2.1", uri);
+      assertAllPhysicalDataFilesAtVersion(2, 2, uri);
+      assertTargetBlobBytes(uri, rowAddressesOf(fqTgt), new byte[][] {blob6});
+
+      // Explicit file_format_version on REPLACE TABLE still updates the dataset default.
+      spark.sql(
+          "REPLACE TABLE "
+              + fqTgt
+              + " USING lance TBLPROPERTIES ('file_format_version' = '2.2')"
+              + " AS SELECT id, data FROM "
+              + fqSrc);
+      assertDatasetDefaultFormatVersion("2.2", uri);
+      assertTargetBlobBytes(uri, rowAddressesOf(fqTgt), new byte[][] {blob5, blob6});
+    } finally {
+      spark.sql("DROP TABLE IF EXISTS " + fqSrc);
+      spark.sql("DROP TABLE IF EXISTS " + fqTgt);
+    }
+  }
+
+  @Test
+  public void promotedNestedBlobV2TableAtFormat21_supportsAppendOverwriteReplaceAndCompaction()
+      throws Exception {
+    String tgt = "v2_prom_nested_" + System.currentTimeMillis();
+    String fqTgt = fq(tgt);
+    byte[] blob1 = deterministicBlob(191, 32);
+    byte[] blob2 = deterministicBlob(192, 32);
+    byte[] blob3 = deterministicBlob(193, 32);
+    byte[] blob4 = deterministicBlob(194, 32);
+    byte[] blob5 = deterministicBlob(195, 32);
+    byte[] blob6 = deterministicBlob(196, 32);
+    Metadata v1BlobMeta =
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build();
+    StructType nestedV1Schema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.IntegerType, false),
+              DataTypes.createStructField(
+                  "payload",
+                  new StructType(
+                      new StructField[] {
+                        new StructField("data", DataTypes.BinaryType, true, v1BlobMeta)
+                      }),
+                  true)
+            });
+    try {
+      spark
+          .createDataFrame(
+              Collections.singletonList(RowFactory.create(1, RowFactory.create((Object) blob1))),
+              nestedV1Schema)
+          .coalesce(1)
+          .writeTo(fqTgt)
+          .using("lance")
+          .tableProperty("file_format_version", "2.1")
+          .create();
+      spark
+          .createDataFrame(
+              Collections.singletonList(RowFactory.create(2, RowFactory.create((Object) blob2))),
+              spark.table(fqTgt).schema())
+          .coalesce(1)
+          .writeTo(fqTgt)
+          .option("file_format_version", "2.2")
+          .append();
+
+      String uri = datasetUriOf(tgt);
+      StructType promotedSchema = spark.table(fqTgt).schema();
+      assertTrue(BlobUtils.containsBlobV2SparkField(promotedSchema));
+      assertDatasetDefaultFormatVersion("2.1", uri);
+
+      spark
+          .createDataFrame(
+              Collections.singletonList(RowFactory.create(3, RowFactory.create((Object) blob3))),
+              promotedSchema)
+          .coalesce(1)
+          .writeTo(fqTgt)
+          .append();
+
+      Row opt = spark.sql("OPTIMIZE " + fqTgt + " WITH (target_rows_per_fragment = 1000)").first();
+      assertTrue(opt.<Long>getAs("fragments_removed") > 0);
+      assertDatasetDefaultFormatVersion("2.1", uri);
+      assertAllPhysicalDataFilesAtVersion(2, 2, uri);
+      assertTargetBlobBytes(
+          uri, rowAddressesOf(fqTgt), "payload.data", new byte[][] {blob1, blob2, blob3});
+
+      // Overwrite (non-empty and empty) on nested Blob v2 preserves dataset default 2.1.
+      spark
+          .createDataFrame(
+              Collections.singletonList(RowFactory.create(4, RowFactory.create((Object) blob4))),
+              promotedSchema)
+          .coalesce(1)
+          .writeTo(fqTgt)
+          .overwrite(lit(true));
+      assertDatasetDefaultFormatVersion("2.1", uri);
+      assertAllPhysicalDataFilesAtVersion(2, 2, uri);
+      assertTargetBlobBytes(uri, rowAddressesOf(fqTgt), "payload.data", new byte[][] {blob4});
+
+      spark
+          .createDataFrame(Collections.emptyList(), promotedSchema)
+          .writeTo(fqTgt)
+          .overwrite(lit(true));
+      assertEquals(0L, spark.table(fqTgt).count());
+      assertDatasetDefaultFormatVersion("2.1", uri);
+
+      // Staged replace() and createOrReplace() on nested Blob v2 preserve dataset default 2.1.
+      spark
+          .createDataFrame(
+              Collections.singletonList(RowFactory.create(5, RowFactory.create((Object) blob5))),
+              promotedSchema)
+          .coalesce(1)
+          .writeTo(fqTgt)
+          .using("lance")
+          .replace();
+      assertDatasetDefaultFormatVersion("2.1", uri);
+      assertAllPhysicalDataFilesAtVersion(2, 2, uri);
+      assertTargetBlobBytes(uri, rowAddressesOf(fqTgt), "payload.data", new byte[][] {blob5});
+
+      spark
+          .createDataFrame(
+              Collections.singletonList(RowFactory.create(6, RowFactory.create((Object) blob6))),
+              promotedSchema)
+          .coalesce(1)
+          .writeTo(fqTgt)
+          .using("lance")
+          .createOrReplace();
+      assertDatasetDefaultFormatVersion("2.1", uri);
+      assertAllPhysicalDataFilesAtVersion(2, 2, uri);
+      assertTargetBlobBytes(uri, rowAddressesOf(fqTgt), "payload.data", new byte[][] {blob6});
+    } finally {
+      spark.sql("DROP TABLE IF EXISTS " + fqTgt);
+    }
+  }
+
+  private static void assertDatasetDefaultFormatVersion(String expected, String datasetUri) {
+    try (org.lance.Dataset ds =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(datasetUri)).build()) {
+      assertEquals(expected, ds.getLanceFileFormatVersion());
+    }
+  }
+
+  private static void assertAllPhysicalDataFilesAtVersion(
+      int expectedMajor, int expectedMinor, String datasetUri) {
+    try (org.lance.Dataset ds =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(datasetUri)).build()) {
+      assertFalse(ds.getFragments().isEmpty(), "expected at least one fragment");
+      ds.getFragments()
+          .forEach(
+              fragment ->
+                  fragment
+                      .metadata()
+                      .getFiles()
+                      .forEach(
+                          file -> {
+                            assertEquals(expectedMajor, file.getFileMajorVersion());
+                            assertEquals(expectedMinor, file.getFileMinorVersion());
+                          }));
     }
   }
 }

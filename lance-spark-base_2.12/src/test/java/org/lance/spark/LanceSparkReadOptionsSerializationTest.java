@@ -61,18 +61,80 @@ public class LanceSparkReadOptionsSerializationTest {
   }
 
   @Test
-  public void testWithVersionPropagatesFullTextQuery() {
+  public void testWithRefPropagatesFullTextQuery() {
     FullTextQuery fts = FullTextQuery.phrase("quick brown fox", "body", 1);
     LanceSparkReadOptions options =
         LanceSparkReadOptions.builder().datasetUri("s3://bucket/path").fullTextQuery(fts).build();
 
-    LanceSparkReadOptions versioned = options.withVersion(42);
+    LanceSparkReadOptions versioned = options.withRef(LanceRef.ofMain(42));
     Assertions.assertNotNull(
-        versioned.getFullTextQuery(), "fullTextQuery must not be dropped by withVersion()");
-    Assertions.assertEquals(42, versioned.getVersion());
+        versioned.getFullTextQuery(), "fullTextQuery must not be dropped by withRef()");
+    Assertions.assertEquals(42, versioned.getRef().getVersionNumber().get());
     Assertions.assertTrue(
         org.lance.spark.utils.FullTextQueryUtils.equals(
             options.getFullTextQuery(), versioned.getFullTextQuery()));
+  }
+
+  @Test
+  public void testFromOptionsParsesBranch() {
+    for (String key : Arrays.asList("branch", "BrAnCh")) {
+      LanceSparkReadOptions options =
+          LanceSparkReadOptions.from(Collections.singletonMap(key, "audit"), "s3://bucket/path");
+      Assertions.assertEquals(LanceRef.ofBranch("audit"), options.getRef());
+    }
+  }
+
+  @Test
+  public void testFromOptionsParsesTag() {
+    for (String key : Arrays.asList("tag", "TaG", "TAG")) {
+      Map<String, String> properties = new HashMap<>();
+      properties.put(key, "stable");
+      properties.put("CustomStorageKey", "value");
+      LanceSparkReadOptions options = LanceSparkReadOptions.from(properties, "s3://bucket/path");
+      Assertions.assertEquals(LanceRef.ofTag("stable"), options.getRef());
+      Assertions.assertEquals(properties, options.getStorageOptions());
+    }
+  }
+
+  @Test
+  public void testFromOptionsParsesMixedCaseVersion() {
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.from(Collections.singletonMap("VeRsIoN", "2"), "s3://bucket/path");
+    Assertions.assertEquals(LanceRef.ofMain(2), options.getRef());
+  }
+
+  @Test
+  public void testFromOptionsRejectsEmptyOrConflictingTag() {
+    Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            LanceSparkReadOptions.from(
+                Collections.singletonMap(LanceSparkReadOptions.CONFIG_TAG, ""),
+                "s3://bucket/path"));
+    for (String tag : Arrays.asList("tag", "TaG")) {
+      for (String other : Arrays.asList("branch", "BrAnCh", "version", "VERSION")) {
+        Map<String, String> options = new HashMap<>();
+        options.put(tag, "stable");
+        options.put(other, "2");
+        Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> LanceSparkReadOptions.from(options, "s3://bucket/path"));
+      }
+    }
+  }
+
+  @Test
+  public void testFromOptionsRejectsBranchAndVersion() {
+    Map<String, String> options = new HashMap<>();
+    options.put(LanceSparkReadOptions.CONFIG_BRANCH, "audit");
+    options.put(LanceSparkReadOptions.CONFIG_VERSION, "2");
+
+    IllegalArgumentException exception =
+        Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> LanceSparkReadOptions.from(options, "s3://bucket/path"));
+    Assertions.assertTrue(exception.getMessage().contains("branch"));
+    Assertions.assertTrue(exception.getMessage().contains("version"));
   }
 
   @Test
@@ -125,15 +187,15 @@ public class LanceSparkReadOptionsSerializationTest {
   }
 
   @Test
-  public void testWithVersionPropagatesMultiMatchQuery() {
+  public void testWithRefPropagatesMultiMatchQuery() {
     FullTextQuery fts = FullTextQuery.multiMatch("quick fox", Arrays.asList("title", "body"));
     LanceSparkReadOptions options =
         LanceSparkReadOptions.builder().datasetUri("s3://bucket/path").fullTextQuery(fts).build();
 
-    LanceSparkReadOptions versioned = options.withVersion(7);
+    LanceSparkReadOptions versioned = options.withRef(LanceRef.ofMain(7));
     Assertions.assertNotNull(
-        versioned.getFullTextQuery(), "fullTextQuery must not be dropped by withVersion()");
-    Assertions.assertEquals(7, versioned.getVersion());
+        versioned.getFullTextQuery(), "fullTextQuery must not be dropped by withRef()");
+    Assertions.assertEquals(7, versioned.getRef().getVersionNumber().get());
     Assertions.assertTrue(
         org.lance.spark.utils.FullTextQueryUtils.equals(
             options.getFullTextQuery(), versioned.getFullTextQuery()));
@@ -188,6 +250,40 @@ public class LanceSparkReadOptionsSerializationTest {
     Assertions.assertTrue(
         options.isExecutorCredentialRefresh(),
         "executor_credential_refresh must default to true to preserve existing behavior");
+  }
+
+  @Test
+  public void testRuntimeFilterGuardrailDefaultsAndOverrides() {
+    LanceSparkReadOptions defaults =
+        LanceSparkReadOptions.builder().datasetUri("s3://bucket/path").build();
+    Assertions.assertEquals(100_000, defaults.getRuntimeFilterMaxKeys());
+    Assertions.assertEquals(4_194_304, defaults.getRuntimeFilterMaxBytes());
+
+    Map<String, String> configured = new HashMap<>();
+    configured.put(LanceSparkReadOptions.CONFIG_RUNTIME_FILTER_MAX_KEYS, "25");
+    configured.put(LanceSparkReadOptions.CONFIG_RUNTIME_FILTER_MAX_BYTES, "4096");
+    LanceSparkReadOptions overrides = LanceSparkReadOptions.from(configured, "s3://bucket/path");
+    Assertions.assertEquals(25, overrides.getRuntimeFilterMaxKeys());
+    Assertions.assertEquals(4096, overrides.getRuntimeFilterMaxBytes());
+
+    LanceSparkReadOptions pinned = overrides.withRef(LanceRef.ofMain(3));
+    Assertions.assertEquals(25, pinned.getRuntimeFilterMaxKeys());
+    Assertions.assertEquals(4096, pinned.getRuntimeFilterMaxBytes());
+  }
+
+  @Test
+  public void testRuntimeFilterGuardrailsMustBePositive() {
+    Map<String, String> invalidKeys =
+        Collections.singletonMap(LanceSparkReadOptions.CONFIG_RUNTIME_FILTER_MAX_KEYS, "0");
+    Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () -> LanceSparkReadOptions.from(invalidKeys, "s3://bucket/path"));
+
+    Map<String, String> invalidBytes =
+        Collections.singletonMap(LanceSparkReadOptions.CONFIG_RUNTIME_FILTER_MAX_BYTES, "-1");
+    Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () -> LanceSparkReadOptions.from(invalidBytes, "s3://bucket/path"));
   }
 
   @Test
@@ -276,7 +372,7 @@ public class LanceSparkReadOptionsSerializationTest {
   }
 
   @Test
-  public void testWithVersionPreservesCacheBackendConfiguration() {
+  public void testWithRefPreservesCacheBackendConfiguration() {
     LanceSparkReadOptions options =
         LanceSparkReadOptions.builder()
             .datasetUri("s3://bucket/path")
@@ -285,7 +381,7 @@ public class LanceSparkReadOptionsSerializationTest {
             .metadataCacheBackend("moka://?capacity=524288")
             .build();
 
-    LanceSparkReadOptions pinned = options.withVersion(7);
+    LanceSparkReadOptions pinned = options.withRef(LanceRef.ofMain(7));
 
     Assertions.assertEquals("cache-catalog", pinned.getCatalogName());
     Assertions.assertEquals("moka://?capacity=1048576", pinned.getIndexCacheBackend());
@@ -293,17 +389,17 @@ public class LanceSparkReadOptionsSerializationTest {
   }
 
   @Test
-  public void testExecutorCredentialRefreshPreservedByWithVersion() {
+  public void testExecutorCredentialRefreshPreservedByWithRef() {
     LanceSparkReadOptions options =
         LanceSparkReadOptions.builder()
             .datasetUri("s3://bucket/path")
             .executorCredentialRefresh(false)
             .build();
 
-    LanceSparkReadOptions pinned = options.withVersion(7);
+    LanceSparkReadOptions pinned = options.withRef(LanceRef.ofMain(7));
     Assertions.assertFalse(
         pinned.isExecutorCredentialRefresh(),
-        "withVersion() must propagate the executor_credential_refresh flag");
+        "withRef() must propagate the executor_credential_refresh flag");
   }
 
   @Test

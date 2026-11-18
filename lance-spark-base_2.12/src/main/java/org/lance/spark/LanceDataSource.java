@@ -45,7 +45,7 @@ import java.util.Map;
  *
  * <pre>
  * // Configure Lance catalog
- * spark.sql.catalog.lance = com.lancedb.lance.spark.LanceNamespaceSparkCatalog
+ * spark.sql.catalog.lance = org.lance.spark.LanceNamespaceSparkCatalog
  *
  * // Then use SQL
  * spark.sql("SELECT * FROM lance.namespace.table")

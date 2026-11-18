@@ -20,15 +20,35 @@ import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.connector.catalog._
 import org.apache.spark.sql.execution.{SparkPlan, SparkStrategy}
 
+import java.util.Locale
+
 case class LanceDataSourceV2Strategy(session: SparkSession) extends SparkStrategy
   with PredicateHelper {
 
   override def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
-    case AddColumnsBackfill(ResolvedIdentifier(catalog, ident), columnNames, source) =>
-      AddColumnsBackfillExec(asTableCatalog(catalog), ident, columnNames, source) :: Nil
+    case AddColumnsBackfill(
+          ResolvedIdentifier(catalog, ident),
+          columnNames,
+          source,
+          writeOptions) =>
+      AddColumnsBackfillExec(
+        asTableCatalog(catalog),
+        ident,
+        columnNames,
+        source,
+        writeOptions) :: Nil
 
-    case UpdateColumnsBackfill(ResolvedIdentifier(catalog, ident), columnNames, source) =>
-      UpdateColumnsBackfillExec(asTableCatalog(catalog), ident, columnNames, source) :: Nil
+    case UpdateColumnsBackfill(
+          ResolvedIdentifier(catalog, ident),
+          columnNames,
+          source,
+          writeOptions) =>
+      UpdateColumnsBackfillExec(
+        asTableCatalog(catalog),
+        ident,
+        columnNames,
+        source,
+        writeOptions) :: Nil
 
     case Optimize(ResolvedIdentifier(catalog, ident), args) =>
       OptimizeExec(asTableCatalog(catalog), ident, args) :: Nil
@@ -50,6 +70,20 @@ case class LanceDataSourceV2Strategy(session: SparkSession) extends SparkStrateg
 
     case LanceDropIndex(ResolvedIdentifier(catalog, ident), indexName) =>
       LanceDropIndexExec(asTableCatalog(catalog), ident, indexName.toLowerCase) :: Nil
+
+    case LanceOptimizeIndex(ResolvedIdentifier(catalog, ident), indexName, args) =>
+      LanceOptimizeIndexExec(
+        asTableCatalog(catalog),
+        ident,
+        indexName.toLowerCase(Locale.ROOT),
+        args) :: Nil
+
+    case RefreshIndex(ResolvedIdentifier(catalog, ident), indexName, args) =>
+      RefreshIndexExec(
+        asTableCatalog(catalog),
+        ident,
+        indexName.toLowerCase(Locale.ROOT),
+        args) :: Nil
 
     case LanceCreateBranch(ResolvedIdentifier(catalog, ident), branchName, ref, ifNotExists) =>
       LanceCreateBranchExec(asTableCatalog(catalog), ident, branchName, ref, ifNotExists) :: Nil

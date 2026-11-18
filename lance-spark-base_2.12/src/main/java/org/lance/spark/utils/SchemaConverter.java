@@ -24,6 +24,8 @@ import org.apache.spark.sql.types.StringType;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 import static org.lance.spark.utils.BlobUtils.ARROW_EXTENSION_BLOB_V2;
@@ -44,7 +46,49 @@ import static org.lance.spark.utils.VectorUtils.ARROW_FIXED_SIZE_LIST_SIZE_KEY;
  */
 public class SchemaConverter {
 
+  private static final List<String> SCHEMA_PROPERTY_SUFFIXES = schemaPropertySuffixes();
+
   private SchemaConverter() {}
+
+  private static List<String> schemaPropertySuffixes() {
+    List<String> suffixes = new ArrayList<>();
+    suffixes.add(VectorUtils.createVectorSizePropertyKey(""));
+    suffixes.add(Float16Utils.createPropertyKey(""));
+    suffixes.add(FixedSizeBinaryUtils.createPropertyKey(""));
+    suffixes.add(LargeVarCharUtils.createPropertyKey(""));
+    suffixes.add(BlobUtils.BLOB_ENCODING_PROPERTY_SUFFIX);
+    for (LanceEncodingUtils.EncodingPropertyRule rule :
+        LanceEncodingUtils.getSupportedEncodingPropertyRules()) {
+      suffixes.add("." + rule.getPropertySuffix());
+    }
+    return List.copyOf(suffixes);
+  }
+
+  /**
+   * Column configured by a schema or encoding property.
+   *
+   * @param property table property key
+   * @return the column prefix, or {@code null} when the key is not a schema or encoding property
+   */
+  public static String schemaPropertyColumn(String property) {
+    String matchedSuffix = null;
+    for (String suffix : SCHEMA_PROPERTY_SUFFIXES) {
+      if (property.length() > suffix.length()
+          && property.endsWith(suffix)
+          && (matchedSuffix == null || suffix.length() > matchedSuffix.length())) {
+        matchedSuffix = suffix;
+      }
+    }
+    if (matchedSuffix == null) {
+      return null;
+    }
+    return property.substring(0, property.length() - matchedSuffix.length());
+  }
+
+  /** Whether a property configures stored Arrow schema metadata or Lance field encoding. */
+  public static boolean isSchemaProperty(String property) {
+    return schemaPropertyColumn(property) != null;
+  }
 
   public static StructType processSchemaWithProperties(
       StructType sparkSchema, Map<String, String> properties) {
@@ -215,22 +259,24 @@ public class SchemaConverter {
     StructField[] newFields = new StructField[sparkSchema.fields().length];
     for (int i = 0; i < sparkSchema.fields().length; i++) {
       StructField field = sparkSchema.fields()[i];
-      String blobEncodingProperty = field.name() + ".lance.encoding";
+      String blobEncodingProperty = field.name() + BlobUtils.BLOB_ENCODING_PROPERTY_SUFFIX;
 
       if (properties.containsKey(blobEncodingProperty)) {
         // This field should be a blob column
         String encodingValue = properties.get(blobEncodingProperty);
-        if ("blob".equalsIgnoreCase(encodingValue)) {
+        if (BlobUtils.BLOB_ENCODING_PROPERTY_VALUE.equalsIgnoreCase(encodingValue)) {
           if (field.dataType() instanceof BinaryType) {
             // Add metadata for blob encoding
             boolean useV2 = BlobUtils.fileFormatSupportsBlobV2(fileFormatVersion);
             String metaKey = useV2 ? ARROW_EXTENSION_NAME_KEY : LANCE_ENCODING_BLOB_KEY;
             String metaVal = useV2 ? ARROW_EXTENSION_BLOB_V2 : LANCE_ENCODING_BLOB_VALUE;
-            Metadata newMetadata =
-                new MetadataBuilder()
-                    .withMetadata(field.metadata())
-                    .putString(metaKey, metaVal)
-                    .build();
+            // A field can arrive already tagged for the other encoding when its schema was read
+            // from an existing blob table. Keeping both markers would describe a column Lance
+            // cannot store, so the stale one is dropped.
+            String staleKey = useV2 ? LANCE_ENCODING_BLOB_KEY : ARROW_EXTENSION_NAME_KEY;
+            MetadataBuilder metadataBuilder = new MetadataBuilder().withMetadata(field.metadata());
+            metadataBuilder.remove(staleKey);
+            Metadata newMetadata = metadataBuilder.putString(metaKey, metaVal).build();
             newFields[i] =
                 new StructField(field.name(), field.dataType(), field.nullable(), newMetadata);
           } else {

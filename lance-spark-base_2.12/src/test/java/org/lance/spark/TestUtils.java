@@ -13,22 +13,39 @@
  */
 package org.lance.spark;
 
+import org.lance.Dataset;
+import org.lance.Transaction;
 import org.lance.namespace.LanceNamespace;
 import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.read.LanceSplit;
 import org.lance.spark.utils.Optional;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.Serializable;
 import java.net.URL;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
 public class TestUtils {
+  public static Map<String, String> readTransactionProperties(LanceSparkReadOptions readOptions) {
+    try (Dataset dataset = Utils.openDatasetBuilder(readOptions).build();
+        Transaction transaction = dataset.readTransaction().orElseThrow(AssertionError::new)) {
+      return transaction.transactionProperties().orElse(Collections.emptyMap());
+    }
+  }
+
   public static class TestTable1Config {
     public static final String dbPath;
     public static final String datasetName = "test_dataset1";
@@ -95,6 +112,20 @@ public class TestUtils {
               null /* namespaceImpl */,
               null /* namespaceProperties */,
               null /* partitionKeyRow */);
+    }
+  }
+
+  /** Serializes and deserializes {@code value}, as Spark does when it ships it between JVMs. */
+  @SuppressWarnings("unchecked")
+  public static <T extends Serializable> T roundTrip(T value)
+      throws IOException, ClassNotFoundException {
+    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    try (ObjectOutputStream output = new ObjectOutputStream(bytes)) {
+      output.writeObject(value);
+    }
+    try (ObjectInputStream input =
+        new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
+      return (T) input.readObject();
     }
   }
 

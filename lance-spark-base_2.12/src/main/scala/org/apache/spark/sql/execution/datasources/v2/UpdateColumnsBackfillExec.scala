@@ -31,18 +31,15 @@ case class UpdateColumnsBackfillExec(
     catalog: TableCatalog,
     ident: Identifier,
     columnNames: Seq[String],
-    query: LogicalPlan)
+    query: LogicalPlan,
+    writeOptions: Map[String, String] = Map.empty)
   extends LeafV2CommandExec {
 
   override def output: Seq[Attribute] = Seq.empty
 
   override protected def run(): Seq[InternalRow] = {
-    val originalTable = catalog.loadTable(ident) match {
-      case lanceTable: LanceDataset => lanceTable
-      case _ =>
-        throw new UnsupportedOperationException(
-          "UpdateColumnsBackfill only supports LanceDataset")
-    }
+    val originalTable =
+      LanceDataset.requireWritable(catalog.loadTable(ident), "UpdateColumnsBackfill")
 
     // Check the updated columns must exist
     val originalFields = originalTable.schema().fieldNames.toSet
@@ -85,7 +82,7 @@ case class UpdateColumnsBackfillExec(
       AppendData.byPosition(
         relation,
         actualQuery,
-        Map(LanceConstant.UPDATE_COLUMNS_KEY -> columnNames.mkString(",")))
+        writeOptions + (LanceConstant.UPDATE_COLUMNS_KEY -> columnNames.mkString(",")))
     val qe = session.sessionState.executePlan(append)
     qe.assertCommandExecuted()
 

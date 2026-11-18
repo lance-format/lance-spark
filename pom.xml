@@ -4,7 +4,7 @@
 
     <groupId>org.lance</groupId>
     <artifactId>lance-spark-root</artifactId>
-    <version>0.7.1</version>
+    <version>0.9.0-beta.2</version>
     <packaging>pom</packaging>
 
     <name>${project.artifactId}</name>
@@ -26,10 +26,12 @@
         </license>
     </licenses>
 
-    <scm>
-        <connection>scm:git:git@github.com:lancedb/lance-spark.git</connection>
-        <developerConnection>scm:git:git@github.com:lancedb/lance-spark.git</developerConnection>
-        <url>git@github.com:lancedb/lance-spark.git</url>
+    <scm child.scm.connection.inherit.append.path="false"
+         child.scm.developerConnection.inherit.append.path="false"
+         child.scm.url.inherit.append.path="false">
+        <connection>scm:git:https://github.com/lance-format/lance-spark.git</connection>
+        <developerConnection>scm:git:https://github.com/lance-format/lance-spark.git</developerConnection>
+        <url>https://github.com/lance-format/lance-spark</url>
         <tag>HEAD</tag>
     </scm>
 
@@ -50,10 +52,10 @@
     </distributionManagement>
 
     <properties>
-        <lance-spark.version>0.7.1</lance-spark.version>
-        <lance.version>11.0.0-beta.10</lance.version>
-        <lance-namespace.version>0.8.6</lance-namespace.version>
-        <lance-namespace-impl.version>0.4.0</lance-namespace-impl.version>
+        <lance-spark.version>0.9.0-beta.2</lance-spark.version>
+        <lance.version>14.0.3</lance.version>
+        <lance-namespace.version>0.12.0</lance-namespace.version>
+        <lance-namespace-impl.version>0.4.2</lance-namespace-impl.version>
 
         <arrow14.version>14.0.2</arrow14.version>
         <arrow15.version>15.0.2</arrow15.version>
