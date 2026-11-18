@@ -200,6 +200,11 @@ Java SDK settings. Spark driver and executor JVMs are independent processes;
 set the Spark conf or environment variable for every process that should emit
 Lance metrics.
 
+When using a Hive namespace, `spark.hadoop.hive.metastore.uris` supplies the
+metastore address if the catalog does not set `hadoop.hive.metastore.uris`.
+The catalog-specific setting takes precedence. Set these options before the
+catalog is initialized.
+
 ## Example Namespace Implementations
 
 ### Directory Namespace

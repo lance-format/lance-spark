@@ -48,6 +48,7 @@ import org.lance.spark.write.StagedCommit;
 import org.lance.spark.write.StagedCommitOptions;
 
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchFunctionException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
@@ -242,6 +243,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     // Initialize the namespace with proper configuration
     Map<String, String> namespaceOptions = new HashMap<>(options);
+    String metastoreUris =
+        SparkSession.active().sparkContext().hadoopConfiguration().get("hive.metastore.uris");
+    if (metastoreUris != null && !options.containsKey("hadoop.hive.metastore.uris")) {
+      namespaceOptions.put("hadoop.hive.metastore.uris", metastoreUris);
+    }
 
     // Save namespace impl and properties for serialization to workers
     this.namespaceImpl = impl;
