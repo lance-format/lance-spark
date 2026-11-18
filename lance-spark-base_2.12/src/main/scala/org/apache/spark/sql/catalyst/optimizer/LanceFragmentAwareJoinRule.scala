@@ -16,7 +16,6 @@ package org.apache.spark.sql.catalyst.optimizer
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.types.IntegerType
 import org.lance.spark.join.FragmentAwareJoinUtils
 
 import scala.collection.mutable
@@ -193,7 +192,7 @@ case class LanceFragmentAwareJoinRule() extends Rule[LogicalPlan] {
       plan: LogicalPlan,
       rowIdCol: AttributeReference): LogicalPlan = {
 
-    val fragmentIdExpr = ShiftRight(rowIdCol, Literal(32, IntegerType))
+    val fragmentIdExpr = FragmentAwareJoinUtils.createFragmentIdExtractor(rowIdCol)
     val fragmentIdAlias = Alias(fragmentIdExpr, FRAGMENT_ID_COL)()
 
     Project(plan.output :+ fragmentIdAlias, plan)

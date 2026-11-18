@@ -95,7 +95,6 @@ Lance supports vector (embedding) columns for AI workloads. These columns are st
 
 - **Element Types**: `FLOAT` (float32), `DOUBLE` (float64), `FLOAT` with float16 flag (half-precision)
 - **Requirements**:
-    - Vectors must be non-nullable
     - All vectors in a column must have the same dimension
     - Dimension is specified via table properties
 
@@ -267,7 +266,13 @@ Lance supports blob encoding for large binary data. Blob columns store large bin
 
 ### Creating Blob Columns
 
-To create a table with blob columns, use the table property pattern `<column_name>.lance.encoding` with the value `'blob'`:
+To create a table with blob columns, use the table property pattern `<column_name>.lance.encoding` with the value `'blob'`.
+
+When neither the table nor the catalog sets `file_format_version`, the table follows Lance's default version
+(`2.2`) and the blob columns are written as blob v2, so reads expose them as descriptor structs
+([Blob v2 Writes](../../config.md#blob-v2-writes)).
+Set `file_format_version = '2.1'` (or `'2.0'`) for the legacy v1 encoding, which reads back as `BINARY`.
+Creating a table from a schema taken from an existing v1 blob table keeps v1 automatically:
 
 === "SQL"
     ```sql
@@ -340,7 +345,8 @@ To create a table with blob columns, use the table property pattern `<column_nam
 
 ### Blob v2 Columns
 
-To create blob v2 columns, set the blob encoding property and use `file_format_version = '2.2'` or higher.
+To create blob v2 columns, set the blob encoding property and use `file_format_version = '2.2'` or higher,
+or leave `file_format_version` unset and let Lance apply its default (`2.2`).
 
 Spark writes blob v2 columns as `BINARY` and reads expose descriptor structs ([Blob v2 Reads](../../config.md#blob-v2-reads)).
 
@@ -495,8 +501,8 @@ They are silently ignored if present:
 
 ### ALTER TABLE Limitation
 
-`ALTER TABLE ... SET TBLPROPERTIES` does **not** mutate Arrow field metadata or change the encoding
-of previously written data. Compression properties are applied only when the table is created.
+See [ALTER TABLE limitations](alter-table.md#limitations) for rules on changing schema and
+encoding properties.
 
 ### Example
 

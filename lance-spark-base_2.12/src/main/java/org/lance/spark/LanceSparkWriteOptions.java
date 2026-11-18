@@ -16,12 +16,17 @@ package org.lance.spark;
 import org.lance.WriteParams;
 import org.lance.WriteParams.WriteMode;
 import org.lance.namespace.LanceNamespace;
+import org.lance.spark.utils.FileFormatVersionResolver;
 
 import com.google.common.base.Preconditions;
+import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
 import java.io.Serializable;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 
@@ -46,10 +51,11 @@ import java.util.Objects;
  * }</pre>
  */
 public class LanceSparkWriteOptions implements Serializable {
-  private static final long serialVersionUID = 1L;
+  private static final long serialVersionUID = 2L;
 
   public static final String CONFIG_DATASET_URI = "path";
   public static final String CONFIG_WRITE_MODE = "write_mode";
+  public static final String CONFIG_TRANSACTION_PROPERTIES = "transaction_properties";
   public static final String CONFIG_MAX_ROWS_PER_FILE = "max_row_per_file";
   public static final String CONFIG_MAX_ROWS_PER_GROUP = "max_rows_per_group";
   public static final String CONFIG_MAX_BYTES_PER_FILE = "max_bytes_per_file";
@@ -78,6 +84,7 @@ public class LanceSparkWriteOptions implements Serializable {
   private final Integer maxRowsPerGroup;
   private final Long maxBytesPerFile;
   private final String fileFormatVersion;
+  private final String fallbackFileFormatVersion;
   private final boolean useQueuedWriteBuffer;
   private final int queueDepth;
   private final int batchSize;
@@ -96,8 +103,16 @@ public class LanceSparkWriteOptions implements Serializable {
   /** The table identifier within the namespace, used for credential refresh. */
   private final List<String> tableId;
 
-  /** Use this version to open the dataset and apply write if set. */
-  private final Long version;
+  /** Use this reference to open the dataset and apply write if set. */
+  private final LanceRef ref;
+
+  /** Catalog and cache backend configuration for process-local session reuse. */
+  private final String catalogName;
+
+  private final String indexCacheBackend;
+
+  private final String metadataCacheBackend;
+  private final Map<String, String> transactionProperties;
 
   private LanceSparkWriteOptions(Builder builder) {
     this.datasetUri = builder.datasetUri;
@@ -106,6 +121,7 @@ public class LanceSparkWriteOptions implements Serializable {
     this.maxRowsPerGroup = builder.maxRowsPerGroup;
     this.maxBytesPerFile = builder.maxBytesPerFile;
     this.fileFormatVersion = builder.fileFormatVersion;
+    this.fallbackFileFormatVersion = builder.fallbackFileFormatVersion;
     this.useQueuedWriteBuffer = builder.useQueuedWriteBuffer;
     this.queueDepth = builder.queueDepth;
     this.batchSize = builder.batchSize;
@@ -114,9 +130,14 @@ public class LanceSparkWriteOptions implements Serializable {
     this.maxBatchBytes = builder.maxBatchBytes;
     this.blobPackFileSizeThreshold = builder.blobPackFileSizeThreshold;
     this.storageOptions = new HashMap<>(builder.storageOptions);
+    this.storageOptions.keySet().removeIf(TransactionProperties::isOption);
+    this.transactionProperties = builder.transactionProperties;
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
-    this.version = builder.version;
+    this.ref = builder.ref;
+    this.catalogName = builder.catalogName;
+    this.indexCacheBackend = builder.indexCacheBackend;
+    this.metadataCacheBackend = builder.metadataCacheBackend;
   }
 
   /** Creates a new builder for LanceSparkWriteOptions. */
@@ -168,6 +189,16 @@ public class LanceSparkWriteOptions implements Serializable {
   }
 
   public String getFileFormatVersion() {
+    return fileFormatVersion != null ? fileFormatVersion : fallbackFileFormatVersion;
+  }
+
+  /**
+   * Returns the file format version explicitly requested via write options (or {@link
+   * Builder#fileFormatVersion(String)}), or {@code null} when inherited from the existing dataset.
+   * Committers pass only this explicit value to {@code CommitBuilder.storageFormat(...)} so
+   * overwrites and replaces do not mutate an existing dataset's default version unintentionally.
+   */
+  public String getExplicitFileFormatVersion() {
     return fileFormatVersion;
   }
 
@@ -213,8 +244,24 @@ public class LanceSparkWriteOptions implements Serializable {
     return tableId;
   }
 
-  public Long getVersion() {
-    return version;
+  public LanceRef getRef() {
+    return ref;
+  }
+
+  public String getCatalogName() {
+    return catalogName;
+  }
+
+  public String getIndexCacheBackend() {
+    return indexCacheBackend;
+  }
+
+  public String getMetadataCacheBackend() {
+    return metadataCacheBackend;
+  }
+
+  public Map<String, String> getTransactionProperties() {
+    return transactionProperties == null ? Collections.emptyMap() : transactionProperties;
   }
 
   /** Returns a builder pre-populated with all fields from this instance. */
@@ -226,6 +273,7 @@ public class LanceSparkWriteOptions implements Serializable {
         .maxRowsPerGroup(maxRowsPerGroup)
         .maxBytesPerFile(maxBytesPerFile)
         .fileFormatVersion(fileFormatVersion)
+        .fallbackFileFormatVersion(fallbackFileFormatVersion)
         .useQueuedWriteBuffer(useQueuedWriteBuffer)
         .queueDepth(queueDepth)
         .batchSize(batchSize)
@@ -234,14 +282,39 @@ public class LanceSparkWriteOptions implements Serializable {
         .useLargeVarTypes(useLargeVarTypes)
         .blobPackFileSizeThreshold(blobPackFileSizeThreshold)
         .storageOptions(storageOptions)
+        .transactionProperties(getTransactionProperties())
         .namespace(namespace)
         .tableId(tableId)
-        .version(version);
+        .ref(ref)
+        .catalogName(catalogName)
+        .indexCacheBackend(indexCacheBackend)
+        .metadataCacheBackend(metadataCacheBackend);
   }
 
-  /** Returns a copy of these options with version set to the given version. */
-  public LanceSparkWriteOptions withVersion(long version) {
-    return toBuilder().version(version).build();
+  /** Returns a copy of these options with the given reference. */
+  public LanceSparkWriteOptions withRef(LanceRef ref) {
+    return toBuilder().ref(ref).build();
+  }
+
+  /**
+   * Converts these write options to read options that open the same dataset at the same ref. Used
+   * by executors that must read what the driver pinned, such as DELETE writing deletion files.
+   *
+   * <p>Read-only flags (block_size, cache sizes, executor_credential_refresh) are re-parsed from
+   * {@code storageOptions} rather than copied field by field, so they cannot be dropped by a caller
+   * that forgets one. The ref is applied last because {@code storageOptions} may also carry one.
+   */
+  public LanceSparkReadOptions toReadOptions() {
+    return LanceSparkReadOptions.builder()
+        .datasetUri(datasetUri)
+        .fromOptions(storageOptions)
+        .namespace(namespace)
+        .tableId(tableId)
+        .catalogName(catalogName)
+        .indexCacheBackend(indexCacheBackend)
+        .metadataCacheBackend(metadataCacheBackend)
+        .ref(ref)
+        .build();
   }
 
   public boolean hasNamespace() {
@@ -292,8 +365,9 @@ public class LanceSparkWriteOptions implements Serializable {
     if (maxBytesPerFile != null) {
       builder.withMaxBytesPerFile(maxBytesPerFile);
     }
-    if (fileFormatVersion != null) {
-      builder.withDataStorageVersion(fileFormatVersion);
+    String dataStorageVersion = getFileFormatVersion();
+    if (dataStorageVersion != null) {
+      builder.withDataStorageVersion(dataStorageVersion);
     }
     if (enableStableRowIds != null) {
       builder.withEnableStableRowIds(enableStableRowIds);
@@ -324,11 +398,16 @@ public class LanceSparkWriteOptions implements Serializable {
         && Objects.equals(maxRowsPerGroup, that.maxRowsPerGroup)
         && Objects.equals(maxBytesPerFile, that.maxBytesPerFile)
         && Objects.equals(fileFormatVersion, that.fileFormatVersion)
+        && Objects.equals(fallbackFileFormatVersion, that.fallbackFileFormatVersion)
         && Objects.equals(enableStableRowIds, that.enableStableRowIds)
         && Objects.equals(blobPackFileSizeThreshold, that.blobPackFileSizeThreshold)
         && Objects.equals(storageOptions, that.storageOptions)
+        && Objects.equals(getTransactionProperties(), that.getTransactionProperties())
         && Objects.equals(tableId, that.tableId)
-        && Objects.equals(version, that.version);
+        && Objects.equals(ref, that.ref)
+        && Objects.equals(catalogName, that.catalogName)
+        && Objects.equals(indexCacheBackend, that.indexCacheBackend)
+        && Objects.equals(metadataCacheBackend, that.metadataCacheBackend);
   }
 
   @Override
@@ -340,6 +419,7 @@ public class LanceSparkWriteOptions implements Serializable {
         maxRowsPerGroup,
         maxBytesPerFile,
         fileFormatVersion,
+        fallbackFileFormatVersion,
         useQueuedWriteBuffer,
         queueDepth,
         batchSize,
@@ -348,8 +428,12 @@ public class LanceSparkWriteOptions implements Serializable {
         maxBatchBytes,
         blobPackFileSizeThreshold,
         storageOptions,
+        getTransactionProperties(),
         tableId,
-        version);
+        ref,
+        catalogName,
+        indexCacheBackend,
+        metadataCacheBackend);
   }
 
   /** Builder for creating LanceSparkWriteOptions instances. */
@@ -360,6 +444,7 @@ public class LanceSparkWriteOptions implements Serializable {
     private Integer maxRowsPerGroup;
     private Long maxBytesPerFile;
     private String fileFormatVersion;
+    private String fallbackFileFormatVersion;
     private boolean useQueuedWriteBuffer = DEFAULT_USE_QUEUED_WRITE_BUFFER;
     private int queueDepth = DEFAULT_QUEUE_DEPTH;
     private int batchSize = DEFAULT_BATCH_SIZE;
@@ -368,11 +453,20 @@ public class LanceSparkWriteOptions implements Serializable {
     private long maxBatchBytes = DEFAULT_MAX_BATCH_BYTES;
     private Long blobPackFileSizeThreshold;
     private Map<String, String> storageOptions = new HashMap<>();
+    private Map<String, String> transactionProperties = Collections.emptyMap();
     private LanceNamespace namespace;
     private List<String> tableId;
-    private Long version;
+    private LanceRef ref;
+    private String catalogName;
+    private String indexCacheBackend;
+    private String metadataCacheBackend;
 
     private Builder() {}
+
+    public Builder transactionProperties(Map<String, String> properties) {
+      this.transactionProperties = TransactionProperties.snapshot(properties);
+      return this;
+    }
 
     public Builder datasetUri(String datasetUri) {
       this.datasetUri = datasetUri;
@@ -401,6 +495,22 @@ public class LanceSparkWriteOptions implements Serializable {
 
     public Builder fileFormatVersion(String fileFormatVersion) {
       this.fileFormatVersion = fileFormatVersion;
+      return this;
+    }
+
+    /**
+     * Sets the dataset-derived data-file format version used when no explicit {@code
+     * file_format_version} write option is supplied. Upgrades incompatible defaults via {@link
+     * FileFormatVersionResolver} without marking the version as an explicit manifest override.
+     */
+    public Builder fallbackFileFormatVersion(StructType schema, String tableFileFormatVersion) {
+      this.fallbackFileFormatVersion =
+          FileFormatVersionResolver.resolveForDataFiles(schema, tableFileFormatVersion);
+      return this;
+    }
+
+    private Builder fallbackFileFormatVersion(String fallbackFileFormatVersion) {
+      this.fallbackFileFormatVersion = fallbackFileFormatVersion;
       return this;
     }
 
@@ -458,9 +568,24 @@ public class LanceSparkWriteOptions implements Serializable {
       return this;
     }
 
-    /** Pin opens to this dataset manifest version. */
-    public Builder version(Long version) {
-      this.version = version;
+    /** Pin opens to this dataset reference. */
+    public Builder ref(LanceRef ref) {
+      this.ref = ref;
+      return this;
+    }
+
+    public Builder catalogName(String catalogName) {
+      this.catalogName = catalogName;
+      return this;
+    }
+
+    public Builder indexCacheBackend(String indexCacheBackend) {
+      this.indexCacheBackend = indexCacheBackend;
+      return this;
+    }
+
+    public Builder metadataCacheBackend(String metadataCacheBackend) {
+      this.metadataCacheBackend = metadataCacheBackend;
       return this;
     }
 
@@ -471,9 +596,18 @@ public class LanceSparkWriteOptions implements Serializable {
      * @return this builder
      */
     public Builder fromOptions(Map<String, String> options) {
+      CaseInsensitiveStringMap references = new CaseInsensitiveStringMap(options);
+      Preconditions.checkArgument(
+          !references.containsKey(LanceSparkReadOptions.CONFIG_BRANCH),
+          "The branch option is read-only");
+      Preconditions.checkArgument(
+          !references.containsKey(LanceSparkReadOptions.CONFIG_TAG), "The tag option is read-only");
       this.storageOptions = new HashMap<>(options);
+      this.storageOptions.keySet().removeIf(TransactionProperties::isOption);
+      this.transactionProperties = Collections.emptyMap();
+      this.transactionProperties = TransactionProperties.fromOptions(options);
       if (options.containsKey(CONFIG_WRITE_MODE)) {
-        this.writeMode = WriteMode.valueOf(options.get(CONFIG_WRITE_MODE).toUpperCase());
+        this.writeMode = WriteMode.valueOf(options.get(CONFIG_WRITE_MODE).toUpperCase(Locale.ROOT));
       }
       if (options.containsKey(CONFIG_MAX_ROWS_PER_FILE)) {
         this.maxRowsPerFile = Integer.parseInt(options.get(CONFIG_MAX_ROWS_PER_FILE));
@@ -537,8 +671,12 @@ public class LanceSparkWriteOptions implements Serializable {
     public Builder withCatalogDefaults(LanceSparkCatalogConfig catalogConfig) {
       // Merge storage options: catalog options are defaults, current options override
       Map<String, String> merged = new HashMap<>(catalogConfig.getStorageOptions());
+      merged.keySet().removeIf(TransactionProperties::isOption);
       merged.putAll(this.storageOptions);
-      return fromOptions(merged);
+      this.indexCacheBackend = catalogConfig.getIndexCacheBackend();
+      this.metadataCacheBackend = catalogConfig.getMetadataCacheBackend();
+      Map<String, String> operationProperties = this.transactionProperties;
+      return fromOptions(merged).transactionProperties(operationProperties);
     }
 
     public LanceSparkWriteOptions build() {

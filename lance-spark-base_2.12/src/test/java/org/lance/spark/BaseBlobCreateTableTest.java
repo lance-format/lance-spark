@@ -19,6 +19,9 @@ import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.TableCatalog;
+import org.apache.spark.sql.connector.expressions.Transform;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
@@ -30,6 +33,8 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
@@ -84,7 +89,7 @@ public abstract class BaseBlobCreateTableTest {
         BlobUtils.LANCE_ENCODING_BLOB_KEY + " metadata should be 'true'");
     assertFalse(
         BlobUtils.isBlobV2SparkField(field),
-        fieldName + " should not be tagged as blob v2 without file_format_version >= 2.2");
+        fieldName + " should not be tagged as blob v2 below file_format_version 2.2");
   }
 
   @Test
@@ -103,7 +108,8 @@ public abstract class BaseBlobCreateTableTest {
             + "data BINARY"
             + ") USING lance "
             + "TBLPROPERTIES ("
-            + "'data.lance.encoding' = 'blob'"
+            + "'data.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.1'"
             + ")");
 
     // Verify schema has blob metadata
@@ -215,6 +221,7 @@ public abstract class BaseBlobCreateTableTest {
     // Create table with tableProperty API
     df.writeTo(catalogName + ".default." + tableName)
         .tableProperty("data.lance.encoding", "blob")
+        .tableProperty("file_format_version", "2.1")
         .createOrReplace();
 
     // Verify schema has blob metadata
@@ -274,7 +281,8 @@ public abstract class BaseBlobCreateTableTest {
             + "blob_data BINARY"
             + ") USING lance "
             + "TBLPROPERTIES ("
-            + "'blob_data.lance.encoding' = 'blob'"
+            + "'blob_data.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.1'"
             + ")");
 
     // Verify table was created
@@ -355,7 +363,8 @@ public abstract class BaseBlobCreateTableTest {
             + ") USING lance "
             + "TBLPROPERTIES ("
             + "'blob1.lance.encoding' = 'blob', "
-            + "'blob2.lance.encoding' = 'blob'"
+            + "'blob2.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.1'"
             + ")");
 
     // Verify table was created
@@ -410,7 +419,8 @@ public abstract class BaseBlobCreateTableTest {
             + "data BINARY"
             + ") USING lance "
             + "TBLPROPERTIES ("
-            + "'data.lance.encoding' = 'blob'"
+            + "'data.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.1'"
             + ")");
 
     // Insert test data using plain schema (no metadata needed)
@@ -493,6 +503,57 @@ public abstract class BaseBlobCreateTableTest {
   }
 
   @Test
+  public void testBlobV1VirtualColumnsWithoutBaseColumnAndInFilters() {
+    String tableName = "blob_virtual_only_" + System.currentTimeMillis();
+    String fqTable = catalogName + ".default." + tableName;
+    spark.sql(
+        "CREATE TABLE "
+            + fqTable
+            + " (id INT, title STRING, content BINARY) USING lance TBLPROPERTIES ("
+            + "'content.lance.encoding' = 'blob', 'file_format_version' = '2.1')");
+    // "HelloWorld" (10 bytes) and "Hi" (2 bytes)
+    spark.sql(
+        "INSERT INTO " + fqTable + " VALUES (1, 'a', X'48656C6C6F576F726C64'), (2, 'b', X'4869')");
+
+    // Only virtual columns, without the base blob column
+    List<Row> rows =
+        spark
+            .sql(
+                "SELECT id, title, content__blob_pos, content__blob_size FROM "
+                    + fqTable
+                    + " WHERE id = 1")
+            .collectAsList();
+    assertEquals(1, rows.size());
+    assertEquals(1, rows.get(0).getInt(0));
+    assertEquals("a", rows.get(0).getString(1));
+    assertTrue(rows.get(0).getLong(2) >= 0, "Blob position should be non-negative");
+    assertEquals(10L, rows.get(0).getLong(3));
+
+    // Filter on a virtual column without projecting it or the base column
+    rows =
+        spark
+            .sql("SELECT id FROM " + fqTable + " WHERE content__blob_size > 5 ORDER BY id")
+            .collectAsList();
+    assertEquals(1, rows.size());
+    assertEquals(1, rows.get(0).getInt(0));
+
+    // Filter on a virtual column together with the base column and a pushable predicate
+    rows =
+        spark
+            .sql(
+                "SELECT id, content, content__blob_size FROM "
+                    + fqTable
+                    + " WHERE content__blob_size = 2 AND id >= 1 ORDER BY id")
+            .collectAsList();
+    assertEquals(1, rows.size());
+    assertEquals(2, rows.get(0).getInt(0));
+    assertNotNull(rows.get(0).get(1));
+    assertEquals(2L, rows.get(0).getLong(2));
+
+    spark.sql("DROP TABLE IF EXISTS " + fqTable);
+  }
+
+  @Test
   public void testBlobV2SupportsSqlInsertAndDataFrameAppend() {
     String tableName = "blob_v2_sql_" + System.currentTimeMillis();
 
@@ -559,6 +620,62 @@ public abstract class BaseBlobCreateTableTest {
     assertEquals(testData2.getBytes(StandardCharsets.UTF_8).length, descriptors.get(1).getLong(1));
     assertEquals(100000L, descriptors.get(2).getLong(1));
     assertBlobV2Metadata(spark.table(catalogName + ".default." + tableName).schema(), "data");
+    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
+  }
+
+  /**
+   * The DDL-created array column allows null elements, so a DataFrame promising containsNull=false
+   * must be accepted: it can never produce a null element. Blob v2 tables are the ones routed
+   * through LanceWriteSchemaValidator, since they advertise ACCEPT_ANY_SCHEMA.
+   */
+  @Test
+  public void testBlobV2DataFrameAppendWithStricterArrayElementNullability() {
+    String tableName = "blob_v2_array_" + System.currentTimeMillis();
+
+    spark.sql(
+        "CREATE TABLE IF NOT EXISTS "
+            + catalogName
+            + ".default."
+            + tableName
+            + " ("
+            + "id INT NOT NULL, "
+            + "data BINARY, "
+            + "embedding ARRAY<FLOAT>"
+            + ") USING lance "
+            + "TBLPROPERTIES ("
+            + "'data.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.2'"
+            + ")");
+
+    StructType strictSchema =
+        new StructType(
+            new StructField[] {
+              DataTypes.createStructField("id", DataTypes.IntegerType, false),
+              DataTypes.createStructField("data", DataTypes.BinaryType, true),
+              DataTypes.createStructField(
+                  "embedding", DataTypes.createArrayType(DataTypes.FloatType, false), true)
+            });
+    List<Row> rows =
+        Arrays.asList(
+            RowFactory.create(1, "one".getBytes(StandardCharsets.UTF_8), new float[] {0.5f, 1.5f}),
+            RowFactory.create(2, "two".getBytes(StandardCharsets.UTF_8), new float[] {2.5f, 3.5f}));
+    Dataset<Row> df = spark.createDataFrame(rows, strictSchema);
+
+    assertDoesNotThrow(() -> df.writeTo(catalogName + ".default." + tableName).append());
+
+    List<Row> written =
+        spark
+            .sql(
+                "SELECT id, embedding FROM "
+                    + catalogName
+                    + ".default."
+                    + tableName
+                    + " ORDER BY id")
+            .collectAsList();
+    assertEquals(2, written.size());
+    assertEquals(Arrays.asList(0.5f, 1.5f), written.get(0).getList(1));
+    assertEquals(Arrays.asList(2.5f, 3.5f), written.get(1).getList(1));
+
     spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
   }
 
@@ -653,6 +770,181 @@ public abstract class BaseBlobCreateTableTest {
 
     assertBlobMetadata(schema, "data");
     assertEquals(DataTypes.BinaryType, schema.apply("data").dataType());
+
+    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
+  }
+
+  @Test
+  public void testCreateTableFromInheritedBlobV1SchemaKeepsBlobV1()
+      throws org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException,
+          org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException {
+    String sourceName = "blob_v1_src_" + System.currentTimeMillis();
+    String targetName = "blob_v1_copy_" + System.currentTimeMillis();
+
+    spark.sql(
+        "CREATE TABLE IF NOT EXISTS "
+            + catalogName
+            + ".default."
+            + sourceName
+            + " (id INT NOT NULL, data BINARY) USING lance "
+            + "TBLPROPERTIES ("
+            + "'data.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.1'"
+            + ")");
+    spark.sql(
+        "INSERT INTO "
+            + catalogName
+            + ".default."
+            + sourceName
+            + " VALUES (1, X'"
+            + bytesToHex("first blob".getBytes(StandardCharsets.UTF_8))
+            + "')");
+
+    // The schema read back from a v1 table carries `lance-encoding:blob`, which 2.2 rejects.
+    spark
+        .read()
+        .table(catalogName + ".default." + sourceName)
+        .writeTo(catalogName + ".default." + targetName)
+        .using("lance")
+        .create();
+
+    StructType targetSchema = spark.table(catalogName + ".default." + targetName).schema();
+    assertBlobMetadata(targetSchema, "data");
+
+    List<Row> rows =
+        spark
+            .sql(
+                "SELECT id, data, data"
+                    + BLOB_SIZE_SUFFIX
+                    + " FROM "
+                    + catalogName
+                    + ".default."
+                    + targetName
+                    + " ORDER BY id")
+            .collectAsList();
+    assertEquals(1, rows.size());
+    assertEquals("first blob".getBytes(StandardCharsets.UTF_8).length, rows.get(0).getLong(2));
+
+    // The catalog API create path validates the schema against the resolved version up front,
+    // so a version that cannot store v1 blob columns fails the create outright.
+    String directName = targetName + "_direct";
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    catalog.createTable(
+        Identifier.of(new String[] {"default"}, directName),
+        targetSchema,
+        new Transform[0],
+        Collections.emptyMap());
+    spark.sql(
+        "INSERT INTO "
+            + catalogName
+            + ".default."
+            + directName
+            + " SELECT id, data FROM "
+            + catalogName
+            + ".default."
+            + sourceName);
+    assertBlobMetadata(spark.table(catalogName + ".default." + directName).schema(), "data");
+
+    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + sourceName);
+    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + targetName);
+    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + directName);
+  }
+
+  @Test
+  public void testReplaceWithoutFileFormatVersionMovesABlobV1TableToBlobV2() {
+    String tableName = "blob_replace_" + System.currentTimeMillis();
+
+    spark.sql(
+        "CREATE TABLE IF NOT EXISTS "
+            + catalogName
+            + ".default."
+            + tableName
+            + " (id INT NOT NULL, data BINARY) USING lance "
+            + "TBLPROPERTIES ("
+            + "'data.lance.encoding' = 'blob', "
+            + "'file_format_version' = '2.1'"
+            + ")");
+    assertBlobMetadata(spark.table(catalogName + ".default." + tableName).schema(), "data");
+
+    // A replace falls back to the replaced table's version only when nothing else resolves one.
+    spark.sql(
+        "CREATE OR REPLACE TABLE "
+            + catalogName
+            + ".default."
+            + tableName
+            + " (id INT NOT NULL, data BINARY) USING lance "
+            + "TBLPROPERTIES ('data.lance.encoding' = 'blob')");
+
+    StructField replaced =
+        spark.table(catalogName + ".default." + tableName).schema().apply("data");
+    assertTrue(
+        BlobUtils.isBlobV2SparkField(replaced),
+        "replacing without a pinned version should move the column to blob v2");
+    assertFalse(replaced.metadata().contains(BlobUtils.LANCE_ENCODING_BLOB_KEY));
+
+    spark.sql(
+        "CREATE OR REPLACE TABLE "
+            + catalogName
+            + ".default."
+            + tableName
+            + " (id INT NOT NULL, data BINARY) USING lance "
+            + "TBLPROPERTIES ('data.lance.encoding' = 'blob', 'file_format_version' = '2.1')");
+    assertBlobMetadata(spark.table(catalogName + ".default." + tableName).schema(), "data");
+
+    spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
+  }
+
+  @Test
+  public void testBlobColumnsUseBlobV2WithoutFileFormatVersion() {
+    String tableName = "blob_v2_ffv_unset_" + System.currentTimeMillis();
+
+    spark.sql(
+        "CREATE TABLE IF NOT EXISTS "
+            + catalogName
+            + ".default."
+            + tableName
+            + " ("
+            + "id INT NOT NULL, "
+            + "data BINARY"
+            + ") USING lance "
+            + "TBLPROPERTIES ("
+            + "'data.lance.encoding' = 'blob'"
+            + ")");
+
+    StructType schema = spark.table(catalogName + ".default." + tableName).schema();
+
+    assertTrue(
+        BlobUtils.isBlobV2SparkField(schema.apply("data")),
+        "data should be tagged as blob v2 when no file_format_version is pinned");
+    assertFalse(schema.apply("data").metadata().contains(BlobUtils.LANCE_ENCODING_BLOB_KEY));
+
+    String first = "unpinned blob one";
+    String second = "unpinned blob two";
+    spark.sql(
+        "INSERT INTO "
+            + catalogName
+            + ".default."
+            + tableName
+            + " VALUES (1, X'"
+            + bytesToHex(first.getBytes(StandardCharsets.UTF_8))
+            + "'), (2, X'"
+            + bytesToHex(second.getBytes(StandardCharsets.UTF_8))
+            + "')");
+
+    List<Row> descriptors =
+        spark
+            .sql(
+                "SELECT id, data.kind AS kind, data.size AS sz FROM "
+                    + catalogName
+                    + ".default."
+                    + tableName
+                    + " ORDER BY id")
+            .collectAsList();
+    assertEquals(2, descriptors.size());
+    assertEquals(0, descriptors.get(0).getShort(1));
+    assertEquals(first.getBytes(StandardCharsets.UTF_8).length, descriptors.get(0).getLong(2));
+    assertEquals(second.getBytes(StandardCharsets.UTF_8).length, descriptors.get(1).getLong(2));
 
     spark.sql("DROP TABLE IF EXISTS " + catalogName + ".default." + tableName);
   }

@@ -55,6 +55,21 @@ Query data from Lance tables using SQL or DataFrames.
 
 ## Aggregate Queries
 
+An ungrouped query with a single `COUNT(*)` or non-distinct `COUNT(column)` can
+be pushed down to Lance. `COUNT(column)` excludes nulls using `IS NOT NULL`
+and returns partial counts for Spark to combine, without transferring column
+values to Spark.
+
+=== "SQL"
+    ```sql
+    SELECT COUNT(email) FROM users WHERE age > 25;
+    ```
+
+Column counts currently require a top-level column and enabled filter pushdown.
+Nested fields, expressions, distinct counts, multiple aggregates,
+grouping, and queries with filters that Lance cannot evaluate remain in Spark.
+Column names containing backticks also remain in Spark.
+
 === "SQL"
     ```sql
     SELECT department, COUNT(*) as employee_count
@@ -199,6 +214,109 @@ Use `VERSION AS OF` to query a specific version of the table:
     df.show();
     ```
 
+The `version` read option applies after Spark analyzes the current table schema.
+Select compatible columns, or use SQL `VERSION AS OF` to analyze the historical schema.
+Missing columns or incompatible types fail during planning.
+
+### Query by Tag
+
+Use `VERSION AS OF` with a quoted tag name to query the snapshot referenced by a tag:
+
+=== "SQL"
+    ```sql
+    -- Query the snapshot referenced by the release_candidate tag
+    SELECT * FROM users VERSION AS OF 'release_candidate';
+
+    -- Query specific columns from a tagged snapshot
+    SELECT id, name FROM users VERSION AS OF 'v1.0';
+    ```
+
+=== "Python"
+    ```python
+    tagged = spark.read.option("tag", "release_candidate").table("users")
+
+    tagged_path = spark.read \
+        .format("lance") \
+        .option("tag", "release_candidate") \
+        .load("/path/to/dataset.lance")
+    ```
+
+=== "Scala"
+    ```scala
+    val tagged = spark.read.option("tag", "release_candidate").table("users")
+    ```
+
+=== "Java"
+    ```java
+    Dataset<Row> tagged = spark.read()
+        .option("tag", "release_candidate")
+        .table("users");
+    ```
+
+!!! note
+    SQL `VERSION AS OF` cannot query tags whose names consist entirely of integer digits.
+    Numeric values are interpreted as table versions, even when quoted. For example, both
+    `VERSION AS OF 123` and `VERSION AS OF '123'` query table version 123 rather than a tag named
+    `123`. Use a tag name containing a non-digit character, or the explicit `tag` read option.
+
+The explicit `tag` read option also accepts numeric tag names. Do not combine it
+with `branch` or `version`. Read options apply at scan time, after Spark analyzes the
+current table schema. You can select columns compatible with the tagged snapshot;
+missing columns or incompatible types (including nested fields) fail during planning.
+Use SQL `VERSION AS OF` to analyze the historical schema instead.
+
+Tag queries are read-only; mutating commands are rejected. Besides DML and schema changes, this
+covers `CREATE INDEX`, `DROP INDEX`, `OPTIMIZE`, `VACUUM`, `SET UNENFORCED PRIMARY KEY`, and
+branch and tag DDL. Branch identifiers behave the same way.
+
+### Query by Branch
+
+Read the current head of a named branch. Do not combine `branch` with `tag` or `version`.
+
+=== "SQL"
+    ```sql
+    SELECT * FROM catalog.db.users.branch_audit;
+    ```
+
+=== "Python"
+    ```python
+    audit = spark.read.option("branch", "audit").table("catalog.db.users")
+
+    audit_path = spark.read \
+        .format("lance") \
+        .option("branch", "audit") \
+        .load("/path/to/dataset.lance")
+    ```
+
+=== "Scala"
+    ```scala
+    val audit = spark.read.option("branch", "audit").table("catalog.db.users")
+
+    val auditPath = spark.read
+        .format("lance")
+        .option("branch", "audit")
+        .load("/path/to/dataset.lance")
+    ```
+
+=== "Java"
+    ```java
+    Dataset<Row> audit = spark.read()
+        .option("branch", "audit")
+        .table("catalog.db.users");
+
+    Dataset<Row> auditPath = spark.read()
+        .format("lance")
+        .option("branch", "audit")
+        .load("/path/to/dataset.lance");
+    ```
+
+If a table named `users.branch_audit` already exists, Spark reads that table. Otherwise the last
+segment is a branch on the parent table. Do not add `VERSION AS OF` or `TIMESTAMP AS OF`. Branch
+identifiers are read-only; mutating commands are rejected.
+
+`.option("branch").table(...)` applies the branch at scan time. Spark still analyzes with the table
+schema. Use `table.branch_name` when the branch schema differs from the table.
+
 ### Query by Timestamp
 
 Use `TIMESTAMP AS OF` to query the table as it existed at a specific point in time:
@@ -236,13 +354,43 @@ These options control how data is read from Lance datasets. They can be set usin
 
 | Option                | Type    | Default | Description                                                                                                       |
 |-----------------------|---------|---------|-------------------------------------------------------------------------------------------------------------------|
-| `batch_size`          | Integer | `512`   | Number of rows to read per batch during scanning. Larger values may improve throughput but increase memory usage. |
+| `batch_size`          | Integer | `8192`  | Number of rows to read per batch during scanning. Larger values may improve throughput but increase memory usage. |
+| `use_scalar_index`    | Boolean | `true`  | Whether to use scalar indices (e.g. btree) for filter acceleration during scanning.                               |
 | `version`             | Integer | Latest  | Specific dataset version to read. If not specified, reads the latest version.                                     |
+| `branch`              | String  | Main    | Named branch to read. Reads the current head. Do not set with `tag` or `version`.                                 |
+| `tag`                 | String  | -       | Tagged snapshot to read. Read-only; do not set with `branch` or `version`.                                        |
 | `block_size`          | Integer | -       | Block size in bytes for reading data.                                                                             |
 | `index_cache_size`    | Integer | -       | Size of the index cache in number of entries.                                                                     |
 | `metadata_cache_size` | Integer | -       | Size of the metadata cache in number of entries.                                                                  |
 | `pushDownFilters`     | Boolean | `true`  | Whether to push down filter predicates to the Lance reader for optimized scanning.                                |
+| `runtime_filter_max_keys` | Integer | `100000` | Maximum accumulated non-null keys accepted from Spark runtime `IN` filters. Oversized filters are ignored.       |
+| `runtime_filter_max_bytes` | Integer | `4194304` | Maximum estimated size in bytes of accumulated Spark runtime filters. Oversized filters are ignored.           |
 | `topN_push_down`      | Boolean | `true`  | Whether to push down TopN (ORDER BY ... LIMIT) operations to Lance for optimized sorting.                         |
+
+### Runtime Join Filtering
+
+On Spark 4.1 and newer, Spark can push join dynamic partition pruning filters into Lance scans. Lance accepts `IN` filters on projected `_rowaddr` and `_rowid` columns, active sharding columns, and top-level scalar columns backed by a compatible scalar or zonemap index. Columns that Spark reads with lossy conversions are skipped (`Timestamp(NANOSECOND)`, `Date(MILLISECOND)`, and `UInt64`).
+
+Runtime filters prune fragments from the pinned snapshot and also get passed to the native Lance scanner, while Spark still runs the full join. Multiple runtime filters combine with `AND`. Null keys are ignored, an empty or all-null key set returns an empty scan, and fragments not covered by a partially built zonemap index are kept safely. A filter with a negative `_rowid` or `_rowaddr` key is left to Spark.
+
+You can control runtime filtering with a few read options:
+
+* `pushDownFilters=false` disables runtime filtering completely.
+* `use_scalar_index=false` skips native scalar index lookups, while keeping `_rowaddr`, sharding, and zonemap fragment pruning enabled.
+* `runtime_filter_max_keys` and `runtime_filter_max_bytes` limit driver memory and task payload size. Since every Spark task carries a copy of the accepted filter, keep the fragment count in mind when raising these limits. You can also set them at the catalog level (for example `spark.sql.catalog.lance.runtime_filter_max_keys=200000`), and per-read `.option()` calls override them. If a filter hits a limit and gets skipped, `rejectedRuntimeFilterCount` increments in the scan metadata and the query still runs normally.
+
+With Spark's default `dynamicPartitionPruning.reuseBroadcastOnly=true`, runtime filters only reach Lance when the other side of the join is broadcast and has a selective filter. Spark drops the filter on shuffle joins or when Lance is the broadcast side.
+
+You can also use a `_rowid` runtime filter when another table (like an Iceberg table) stores Lance row IDs and joins back to Lance:
+
+```sql
+SELECT /*+ BROADCAST(o) */ i.image_bytes
+FROM lance.default.images i
+JOIN iceberg.db.observations o ON i._rowid = o.lance_row_id
+WHERE o.ingestion_date = '2026-05-01';
+```
+
+Without stable row IDs, `_rowid` equals `_rowaddr`, so Lance prunes fragments. With `enable_stable_row_ids`, a row ID does not identify its fragment, so every fragment is scanned and the native scanner filters the matching rows.
 
 ## User-Defined Types
 

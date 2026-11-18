@@ -128,7 +128,7 @@ public abstract class BaseBucketSpjTest {
   }
 
   @Test
-  public void testBucketJoinPlanShowsSpj() {
+  public void testZonemapCoverageControlsSpj() {
     String tableA = "bkt_spj_a_" + UUID.randomUUID().toString().replace("-", "");
     String tableB = "bkt_spj_b_" + UUID.randomUUID().toString().replace("-", "");
     createBucketedTable(tableA, 4);
@@ -137,26 +137,36 @@ public abstract class BaseBucketSpjTest {
     String fullA = catalogName + ".default." + tableA;
     String fullB = catalogName + ".default." + tableB;
 
-    Dataset<Row> joined =
-        spark.sql(
-            String.format(
-                "SELECT a.id, a.region, b.value "
-                    + "FROM %s a JOIN %s b "
-                    + "ON a.region = b.region",
-                fullA, fullB));
+    String joinSql =
+        String.format(
+            "SELECT a.id, a.region, b.value " + "FROM %s a JOIN %s b " + "ON a.region = b.region",
+            fullA, fullB);
+    Dataset<Row> joined = spark.sql(joinSql);
 
-    // Force execution so AQE finalizes the plan
     long count = joined.count();
-    assertTrue(count > 0, "Join should produce results");
+    assertEquals(300, count, "The fully indexed join should produce all matching rows");
 
-    String plan = joined.queryExecution().executedPlan().toString();
-
-    boolean hasShuffleExchange = plan.contains("Exchange");
-
+    String fullCoveragePlan = joined.queryExecution().executedPlan().toString();
     assertFalse(
-        hasShuffleExchange,
+        fullCoveragePlan.contains("Exchange"),
         "SPJ should eliminate shuffle — bucket(4, region)"
             + " partitioning must be recognized. Plan: "
-            + plan);
+            + fullCoveragePlan);
+
+    // This fragment is not covered by the already-committed zonemap index.
+    spark.sql(
+        String.format("INSERT INTO %s (id, region, value) VALUES (1000, 'east', 1000.0)", fullA));
+
+    Dataset<Row> joinedWithPartialCoverage = spark.sql(joinSql);
+    long countWithPartialCoverage = joinedWithPartialCoverage.count();
+    assertEquals(
+        310, countWithPartialCoverage, "The unindexed fragment must participate in the join");
+
+    String partialCoveragePlan =
+        joinedWithPartialCoverage.queryExecution().executedPlan().toString();
+    assertTrue(
+        partialCoveragePlan.contains("Exchange"),
+        "Partial zonemap coverage must disable SPJ and require a shuffle. Plan: "
+            + partialCoveragePlan);
   }
 }

@@ -37,36 +37,56 @@ final class TestPredicates {
   private TestPredicates() {}
 
   static Predicate eq(String column, Object value) {
-    return new Predicate("=", new Expression[] {FieldReference.apply(column), literalOf(value)});
+    return new Predicate("=", new Expression[] {FieldReference.column(column), literalOf(value)});
+  }
+
+  /**
+   * Builds an equality predicate whose literal is a raw {@code TimestampType} value carrying {@code
+   * micros}-since-epoch UTC, exactly as Spark hands timestamps to V2 pushdown. Unlike {@link
+   * #eq(String, Object)} with a {@link Timestamp}, the value is not derived from the JVM default
+   * time zone, so it pins time-zone-independent rendering.
+   */
+  static Predicate eqTimestampMicros(String column, long micros) {
+    return cmpTimestampMicros("=", column, micros);
+  }
+
+  /**
+   * Like {@link #eqTimestampMicros(String, long)} but for any comparison operator ({@code "<"},
+   * {@code ">="}, ...), so range/non-equality pushdown of {@code TimestampType} literals can be
+   * exercised through the same raw {@code Long}-micros shape Spark produces.
+   */
+  static Predicate cmpTimestampMicros(String op, String column, long micros) {
+    LiteralValue<Long> lit = new LiteralValue<>(micros, DataTypes.TimestampType);
+    return new Predicate(op, new Expression[] {FieldReference.column(column), lit});
   }
 
   static Predicate lt(String column, Object value) {
-    return new Predicate("<", new Expression[] {FieldReference.apply(column), literalOf(value)});
+    return new Predicate("<", new Expression[] {FieldReference.column(column), literalOf(value)});
   }
 
   static Predicate lte(String column, Object value) {
-    return new Predicate("<=", new Expression[] {FieldReference.apply(column), literalOf(value)});
+    return new Predicate("<=", new Expression[] {FieldReference.column(column), literalOf(value)});
   }
 
   static Predicate gt(String column, Object value) {
-    return new Predicate(">", new Expression[] {FieldReference.apply(column), literalOf(value)});
+    return new Predicate(">", new Expression[] {FieldReference.column(column), literalOf(value)});
   }
 
   static Predicate gte(String column, Object value) {
-    return new Predicate(">=", new Expression[] {FieldReference.apply(column), literalOf(value)});
+    return new Predicate(">=", new Expression[] {FieldReference.column(column), literalOf(value)});
   }
 
   static Predicate isNull(String column) {
-    return new Predicate("IS_NULL", new Expression[] {FieldReference.apply(column)});
+    return new Predicate("IS_NULL", new Expression[] {FieldReference.column(column)});
   }
 
   static Predicate isNotNull(String column) {
-    return new Predicate("IS_NOT_NULL", new Expression[] {FieldReference.apply(column)});
+    return new Predicate("IS_NOT_NULL", new Expression[] {FieldReference.column(column)});
   }
 
   static Predicate in(String column, Object... values) {
     Expression[] children = new Expression[values.length + 1];
-    children[0] = FieldReference.apply(column);
+    children[0] = FieldReference.column(column);
     for (int i = 0; i < values.length; i++) {
       children[i + 1] = literalOf(values[i]);
     }
@@ -75,7 +95,7 @@ final class TestPredicates {
 
   static Predicate contains(String column, String value) {
     return new Predicate(
-        "CONTAINS", new Expression[] {FieldReference.apply(column), literalOf(value)});
+        "CONTAINS", new Expression[] {FieldReference.column(column), literalOf(value)});
   }
 
   static Predicate and(Predicate left, Predicate right) {

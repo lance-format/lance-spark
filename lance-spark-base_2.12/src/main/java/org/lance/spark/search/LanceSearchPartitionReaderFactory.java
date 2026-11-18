@@ -13,6 +13,8 @@
  */
 package org.lance.spark.search;
 
+import org.lance.spark.LanceRuntime;
+
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.PartitionReader;
@@ -24,12 +26,14 @@ public class LanceSearchPartitionReaderFactory implements PartitionReaderFactory
 
   @Override
   public PartitionReader<InternalRow> createReader(InputPartition partition) {
+    LanceRuntime.enableOpenTelemetry();
     return new LanceSearchRowPartitionReader(
         new LanceSearchColumnarPartitionReader(asSearchPartition(partition)));
   }
 
   @Override
   public PartitionReader<ColumnarBatch> createColumnarReader(InputPartition partition) {
+    LanceRuntime.enableOpenTelemetry();
     return new LanceSearchColumnarPartitionReader(asSearchPartition(partition));
   }
 

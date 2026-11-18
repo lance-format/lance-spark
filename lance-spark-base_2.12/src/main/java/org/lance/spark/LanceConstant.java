@@ -18,6 +18,12 @@ public class LanceConstant {
   public static final String ROW_ID = "_rowid";
   public static final String ROW_ADDRESS = "_rowaddr";
 
+  /**
+   * BM25 relevance score column. Explicitly included in the native column projection when a
+   * full-text query is active. Exposed as a metadata column so it is hidden from SELECT *.
+   */
+  public static final String SCORE = "_score";
+
   // CDF (Change Data Feed) version tracking columns
   public static final String ROW_CREATED_AT_VERSION = "_row_created_at_version";
   public static final String ROW_LAST_UPDATED_AT_VERSION = "_row_last_updated_at_version";

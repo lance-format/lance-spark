@@ -35,7 +35,12 @@ object BlobPlanProbe {
   /** The dataset version each encoded blob source context would resolve against; null = latest. */
   def blobSourceContextVersions(plan: LogicalPlan): java.util.Map[String, java.lang.Long] = {
     val versions = new java.util.HashMap[String, java.lang.Long]()
-    decodedContexts(plan).forEach((uri, ctx) => versions.put(uri, ctx.getReadOptions.getVersion))
+    decodedContexts(plan).forEach { (uri, ctx) =>
+      val ref = ctx.getReadOptions.getRef
+      val version =
+        if (ref == null || ref.getVersionNumber.isEmpty) null else ref.getVersionNumber.get
+      versions.put(uri, version)
+    }
     versions
   }
 

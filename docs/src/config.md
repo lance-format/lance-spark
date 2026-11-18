@@ -52,10 +52,82 @@ The following features require the Lance Spark SQL extension to be enabled:
 - [VECTOR_SEARCH](operations/dql/vector-search.md) - Run vector similarity search through Lance namespace execution
 - [SEARCH](operations/dql/search.md) - Run full-text search through Lance namespace execution
 - [HYBRID_SEARCH](operations/dql/hybrid-search.md) - Combine vector and full-text search with reciprocal rank fusion
+- [Full-Text Search](operations/dql/fts.md) - `lance_match`, `lance_match_phrase`, and `lance_multi_match` SQL functions for querying FTS indexes
 - [ADD COLUMNS with backfill](operations/dml/add-columns.md) - Add new columns and backfill existing rows with data
 - [UPDATE COLUMNS with backfill](operations/dml/update-columns.md) - Update existing columns using data from a source
 - [OPTIMIZE](operations/ddl/optimize.md) - Compact table fragments for improved query performance
+- [OPTIMIZE INDEX](operations/ddl/optimize-index.md) - Incrementally maintain a named index
 - [VACUUM](operations/ddl/vacuum.md) - Remove old versions and reclaim storage space
+
+## Per-write Transaction Properties
+
+Attach optional string properties to a write using prefixed options:
+
+```python
+df.writeTo("lance.default.events").option(
+    "transaction_properties.request_id", "example-42"
+).option(
+    "transaction_properties.application", "import"
+).append()
+```
+
+Prefixed property names must be non-empty and are normalized to lowercase,
+independently of the system locale, following Spark's case-insensitive option
+semantics. Values retain their case, Unicode and empty strings.
+
+Alternatively, pass a JSON object through `transaction_properties`. JSON property
+names preserve their exact case and may be empty:
+
+```python
+df.writeTo("lance.default.events").option(
+    "transaction_properties", '{"request_id":"example-42","application":"import"}'
+).append()
+```
+
+Properties are persisted in the same native transaction as the data change.
+They are not table properties, catalog defaults, storage options or read options.
+Use one format per write: combining the JSON option and prefixed options is
+rejected, even if the JSON object is empty or the property names differ.
+Malformed JSON, duplicate JSON keys, ambiguous case-insensitive prefixed names,
+and non-string or null property values are rejected before committing. JSON values
+also retain their case, Unicode and empty strings. Omitting both forms or passing
+`{}` keeps existing metadata-free behavior; a no-op does not gain a metadata-only
+commit.
+
+For SQL, use the synchronous JVM API rather than a shared session setting:
+
+```scala
+import org.lance.spark.LanceSpark
+import scala.collection.JavaConverters._
+
+LanceSpark.executeSql(
+  spark,
+  "DELETE FROM lance.default.events WHERE expired = true",
+  Map("request_id" -> "example-43").asJava)
+```
+
+`executeSql` copies the map before planning and binds it to that statement's write
+target. Concurrent calls can use the same Spark session without sharing property
+maps. It returns after executing the command and does not return a commit receipt
+or query results. Supported statements are `INSERT`, `INSERT OVERWRITE`,
+`CREATE/REPLACE TABLE AS SELECT`, `UPDATE`, `DELETE`, `MERGE`, and the Lance
+`ADD COLUMNS` / `UPDATE COLUMNS` backfill commands, subject to the Spark version's
+existing operation support. Backfill commands require the SQL extensions above.
+The API uses classic Spark, not Spark Connect.
+
+This includes staged create/replace commits. It excludes schema-only DDL,
+index operations, compaction, vacuum, primary-key commands and streaming writes.
+Do not configure operation metadata in table properties or catalog/session defaults.
+
+Consumers can inspect each retained native version using `Dataset.checkoutVersion`
+and `Dataset.readTransaction`, then read `Transaction.transactionProperties`.
+Transaction history may be removed by cleanup, and a transaction's `readVersion`
+is not its committed version. Properties provide correlation, not exactly-once
+writes or retry deduplication.
+
+!!! warning
+    Properties are caller-supplied persisted data. Do not include credentials,
+    tokens or sensitive payloads.
 
 ## Basic Setup
 
@@ -67,9 +139,136 @@ and namespace-specific options:
 | `spark.sql.catalog.{name}`                  | String | ✓        | Set to `org.lance.spark.LanceNamespaceSparkCatalog`                                                                        |
 | `spark.sql.catalog.{name}.impl`             | String | ✓        | Namespace implementation, short name like `dir`, `rest`, `hive3`, `glue` or full Java implementation class                 |
 | `spark.sql.catalog.{name}.storage.*`        | -      | ✗        | Lance IO storage options. See [Lance Object Store Guide](https://lance.org/guide/object_store) for all available options.  |
+| `spark.sql.catalog.{name}.index_cache_backend` | String | ✗     | Registered native index cache backend URI, for example `moka://?capacity=6442450944`. |
+| `spark.sql.catalog.{name}.metadata_cache_backend` | String | ✗  | Registered native metadata cache backend URI, for example `moka://?capacity=1073741824`. |
 | `spark.sql.catalog.{name}.single_level_ns`  | Boolean | ✗       | Enable single-level mode with virtual "default" namespace. Default: `false`. See [Note on Namespace Levels](#note-on-namespace-levels). |
 | `spark.sql.catalog.{name}.parent`           | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                             |
 | `spark.sql.catalog.{name}.parent_delimiter` | String | ✗        | Delimiter for parent prefix (default: `.`). See [Note on Namespace Levels](#note-on-namespace-levels).                           |
+
+## Distributed Vector Search
+
+Set `spark.sql.lance.search.distributed.enabled=true` to execute `VECTOR_SEARCH` with Spark tasks
+instead of through the namespace server's `queryTable` endpoint. The default is `false`.
+
+Distributed search opens the Lance dataset from executors, so each executor must have network
+access to the backing object store. Storage credentials may come from the configured namespace;
+the `executor_credential_refresh` catalog option controls whether executors reconstruct the
+namespace client and refresh credentials when opening the dataset.
+
+The planner creates one task for every selected vector-index segment and one flat-search task for
+each unindexed fragment. `bypass_vector_index=true` uses only flat-search tasks, while
+`fast_search=true` searches only indexed fragments.
+
+A fragment-restricted scan can only prefilter, so a distributed plan cannot reproduce namespace
+execution's default `prefilter=false`, which applies the filter *after* the top k is chosen and
+therefore usually returns fewer rows. A filtered distributed search must say `prefilter=true`
+explicitly; omitting `prefilter` or setting it to `false` fails during planning rather than
+silently changing what the filter means.
+
+`lower_bound` and `upper_bound` are not supported either, because lance-core's Java scanner cannot
+apply them yet. Disable `spark.sql.lance.search.distributed.enabled` to run any of these through
+the namespace.
+
+## Cache Backends
+
+Each Spark catalog owns an isolated Lance `Session`. Select registered native cache backends for
+the index and metadata cache independently by setting backend URIs:
+
+```python
+spark = SparkSession.builder \
+    .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog") \
+    .config("spark.sql.catalog.lance.impl", "dir") \
+    .config("spark.sql.catalog.lance.root", "/path/to/lance/database") \
+    .config(
+        "spark.sql.catalog.lance.index_cache_backend",
+        "moka://?capacity=6442450944",
+    ) \
+    .config(
+        "spark.sql.catalog.lance.metadata_cache_backend",
+        "moka://?capacity=1073741824",
+    ) \
+    .getOrCreate()
+```
+
+`moka` is registered by Lance Core. Other backend kinds must already be registered by the native
+Lance runtime packaged with the application. These options select a registered backend; they do
+not register a Java cache implementation.
+
+The connector serializes the backend URIs with its read and write options, so driver and executor
+JVMs create equivalent process-local sessions. A catalog's session is fixed when that catalog is
+first used. To switch backends in one Spark application, configure a second catalog:
+
+```python
+spark = SparkSession.builder \
+    .config("spark.sql.catalog.memory_lance", "org.lance.spark.LanceNamespaceSparkCatalog") \
+    .config("spark.sql.catalog.memory_lance.impl", "dir") \
+    .config("spark.sql.catalog.memory_lance.root", "/path/to/lance/database") \
+    .config(
+        "spark.sql.catalog.memory_lance.index_cache_backend",
+        "moka://?capacity=6442450944",
+    ) \
+    .config("spark.sql.catalog.other_lance", "org.lance.spark.LanceNamespaceSparkCatalog") \
+    .config("spark.sql.catalog.other_lance.impl", "dir") \
+    .config("spark.sql.catalog.other_lance.root", "/path/to/lance/database") \
+    .config(
+        "spark.sql.catalog.other_lance.index_cache_backend",
+        "other://?option=value",
+    ) \
+    .getOrCreate()
+```
+
+For structured Java SDK configuration, build a `Session` with `CacheBackendConfig` and register it
+before the catalog is first used:
+
+```java
+import org.lance.CacheBackendConfig;
+import org.lance.Session;
+import org.lance.spark.LanceRuntime;
+
+Session session = Session.builder()
+    .indexCacheBackend(
+        CacheBackendConfig.builder("moka")
+            .option("capacity", "6442450944")
+            .build())
+    .metadataCacheBackend(
+        CacheBackendConfig.builder("moka")
+            .option("capacity", "1073741824")
+            .build())
+    .build();
+LanceRuntime.registerSession("lance", session);
+```
+
+Registration transfers session ownership to `LanceRuntime`; do not close it directly. In cluster
+mode, programmatic registration must run in every JVM that accesses Lance. Catalog URI options are
+recommended when the same configuration should be distributed automatically.
+
+The corresponding environment fallbacks are `LANCE_INDEX_CACHE_BACKEND` and
+`LANCE_METADATA_CACHE_BACKEND`. Per-catalog URIs take precedence over environment backend URIs.
+Backend URIs take precedence over the legacy `LANCE_INDEX_CACHE_SIZE` and
+`LANCE_METADATA_CACHE_SIZE` settings for the same cache tier.
+
+## OpenTelemetry Metrics
+
+Lance Spark can bridge Lance's native Java metrics into the JVM OpenTelemetry
+pipeline. Enable it with:
+
+```shell
+--conf spark.lance.otel.enabled=true
+```
+
+You can also set the JVM system property
+`-Dspark.lance.otel.enabled=true`, or set
+`LANCE_SPARK_OTEL_ENABLED=true` in each JVM environment. When multiple sources
+are set, Spark configuration takes precedence over the JVM system property,
+which takes precedence over the environment variable. Values must be `true` or
+`false` (case-insensitive); invalid values disable the bridge and produce a
+warning.
+
+The bridge uses the OpenTelemetry `GlobalOpenTelemetry` meter provider, so
+configure your exporter, resource, and reader with the standard OpenTelemetry
+Java SDK settings. Spark driver and executor JVMs are independent processes;
+set the Spark conf or environment variable for every process that should emit
+Lance metrics.
 
 ## Example Namespace Implementations
 
@@ -294,7 +493,7 @@ Using the Glue namespace requires additional dependencies beyond the main Lance 
 Example with Spark Shell:
 ```shell
 spark-shell \
-  --packages org.lance:lance-spark-bundle-3.5_2.12:0.4.0,org.lance:lance-namespace-glue:0.3.0,software.amazon.awssdk:bundle:2.20.0 \
+  --packages org.lance:lance-spark-bundle-3.5_2.12:0.4.0,org.lance:lance-namespace-glue:0.4.2,software.amazon.awssdk:bundle:2.20.0 \
   --conf spark.sql.catalog.lance=org.lance.spark.LanceNamespaceSparkCatalog \
   --conf spark.sql.catalog.lance.impl=glue \
   --conf spark.sql.catalog.lance.root=s3://your-bucket/lance
@@ -404,7 +603,7 @@ Using Hive namespaces requires additional JARs beyond the main Lance Spark bundl
 Example with Spark Shell for Hive 3.x:
 ```shell
 spark-shell \
-  --packages org.lance:lance-spark-bundle-3.5_2.12:0.4.0,org.lance:lance-namespace-hive3:0.3.0 \
+  --packages org.lance:lance-spark-bundle-3.5_2.12:0.4.0,org.lance:lance-namespace-hive3:0.4.2 \
   --conf spark.sql.catalog.lance=org.lance.spark.LanceNamespaceSparkCatalog \
   --conf spark.sql.catalog.lance.impl=hive3 \
   --conf spark.sql.catalog.lance.hadoop.hive.metastore.uris=thrift://metastore:9083 \
@@ -475,6 +674,58 @@ The parent configuration effectively "anchors" your Spark catalog at a specific 
 hierarchy, making the extra levels transparent to Spark users while maintaining compatibility with the underlying
 namespace implementation.
 
+## Branch and Tag Read Options
+
+Set `branch` to read the current head of a named branch, or `tag` to read a tagged
+snapshot. Specify only one of `branch`, `tag`, or `version`. Branch and tag options
+are read-only.
+
+```python
+df = spark.read \
+    .format("lance") \
+    .option("branch", "audit") \
+    .load("/path/to/dataset.lance")
+```
+
+```python
+df = spark.read \
+    .format("lance") \
+    .option("tag", "release_candidate") \
+    .load("/path/to/dataset.lance")
+
+tagged = spark.read.option("tag", "release_candidate").table("lance.db.users")
+```
+
+Spark analyzes the current table schema before applying the `version` or `tag` read option.
+Select columns compatible with the snapshot; missing columns or incompatible types,
+including nested fields, fail during planning. Use SQL `VERSION AS OF 'release_candidate'`
+to analyze the query against the historical schema instead.
+
+## Arrow Batch Reads
+
+Set `arrow_batch_reads` to `true` to expose supported scans as Spark `ArrowColumnVector`
+batches, so an engine that processes Arrow data, such as Apache Gluten, can take them as Arrow.
+This is disabled by default.
+
+```python
+df = spark.read \
+    .format("lance") \
+    .option("arrow_batch_reads", "true") \
+    .load("/path/to/dataset.lance")
+```
+
+If any selected column is unsupported, the whole scan uses the regular reader. This includes
+blob columns and columns holding a blob in a struct or list, JSON columns, `_score`, and Arrow
+types Spark cannot read directly, such as unsigned integers or nanosecond timestamps.
+`LanceScan.arrowBatchSchema()` reports whether a scan supports Arrow batches;
+`LanceScan.withArrowBatches()` turns them on for a planned scan and throws if it does not.
+
+`FixedSizeList` (vector) columns become Arrow `List`s, and `_rowid`, `_rowaddr`, and the row
+version columns are exposed as signed 64-bit integers.
+
+Native vectors may be reused on `next()`, while converted vectors are released. Consumers must
+copy or transfer data they need to keep before advancing.
+
 ## Memory Configuration
 
 Lance Spark uses Arrow for data transfer between native code and Spark, and maintains caches for improved performance.
@@ -484,6 +735,9 @@ Lance Spark uses Arrow for data transfer between native code and Spark, and main
 Set via environment variable `LANCE_ALLOCATOR_SIZE` (default: unlimited).
 
 Controls the maximum memory allocation for Arrow buffers used in data transfer between Lance native code and Spark.
+[Arrow batch reads](#arrow-batch-reads) allocate their buffers from a child of Spark's root allocator instead, so
+that a consumer under that root can take them without copying. `LANCE_ALLOCATOR_SIZE` caps that allocator too, as a
+separate budget.
 
 | Environment Variable   | Default          | Description                              |
 |------------------------|------------------|------------------------------------------|
@@ -537,12 +791,24 @@ TBLPROPERTIES (
 ```
 
 With `file_format_version = '2.2'` or higher, blob columns are written using blob v2
-encoding and `ARROW:extension:name = lance.blob.v2 metadata`.
+encoding and `ARROW:extension:name = lance.blob.v2 metadata`. The `stable` and `next`
+release selectors resolve to `2.2` or newer, so they select blob v2 as well.
 
-With an older version, or when `file_format_version` is not set, blob columns use the
-legacy v1 encoding with `lance-encoding:blob = true` metadata.
+When neither the table nor the catalog sets `file_format_version`, the table follows
+Lance's default version, which is `2.2`, so its blob columns are blob v2. A catalog-level
+`file_format_version` is applied first, so a catalog pinned to `2.0`, `2.1` or `legacy`
+still produces v1 blob columns.
 
-Blob encoding requires a numeric `file_format_version`, such as `2.2`.
+Creating a table from a schema read back from an existing v1 blob table is the exception:
+that schema already carries `lance-encoding:blob = true`, which Lance writes as blob v2
+from `2.2` on, so the new table is created at `2.1` and its blob columns stay v1. Pinning a version
+of `2.2` or newer for such a schema is rejected — rebuild the column as blob v2 instead.
+A schema that mixes v1 and v2 blob columns is rejected as well, because no single file
+format version can store both.
+
+With an older version, such as `2.0`, `2.1` or `legacy`, blob columns use the legacy v1
+encoding with `lance-encoding:blob = true` metadata. Pin one of those versions to keep a
+blob column on v1 and read it back as `BINARY` instead of a descriptor struct.
 
 Blob v2 writes must go through the catalog path. Use SQL DDL with `TBLPROPERTIES`, as
 shown above, or use the `DataFrameWriterV2` API:

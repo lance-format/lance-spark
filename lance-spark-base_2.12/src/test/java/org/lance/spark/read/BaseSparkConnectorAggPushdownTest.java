@@ -17,6 +17,7 @@ import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.execution.ExplainMode;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -27,6 +28,7 @@ import java.nio.file.Path;
 import java.util.Arrays;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public abstract class BaseSparkConnectorAggPushdownTest {
@@ -41,6 +43,8 @@ public abstract class BaseSparkConnectorAggPushdownTest {
             .appName("LanceAggregatePushDownTest")
             .master("local[*]")
             .config("spark.ui.enabled", "false")
+            .config(
+                "spark.sql.extensions", "org.lance.spark.extensions.LanceSparkSessionExtensions")
             .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
             .config("spark.sql.catalog.lance.impl", "dir")
             .config("spark.sql.catalog.lance.root", tempDir.toString())
@@ -120,7 +124,7 @@ public abstract class BaseSparkConnectorAggPushdownTest {
   }
 
   @Test
-  public void testCountColumnNotPushedDown() throws Exception {
+  public void testCountColumnPushDown() throws Exception {
     String tableName = "lance.default.count_column_test_dataset";
 
     // Create test data with some nulls
@@ -135,6 +139,7 @@ public abstract class BaseSparkConnectorAggPushdownTest {
             new StructType()
                 .add("id", org.apache.spark.sql.types.DataTypes.LongType)
                 .add("name", org.apache.spark.sql.types.DataTypes.StringType))
+        .repartition(2)
         .writeTo(tableName)
         .create();
 
@@ -143,9 +148,34 @@ public abstract class BaseSparkConnectorAggPushdownTest {
 
     Dataset<Row> lanceDataset = spark.table(tableName);
 
-    // COUNT(column) should not be pushed down (it excludes nulls)
-    long countName = lanceDataset.selectExpr("count(name)").first().getLong(0);
-    assertEquals(3L, countName, "Count(name) should be 3 (excluding nulls)");
+    Dataset<Row> countName = lanceDataset.selectExpr("count(name)");
+    String plan = countName.queryExecution().explainString(ExplainMode.fromString("formatted"));
+    assertTrue(plan.contains("pushedAggregation: Optional["), plan);
+    assertTrue(plan.contains("`name` IS NOT NULL"), plan);
+    assertFalse(plan.contains("LocalTableScan"), plan);
+    assertEquals(3L, countName.first().getLong(0), "Count(name) should exclude nulls");
+
+    Dataset<Row> filteredCount = lanceDataset.filter("id >= 2").selectExpr("count(name)");
+    String filteredPlan =
+        filteredCount.queryExecution().explainString(ExplainMode.fromString("formatted"));
+    assertTrue(filteredPlan.contains("pushedAggregation: Optional["), filteredPlan);
+    assertEquals(2L, filteredCount.first().getLong(0));
+    assertEquals(
+        "{\"n\":0}",
+        lanceDataset.filter("name IS NULL").selectExpr("count(name) AS n").toJSON().first());
+    assertEquals(
+        "{\"n\":0}", lanceDataset.filter("id < 0").selectExpr("count(name) AS n").toJSON().first());
+
+    Dataset<Row> residualCount = lanceDataset.filter("length(name) = 1").selectExpr("count(name)");
+    String residualPlan =
+        residualCount.queryExecution().explainString(ExplainMode.fromString("formatted"));
+    assertTrue(residualPlan.contains("pushedAggregation: Optional.empty"), residualPlan);
+    assertEquals(3L, residualCount.first().getLong(0));
+
+    String emptyTable = "lance.default.count_column_empty_dataset";
+    lanceDataset.limit(0).writeTo(emptyTable).create();
+    assertEquals(
+        "{\"n\":0}", spark.table(emptyTable).selectExpr("count(name) AS n").toJSON().first());
 
     // COUNT(*) should still be pushed down
     long countStar = lanceDataset.selectExpr("count(*)").first().getLong(0);
@@ -179,6 +209,48 @@ public abstract class BaseSparkConnectorAggPushdownTest {
     // COUNT(DISTINCT column) should not be pushed down
     long countDistinct = lanceDataset.selectExpr("count(distinct category)").first().getLong(0);
     assertEquals(3L, countDistinct, "Count(distinct category) should be 3");
+  }
+
+  @Test
+  public void testCountColumnWithQuotedNames() throws Exception {
+    String tableName = "lance.default.count_quoted_column_test_dataset";
+    spark
+        .range(0, 3)
+        .selectExpr(
+            "CASE WHEN id = 0 THEN CAST(NULL AS STRING) ELSE 'value' END AS `a b`",
+            "CASE WHEN id = 0 THEN CAST(NULL AS STRING) ELSE 'value' END AS `select`")
+        .writeTo(tableName)
+        .create();
+
+    for (String column : Arrays.asList("`a b`", "`select`")) {
+      Dataset<Row> count = spark.table(tableName).selectExpr("count(" + column + ")");
+      String plan = count.queryExecution().explainString(ExplainMode.fromString("formatted"));
+      assertTrue(plan.contains("pushedAggregation: Optional["), plan);
+      assertEquals(2L, count.first().getLong(0));
+    }
+  }
+
+  @Test
+  public void testCountColumnWithFilterPruningEveryFragment() throws Exception {
+    String tableName = "lance.default.count_column_all_pruned_test_dataset";
+    spark
+        .range(0, 100)
+        .selectExpr("id", "CASE WHEN id % 2 = 0 THEN NULL ELSE CAST(id AS STRING) END AS name")
+        .repartition(4)
+        .writeTo(tableName)
+        .create();
+    spark
+        .sql("ALTER TABLE " + tableName + " CREATE INDEX id_zm USING zonemap (id)")
+        .collectAsList();
+    spark.catalog().refreshTable(tableName);
+
+    for (String filter : Arrays.asList("id >= 1000 AND id < 2000", "_rowaddr = " + (1000L << 32))) {
+      Dataset<Row> count = spark.table(tableName).filter(filter).selectExpr("count(name) AS n");
+      assertEquals("{\"n\":0}", count.toJSON().first());
+      String plan = count.queryExecution().executedPlan().toString();
+      assertTrue(plan.contains("LocalTableScan"), plan);
+      assertFalse(plan.contains("BatchScan"), plan);
+    }
   }
 
   @Test
@@ -221,5 +293,156 @@ public abstract class BaseSparkConnectorAggPushdownTest {
     // Verify the count is correct (ids 11 to 49 = 39 rows)
     long count = countDataset.first().getLong(0);
     assertEquals(39L, count, "Filtered count should be 39");
+  }
+
+  @Test
+  public void testCountStarWithExactScalarIndexUsesSingleTask() throws Exception {
+    String tableName = "lance.default.count_indexed_single_partition_test_dataset";
+    spark
+        .range(0, 100)
+        .selectExpr("id", "id % 10 as category")
+        .repartition(4)
+        .writeTo(tableName)
+        .create();
+
+    spark
+        .sql(
+            "ALTER TABLE "
+                + tableName
+                + " CREATE INDEX category_bitmap USING BITMAP(category) WITH (num_segments = 2)")
+        .collectAsList();
+    spark.catalog().refreshTable(tableName);
+
+    Dataset<Row> indexedCount =
+        spark.table(tableName).filter("category = 5").selectExpr("count(*)");
+
+    org.apache.spark.sql.execution.SparkPlan executed =
+        indexedCount.queryExecution().executedPlan();
+    String plan = executed.toString();
+    assertTrue(
+        plan.contains(LanceIndexedCountScan.PLAN_MARKER),
+        "A fully indexed equality COUNT(*) should be one indexed-count task. Plan: " + plan);
+    assertFalse(plan.contains("LocalTableScan"), plan);
+    assertEquals(1, indexedCountPartitions(executed), plan);
+    assertEquals(10L, indexedCount.first().getLong(0));
+  }
+
+  @Test
+  public void testCountStarWithoutScalarIndexKeepsFragmentParallelism() throws Exception {
+    String tableName = "lance.default.count_unindexed_parallel_test_dataset";
+    spark
+        .range(0, 100)
+        .selectExpr("id", "id % 10 as category")
+        .repartition(4)
+        .writeTo(tableName)
+        .create();
+
+    Dataset<Row> unindexedCount =
+        spark.table(tableName).filter("category = 5").selectExpr("count(*)");
+
+    assertEquals(10L, unindexedCount.first().getLong(0));
+    String plan = unindexedCount.queryExecution().executedPlan().toString();
+    assertTrue(
+        plan.contains("BatchScan"),
+        "An unindexed filtered COUNT(*) should retain a distributed scan. Plan: " + plan);
+    assertFalse(plan.contains(LanceIndexedCountScan.PLAN_MARKER), plan);
+  }
+
+  @Test
+  public void testCountStarOnEmptyTableUsesLocalScan() throws Exception {
+    String tableName = "lance.default.count_empty_filtered_test_dataset";
+    spark.range(0, 0).selectExpr("id", "id % 10 as category").writeTo(tableName).create();
+
+    Dataset<Row> emptyCount = spark.table(tableName).filter("category = 5").selectExpr("count(*)");
+
+    assertEquals(0L, emptyCount.first().getLong(0));
+    String plan = emptyCount.queryExecution().executedPlan().toString();
+    assertTrue(plan.contains("LocalTableScan"), plan);
+    assertFalse(
+        plan.contains("BatchScan"),
+        "An empty filtered COUNT(*) should not plan a distributed scan. Plan: " + plan);
+  }
+
+  @Test
+  public void testCountStarWithFilterPruningEveryFragment() throws Exception {
+    String tableName = "lance.default.count_all_pruned_test_dataset";
+    spark.range(0, 100).toDF("id").repartition(4).writeTo(tableName).create();
+    spark
+        .sql("ALTER TABLE " + tableName + " CREATE INDEX id_zm USING zonemap (id)")
+        .collectAsList();
+    spark.catalog().refreshTable(tableName);
+
+    // Zonemap pruning eliminates every fragment, so the scan would plan no partition at all and
+    // Spark's SUM over the per-partition counts would see zero rows.
+    Dataset<Row> prunedCount =
+        spark.table(tableName).filter("id >= 1000 AND id < 2000").selectExpr("count(*)");
+
+    Row row = prunedCount.first();
+    assertFalse(row.isNullAt(0), "A COUNT(*) matching no row must be 0, not NULL");
+    assertEquals(0L, row.getLong(0));
+    String plan = prunedCount.queryExecution().executedPlan().toString();
+    assertTrue(
+        plan.contains("LocalTableScan"),
+        "A fully pruned COUNT(*) should not plan a distributed scan. Plan: " + plan);
+  }
+
+  @Test
+  public void testCountStarWithPartialScalarIndexKeepsDistributedScan() throws Exception {
+    String tableName = "lance.default.count_partial_index_test_dataset";
+    spark
+        .range(0, 40)
+        .selectExpr("id", "id % 10 as category")
+        .repartition(2)
+        .writeTo(tableName)
+        .create();
+
+    spark
+        .sql(
+            "ALTER TABLE "
+                + tableName
+                + " CREATE INDEX category_bitmap USING BITMAP(category) WITH (num_segments = 1)")
+        .collectAsList();
+    spark
+        .range(40, 100)
+        .selectExpr("id", "id % 10 as category")
+        .repartition(2)
+        .writeTo(tableName)
+        .append();
+    spark.catalog().refreshTable(tableName);
+
+    Dataset<Row> partiallyIndexedCount =
+        spark.table(tableName).filter("category = 5").selectExpr("count(*)");
+
+    assertEquals(10L, partiallyIndexedCount.first().getLong(0));
+    String plan = partiallyIndexedCount.queryExecution().executedPlan().toString();
+    assertTrue(
+        plan.contains("BatchScan"),
+        "The partially indexed COUNT(*) plan should stay on BatchScan. Plan: " + plan);
+    assertFalse(plan.contains(LanceIndexedCountScan.PLAN_MARKER), plan);
+  }
+
+  /** Partitions of the indexed-count scan, or -1 when that scan is absent. */
+  private static int indexedCountPartitions(org.apache.spark.sql.execution.SparkPlan plan) {
+    if (plan instanceof org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec) {
+      return indexedCountPartitions(
+          ((org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec) plan).inputPlan());
+    }
+    if (plan instanceof org.apache.spark.sql.execution.datasources.v2.BatchScanExec) {
+      org.apache.spark.sql.connector.read.Scan scan =
+          ((org.apache.spark.sql.execution.datasources.v2.BatchScanExec) plan).scan();
+      if (scan instanceof org.apache.spark.sql.connector.read.Batch
+          && scan.description().contains(LanceIndexedCountScan.PLAN_MARKER)) {
+        return ((org.apache.spark.sql.connector.read.Batch) scan).planInputPartitions().length;
+      }
+    }
+    scala.collection.Iterator<org.apache.spark.sql.execution.SparkPlan> children =
+        plan.children().iterator();
+    while (children.hasNext()) {
+      int found = indexedCountPartitions(children.next());
+      if (found >= 0) {
+        return found;
+      }
+    }
+    return -1;
   }
 }

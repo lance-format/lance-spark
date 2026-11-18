@@ -15,15 +15,17 @@ package org.lance.spark.search
 
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
-import org.apache.spark.sql.catalyst.expressions.{CreateArray, Expression, Literal}
-import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.catalyst.analysis.{UnresolvedAttribute, UnresolvedStar}
+import org.apache.spark.sql.catalyst.expressions.{Ascending, CreateArray, Descending, Expression, Literal, NamedExpression, SortOrder}
+import org.apache.spark.sql.catalyst.plans.logical.{Filter, GlobalLimit, Limit, LocalLimit, LogicalPlan, Offset, Project, Sort}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.types.{DataTypes, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
-import org.lance.spark.LanceDataset
+import org.lance.ipc.FullTextQuery
+import org.lance.spark.{LanceDataset, LanceSparkReadOptions}
 import org.lance.spark.search.LanceSearchQuery.SearchType
+import org.lance.spark.utils.{FullTextQueryUtils, Utils}
 
 import java.util.Locale
 
@@ -73,6 +75,9 @@ object LanceSearchTableFunctions {
       .tableId(resolved.table.readOptions().getTableId)
       .namespaceImpl(resolved.table.getNamespaceImpl)
       .namespaceProperties(resolved.table.getNamespaceProperties)
+      // Only the distributed path reads these; it opens the dataset itself.
+      .readOptions(resolved.table.readOptions())
+      .initialStorageOptions(resolved.table.getInitialStorageOptions)
       .outputColumns(requestColumns.asJava)
       .vector(queryVector.asJava)
       .topK(requestK)
@@ -100,34 +105,75 @@ object LanceSearchTableFunctions {
     val queryText = optionalString(parsed, QueryArg)
       .orElse(optionalString(parsed, SearchQueryArg))
       .getOrElse(throw new IllegalArgumentException("SEARCH requires query"))
+    val searchColumns = optionalStringArray(parsed, SearchColumnsArg).getOrElse(Seq.empty)
+    if (searchColumns.isEmpty) {
+      throw new IllegalArgumentException(
+        "SEARCH requires search_columns for full-text search, " +
+          "e.g. search_columns => array('body')")
+    }
     val k = optionalInt(parsed, "num_results")
       .orElse(optionalInt(parsed, "limit"))
       .orElse(optionalInt(parsed, "k"))
       .getOrElse(DefaultK)
     val outputColumns = optionalStringArray(parsed, ColumnsArg).getOrElse(Seq.empty)
-    val filter = optionalString(parsed, "filter").orNull
     val withRowId = effectiveWithRowId(parsed, outputColumns)
     val version = optionalLong(parsed, "version")
     val resolved = resolveLanceTable(tableName, version)
-    val schemaColumns = requestOutputColumns(resolved.table.schema(), outputColumns, FtsScoreColumn)
-    val requestColumns = namespaceOutputColumns(schemaColumns)
-    val schema = outputSchema(resolved.table.schema(), schemaColumns, FtsScoreColumn, withRowId)
 
-    val builder = LanceSearchQuery
-      .builder(SearchType.FULL_TEXT)
-      .tableId(resolved.table.readOptions().getTableId)
-      .namespaceImpl(resolved.table.getNamespaceImpl)
-      .namespaceProperties(resolved.table.getNamespaceProperties)
-      .outputColumns(requestColumns.asJava)
-      .textQuery(queryText)
-      .searchColumns(optionalStringArray(parsed, SearchColumnsArg).getOrElse(Seq.empty).asJava)
-      .topK(k)
-      .filter(filter)
-      .offset(optionalInt(parsed, "offset").orNull)
-      .version(version.orNull)
-      .withRowId(withRowId.orNull)
+    // Build the canonical FullTextQuery and carry it through the shared scan path via options,
+    // instead of the bespoke LanceSearchTable. One column -> match, several -> multi_match.
+    val fullTextQuery =
+      if (searchColumns.size == 1) {
+        FullTextQuery.`match`(queryText, searchColumns.head)
+      } else {
+        FullTextQuery.multiMatch(queryText, searchColumns.asJava)
+      }
+    val options = new java.util.HashMap[String, String]()
+    options.put(
+      LanceSparkReadOptions.CONFIG_FULL_TEXT_QUERY,
+      FullTextQueryUtils.fullTextQueryToString(fullTextQuery))
+    version.foreach(v => options.put(LanceSparkReadOptions.CONFIG_VERSION, v.toString))
 
-    relation("SEARCH", schema, builder.build(), resolved)
+    val relation = DataSourceV2Relation.create(
+      resolved.table,
+      Some(resolved.catalog),
+      Some(resolved.identifier),
+      new CaseInsensitiveStringMap(options))
+
+    // SEARCH is ranked top-k: optional filter, project requested columns + _score, order by
+    // _score descending, limit k. k flows to the scan through Spark's limit pushdown; _score is
+    // resolved as a metadata column on LanceDataset.
+    val filtered = optionalString(parsed, "filter")
+      .map(f =>
+        Filter(SparkSession.active.sessionState.sqlParser.parseExpression(f), relation))
+      .getOrElse(relation)
+    val projected = Project(searchProjectList(outputColumns, withRowId), filtered)
+    val ordered =
+      Sort(
+        Seq(SortOrder(UnresolvedAttribute(FtsScoreColumn), Descending)),
+        global = true,
+        projected)
+    Limit(Literal(k.intValue()), ordered)
+  }
+
+  private def searchProjectList(
+      outputColumns: Seq[String],
+      withRowId: Option[java.lang.Boolean]): Seq[NamedExpression] = {
+    val normalized = normalizeOutputColumns(outputColumns)
+    val buf = ArrayBuffer.empty[NamedExpression]
+    if (normalized.isEmpty) {
+      buf += UnresolvedStar(None)
+    } else {
+      normalized.foreach(column => buf += UnresolvedAttribute.quoted(column))
+    }
+    if (!normalized.exists(_.equalsIgnoreCase(FtsScoreColumn))) {
+      buf += UnresolvedAttribute.quoted(FtsScoreColumn)
+    }
+    if (withRowId.contains(java.lang.Boolean.TRUE) &&
+      !normalized.exists(_.equalsIgnoreCase(RowIdColumn))) {
+      buf += UnresolvedAttribute.quoted(RowIdColumn)
+    }
+    buf.toSeq
   }
 
   def hybridSearch(args: Seq[Expression]): LogicalPlan = {
@@ -154,6 +200,7 @@ object LanceSearchTableFunctions {
     val version = optionalLong(parsed, "version")
 
     val resolved = resolveLanceTable(tableName, version)
+    Utils.validateFullTextSearchSchema(resolved.table.schema())
     val vectorSchemaColumns =
       hybridSideOutputColumns(resolved.table.schema(), outputColumns, DistanceMetricColumn)
     val ftsSchemaColumns =
@@ -208,6 +255,7 @@ object LanceSearchTableFunctions {
       .searchColumns(optionalStringArray(parsed, SearchColumnsArg).getOrElse(Seq.empty).asJava)
       .topK(candidateK)
       .filter(filter)
+      .prefilter(optionalBoolean(parsed, "prefilter").orNull)
       .version(version.orNull)
       .withRowId(java.lang.Boolean.TRUE)
       .build()
@@ -221,13 +269,111 @@ object LanceSearchTableFunctions {
       functionName: String,
       schema: StructType,
       query: LanceSearchQuery,
-      resolved: ResolvedLanceTable): LogicalPlan = {
-    val table = new LanceSearchTable(functionName, schema, query)
+      resolved: ResolvedLanceTable): LogicalPlan =
+    if (shouldUseDistributed(query)) {
+      distributedRelation(functionName, schema, query, resolved)
+    } else {
+      searchRelation(functionName, schema, query, resolved)
+    }
+
+  /** Search served by the namespace itself: one partition, results already globally ranked. */
+  private def searchRelation(
+      functionName: String,
+      schema: StructType,
+      query: LanceSearchQuery,
+      resolved: ResolvedLanceTable): LogicalPlan =
     DataSourceV2Relation.create(
-      table,
+      new LanceSearchTable(functionName, schema, query),
       Some(resolved.catalog),
       Some(resolved.identifier),
       CaseInsensitiveStringMap.empty())
+
+  /**
+   * Search executed by Spark tasks, one per searchable unit of the dataset. Every worker requests
+   * `k + offset` rows (LanceSearchQuery.k = userK + offset, set by
+   * LanceSearchTableFunctions.vectorSearch), so the merge has to happen here: sort globally, drop
+   * the first `offset` rows, then take `userK`.
+   */
+  private def distributedRelation(
+      functionName: String,
+      schema: StructType,
+      query: LanceSearchQuery,
+      resolved: ResolvedLanceTable): LogicalPlan = {
+    // lance-core sorts by (`_distance`, row id); on distance alone, tied rows land on the k and
+    // offset boundaries in task arrival order and paging stops being repeatable. So read the row
+    // id even when the query did not ask for it, and project it away afterwards.
+    val wantsRowId = java.lang.Boolean.TRUE == query.getWithRowId
+    val scanSchema =
+      if (wantsRowId) schema
+      else schema.add(StructField(RowIdColumn, DataTypes.LongType, nullable = true))
+    val scanQuery = if (wantsRowId) query else query.toBuilder.withRowId(true).build()
+
+    val rel = DataSourceV2Relation.create(
+      new LanceDistributedSearchTable(functionName, scanSchema, scanQuery),
+      Some(resolved.catalog),
+      Some(resolved.identifier),
+      CaseInsensitiveStringMap.empty())
+
+    def internalColumn(name: String) =
+      rel.output
+        .find(attr => attr.name == name)
+        .getOrElse {
+          throw new IllegalStateException(
+            s"Internal column ${name} is missing from vector_search plan.")
+        }
+
+    val sortOrder =
+      Seq(
+        SortOrder(internalColumn(DistanceMetricColumn), Ascending),
+        SortOrder(internalColumn(RowIdColumn), Ascending))
+    val sorted = Sort(sortOrder, global = true, rel)
+    val totalCandidates = query.getK
+    val effectiveOffset =
+      if (query.getOffset != null) query.getOffset.intValue() else 0
+    val userK = math.max(totalCandidates - effectiveOffset, 0)
+    val candidateLimited =
+      GlobalLimit(Literal(totalCandidates), LocalLimit(Literal(totalCandidates), sorted))
+    val limited =
+      if (effectiveOffset > 0) {
+        GlobalLimit(
+          Literal(userK),
+          LocalLimit(Literal(userK), Offset(Literal(effectiveOffset), candidateLimited)))
+      } else {
+        candidateLimited
+      }
+
+    if (wantsRowId) limited
+    else Project(rel.output.filterNot(attr => attr.name == RowIdColumn), limited)
+  }
+
+  private def shouldUseDistributed(query: LanceSearchQuery): Boolean = {
+    val spark = SparkSession.active
+    // Not String.toBoolean: it throws on anything but "true"/"false", and this runs for every
+    // VECTOR_SEARCH.
+    val enabled = java.lang.Boolean.parseBoolean(
+      spark.conf.get("spark.sql.lance.search.distributed.enabled", "false"))
+    if (!enabled) return false
+    // A distributed plan can only prefilter, while namespace execution defaults to post-filtering
+    // the top k, which returns a different set of rows. Make the user pick.
+    val hasFilter = query.getFilter != null && !query.getFilter.isEmpty
+    if (hasFilter && java.lang.Boolean.TRUE != query.getPrefilter) {
+      throw new IllegalArgumentException(
+        "Distributed VECTOR_SEARCH with a filter requires prefilter=true, which returns the true " +
+          "filtered top k; disable spark.sql.lance.search.distributed.enabled to keep namespace " +
+          "post-filter semantics, where the filter is applied after the top k is chosen")
+    }
+    if (java.lang.Boolean.FALSE == query.getPrefilter) {
+      throw new IllegalArgumentException(
+        "Distributed VECTOR_SEARCH does not support prefilter=false; disable " +
+          "spark.sql.lance.search.distributed.enabled to use namespace execution")
+    }
+    // lance-core's Java scanner cannot apply distance bounds yet.
+    if (query.getLowerBound != null || query.getUpperBound != null) {
+      throw new IllegalArgumentException(
+        "Distributed VECTOR_SEARCH does not support lower_bound or upper_bound; disable " +
+          "spark.sql.lance.search.distributed.enabled to use namespace execution")
+    }
+    true
   }
 
   private def hybridRelation(
@@ -338,7 +484,6 @@ object LanceSearchTableFunctions {
   private def toNumber(value: Any): Number = value match {
     case number: Number => number
     case decimal: org.apache.spark.sql.types.Decimal => decimal.toJavaBigDecimal
-    case decimal: scala.math.BigDecimal => decimal.bigDecimal
     case other => throw new IllegalArgumentException(s"Expected numeric literal, got $other")
   }
 

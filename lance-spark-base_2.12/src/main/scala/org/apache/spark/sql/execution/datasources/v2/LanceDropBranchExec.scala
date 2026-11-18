@@ -32,19 +32,20 @@ case class LanceDropBranchExec(
   override def output: Seq[Attribute] = LanceDropBranchOutputType.SCHEMA
 
   override protected def run(): Seq[InternalRow] = {
-    val lanceDataset = catalog.loadTable(ident) match {
-      case d: LanceDataset => d
-      case _ => throw new UnsupportedOperationException("DropBranch only supports LanceDataset")
-    }
+    val lanceDataset = LanceDataset.requireWritable(catalog.loadTable(ident), "DropBranch")
 
     val dataset = Utils.openDatasetBuilder(lanceDataset.readOptions())
       .initialStorageOptions(lanceDataset.getInitialStorageOptions)
       .build()
 
     try {
+      // The missing-branch error is enforced here rather than delegated to
+      // branches().delete(), which only reports it on local filesystems.
       val exists = dataset.branches().list().asScala.exists(_.getName == branchName)
-      if (!ifExists || exists) {
+      if (exists) {
         dataset.branches().delete(branchName)
+      } else if (!ifExists) {
+        throw new IllegalArgumentException(s"Can't drop missing branch: $branchName")
       }
     } finally {
       dataset.close()

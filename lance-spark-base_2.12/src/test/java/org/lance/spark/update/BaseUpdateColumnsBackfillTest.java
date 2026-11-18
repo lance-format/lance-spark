@@ -13,8 +13,9 @@
  */
 package org.lance.spark.update;
 
-import org.lance.WriteParams;
 import org.lance.spark.LanceConstant;
+import org.lance.spark.LanceDataset;
+import org.lance.spark.LanceSpark;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
 import org.lance.spark.write.LanceBatchWrite;
@@ -30,6 +31,8 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
+import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.write.DataWriter;
 import org.apache.spark.sql.connector.write.DataWriterFactory;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
@@ -51,6 +54,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Base test class for UPDATE COLUMNS FROM command.
@@ -113,6 +117,27 @@ public abstract class BaseUpdateColumnsBackfillTest {
         String.format(
             "insert into %s (id, value, name) values (1, 10, 'one'), (2, 20, 'two'), (3, 30, 'three');",
             fullTable));
+  }
+
+  @Test
+  public void testTransactionPropertiesBackfill() throws Exception {
+    prepareDataset();
+    spark.sql(
+        "CREATE TEMPORARY VIEW properties_source AS SELECT _rowaddr, _fragid, 200 AS value FROM "
+            + fullTable
+            + " WHERE id = 2");
+    LanceSpark.executeSql(
+        spark,
+        "ALTER TABLE " + fullTable + " UPDATE COLUMNS value FROM properties_source",
+        Collections.singletonMap("request", "update-columns"));
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    LanceDataset table =
+        (LanceDataset) catalog.loadTable(Identifier.of(new String[] {"default"}, tableName));
+    assertEquals(
+        Collections.singletonMap("request", "update-columns"),
+        TestUtils.readTransactionProperties(table.readOptions()));
+    assertEquals(240, spark.sql("SELECT SUM(value) FROM " + fullTable).first().getLong(0));
   }
 
   @Test
@@ -328,19 +353,11 @@ public abstract class BaseUpdateColumnsBackfillTest {
   }
 
   /**
-   * Pins down the version-column behavior of UPDATE COLUMNS FROM on a stable-row-id table.
-   *
-   * <p>UPDATE COLUMNS goes through Lance's {@code Update} operation, which (unlike ADD COLUMNS via
-   * {@code Merge} and unlike row-level UPDATE) does <strong>not</strong> bump {@code
-   * _row_last_updated_at_version}. CDF consumers therefore cannot detect column-level rewrites via
-   * the version columns today.
-   *
-   * <p>This test pins down current behavior so a future change to make UPDATE COLUMNS CDF-aware
-   * shows up as a deliberate test update rather than a silent regression.
-   *
-   * <p>Tracking upstream fix: https://github.com/lance-format/lance/issues/6734 — once that lands,
-   * flip the {@code _row_last_updated_at_version} assertion below from {@code assertEquals} to a
-   * strict-greater check (mirroring the ADD COLUMNS version test).
+   * UPDATE COLUMNS FROM on a stable-row-id table must preserve {@code _row_created_at_version} for
+   * every row, advance {@code _row_last_updated_at_version} only for the matched row, and leave
+   * unmatched rows' last-updated version unchanged. The connector passes matched physical row
+   * offsets on commit so Lance can partially refresh last-updated metadata (see
+   * lance-format/lance#6734 and the Java {@code Update.updatedFragmentOffsets} API).
    */
   @Test
   public void testUpdateColumnsPreservesCreatedAtAndAdvancesLastUpdatedWithStableRowIds() {
@@ -354,9 +371,10 @@ public abstract class BaseUpdateColumnsBackfillTest {
                     fullTable))
             .collectAsList();
 
+    // Only update id=2; id=1 and id=3 are unmatched and must not have their last-updated advanced.
     spark.sql(
         String.format(
-            "CREATE TEMPORARY VIEW tmp_view_cdf AS SELECT _rowaddr, _fragid, value * 100 AS value FROM %s",
+            "CREATE TEMPORARY VIEW tmp_view_cdf AS SELECT _rowaddr, _fragid, value * 100 AS value FROM %s WHERE id = 2",
             fullTable));
     spark.sql(String.format("ALTER TABLE %s UPDATE COLUMNS value FROM tmp_view_cdf", fullTable));
 
@@ -372,19 +390,20 @@ public abstract class BaseUpdateColumnsBackfillTest {
     for (int i = 0; i < before.size(); i++) {
       Row b = before.get(i);
       Row a = after.get(i);
-      assertEquals(b.getInt(0), a.getInt(0));
+      int id = b.getInt(0);
+      assertEquals(id, a.getInt(0));
       assertEquals(
-          b.getLong(1),
-          a.getLong(1),
-          "_row_created_at_version must be unchanged for id=" + b.getInt(0));
-      // Known gap (lance-format/lance#6734): UPDATE COLUMNS does not currently advance
-      // last_updated. When that issue is fixed, flip this assertion to a strict-greater check.
-      assertEquals(
-          b.getLong(2),
-          a.getLong(2),
-          "_row_last_updated_at_version is currently NOT advanced by UPDATE COLUMNS (id="
-              + b.getInt(0)
-              + ") — if this changes, update the assertion");
+          b.getLong(1), a.getLong(1), "_row_created_at_version must be unchanged for id=" + id);
+      if (id == 2) {
+        assertTrue(
+            a.getLong(2) > b.getLong(2),
+            "_row_last_updated_at_version must advance for matched id=" + id);
+      } else {
+        assertEquals(
+            b.getLong(2),
+            a.getLong(2),
+            "_row_last_updated_at_version must not change for unmatched id=" + id);
+      }
     }
   }
 
@@ -402,7 +421,11 @@ public abstract class BaseUpdateColumnsBackfillTest {
               Arrays.asList(
                   new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
                   new Field("value", FieldType.nullable(new ArrowType.Int(32, true)), null)));
-      org.lance.Dataset.create(allocator, datasetUri, schema, new WriteParams.Builder().build())
+      org.lance.Dataset.write()
+          .allocator(allocator)
+          .uri(datasetUri)
+          .schema(schema)
+          .execute()
           .close();
 
       LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
@@ -429,7 +452,7 @@ public abstract class BaseUpdateColumnsBackfillTest {
 
       UpdateColumnsBackfillBatchWrite updateWrite =
           new UpdateColumnsBackfillBatchWrite(
-              updateSchema, writeOptions, updateColumns, null, null, null, null);
+              updateSchema, writeOptions, updateColumns, null, null, null, null, false);
 
       DataWriterFactory factory = updateWrite.createBatchWriterFactory(() -> 1);
       WriterCommitMessage updateMsg;

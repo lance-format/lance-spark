@@ -22,6 +22,7 @@ import org.lance.WriteParams;
 import org.lance.namespace.LanceNamespace;
 import org.lance.operation.Update;
 import org.lance.spark.LanceConstant;
+import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
@@ -60,6 +61,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.FutureTask;
 import java.util.stream.Collectors;
@@ -95,9 +97,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       List<String> tableId) {
     this.sparkSchema = sparkSchema;
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
-      this.writeOptions = writeOptions.withVersion(ds.version());
-      logger.debug(
-          "Resolved dataset version for position delta write: {}", this.writeOptions.getVersion());
+      this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
+      logger.debug("Resolved dataset ref for position delta write: {}", this.writeOptions.getRef());
     }
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
@@ -143,6 +144,14 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
     }
 
     @Override
+    public boolean useCommitCoordinator() {
+      // Lance commits are atomic at the dataset level via CommitBuilder/Transaction on the
+      // driver; Spark's OutputCommitCoordinator is unnecessary and can break under speculation or
+      // retries.
+      return false;
+    }
+
+    @Override
     public void commit(WriterCommitMessage[] messages) {
       List<FragmentMetadata> newFragments = new ArrayList<>();
       Map<Integer, RoaringBitmap> aggregatedDeletions = new HashMap<>();
@@ -165,8 +174,10 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
 
       long version =
           Objects.requireNonNull(
-              writeOptions.getVersion(),
-              "version must be set (resolved in SparkPositionDeltaWrite constructor)");
+                  writeOptions.getRef(),
+                  "ref must be set (resolved in SparkPositionDeltaWrite constructor)")
+              .getVersionNumber()
+              .get();
       try (Dataset dataset = Utils.openDatasetBuilder(writeOptions).build()) {
         // Parallel stream is safe: each deleteRows() operates on an independent
         // FileFragment value writing to a distinct object store path (see lance-core).
@@ -192,6 +203,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
                 .removedFragmentIds(removedFragmentIds)
                 .updatedFragments(updatedFragments)
                 .newFragments(newFragments)
+                .updateMode(Optional.of(Update.UpdateMode.RewriteRows))
                 .build();
 
         CommitBuilder commitBuilder =
@@ -199,6 +211,10 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
                 .writeParams(
                     LanceRuntime.mergeStorageOptions(
                         writeOptions.getStorageOptions(), initialStorageOptions));
+        String explicitFileFormatVersion = writeOptions.getExplicitFileFormatVersion();
+        if (explicitFileFormatVersion != null) {
+          commitBuilder.storageFormat(explicitFileFormatVersion);
+        }
         if (dataset.hasStableRowIds()
             || Boolean.TRUE.equals(writeOptions.getEnableStableRowIds())) {
           commitBuilder.useStableRowIds(true);
@@ -212,7 +228,11 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
               .namespaceClientManagedVersioning(true);
         }
         try (Transaction txn =
-                new Transaction.Builder().readVersion(version).operation(update).build();
+                new Transaction.Builder()
+                    .readVersion(version)
+                    .operation(update)
+                    .transactionProperties(writeOptions.getTransactionProperties())
+                    .build();
             Dataset committed = commitBuilder.execute(txn)) {
           // auto-close txn and committed dataset
         }
@@ -279,7 +299,11 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
             try (ArrowArrayStream arrowStream =
                 ArrowArrayStream.allocateNew(LanceRuntime.allocator())) {
               Data.exportArrayStream(LanceRuntime.allocator(), writeBuffer, arrowStream);
-              return Fragment.create(writeOptions.getDatasetUri(), arrowStream, params);
+              return Fragment.write()
+                  .datasetUri(writeOptions.getDatasetUri())
+                  .data(arrowStream)
+                  .writeParams(params)
+                  .execute();
             }
           };
       FutureTask<List<FragmentMetadata>> fragmentCreationTask =

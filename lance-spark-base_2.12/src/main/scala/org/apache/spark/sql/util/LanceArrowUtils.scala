@@ -30,7 +30,7 @@ import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.apache.spark.{SparkException, SparkUnsupportedOperationException}
 import org.apache.spark.sql.types._
 import org.lance.spark.LanceConstant
-import org.lance.spark.utils.{BlobUtils, DateMilliUtils, FixedSizeBinaryUtils, Float16Utils, LargeVarCharUtils, VectorUtils}
+import org.lance.spark.utils.{BlobUtils, DateMilliUtils, FixedSizeBinaryUtils, Float16Utils, JsonUtils, LargeVarBinaryUtils, LargeVarCharUtils, ListChildUtils, VectorUtils}
 
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
@@ -47,9 +47,19 @@ object LanceArrowUtils {
   val ARROW_EXT_NAME_KEY = BlobUtils.ARROW_EXTENSION_NAME_KEY
   val BLOB_V2_EXT_NAME = BlobUtils.ARROW_EXTENSION_BLOB_V2
   val ARROW_LARGE_VAR_CHAR_KEY = LargeVarCharUtils.ARROW_LARGE_VAR_CHAR_KEY
+  val JSON_EXT_NAME = JsonUtils.ARROW_JSON_EXTENSION_NAME
+  val ARROW_LARGE_VAR_BINARY_KEY = LargeVarBinaryUtils.ARROW_LARGE_VAR_BINARY_KEY
   val ARROW_DATE_MILLISECOND_KEY = DateMilliUtils.ARROW_DATE_MILLISECOND_KEY
   val ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY =
     FixedSizeBinaryUtils.ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY
+
+  val LANCE_TIMESTAMP_UNIT_KEY = "_lance.timestamp_unit"
+  val LANCE_TIMESTAMP_TIMEZONE_KEY = "_lance.timestamp_timezone"
+
+  // Spark has no unsigned integer types, so reads widen UInt8/16/32/64 to Short/Int/Long/Long.
+  // Writes into an existing table set this key from the table's Lance schema (see
+  // markUnsignedForWrite) so toArrowField writes those columns back with their unsigned type.
+  val LANCE_UNSIGNED_INT_BIT_WIDTH_KEY = "_lance.unsigned_int_bit_width"
 
   // Namespaced keys used to embed child Spark Metadata on a parent StructField when the
   // child sits inside an ArrayType/MapType — Spark has no per-element metadata slot of its
@@ -68,9 +78,13 @@ object LanceArrowUtils {
   val LANCE_UDT_CLASS_KEY = "__udt"
 
   private val LANCE_INTERNAL_METADATA_KEYS = Set(
+    LANCE_TIMESTAMP_UNIT_KEY,
+    LANCE_TIMESTAMP_TIMEZONE_KEY,
+    LANCE_UNSIGNED_INT_BIT_WIDTH_KEY,
     LANCE_ELEMENT_METADATA_KEY,
     LANCE_MAP_KEY_METADATA_KEY,
-    LANCE_MAP_VALUE_METADATA_KEY)
+    LANCE_MAP_VALUE_METADATA_KEY,
+    ListChildUtils.LANCE_LIST_CHILD_NAME_METADATA_KEY)
 
   def fromArrowField(field: Field): DataType = {
     val baseType = convertArrowFieldType(field)
@@ -135,6 +149,9 @@ object LanceArrowUtils {
         // Lance returns LargeBinary in schema but Struct in data for blob columns
         // We need to handle this as binary to match the schema
         BinaryType
+      case _: ArrowType.LargeBinary if JsonUtils.hasJsonArrowExtension(field) =>
+        // Lance stores JSON as LargeBinary JSONB, but Spark reads the decoded values as strings.
+        StringType
       case _: ArrowType.LargeUtf8 =>
         // LargeUtf8 maps back to StringType in Spark
         StringType
@@ -154,7 +171,7 @@ object LanceArrowUtils {
       case ts: ArrowType.Timestamp =>
         if (ts.getTimezone != null && ts.getTimezone.nonEmpty) TimestampType
         else TimestampNTZType
-      case l: ArrowType.List =>
+      case _: ArrowType.List | _: ArrowType.LargeList =>
         val children = field.getChildren
         if (children.isEmpty) {
           throw new SparkException(s"List field ${field.getName} has no children")
@@ -236,13 +253,35 @@ object LanceArrowUtils {
 
   private def augmentTypeMarkers(builder: MetadataBuilder, field: Field): Unit = {
     field.getType match {
+      case ts: ArrowType.Timestamp =>
+        builder.putString(LANCE_TIMESTAMP_UNIT_KEY, ts.getUnit.name())
+        if (ts.getTimezone != null) {
+          builder.putString(LANCE_TIMESTAMP_TIMEZONE_KEY, ts.getTimezone)
+        }
       case fixedSizeList: ArrowType.FixedSizeList =>
         builder.putLong(ARROW_FIXED_SIZE_LIST_SIZE_KEY, fixedSizeList.getListSize.toLong)
         if (Float16Utils.isFloat16ArrowField(field)) {
           builder.putString(ARROW_FLOAT16_KEY, Float16Utils.ARROW_FLOAT16_VALUE)
         }
+      case _: ArrowType.LargeBinary if JsonUtils.isLanceJsonField(field) =>
+        // Dataset.getSchema exposes Lance's physical JSONB representation. Spark uses the
+        // logical Arrow extension name for the decoded StringType it presents to callers.
+        builder.putString(ARROW_EXT_NAME_KEY, JsonUtils.ARROW_JSON_EXTENSION_NAME)
       case _: ArrowType.LargeUtf8 =>
         builder.putString(ARROW_LARGE_VAR_CHAR_KEY, LargeVarCharUtils.ARROW_LARGE_VAR_CHAR_VALUE)
+      // Spark has a single BinaryType covering both Arrow Binary (32-bit offsets) and LargeBinary
+      // (64-bit offsets), so record which one this field was. Without the marker a Lance
+      // LargeBinary column is silently narrowed to Binary whenever a Spark operation round-trips
+      // the schema (UPDATE, ADD COLUMNS FROM, or simply read -> transform -> write), and the
+      // resulting write fails type validation against the existing Lance schema.
+      // Blob columns are excluded: they are already LargeBinary-backed via the blob marker, which
+      // toArrowField honors on its own. JSON columns are excluded too: they surface as StringType,
+      // so a binary marker would contradict the Spark type and steer writeback to LargeBinary.
+      case _: ArrowType.LargeBinary
+          if !isBlobField(field) && !JsonUtils.hasJsonArrowExtension(field) =>
+        builder.putString(
+          ARROW_LARGE_VAR_BINARY_KEY,
+          LargeVarBinaryUtils.ARROW_LARGE_VAR_BINARY_VALUE)
       case date: ArrowType.Date if date.getUnit == DateUnit.MILLISECOND =>
         builder.putString(ARROW_DATE_MILLISECOND_KEY, DateMilliUtils.ARROW_DATE_MILLISECOND_VALUE)
       case fsb: ArrowType.FixedSizeBinary =>
@@ -255,14 +294,27 @@ object LanceArrowUtils {
 
   private def augmentChildMetadata(builder: MetadataBuilder, field: Field): Unit = {
     field.getType match {
-      case _: ArrowType.FixedSizeList | _: ArrowType.List =>
+      case _: ArrowType.FixedSizeList | _: ArrowType.List | _: ArrowType.LargeList =>
         val children = field.getChildren
-        if (!children.isEmpty && !Float16Utils.isFloat16ArrowField(field)) {
-          // For Float16 vectors, the child's HALF type is encoded in `arrow.float16` on the
-          // parent, so there is no extra child-side metadata worth embedding.
-          val childMeta = buildFieldMetadata(children.get(0))
-          if (hasContent(childMeta)) {
-            builder.putString(LANCE_ELEMENT_METADATA_KEY, childMeta.json)
+        if (!children.isEmpty) {
+          val childField = children.get(0)
+          // Arrow permits unnamed List children; a null here would survive into the Metadata map
+          // and only blow up later when it is serialized to JSON.
+          val childName =
+            Option(childField.getName).getOrElse(ListChildUtils.LIST_CHILD_NAME_DEFAULT)
+          // Only record a non-default name. Writeback resolves an absent key to the same default,
+          // so stamping it would add nothing while putting an internal key on the Spark schema of
+          // every array column, breaking equality against an equivalent plain Spark schema.
+          if (childName != ListChildUtils.LIST_CHILD_NAME_DEFAULT) {
+            builder.putString(ListChildUtils.LANCE_LIST_CHILD_NAME_METADATA_KEY, childName)
+          }
+          if (!Float16Utils.isFloat16ArrowField(field)) {
+            // For Float16 vectors, the child's HALF type is encoded in `arrow.float16` on the
+            // parent, so there is no extra child-side metadata worth embedding.
+            val childMeta = buildFieldMetadata(childField)
+            if (hasContent(childMeta)) {
+              builder.putString(LANCE_ELEMENT_METADATA_KEY, childMeta.json)
+            }
           }
         }
       case _: ArrowType.Map =>
@@ -286,6 +338,84 @@ object LanceArrowUtils {
 
   private def hasContent(metadata: Metadata): Boolean =
     metadata != null && metadata.json != "{}"
+
+  /**
+   * Marks the columns of `schema` that are unsigned integers in `destination`, the Lance schema of
+   * the table being written, so toArrowSchema writes them back unsigned. Columns are matched by
+   * name, including struct fields, list elements and map keys and values. A column is marked only
+   * if its Spark type is the one fromArrowSchema reads that unsigned width as.
+   */
+  def markUnsignedForWrite(schema: StructType, destination: Schema): StructType =
+    markUnsignedFields(schema, destination.getFields.asScala)
+
+  private def markUnsignedFields(schema: StructType, destination: Iterable[Field]): StructType = {
+    val destinationByName = destination.map(field => field.getName -> field).toMap
+    StructType(schema.fields.map { field =>
+      destinationByName.get(field.name) match {
+        case Some(destinationField) =>
+          val (dataType, metadata) =
+            markUnsigned(field.dataType, field.metadata, destinationField)
+          field.copy(dataType = dataType, metadata = metadata)
+        case None => field
+      }
+    })
+  }
+
+  // Returns the data type with nested struct fields marked, and the metadata of this position,
+  // which for a list element or map key or value is embedded in its parent's metadata.
+  private def markUnsigned(
+      dt: DataType,
+      metadata: Metadata,
+      destination: Field): (DataType, Metadata) = (dt, destination.getType) match {
+    case (_, int: ArrowType.Int) if !int.getIsSigned && isUnsignedWidthValid(dt, int.getBitWidth) =>
+      val marked = new MetadataBuilder()
+        .withMetadata(metadata)
+        .putLong(LANCE_UNSIGNED_INT_BIT_WIDTH_KEY, int.getBitWidth.toLong)
+        .build()
+      (dt, marked)
+    case (struct: StructType, _: ArrowType.Struct) =>
+      (markUnsignedFields(struct, destination.getChildren.asScala), metadata)
+    case (
+          ArrayType(elementType, containsNull),
+          _: ArrowType.List | _: ArrowType.LargeList |
+          _: ArrowType.FixedSizeList) =>
+      val (element, elementMetadata) = markUnsigned(
+        elementType,
+        parseEmbeddedMetadata(metadata, LANCE_ELEMENT_METADATA_KEY),
+        destination.getChildren.get(0))
+      (
+        ArrayType(element, containsNull),
+        withEmbeddedMetadata(metadata, LANCE_ELEMENT_METADATA_KEY, elementMetadata))
+    case (MapType(keyType, valueType, valueContainsNull), _: ArrowType.Map) =>
+      val entries = destination.getChildren.get(0).getChildren
+      val (key, keyMetadata) = markUnsigned(
+        keyType,
+        parseEmbeddedMetadata(metadata, LANCE_MAP_KEY_METADATA_KEY),
+        entries.get(0))
+      val (value, valueMetadata) = markUnsigned(
+        valueType,
+        parseEmbeddedMetadata(metadata, LANCE_MAP_VALUE_METADATA_KEY),
+        entries.get(1))
+      val withKey = withEmbeddedMetadata(metadata, LANCE_MAP_KEY_METADATA_KEY, keyMetadata)
+      (
+        MapType(key, value, valueContainsNull),
+        withEmbeddedMetadata(withKey, LANCE_MAP_VALUE_METADATA_KEY, valueMetadata))
+    case _ => (dt, metadata)
+  }
+
+  private def isUnsignedWidthValid(dt: DataType, bitWidth: Int): Boolean = dt match {
+    case ShortType => bitWidth == 8
+    case IntegerType => bitWidth == 16
+    case LongType => bitWidth == 32 || bitWidth == 64
+    case _ => false
+  }
+
+  private def withEmbeddedMetadata(parent: Metadata, key: String, child: Metadata): Metadata =
+    if (hasContent(child)) {
+      new MetadataBuilder().withMetadata(parent).putString(key, child.json).build()
+    } else {
+      parent
+    }
 
   private def parseEmbeddedMetadata(parent: Metadata, key: String): Metadata = {
     if (parent == null || !parent.contains(key)) {
@@ -337,6 +467,14 @@ object LanceArrowUtils {
         && metadata.getString(ARROW_LARGE_VAR_CHAR_KEY).equalsIgnoreCase("true")) {
         large = true
       }
+      // Restore 64-bit offsets for a BinaryType that came from an Arrow LargeBinary column.
+      // Gated on dt == BinaryType so the marker cannot leak onto an unrelated type if the
+      // metadata is copied across columns by a Spark transform.
+      if (dt == BinaryType
+        && metadata.contains(ARROW_LARGE_VAR_BINARY_KEY)
+        && metadata.getString(ARROW_LARGE_VAR_BINARY_KEY).equalsIgnoreCase("true")) {
+        large = true
+      }
 
       meta = mapper
         .readValue(metadata.json, classOf[java.util.LinkedHashMap[_, _]])
@@ -351,6 +489,7 @@ object LanceArrowUtils {
     dt match {
       case ArrayType(elementType, containsNull) =>
         val elementMetadata = parseEmbeddedMetadata(metadata, LANCE_ELEMENT_METADATA_KEY)
+        val elementName = ListChildUtils.listChildName(metadata)
         if (shouldBeFixedSizeList(metadata, elementType)) {
           val listSize = metadata.getLong(ARROW_FIXED_SIZE_LIST_SIZE_KEY).toInt
           val fieldType =
@@ -364,7 +503,7 @@ object LanceArrowUtils {
                   "Current Arrow version does not support Float2Vector.")
             }
             new Field(
-              "element",
+              elementName,
               new FieldType(
                 containsNull,
                 new ArrowType.FloatingPoint(FloatingPointPrecision.HALF),
@@ -372,7 +511,7 @@ object LanceArrowUtils {
               Seq.empty[Field].asJava)
           } else {
             toArrowField(
-              "element",
+              elementName,
               elementType,
               containsNull,
               timeZoneId,
@@ -390,7 +529,7 @@ object LanceArrowUtils {
             fieldType,
             Seq(
               toArrowField(
-                "element",
+                elementName,
                 elementType,
                 containsNull,
                 timeZoneId,
@@ -452,6 +591,20 @@ object LanceArrowUtils {
           case _ =>
             toArrowField(name, udt.sqlType, nullable, timeZoneId, metadata, largeVarTypes)
         }
+      case TimestampType | TimestampNTZType
+          if metadata != null && metadata.contains(LANCE_TIMESTAMP_UNIT_KEY) =>
+        val unit = TimeUnit.valueOf(metadata.getString(LANCE_TIMESTAMP_UNIT_KEY))
+        val originalTimezone = if (metadata.contains(LANCE_TIMESTAMP_TIMEZONE_KEY)) {
+          metadata.getString(LANCE_TIMESTAMP_TIMEZONE_KEY)
+        } else null
+        val timezone = if (dt == TimestampType) {
+          Option(originalTimezone).filter(_.nonEmpty).getOrElse(timeZoneId)
+        } else {
+          null
+        }
+        val fieldType =
+          new FieldType(nullable, new ArrowType.Timestamp(unit, timezone), null, meta.asJava)
+        new Field(name, fieldType, Seq.empty[Field].asJava)
       case DateType if DateMilliUtils.hasDateMilliMetadata(metadata) =>
         val fieldType = new FieldType(
           nullable,
@@ -480,6 +633,21 @@ object LanceArrowUtils {
             toArrowField("uri", StringType, nullable = true, timeZoneId),
             arrowUInt64Field("position"),
             arrowUInt64Field("size")).asJava)
+      case ShortType | IntegerType | LongType
+          if metadata != null && metadata.contains(LANCE_UNSIGNED_INT_BIT_WIDTH_KEY) =>
+        val bitWidth = metadata.getLong(LANCE_UNSIGNED_INT_BIT_WIDTH_KEY).toInt
+        val fieldType =
+          new FieldType(nullable, new ArrowType.Int(bitWidth, false), null, meta.asJava)
+        new Field(name, fieldType, Seq.empty[Field].asJava)
+      case _: StringType if JsonUtils.hasJsonMetadata(metadata) =>
+        // Lance JSON column. Two things matter here. First, the storage must be UTF-8: Lance
+        // encodes the JSON text to its internal JSONB form itself, and rejects a LargeBinary
+        // array of pre-encoded bytes. The extension name must be the canonical `arrow.json`.
+        // Read metadata is normalized to that name, and forcing it here also supports callers
+        // that provide the physical `lance.json` spelling directly.
+        val jsonMeta = (meta + (ARROW_EXT_NAME_KEY -> JSON_EXT_NAME)).asJava
+        val jsonType = if (large) ArrowType.LargeUtf8.INSTANCE else ArrowType.Utf8.INSTANCE
+        new Field(name, new FieldType(nullable, jsonType, null, jsonMeta), Seq.empty[Field].asJava)
       case dataType =>
         val fieldType =
           new FieldType(nullable, toArrowType(dataType, timeZoneId, large, name), null, meta.asJava)

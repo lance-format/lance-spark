@@ -624,4 +624,184 @@ public abstract class BaseSparkDataTypeRoundtripTest {
     assertEquals(v1, got.get(0));
     assertEquals(v2, got.get(1));
   }
+
+  // ---------------- fixed-size-list with null ----------------
+
+  @Test
+  public void testFixedSizeListNullMixed() {
+    org.apache.spark.sql.types.Metadata meta =
+        new org.apache.spark.sql.types.MetadataBuilder()
+            .putLong("arrow.fixed-size-list.size", 4L)
+            .build();
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add(
+                org.apache.spark.sql.types.DataTypes.createStructField(
+                    "vec", DataTypes.createArrayType(DataTypes.FloatType, false), true, meta));
+    List<Row> data =
+        Arrays.asList(
+            RowFactory.create(0, Arrays.asList(1.0f, 2.0f, 3.0f, 4.0f)),
+            RowFactory.create(1, null),
+            RowFactory.create(2, null),
+            RowFactory.create(3, Arrays.asList(5.0f, 6.0f, 7.0f, 8.0f)));
+    List<Row> out = writeAndRead(schema, data, "fsl_null").orderBy("id").collectAsList();
+    assertEquals(4, out.size());
+    // Row 0: non-null
+    assertFalse(out.get(0).isNullAt(1));
+    assertEquals(Arrays.asList(1.0f, 2.0f, 3.0f, 4.0f), out.get(0).getList(1));
+    // Row 1: null
+    assertTrue(out.get(1).isNullAt(1));
+    // Row 2: null
+    assertTrue(out.get(2).isNullAt(1));
+    // Row 3: non-null AFTER nulls - this is the critical assertion
+    assertFalse(out.get(3).isNullAt(1), "Row after null should not be null");
+    assertEquals(Arrays.asList(5.0f, 6.0f, 7.0f, 8.0f), out.get(3).getList(1));
+  }
+
+  @Test
+  public void testStructWithNullFslField() {
+    // Non-null struct row where the FSL field inside is null.
+    org.apache.spark.sql.types.Metadata fslMeta =
+        new org.apache.spark.sql.types.MetadataBuilder()
+            .putLong("arrow.fixed-size-list.size", 3L)
+            .build();
+    StructType inner =
+        new StructType()
+            .add("label", DataTypes.StringType, true)
+            .add(
+                org.apache.spark.sql.types.DataTypes.createStructField(
+                    "vec", DataTypes.createArrayType(DataTypes.FloatType, false), true, fslMeta));
+    StructType schema =
+        new StructType().add("id", DataTypes.IntegerType, false).add("payload", inner, true);
+    List<Row> data =
+        Arrays.asList(
+            RowFactory.create(0, RowFactory.create("a", Arrays.asList(1.0f, 2.0f, 3.0f))),
+            RowFactory.create(1, RowFactory.create("b", null)),
+            RowFactory.create(2, RowFactory.create("c", Arrays.asList(4.0f, 5.0f, 6.0f))));
+    List<Row> out = writeAndRead(schema, data, "struct_fsl_null").orderBy("id").collectAsList();
+    assertEquals(3, out.size());
+    // Row 0
+    Row s0 = out.get(0).getStruct(1);
+    assertEquals("a", s0.getString(0));
+    assertEquals(Arrays.asList(1.0f, 2.0f, 3.0f), s0.getList(1));
+    // Row 1: struct non-null but vec field is null
+    Row s1 = out.get(1).getStruct(1);
+    assertEquals("b", s1.getString(0));
+    assertTrue(s1.isNullAt(1));
+    // Row 2: after the null FSL, values should be correct
+    Row s2 = out.get(2).getStruct(1);
+    assertEquals("c", s2.getString(0));
+    assertEquals(Arrays.asList(4.0f, 5.0f, 6.0f), s2.getList(1));
+  }
+
+  @Test
+  public void testStructAllNullRowWithFsl() {
+    // Entire struct row is null — exercisesStructWriter.setNull() cascading to FSL child.
+    org.apache.spark.sql.types.Metadata fslMeta =
+        new org.apache.spark.sql.types.MetadataBuilder()
+            .putLong("arrow.fixed-size-list.size", 3L)
+            .build();
+    StructType inner =
+        new StructType()
+            .add("label", DataTypes.StringType, true)
+            .add(
+                org.apache.spark.sql.types.DataTypes.createStructField(
+                    "vec", DataTypes.createArrayType(DataTypes.FloatType, false), true, fslMeta));
+    StructType schema =
+        new StructType().add("id", DataTypes.IntegerType, false).add("payload", inner, true);
+    List<Row> data =
+        Arrays.asList(
+            RowFactory.create(0, RowFactory.create("a", Arrays.asList(1.0f, 2.0f, 3.0f))),
+            RowFactory.create(1, null),
+            RowFactory.create(2, null),
+            RowFactory.create(3, RowFactory.create("d", Arrays.asList(7.0f, 8.0f, 9.0f))));
+    List<Row> out = writeAndRead(schema, data, "struct_all_null_fsl").orderBy("id").collectAsList();
+    assertEquals(4, out.size());
+    // Row 0
+    Row s0 = out.get(0).getStruct(1);
+    assertEquals("a", s0.getString(0));
+    assertEquals(Arrays.asList(1.0f, 2.0f, 3.0f), s0.getList(1));
+    // Rows 1,2: entire struct is null
+    assertTrue(out.get(1).isNullAt(1));
+    assertTrue(out.get(2).isNullAt(1));
+    // Row 3: after null struct rows, values must be correct
+    Row s3 = out.get(3).getStruct(1);
+    assertEquals("d", s3.getString(0));
+    assertEquals(Arrays.asList(7.0f, 8.0f, 9.0f), s3.getList(1));
+  }
+
+  @Test
+  public void testArrayOfFslWithNullElements() {
+    // ARRAY<ARRAY<FLOAT>> where the inner array has FSL metadata and outer elements can be null.
+    org.apache.spark.sql.types.Metadata fslMeta =
+        new org.apache.spark.sql.types.MetadataBuilder()
+            .putLong("arrow.fixed-size-list.size", 2L)
+            .build();
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add(
+                org.apache.spark.sql.types.DataTypes.createStructField(
+                    "vecs",
+                    DataTypes.createArrayType(
+                        DataTypes.createArrayType(DataTypes.FloatType, false), true),
+                    true,
+                    fslMeta));
+    List<Row> data =
+        Arrays.asList(
+            RowFactory.create(
+                0, Arrays.asList(Arrays.asList(1.0f, 2.0f), null, Arrays.asList(3.0f, 4.0f))),
+            RowFactory.create(1, Arrays.asList(Arrays.asList(5.0f, 6.0f))));
+    List<Row> out = writeAndRead(schema, data, "array_fsl_null_elem").orderBy("id").collectAsList();
+    assertEquals(2, out.size());
+    // Row 0: [vec, null, vec]
+    List<Object> row0list = out.get(0).getList(1);
+    assertEquals(3, row0list.size());
+    // Row 1: single element
+    List<Object> row1list = out.get(1).getList(1);
+    assertEquals(1, row1list.size());
+  }
+
+  @Test
+  public void testMapWithFslValue() {
+    // MAP<INT, ARRAY<FLOAT>> where the value array has FSL metadata.
+    // Map requires Lance file format 2.2+.
+    org.apache.spark.sql.types.Metadata fslMeta =
+        new org.apache.spark.sql.types.MetadataBuilder()
+            .putLong("arrow.fixed-size-list.size", 2L)
+            .build();
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add(
+                org.apache.spark.sql.types.DataTypes.createStructField(
+                    "m",
+                    DataTypes.createMapType(
+                        DataTypes.IntegerType,
+                        DataTypes.createArrayType(DataTypes.FloatType, false),
+                        true),
+                    true,
+                    fslMeta));
+    java.util.Map<Integer, List<Float>> m0 = new java.util.HashMap<>();
+    m0.put(1, Arrays.asList(1.0f, 2.0f));
+    m0.put(2, null);
+    java.util.Map<Integer, List<Float>> m1 = new java.util.HashMap<>();
+    m1.put(3, Arrays.asList(3.0f, 4.0f));
+    List<Row> data = Arrays.asList(RowFactory.create(0, m0), RowFactory.create(1, m1));
+    String path = outputPath("map_fsl_value");
+    spark
+        .createDataFrame(data, schema)
+        .write()
+        .format("lance")
+        .option("file_format_version", "2.2")
+        .mode(SaveMode.ErrorIfExists)
+        .save(path);
+    List<Row> out = spark.read().format("lance").load(path).orderBy("id").collectAsList();
+    assertEquals(2, out.size());
+    // Row 0: map with a null value
+    assertFalse(out.get(0).isNullAt(1));
+    // Row 1: map without null
+    assertFalse(out.get(1).isNullAt(1));
+  }
 }

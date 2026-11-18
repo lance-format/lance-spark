@@ -18,22 +18,21 @@ import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, Project}
 import org.apache.spark.sql.connector.catalog._
 import org.lance.spark.{LanceConstant, LanceDataset}
+import org.lance.spark.utils.SchemaConverter
 
 case class AddColumnsBackfillExec(
     catalog: TableCatalog,
     ident: Identifier,
     columnNames: Seq[String],
-    query: LogicalPlan)
+    query: LogicalPlan,
+    writeOptions: Map[String, String] = Map.empty)
   extends LeafV2CommandExec {
 
   override def output: Seq[Attribute] = Seq.empty
 
   override protected def run(): Seq[InternalRow] = {
-    val originalTable = catalog.loadTable(ident) match {
-      case lanceTable: LanceDataset => lanceTable
-      case _ =>
-        throw new UnsupportedOperationException("AddColumnsBackfill only supports for LanceDataset")
-    }
+    val originalTable =
+      LanceDataset.requireWritable(catalog.loadTable(ident), "AddColumnsBackfill")
 
     // Check the added columns must not exist
     val originalFields = originalTable.schema().fieldNames.toSet
@@ -55,15 +54,24 @@ case class AddColumnsBackfillExec(
       query
     }
 
+    val tableProperties = originalTable.properties()
+    val backfillSchema = SchemaConverter.processSchemaWithProperties(
+      actualQuery.schema,
+      tableProperties,
+      originalTable.getFileFormatVersion)
+
     val relation = DataSourceV2Relation.create(
       new LanceDataset(
         originalTable.readOptions(),
-        actualQuery.schema,
+        backfillSchema,
         originalTable.getInitialStorageOptions,
         originalTable.getNamespaceImpl,
         originalTable.getNamespaceProperties,
         originalTable.getManagedVersioning,
-        originalTable.getFileFormatVersion),
+        null,
+        originalTable.getFileFormatVersion,
+        tableProperties,
+        null),
       Some(catalog),
       Some(ident))
 
@@ -71,7 +79,7 @@ case class AddColumnsBackfillExec(
       AppendData.byPosition(
         relation,
         actualQuery,
-        Map(LanceConstant.BACKFILL_COLUMNS_KEY -> columnNames.mkString(",")))
+        writeOptions + (LanceConstant.BACKFILL_COLUMNS_KEY -> columnNames.mkString(",")))
     val qe = session.sessionState.executePlan(append)
     qe.assertCommandExecuted()
 

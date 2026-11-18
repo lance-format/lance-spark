@@ -13,18 +13,28 @@
  */
 package org.lance.spark.write;
 
+import org.lance.Transaction;
 import org.lance.Version;
 import org.lance.spark.LanceDataSource;
 import org.lance.spark.LanceRuntime;
+import org.lance.spark.LanceSpark;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.utils.Utils;
 
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SaveMode;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.api.java.UDF1;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException;
 import org.apache.spark.sql.types.DataTypes;
@@ -39,19 +49,37 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.File;
 import java.nio.file.Path;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static org.apache.spark.sql.functions.col;
+import static org.apache.spark.sql.functions.lit;
+import static org.apache.spark.sql.functions.udf;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 public abstract class BaseSparkConnectorWriteTest {
+  /** Version Lance's STABLE release selector resolves to (lance-format/lance#8657). */
+  private static final String STABLE_FILE_FORMAT_VERSION = "2.2";
+
   private static SparkSession spark;
   private static Dataset<Row> testData;
+  private static CountDownLatch concurrentWriteTasks;
   @TempDir static Path dbPath;
 
   @BeforeAll
@@ -59,7 +87,7 @@ public abstract class BaseSparkConnectorWriteTest {
     spark =
         SparkSession.builder()
             .appName("spark-lance-connector-test")
-            .master("local")
+            .master("local[2]")
             .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
             .config("spark.sql.catalog.lance.max_row_per_file", "1")
             .config("spark.sql.session.timeZone", "UTC")
@@ -92,6 +120,339 @@ public abstract class BaseSparkConnectorWriteTest {
     if (spark != null) {
       spark.stop();
     }
+  }
+
+  @Test
+  public void transactionPropertiesDataFrameWrites(TestInfo testInfo) throws Exception {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
+    String table = "lance.`" + path + "`";
+    LanceSparkReadOptions readOptions = LanceSparkReadOptions.from(path);
+    testData.writeTo(table).option("transaction_properties", "{\"request\":\"create\"}").create();
+    assertEquals(
+        Collections.singletonMap("request", "create"),
+        TestUtils.readTransactionProperties(readOptions));
+    testData.writeTo(table).option("transaction_properties", "{\"request\":\"append\"}").append();
+    assertEquals(4, spark.table(table).count());
+    assertEquals(
+        Collections.singletonMap("request", "append"),
+        TestUtils.readTransactionProperties(readOptions));
+    testData
+        .writeTo(table)
+        .option("transaction_properties", "{\"request\":\"overwrite\"}")
+        .overwrite(lit(true));
+    assertEquals(2, spark.table(table).count());
+    assertEquals(
+        Collections.singletonMap("request", "overwrite"),
+        TestUtils.readTransactionProperties(readOptions));
+  }
+
+  @Test
+  public void transactionPropertiesPrefixedWrites(TestInfo testInfo) throws Exception {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
+    String table = "lance.`" + path + "`";
+    LanceSparkReadOptions readOptions = LanceSparkReadOptions.from(path);
+    String payload = "{\"NestedKey\":\"Mixed-Case-\u96ea\"}";
+    testData
+        .writeTo(table)
+        .option("TrAnSaCtIoN_PrOpErTiEs.ReQuEsT_ID", "create")
+        .option("transaction_properties.payload", payload)
+        .create();
+    Map<String, String> expected = new HashMap<>();
+    expected.put("request_id", "create");
+    expected.put("payload", payload);
+    assertEquals(expected, TestUtils.readTransactionProperties(readOptions));
+
+    testData.writeTo(table).option("transaction_properties.REQUEST_ID", "replace").replace();
+    assertEquals(
+        Collections.singletonMap("request_id", "replace"),
+        TestUtils.readTransactionProperties(readOptions));
+    testData
+        .write()
+        .format(LanceDataSource.name)
+        .mode(SaveMode.Append)
+        .option(LanceSparkReadOptions.CONFIG_DATASET_URI, path)
+        .option("TRANSACTION_PROPERTIES.Request_ID", "writer-v1")
+        .save();
+    assertEquals(
+        Collections.singletonMap("request_id", "writer-v1"),
+        TestUtils.readTransactionProperties(readOptions));
+
+    long version;
+    try (org.lance.Dataset dataset = Utils.openDatasetBuilder(readOptions).build()) {
+      version = dataset.version();
+    }
+    assertThrows(
+        Exception.class,
+        () ->
+            testData
+                .writeTo(table)
+                .option("transaction_properties", "{}")
+                .option("transaction_properties.request_id", "mixed")
+                .append());
+    assertThrows(
+        Exception.class,
+        () ->
+            testData
+                .writeTo(table)
+                .option("transaction_properties", "{}")
+                .option("transaction_properties.request_id", "mixed")
+                .replace());
+    try (org.lance.Dataset dataset = Utils.openDatasetBuilder(readOptions).build()) {
+      assertEquals(version, dataset.version());
+      assertEquals(4, dataset.countRows());
+    }
+    assertEquals(
+        Collections.singletonMap("request_id", "writer-v1"),
+        TestUtils.readTransactionProperties(readOptions));
+
+    testData
+        .writeTo(table)
+        .option("transaction_properties", "{\"RequestID\":\"upper\",\"requestid\":\"lower\"}")
+        .append();
+    expected.clear();
+    expected.put("RequestID", "upper");
+    expected.put("requestid", "lower");
+    assertEquals(expected, TestUtils.readTransactionProperties(readOptions));
+    testData.writeTo(table).append();
+    assertTrue(TestUtils.readTransactionProperties(readOptions).isEmpty());
+    assertEquals(8, spark.table(table).count());
+  }
+
+  @Test
+  public void transactionPropertiesEmptyAppendDoesNotCommit(TestInfo testInfo) throws Exception {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
+    String table = "lance.`" + path + "`";
+    testData.writeTo(table).create();
+    long version = datasetVersion(path);
+
+    testData
+        .limit(0)
+        .writeTo(table)
+        .option("transaction_properties", "{\"request\":\"noop\"}")
+        .append();
+    assertEquals(version, datasetVersion(path));
+  }
+
+  @Test
+  public void transactionPropertiesInvalidWritesDoNotCommit(TestInfo testInfo) throws Exception {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
+    String table = "lance.`" + path + "`";
+    testData.writeTo(table).create();
+    long version = datasetVersion(path);
+
+    assertThrows(
+        Exception.class,
+        () ->
+            testData
+                .writeTo(table)
+                .option("transaction_properties", "{\"request\":null}")
+                .append());
+    assertThrows(
+        Exception.class,
+        () ->
+            testData
+                .writeTo(table)
+                .option("transaction_properties", "{\"request\":null}")
+                .replace());
+    assertEquals(version, datasetVersion(path));
+  }
+
+  @Test
+  public void transactionPropertiesEmptyOverwriteAndReset(TestInfo testInfo) throws Exception {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
+    String table = "lance.`" + path + "`";
+    LanceSparkReadOptions readOptions = LanceSparkReadOptions.from(path);
+    testData.writeTo(table).create();
+
+    testData
+        .limit(0)
+        .writeTo(table)
+        .option("transaction_properties", "{\"request\":\"truncate\"}")
+        .overwrite(lit(true));
+    assertEquals(0, spark.table(table).count());
+    assertEquals(
+        Collections.singletonMap("request", "truncate"),
+        TestUtils.readTransactionProperties(readOptions));
+    testData.writeTo(table).append();
+    assertEquals(Collections.emptyMap(), TestUtils.readTransactionProperties(readOptions));
+  }
+
+  @Test
+  public void transactionPropertiesSqlDelete(TestInfo testInfo) throws Exception {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
+    String table = "lance.`" + path + "`";
+    testData.writeTo(table).create();
+    Map<String, String> properties = Collections.singletonMap("RequestID", "Delete-\u96ea");
+    LanceSpark.executeSql(spark, "DELETE FROM " + table, properties);
+    assertEquals(0, spark.table(table).count());
+    assertEquals(properties, TestUtils.readTransactionProperties(LanceSparkReadOptions.from(path)));
+  }
+
+  @Test
+  public void transactionPropertiesSqlStaging(TestInfo testInfo) {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
+    String table = "lance.`" + path + "`";
+    LanceSparkReadOptions readOptions = LanceSparkReadOptions.from(path);
+    long expectedVersion = 1;
+    for (String operation : Arrays.asList("CREATE", "REPLACE", "CREATE OR REPLACE")) {
+      Map<String, String> properties = Collections.singletonMap("request", operation);
+      LanceSpark.executeSql(
+          spark, operation + " TABLE " + table + " AS SELECT * FROM tmp_view", properties);
+      assertEquals(properties, TestUtils.readTransactionProperties(readOptions));
+      assertEquals(2, spark.table(table).count());
+      assertEquals(expectedVersion++, datasetVersion(path));
+    }
+  }
+
+  @Test
+  public void transactionPropertiesSqlCreateOrReplaceNewTable(TestInfo testInfo) {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
+    LanceSpark.executeSql(
+        spark,
+        "CREATE OR REPLACE TABLE lance.`" + path + "` AS SELECT * FROM tmp_view",
+        Collections.singletonMap("request", "new-create-or-replace"));
+    assertEquals(
+        Collections.singletonMap("request", "new-create-or-replace"),
+        TestUtils.readTransactionProperties(LanceSparkReadOptions.from(path)));
+  }
+
+  @Test
+  public void transactionPropertiesSqlEmptyCreate(TestInfo testInfo) {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
+    LanceSpark.executeSql(
+        spark,
+        "CREATE TABLE lance.`" + path + "` AS SELECT * FROM tmp_view WHERE false",
+        Collections.singletonMap("request", "empty-ctas"));
+    assertEquals(
+        Collections.singletonMap("request", "empty-ctas"),
+        TestUtils.readTransactionProperties(LanceSparkReadOptions.from(path)));
+  }
+
+  @Test
+  public void transactionPropertiesSqlRejectsNonWritingStatements(TestInfo testInfo)
+      throws Exception {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
+    String table = "lance.`" + path + "`";
+    testData.writeTo(table).create();
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> LanceSpark.executeSql(spark, "SELECT * FROM " + table, Collections.emptyMap()));
+  }
+
+  @Test
+  public void transactionPropertiesConcurrentAppends(TestInfo testInfo) throws Exception {
+    String path =
+        TestUtils.getDatasetUri(dbPath.toString(), testInfo.getTestMethod().get().getName());
+    String table = "lance.`" + path + "`";
+    testData.writeTo(table).create();
+    long initialVersion = datasetVersion(path);
+    String sourceView = "transaction_properties_concurrent_source";
+    createConcurrentAppendSource(sourceView);
+    Map<String, String> firstProperties =
+        new HashMap<>(Collections.singletonMap("request", "writer-a"));
+    firstProperties.put("only-a", "value-a");
+    Map<String, String> secondProperties =
+        new HashMap<>(Collections.singletonMap("request", "writer-b"));
+    secondProperties.put("only-b", "value-b");
+    Set<Map<String, String>> expectedProperties =
+        new HashSet<>(Arrays.asList(firstProperties, secondProperties));
+    try {
+      appendConcurrently(table, sourceView, firstProperties, secondProperties);
+      try (org.lance.Dataset dataset =
+          Utils.openDatasetBuilder(LanceSparkReadOptions.from(path)).build()) {
+        assertEquals(6, dataset.countRows());
+        List<Map<String, String>> committedProperties =
+            readTransactionPropertiesAfter(dataset, initialVersion);
+        assertEquals(2, committedProperties.size());
+        assertEquals(expectedProperties, new HashSet<>(committedProperties));
+      }
+    } finally {
+      spark.catalog().dropTempView(sourceView);
+    }
+  }
+
+  private static long datasetVersion(String path) {
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(path)).build()) {
+      return dataset.version();
+    }
+  }
+
+  private static void createConcurrentAppendSource(String sourceView) {
+    concurrentWriteTasks = new CountDownLatch(2);
+    // One task per write makes the barrier synchronize different writes, not source partitions.
+    testData
+        .coalesce(1)
+        .withColumn(
+            "id",
+            udf(
+                    (UDF1<Integer, Integer>)
+                        id -> {
+                          concurrentWriteTasks.countDown();
+                          if (!concurrentWriteTasks.await(30, TimeUnit.SECONDS)) {
+                            throw new IllegalStateException(
+                                "Concurrent write tasks did not overlap");
+                          }
+                          return id;
+                        },
+                    DataTypes.IntegerType)
+                .asNondeterministic()
+                .apply(col("id")))
+        .createOrReplaceTempView(sourceView);
+  }
+
+  private static void appendConcurrently(
+      String table,
+      String sourceView,
+      Map<String, String> firstProperties,
+      Map<String, String> secondProperties)
+      throws Exception {
+    String statement =
+        "WITH source AS (SELECT * FROM "
+            + sourceView
+            + ") INSERT INTO "
+            + table
+            + " SELECT * FROM source";
+    ExecutorService executor = Executors.newFixedThreadPool(2);
+    try {
+      List<Future<?>> writes =
+          Arrays.asList(
+              executor.submit(() -> LanceSpark.executeSql(spark, statement, firstProperties)),
+              executor.submit(() -> LanceSpark.executeSql(spark, statement, secondProperties)));
+      for (Future<?> write : writes) {
+        write.get(60, TimeUnit.SECONDS);
+      }
+    } finally {
+      concurrentWriteTasks.countDown();
+      concurrentWriteTasks.countDown();
+      executor.shutdownNow();
+    }
+  }
+
+  private static List<Map<String, String>> readTransactionPropertiesAfter(
+      org.lance.Dataset dataset, long initialVersion) {
+    List<Map<String, String>> committedProperties = new ArrayList<>();
+    for (Version version : dataset.listVersions()) {
+      if (version.getId() > initialVersion) {
+        try (org.lance.Dataset historical = dataset.checkoutVersion(version.getId());
+            Transaction transaction =
+                historical.readTransaction().orElseThrow(AssertionError::new)) {
+          committedProperties.add(
+              new HashMap<>(transaction.transactionProperties().orElseThrow(AssertionError::new)));
+        }
+      }
+    }
+    return committedProperties;
   }
 
   @Test
@@ -545,11 +906,8 @@ public abstract class BaseSparkConnectorWriteTest {
 
     try (org.lance.Dataset ds =
         org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
-      // STABLE maps to 2.0 or 2.1 depending on lance version
-      String version = ds.getLanceFileFormatVersion();
-      assertTrue(
-          version.equals("2.0") || version.equals("2.1"),
-          "Expected STABLE version (2.0 or 2.1), got: " + version);
+      // STABLE is a release selector; lance resolves it at write time
+      assertEquals(STABLE_FILE_FORMAT_VERSION, ds.getLanceFileFormatVersion());
     }
   }
 
@@ -669,10 +1027,7 @@ public abstract class BaseSparkConnectorWriteTest {
 
     try (org.lance.Dataset ds =
         org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
-      String version = ds.getLanceFileFormatVersion();
-      assertTrue(
-          version.equals("2.0") || version.equals("2.1"),
-          "Expected STABLE version (2.0 or 2.1), got: " + version);
+      assertEquals(STABLE_FILE_FORMAT_VERSION, ds.getLanceFileFormatVersion());
     }
   }
 
@@ -732,6 +1087,137 @@ public abstract class BaseSparkConnectorWriteTest {
           org.apache.arrow.vector.types.pojo.ArrowType.LargeUtf8.INSTANCE,
           idField.getType(),
           "id field should be LargeUtf8 when use_large_var_types=true on createOrReplace path");
+    }
+  }
+
+  /**
+   * Regression: reading a Lance table with a LargeBinary column, transforming it in Spark, and
+   * writing back must not fail. Spark maps both Arrow Binary and LargeBinary onto its single
+   * BinaryType, so without a metadata marker the round trip silently narrows LargeBinary -> Binary
+   * and the append is rejected by Lance's schema validation.
+   */
+  @Test
+  public void appendAfterTransformPreservesLargeBinary(TestInfo testInfo) throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    StructType schema =
+        new StructType().add("id", DataTypes.IntegerType).add("image_bytes", DataTypes.BinaryType);
+    Dataset<Row> data =
+        spark.createDataFrame(
+            Arrays.asList(
+                RowFactory.create(1, new byte[] {1, 2, 3}),
+                RowFactory.create(2, new byte[] {4, 5, 6})),
+            schema);
+    data.writeTo("lance.`" + path + "`")
+        .using("lance")
+        .option("use_large_var_types", "true")
+        .create();
+
+    // Read back, apply a transform that leaves image_bytes untouched, and append.
+    // This is the exact shape of the reported failure.
+    Dataset<Row> transformed =
+        spark
+            .read()
+            .format(LanceDataSource.name)
+            .option(LanceSparkReadOptions.CONFIG_DATASET_URI, path)
+            .load()
+            .withColumn("id", col("id").plus(10));
+
+    transformed.writeTo("lance.`" + path + "`").append();
+
+    // The on-disk Arrow type must still be LargeBinary, not silently narrowed to Binary.
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      assertEquals(
+          org.apache.arrow.vector.types.pojo.ArrowType.LargeBinary.INSTANCE,
+          ds.getSchema().findField("image_bytes").getType(),
+          "image_bytes must remain LargeBinary after a read -> transform -> write round trip");
+    }
+
+    List<Row> rows =
+        spark
+            .read()
+            .format(LanceDataSource.name)
+            .option(LanceSparkReadOptions.CONFIG_DATASET_URI, path)
+            .load()
+            .orderBy("id")
+            .collectAsList();
+    assertEquals(4, rows.size());
+    assertArrayEquals(new byte[] {1, 2, 3}, (byte[]) rows.get(0).get(1));
+    assertArrayEquals(new byte[] {4, 5, 6}, (byte[]) rows.get(1).get(1));
+    assertArrayEquals(new byte[] {1, 2, 3}, (byte[]) rows.get(2).get(1));
+    assertArrayEquals(new byte[] {4, 5, 6}, (byte[]) rows.get(3).get(1));
+  }
+
+  /**
+   * Regression for #687 / #697: appending into a dataset whose Arrow List child is named {@code
+   * element} (the pre-#697 lance-spark convention, and what a dataset written by an older
+   * lance-spark or a hand-built producer looks like) must not fail lance-core's by-name schema
+   * validation. The fix records the non-default child name in Spark metadata on read and restores
+   * it on writeback; this test drives the full driver-to-executor write path so a regression in the
+   * write buffer's schema source turns the suite red instead of surfacing on a real legacy table.
+   */
+  @Test
+  public void appendIntoLegacyElementChildDataset(TestInfo testInfo) throws NoSuchTableException {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);
+
+    // Seed a dataset directly through the Lance JNI with a List child explicitly named "element",
+    // bypassing the Spark write path (which would name it "item" today).
+    Field elementField = new Field("element", FieldType.nullable(ArrowType.Utf8.INSTANCE), null);
+    Field tagsField =
+        new Field(
+            "tags",
+            FieldType.nullable(ArrowType.List.INSTANCE),
+            Collections.singletonList(elementField));
+    Field idField = new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null);
+    Schema legacySchema = new Schema(Arrays.asList(idField, tagsField));
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      org.lance.Dataset.write()
+          .allocator(allocator)
+          .uri(path)
+          .schema(legacySchema)
+          .execute()
+          .close();
+    }
+
+    // Confirm the seeded dataset really uses "element", otherwise the test would be vacuous.
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      assertEquals("element", ds.getSchema().findField("tags").getChildren().get(0).getName());
+    }
+
+    StructType sparkSchema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, true)
+            .add("tags", DataTypes.createArrayType(DataTypes.StringType, true), true);
+    List<Row> rows =
+        Arrays.asList(
+            RowFactory.create(1, Arrays.asList("a", "b")),
+            RowFactory.create(2, Collections.emptyList()));
+    Dataset<Row> df = spark.createDataFrame(rows, sparkSchema);
+
+    // Append through the documented catalog-routed path. Before #697 this failed lance-core
+    // validation with "element" != "item".
+    df.writeTo("lance.`" + path + "`").append();
+
+    Dataset<Row> afterCatalog =
+        spark.read().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, path).load();
+    assertEquals(2, afterCatalog.count());
+
+    // Append through the path-based DataSource save() path as well, covering the getTable() branch
+    // that adopts the caller-provided schema.
+    df.write().format(LanceDataSource.name).mode(SaveMode.Append).save(path);
+
+    Dataset<Row> afterPath =
+        spark.read().format("lance").option(LanceSparkReadOptions.CONFIG_DATASET_URI, path).load();
+    assertEquals(4, afterPath.count());
+
+    // The stored List child name must be unchanged after the appends.
+    try (org.lance.Dataset ds =
+        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(path).build()) {
+      assertEquals("element", ds.getSchema().findField("tags").getChildren().get(0).getName());
     }
   }
 }

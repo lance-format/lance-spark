@@ -13,6 +13,7 @@
  */
 package org.lance.spark.read;
 
+import org.lance.spark.internal.ExecutorNamespace;
 import org.lance.spark.internal.LanceFragmentColumnarBatchScanner;
 import org.lance.spark.read.metric.LanceReadMetricsTracker;
 
@@ -29,6 +30,7 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
   private ColumnarBatch currentBatch;
   private final LanceReadMetricsTracker metricsTracker = new LanceReadMetricsTracker();
   private boolean currentScanStatsAdded = false;
+  private ExecutorNamespace executorNamespace;
 
   public LanceColumnarPartitionReader(LanceInputPartition inputPartition) {
     this.inputPartition = inputPartition;
@@ -37,13 +39,27 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
 
   @Override
   public boolean next() throws IOException {
+    try {
+      return nextInternal();
+    } catch (Throwable t) {
+      throw asIOException(closeResources(t));
+    }
+  }
+
+  private boolean nextInternal() throws IOException {
     if (loadNextBatchFromCurrentReader()) {
       return true;
     }
     while (fragmentIndex < inputPartition.getLanceSplit().getFragments().size()) {
+      // Null-first so if create(...) below throws, the subsequent close() sees fragmentReader ==
+      // null and short-circuits, rather than re-closing the already-closed previous scanner and
+      // raising `ArrowArrayStream is already closed`.
       if (fragmentReader != null) {
-        fragmentReader.close();
+        LanceFragmentColumnarBatchScanner toClose = fragmentReader;
+        fragmentReader = null;
+        toClose.close();
       }
+      initializeExecutorNamespace();
       fragmentReader =
           LanceFragmentColumnarBatchScanner.create(
               inputPartition.getLanceSplit().getFragments().get(fragmentIndex), inputPartition);
@@ -59,6 +75,12 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
       }
     }
     return false;
+  }
+
+  private void initializeExecutorNamespace() {
+    if (executorNamespace == null) {
+      executorNamespace = ExecutorNamespace.acquire(inputPartition);
+    }
   }
 
   private boolean loadNextBatchFromCurrentReader() throws IOException {
@@ -93,17 +115,59 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
 
   @Override
   public void close() throws IOException {
-    if (fragmentReader != null) {
-      if (!currentScanStatsAdded) {
+    Throwable failure = null;
+    if (fragmentReader != null && !currentScanStatsAdded) {
+      try {
         metricsTracker.addScanStats(fragmentReader.getScanStats());
         currentScanStatsAdded = true;
-      }
-
-      try {
-        fragmentReader.close();
-      } catch (Exception e) {
-        throw new IOException(e);
+      } catch (Throwable t) {
+        failure = t;
       }
     }
+    failure = closeResources(failure);
+    if (failure != null) {
+      throw asIOException(failure);
+    }
+  }
+
+  private Throwable closeResources(Throwable primary) {
+    // Null-first so close() is idempotent. A repeat call must not raise
+    // "ArrowArrayStream is already closed" from a second release().
+    LanceFragmentColumnarBatchScanner scannerToClose = fragmentReader;
+    fragmentReader = null;
+    ExecutorNamespace namespaceToClose = executorNamespace;
+    executorNamespace = null;
+
+    primary = closeResource(scannerToClose, primary);
+    primary = closeResource(namespaceToClose, primary);
+    return primary;
+  }
+
+  private static Throwable closeResource(AutoCloseable resource, Throwable primary) {
+    if (resource == null) {
+      return primary;
+    }
+    try {
+      resource.close();
+    } catch (Throwable closeError) {
+      if (primary == null) {
+        return closeError;
+      }
+      primary.addSuppressed(closeError);
+    }
+    return primary;
+  }
+
+  private static IOException asIOException(Throwable failure) {
+    if (failure instanceof IOException) {
+      return (IOException) failure;
+    }
+    if (failure instanceof RuntimeException) {
+      throw (RuntimeException) failure;
+    }
+    if (failure instanceof Error) {
+      throw (Error) failure;
+    }
+    return new IOException(failure);
   }
 }

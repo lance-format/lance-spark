@@ -1,0 +1,163 @@
+# Full-Text Search
+
+Query Lance tables using full-text search (FTS) with the `lance_match`, `lance_match_phrase`, and `lance_multi_match` SQL functions. These functions push FTS predicates down to the Lance inverted index for efficient text search.
+
+!!! warning "Prerequisites"
+    - The Lance Spark SQL extension must be enabled. See [Spark SQL Extensions](../../config.md#spark-sql-extensions).
+    - The Lance catalog must be the session's default catalog (`spark.sql.defaultCatalog`). Spark resolves unqualified function names against the default catalog; if it points elsewhere, calls to `lance_match`, `lance_match_phrase`, and `lance_multi_match` fail with a "function not found" error.
+    - An FTS index must exist on the target column(s). See [CREATE INDEX — FTS Options](../ddl/create-index.md#fts-inverted-options).
+    - `lance_match_phrase` requires the FTS index to be built with `with_position = true`.
+
+## lance_match
+
+Keyword search against a single FTS-indexed column.
+
+```sql
+lance_match(column, query)
+lance_match(column, query, 'key=value,...')
+```
+
+**Arguments:**
+
+| Position | Name    | Type   | Description                        |
+|----------|---------|--------|------------------------------------|
+| 1        | column  | String | Column name with an FTS index.     |
+| 2        | query   | String | Search query text.                 |
+| 3        | options | String | Optional comma-separated key=value options. |
+
+**Options:**
+
+| Key              | Type    | Default | Constraints      | Description                                                    |
+|------------------|---------|---------|------------------|----------------------------------------------------------------|
+| `fuzziness`      | Integer | not set (auto) | ≥ 0       | Edit distance for fuzzy matching. When omitted, the engine determines fuzziness by token length. |
+| `operator`       | String  | `OR`    | `AND` or `OR`    | Whether all terms must match (`AND`) or any term (`OR`).       |
+| `boost`          | Float   | `1.0`   | any number       | Scoring multiplier (affects ranking, not row selection).        |
+| `prefix_length`  | Integer | `0`     | ≥ 0              | Number of leading characters that must match exactly for fuzzy. |
+| `max_expansions` | Integer | `50`    | ≥ 1              | Maximum fuzzy term expansions.                                 |
+
+**Examples:**
+
+```sql
+-- Basic keyword search
+SELECT * FROM lance.db.documents WHERE lance_match(body, 'machine learning');
+
+-- Fuzzy search with AND operator
+SELECT * FROM lance.db.documents
+WHERE lance_match(body, 'machin lerning', 'fuzziness=1,operator=AND');
+
+-- Boosted search with prefix length
+SELECT * FROM lance.db.documents
+WHERE lance_match(body, 'spark', 'boost=2.0,prefix_length=2');
+```
+
+## lance_match_phrase
+
+Phrase search against a single FTS-indexed column. Returns rows where the query terms appear consecutively (or within a `slop` distance).
+
+!!! note
+    The FTS index must be built with `with_position = true` for phrase queries.
+
+```sql
+lance_match_phrase(column, query)
+lance_match_phrase(column, query, slop)
+```
+
+**Arguments:**
+
+| Position | Name   | Type    | Description                                              |
+|----------|--------|---------|----------------------------------------------------------|
+| 1        | column | String  | Column name with a positional FTS index.                 |
+| 2        | query  | String  | Phrase to search for.                                    |
+| 3        | slop   | Integer | Optional. Max positional distance between terms (default: 0 = exact). Must be ≥ 0. |
+
+**Examples:**
+
+```sql
+-- Exact phrase match
+SELECT * FROM lance.db.documents WHERE lance_match_phrase(body, 'machine learning');
+
+-- Phrase match allowing 2 words between terms
+SELECT * FROM lance.db.documents WHERE lance_match_phrase(body, 'deep networks', 2);
+```
+
+## lance_multi_match
+
+Search across multiple FTS-indexed columns with a single query. A row matches if **any** column matches. The `operator` controls whether all terms must match within that column (AND) or any term can match (OR, default).
+
+```sql
+lance_multi_match(query, col1, col2, ...)
+lance_multi_match(query, 'operator=AND|OR', col1, col2, ...)
+```
+
+**Arguments:**
+
+| Position | Name     | Type   | Description                                                              |
+|----------|----------|--------|--------------------------------------------------------------------------|
+| 1        | query    | String | Search query text.                                                       |
+| 2        | options  | String | Optional. `'operator=AND'` or `'operator=OR'`. If omitted, default is OR. |
+| 2+       | columns  | String | Two or more column names, each with an FTS index.                        |
+
+When the second argument is a string literal containing `=` with a recognized option key, it is treated as an options string. Otherwise it is treated as the first column name.
+
+**Examples:**
+
+```sql
+-- Search across title and body (OR — row matches if either column matches)
+SELECT * FROM lance.db.documents
+WHERE lance_multi_match('machine learning', title, body);
+
+-- AND operator — a single column must contain ALL query terms.
+SELECT * FROM lance.db.documents
+WHERE lance_multi_match('machine learning', 'operator=AND', title, body);
+```
+
+## Relevance Score (`_score`)
+
+The `_score` metadata column exposes the BM25 relevance score computed by the FTS index. It is available only when a full-text search predicate is active.
+
+```sql
+-- Project _score alongside data columns
+SELECT id, body, _score FROM lance.db.documents
+WHERE lance_match(body, 'machine learning');
+
+-- Sort by relevance
+SELECT id, _score FROM lance.db.documents
+WHERE lance_match(body, 'vector database')
+ORDER BY _score DESC;
+
+-- Combine with scalar filters
+SELECT id, _score FROM lance.db.documents
+WHERE lance_match(body, 'deep learning') AND year >= 2024
+ORDER BY _score DESC;
+```
+
+`_score` is a hidden metadata column — it does not appear in `SELECT *` output. Selecting or filtering on this metadata column without an FTS predicate raises an error at planning time.
+
+If the table has a stored column named `_score`, Spark resolves `_score` to that data column instead. It remains visible in `SELECT *` and supports ordinary reads, filters, and ordering without FTS. Full-text search, including `SEARCH` and `HYBRID_SEARCH`, rejects tables with a stored `_score` column of any type, even when the column is not projected. Rename the stored column to use FTS and access relevance scores.
+
+!!! note "Ranked retrieval depends on the scan path"
+    On a query-capable namespace, such as the directory namespace, a single `ORDER BY _score DESC LIMIT k` can push the generated relevance-score top-k into `queryTable`. Spark retains a final sort and limit. Ascending or multi-key ordering and residual filters do not use this optimization.
+
+    Pushed scalar filters are evaluated before namespace top-k selection. Filters on `_score` remain in Spark, so they prevent top-k pushdown.
+
+    Local per-fragment scans return all matching rows; Spark sorts and limits them. Pushed ranked retrieval for this path remains a future extension.
+
+!!! note "Index coverage affects relevance scores"
+    As of Lance 14.0.3, partially indexed data can produce different scores or rankings before and after index optimization, even when the data and query are unchanged ([Lance issue #9058](https://github.com/lance-format/lance/issues/9058)). Run `ALTER TABLE lance.db.documents OPTIMIZE INDEX fts_body` after appends and use a fully indexed snapshot when relying on score thresholds or corpus-relative ranking.
+
+!!! warning "Rebuild existing FTS indexes when upgrading to Lance 14+"
+    Lance 14 updated stop-word lists for English and other Latin-script languages. `OPTIMIZE INDEX` merges segments without re-tokenizing existing postings, so rebuild pre-14 FTS indexes with `ALTER TABLE ... CREATE INDEX <name> USING fts (...)` when stop-word filtering (`remove_stop_words = true`) is enabled.
+
+## Known Limitations
+
+- **No local pushed ranked retrieval.** Local per-fragment scans score all matching rows before Spark applies `ORDER BY _score DESC LIMIT k`.
+- **Column names must match the schema exactly.** Column references are resolved at planning time; aliases or expressions are not supported.
+- **`lance_match_phrase` requires positional index.** The FTS index must be built with `with_position = true`. Without it, phrase queries will fail.
+- **Unbounded WHERE-filter queries return every match.** Without a supported namespace top-k push, every matching row is evaluated. `wand_factor` is not exposed.
+- **One FTS predicate per query.** Only a single FTS function call is allowed per `WHERE` clause. For multi-column search, use `lance_multi_match` instead of combining multiple `lance_match` calls with OR.
+- **FTS predicates cannot appear inside OR.** `WHERE lance_match(a, 'x') OR other_condition` is not supported — OR semantics cannot be preserved when pushing a single FTS query to the scanner.
+- **Query-serving namespaces must implement structured FTS queries.** The directory namespace supports this request format. Custom REST implementations must evaluate the structured full-text query rather than ignore it. Catalog-only namespaces (Glue, Hive, Iceberg) fall back to local per-fragment scans.
+
+## Cost Model
+
+On the local per-fragment scan path, each Spark task independently opens all committed FTS index segments to build a global BM25 scorer. Total segment-open cost per query is proportional to `N_fragments × M_index_segments`. For example, a 500-fragment dataset with 20 index segments causes 10,000 segment opens per query. Running `OPTIMIZE` periodically compacts data fragments, reducing the fragment count and therefore the total number of segment opens — this is the primary user-facing mitigation for latency-sensitive workloads.

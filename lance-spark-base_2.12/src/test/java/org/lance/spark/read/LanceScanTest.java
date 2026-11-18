@@ -13,12 +13,17 @@
  */
 package org.lance.spark.read;
 
+import org.lance.ipc.FullTextQuery;
+import org.lance.memwal.ShardingField;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.sharding.SparkLanceShardingUtils;
 
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.Expressions;
 import org.apache.spark.sql.connector.expressions.FieldReference;
+import org.apache.spark.sql.connector.expressions.Transform;
 import org.apache.spark.sql.connector.expressions.aggregate.AggregateFunc;
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
 import org.apache.spark.sql.connector.expressions.aggregate.CountStar;
@@ -38,6 +43,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 public class LanceScanTest {
 
@@ -207,15 +213,21 @@ public class LanceScanTest {
             org.lance.spark.utils.Optional.empty(),
             new Predicate[0],
             null,
-            Collections.emptyMap(),
             null,
+            Collections.emptyMap(),
+            Collections.emptyMap(),
+            new org.apache.spark.sql.connector.expressions.NamedReference[0],
             plan.getSplits(),
             plan.getFragmentRowCounts(),
             partitionExpression,
+            "region",
             fragKeys,
             Collections.emptyMap(),
             null,
-            Collections.emptyMap());
+            Collections.emptyMap(),
+            true,
+            null,
+            null);
 
     // Plan partitions to set numPartitions
     scan.planInputPartitions();
@@ -233,12 +245,100 @@ public class LanceScanTest {
   }
 
   @Test
+  public void testNestedIdentityShardingUsesLeafPartitionKeyType() {
+    StructType schema =
+        new StructType()
+            .add("parent", new StructType().add("child", DataTypes.IntegerType))
+            .add("id", DataTypes.IntegerType);
+    ShardingField field =
+        SparkLanceShardingUtils.fromSparkTransforms(
+                new Transform[] {Expressions.identity("parent.child")})
+            .fields()
+            .get(0);
+    Expression partitionExpression = SparkLanceShardingUtils.toSparkExpression(field, null);
+    LanceSplit.ScanPlanResult plan = LanceSplit.planScan(TestUtils.TestTable1Config.readOptions);
+    Map<Integer, Object> fragKeys = new HashMap<>();
+    for (LanceSplit split : plan.getSplits()) {
+      int fragmentId = split.getFragments().get(0);
+      fragKeys.put(fragmentId, 10L * (fragmentId + 1));
+    }
+
+    LanceScan scan =
+        new LanceScan(
+            schema,
+            TestUtils.TestTable1Config.readOptions,
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            new Predicate[0],
+            null,
+            null,
+            Collections.emptyMap(),
+            Collections.emptyMap(),
+            new org.apache.spark.sql.connector.expressions.NamedReference[0],
+            plan.getSplits(),
+            plan.getFragmentRowCounts(),
+            partitionExpression,
+            "parent.child",
+            fragKeys,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            true,
+            null,
+            null);
+
+    InputPartition[] partitions = scan.planInputPartitions();
+    assertTrue(partitions.length > 0);
+    for (InputPartition partition : partitions) {
+      LanceInputPartition lancePartition = (LanceInputPartition) partition;
+      int fragmentId = lancePartition.getLanceSplit().getFragments().get(0);
+      assertEquals(10 * (fragmentId + 1), lancePartition.partitionKey().getInt(0));
+    }
+    KeyGroupedPartitioning partitioning = (KeyGroupedPartitioning) scan.outputPartitioning();
+    assertArrayEquals(
+        new String[] {"parent", "child"}, ((FieldReference) partitioning.keys()[0]).fieldNames());
+  }
+
+  @Test
   public void testOutputPartitioningWithoutPartitionInfoIsUnknown() {
     // No partition info → should return UnknownPartitioning
     LanceScan scan = buildScan();
     scan.planInputPartitions();
     Partitioning partitioning = scan.outputPartitioning();
     assertInstanceOf(UnknownPartitioning.class, partitioning);
+  }
+
+  // --- getMetaData: fullTextQuery key ---
+
+  @Test
+  public void testGetMetaDataFullTextQueryKeyAbsentWhenNull() {
+    LanceScan scan = buildScan();
+    Map<String, String> meta = scala.collection.JavaConverters.mapAsJavaMap(scan.getMetaData());
+    assertFalse(
+        meta.containsKey("fullTextQuery"),
+        "fullTextQuery key must be absent when getFullTextQuery() == null");
+  }
+
+  @Test
+  public void testGetMetaDataFullTextQueryKeyPresentWhenSet() {
+    LanceSparkReadOptions opts =
+        LanceSparkReadOptions.builder()
+            .datasetUri(TestUtils.TestTable1Config.readOptions.getDatasetUri())
+            .fullTextQuery(FullTextQuery.match("hello world", "body"))
+            .build();
+    LanceScan scan =
+        (LanceScan)
+            new LanceScanBuilder(
+                    TEST_SCHEMA, opts, Collections.emptyMap(), null, Collections.emptyMap(), null)
+                .build();
+    Map<String, String> meta = scala.collection.JavaConverters.mapAsJavaMap(scan.getMetaData());
+    assertTrue(
+        meta.containsKey("fullTextQuery"),
+        "fullTextQuery key must be present when getFullTextQuery() != null");
+    assertNotNull(meta.get("fullTextQuery"), "fullTextQuery metadata value must not be null");
   }
 
   @Test
@@ -262,15 +362,21 @@ public class LanceScanTest {
             org.lance.spark.utils.Optional.empty(),
             new Predicate[0],
             null,
-            Collections.emptyMap(),
             null,
+            Collections.emptyMap(),
+            Collections.emptyMap(),
+            new org.apache.spark.sql.connector.expressions.NamedReference[0],
             bucketPlan.getSplits(),
             bucketPlan.getFragmentRowCounts(),
             partitionExpression,
+            "region",
             fragKeys,
             Collections.emptyMap(),
             null,
-            Collections.emptyMap());
+            Collections.emptyMap(),
+            true,
+            null,
+            null);
 
     Partitioning partitioning = scan.outputPartitioning();
     assertInstanceOf(KeyGroupedPartitioning.class, partitioning);

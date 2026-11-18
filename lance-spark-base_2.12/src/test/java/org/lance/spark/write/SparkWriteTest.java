@@ -17,6 +17,7 @@ import org.lance.Dataset;
 import org.lance.WriteParams;
 import org.lance.memwal.InitializeMemWalParams;
 import org.lance.namespace.LanceNamespace;
+import org.lance.spark.LanceRef;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
 
@@ -60,8 +61,7 @@ public class SparkWriteTest {
   private String createDataset(String name) {
     String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), name);
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
-      Dataset.create(allocator, datasetUri, ARROW_SCHEMA, new WriteParams.Builder().build())
-          .close();
+      Dataset.write().allocator(allocator).uri(datasetUri).schema(ARROW_SCHEMA).execute().close();
     }
     return datasetUri;
   }
@@ -69,7 +69,7 @@ public class SparkWriteTest {
   private String createIdentityShardedDataset(String name) {
     String datasetUri = createDataset(name);
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
-        Dataset dataset = Dataset.open(datasetUri, allocator)) {
+        Dataset dataset = Dataset.open().uri(datasetUri).allocator(allocator).build()) {
       dataset.initializeMemWal(new InitializeMemWalParams().withIdentitySharding("name"));
     }
     return datasetUri;
@@ -158,7 +158,7 @@ public class SparkWriteTest {
             .storageOptions(storageOptions)
             .namespace(stubNamespace)
             .tableId(Arrays.asList("default", "test_table"))
-            .version(7L)
+            .ref(LanceRef.ofMain(7L))
             .build();
     SparkWrite.SparkWriteBuilder builder =
         new SparkWrite.SparkWriteBuilder(
@@ -199,7 +199,7 @@ public class SparkWriteTest {
     assertEquals(storageOptions, truncatedOptions.getStorageOptions());
     assertSame(stubNamespace, truncatedOptions.getNamespace());
     assertEquals(Arrays.asList("default", "test_table"), truncatedOptions.getTableId());
-    assertEquals(7L, truncatedOptions.getVersion());
+    assertEquals(7L, truncatedOptions.getRef().getVersionNumber().get());
   }
 
   // --- requiredDistribution / requiredOrdering tests ---

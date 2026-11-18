@@ -13,6 +13,10 @@
  */
 package org.lance.spark.utils;
 
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
@@ -43,6 +47,24 @@ public class BlobUtilsTest {
   @Test
   public void testV1Field() {
     assertTrue(BlobUtils.isBlobSparkField(blobV1Field()));
+  }
+
+  /** Like lance-core, a v1 blob marker of any value or the blob v2 extension marks a blob. */
+  @Test
+  public void testIsLanceBlobArrowField() {
+    assertTrue(
+        BlobUtils.isLanceBlobArrowField(
+            arrowField(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)));
+    assertTrue(
+        BlobUtils.isLanceBlobArrowField(arrowField(BlobUtils.LANCE_ENCODING_BLOB_KEY, "false")));
+    assertTrue(
+        BlobUtils.isLanceBlobArrowField(
+            arrowField(BlobUtils.ARROW_EXTENSION_NAME_KEY, BlobUtils.ARROW_EXTENSION_BLOB_V2)));
+    assertFalse(
+        BlobUtils.isLanceBlobArrowField(
+            arrowField(BlobUtils.ARROW_EXTENSION_NAME_KEY, "arrow.uuid")));
+    assertFalse(BlobUtils.isLanceBlobArrowField(arrowField(null, null)));
+    assertFalse(BlobUtils.isLanceBlobArrowField(null));
   }
 
   @Test
@@ -143,6 +165,10 @@ public class BlobUtilsTest {
     assertTrue(BlobUtils.fileFormatSupportsBlobV2("2.10"));
     assertTrue(BlobUtils.fileFormatSupportsBlobV2("3.0"));
     assertTrue(BlobUtils.fileFormatSupportsBlobV2(" 2.2 "));
+    // Lance's release selectors resolve to 2.2 or newer at write time.
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2("stable"));
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2("next"));
+    assertTrue(BlobUtils.fileFormatSupportsBlobV2("STABLE"));
   }
 
   @Test
@@ -156,10 +182,97 @@ public class BlobUtilsTest {
 
   @Test
   public void fileFormatSupportsBlobV2RejectsNamedAndMalformedVersions() {
-    assertFalse(BlobUtils.fileFormatSupportsBlobV2("stable"));
+    assertFalse(BlobUtils.fileFormatSupportsBlobV2("legacy"));
     assertFalse(BlobUtils.fileFormatSupportsBlobV2(""));
     assertFalse(BlobUtils.fileFormatSupportsBlobV2("."));
     assertFalse(BlobUtils.fileFormatSupportsBlobV2("2.x"));
+  }
+
+  @Test
+  public void knownToRejectBlobV1OnlyAnswersForVersionsLanceRecognizes() {
+    assertTrue(BlobUtils.knownToRejectBlobV1("2.2"));
+    assertTrue(BlobUtils.knownToRejectBlobV1("2.3"));
+    assertTrue(BlobUtils.knownToRejectBlobV1("stable"));
+    assertTrue(BlobUtils.knownToRejectBlobV1("NEXT"));
+    assertFalse(BlobUtils.knownToRejectBlobV1("2.1"));
+    assertFalse(BlobUtils.knownToRejectBlobV1("legacy"));
+    assertFalse(BlobUtils.knownToRejectBlobV1(null));
+    // Lance parses versions against a closed set, so these do not name a newer format at all.
+    assertFalse(BlobUtils.knownToRejectBlobV1("2.4"));
+    assertFalse(BlobUtils.knownToRejectBlobV1("3.0"));
+  }
+
+  @Test
+  public void isV2FormatBelowBlobV2MatchesTwoZeroAndTwoOneOnly() {
+    assertTrue(BlobUtils.isV2FormatBelowBlobV2("2.0"));
+    assertTrue(BlobUtils.isV2FormatBelowBlobV2("2.1"));
+    assertTrue(BlobUtils.isV2FormatBelowBlobV2(" 2.1 "));
+    assertFalse(BlobUtils.isV2FormatBelowBlobV2("0.1"));
+    assertFalse(BlobUtils.isV2FormatBelowBlobV2("legacy"));
+    assertFalse(BlobUtils.isV2FormatBelowBlobV2("2.2"));
+    assertFalse(BlobUtils.isV2FormatBelowBlobV2("stable"));
+    assertFalse(BlobUtils.isV2FormatBelowBlobV2(null));
+  }
+
+  @Test
+  public void containsBlobV2DetectsNestedSparkAndArrowFields() {
+    StructType nestedSpark =
+        new StructType(
+            new StructField[] {
+              field("id", DataTypes.IntegerType),
+              field("nested", new StructType(new StructField[] {blobV2Field("data")})),
+            });
+    StructType v1OnlySpark =
+        new StructType(
+            new StructField[] {
+              field("id", DataTypes.IntegerType),
+              field("nested", new StructType(new StructField[] {blobV1Field("data")})),
+            });
+    assertTrue(BlobUtils.containsBlobV2SparkField(nestedSpark));
+    assertFalse(BlobUtils.containsBlobV2SparkField(v1OnlySpark));
+    assertEquals(Collections.singleton("nested.data"), BlobUtils.blobV2FieldPaths(nestedSpark));
+    assertEquals("2.2", FileFormatVersionResolver.resolveForDataFiles(nestedSpark, "2.1"));
+    assertEquals("2.3", FileFormatVersionResolver.resolveForDataFiles(nestedSpark, "2.3"));
+    assertEquals("2.1", FileFormatVersionResolver.resolveForDataFiles(v1OnlySpark, "2.1"));
+    assertEquals("0.1", FileFormatVersionResolver.resolveForDataFiles(nestedSpark, "0.1"));
+
+    Field nestedBlobArrow =
+        new Field(
+            "payload",
+            FieldType.nullable(ArrowType.Struct.INSTANCE),
+            Collections.singletonList(
+                arrowField(BlobUtils.ARROW_EXTENSION_NAME_KEY, BlobUtils.ARROW_EXTENSION_BLOB_V2)));
+    Field nestedV1Arrow =
+        new Field(
+            "payload",
+            FieldType.nullable(ArrowType.Struct.INSTANCE),
+            Collections.singletonList(
+                arrowField(
+                    BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)));
+    assertTrue(
+        BlobUtils.containsBlobV2ArrowField(new Schema(Collections.singletonList(nestedBlobArrow))));
+    assertFalse(
+        BlobUtils.containsBlobV2ArrowField(new Schema(Collections.singletonList(nestedV1Arrow))));
+  }
+
+  private static StructField blobV1Field(String name) {
+    return new StructField(
+        name,
+        DataTypes.BinaryType,
+        true,
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build());
+  }
+
+  private static StructField blobV2Field(String name) {
+    return new StructField(
+        name,
+        DataTypes.BinaryType,
+        true,
+        new MetadataBuilder()
+            .putString(BlobUtils.ARROW_EXTENSION_NAME_KEY, BlobUtils.ARROW_EXTENSION_BLOB_V2)
+            .build());
   }
 
   private static StructField field(String name, org.apache.spark.sql.types.DataType dt) {
@@ -172,6 +285,17 @@ public class BlobUtilsTest {
             .putString(BlobUtils.ARROW_EXTENSION_NAME_KEY, BlobUtils.ARROW_EXTENSION_BLOB_V2)
             .build();
     return new StructField("payload", DataTypes.BinaryType, true, md);
+  }
+
+  private static Field arrowField(String metadataKey, String metadataValue) {
+    return new Field(
+        "payload",
+        new FieldType(
+            true,
+            ArrowType.LargeBinary.INSTANCE,
+            null,
+            metadataKey == null ? null : Collections.singletonMap(metadataKey, metadataValue)),
+        null);
   }
 
   private static StructField blobV1Field() {

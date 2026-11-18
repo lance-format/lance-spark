@@ -95,9 +95,16 @@ public class CreateTableSpecTest {
   }
 
   @Test
-  public void blobV2SchemaUpgradesNamedCatalogDefault() {
+  public void blobV2SchemaKeepsNamedCatalogDefaultThatResolvesAboveMinimum() {
     CreateTableSpec spec =
         CreateTableSpec.resolve(blobV2QuerySchema(), Collections.emptyMap(), "stable");
+    assertEquals("stable", spec.fileFormatVersion());
+  }
+
+  @Test
+  public void blobV2SchemaUpgradesLegacyCatalogDefault() {
+    CreateTableSpec spec =
+        CreateTableSpec.resolve(blobV2QuerySchema(), Collections.emptyMap(), "legacy");
     assertEquals(BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION, spec.fileFormatVersion());
   }
 
@@ -128,23 +135,110 @@ public class CreateTableSpecTest {
   }
 
   @Test
-  public void blobPropertyAtNamedCatalogDefaultStaysBlobV1() {
+  public void blobPropertyAtNamedCatalogDefaultResolvesToBlobV2() {
     CreateTableSpec spec =
         CreateTableSpec.resolve(SCHEMA, props("data.lance.encoding", "blob"), "stable");
     assertEquals("stable", spec.fileFormatVersion());
+    assertTrue(BlobUtils.isBlobV2SparkField(spec.schema().apply("data")));
+  }
+
+  @Test
+  public void blobPropertyAtLegacyCatalogDefaultStaysBlobV1() {
+    CreateTableSpec spec =
+        CreateTableSpec.resolve(SCHEMA, props("data.lance.encoding", "blob"), "legacy");
+    assertEquals("legacy", spec.fileFormatVersion());
     assertTrue(BlobUtils.isBlobSparkField(spec.schema().apply("data")));
     assertFalse(BlobUtils.isBlobV2SparkField(spec.schema().apply("data")));
   }
 
   @Test
-  public void blobV2SchemaRejectsExplicitNamedTableVersion() {
+  public void blobPropertyWithoutAnyVersionResolvesToBlobV2() {
+    CreateTableSpec spec =
+        CreateTableSpec.resolve(SCHEMA, props("data.lance.encoding", "blob"), null);
+    assertEquals(BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION, spec.fileFormatVersion());
+    assertTrue(BlobUtils.isBlobV2SparkField(spec.schema().apply("data")));
+    assertFalse(BlobUtils.isBlobSparkField(spec.schema().apply("data")));
+  }
+
+  @Test
+  public void plainSchemaWithoutBlobPropertyLeavesVersionUnset() {
+    CreateTableSpec spec = CreateTableSpec.resolve(SCHEMA, Collections.emptyMap(), null);
+    assertNull(spec.fileFormatVersion());
+  }
+
+  @Test
+  public void blobV2SchemaAcceptsExplicitNamedTableVersion() {
+    CreateTableSpec spec =
+        CreateTableSpec.resolve(blobV2QuerySchema(), props("file_format_version", "stable"), null);
+    assertEquals("stable", spec.fileFormatVersion());
+  }
+
+  @Test
+  public void blobV2SchemaRejectsExplicitLegacyTableVersion() {
     IllegalArgumentException ex =
         assertThrows(
             IllegalArgumentException.class,
             () ->
                 CreateTableSpec.resolve(
-                    blobV2QuerySchema(), props("file_format_version", "stable"), null));
-    assertTrue(ex.getMessage().contains("stable"), ex.getMessage());
+                    blobV2QuerySchema(), props("file_format_version", "legacy"), null));
+    assertTrue(ex.getMessage().contains("legacy"), ex.getMessage());
+  }
+
+  @Test
+  public void inheritedBlobV1SchemaWithoutVersionStaysOnAV1CapableVersion() {
+    CreateTableSpec spec = CreateTableSpec.resolve(blobV1Schema(), Collections.emptyMap(), null);
+    assertEquals(BlobUtils.MAX_BLOB_V1_FILE_FORMAT_VERSION, spec.fileFormatVersion());
+    assertTrue(BlobUtils.isBlobSparkField(spec.schema().apply("data")));
+    assertFalse(BlobUtils.isBlobV2SparkField(spec.schema().apply("data")));
+  }
+
+  @Test
+  public void inheritedBlobV1SchemaKeepsPinnedV1CapableVersion() {
+    CreateTableSpec spec =
+        CreateTableSpec.resolve(blobV1Schema(), props("file_format_version", "2.0"), null);
+    assertEquals("2.0", spec.fileFormatVersion());
+  }
+
+  @Test
+  public void inheritedBlobV1SchemaDowngradesBlobV2CatalogDefault() {
+    CreateTableSpec spec = CreateTableSpec.resolve(blobV1Schema(), Collections.emptyMap(), "2.2");
+    assertEquals(BlobUtils.MAX_BLOB_V1_FILE_FORMAT_VERSION, spec.fileFormatVersion());
+  }
+
+  @Test
+  public void inheritedBlobV1SchemaRejectsExplicitBlobV2TableVersion() {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                CreateTableSpec.resolve(blobV1Schema(), props("file_format_version", "2.2"), null));
+    assertTrue(ex.getMessage().contains("data"), ex.getMessage());
+  }
+
+  @Test
+  public void mixedBlobV1AndBlobV2SchemaIsRejected() {
+    Metadata v1 =
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build();
+    Metadata v2 =
+        new MetadataBuilder()
+            .putString(BlobUtils.ARROW_EXTENSION_NAME_KEY, BlobUtils.ARROW_EXTENSION_BLOB_V2)
+            .build();
+    StructType mixed =
+        new StructType(
+            new StructField[] {
+              new StructField("id", DataTypes.IntegerType, false, Metadata.empty()),
+              new StructField("legacy_blob", DataTypes.BinaryType, true, v1),
+              new StructField("modern_blob", DataTypes.BinaryType, true, v2),
+            });
+
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> CreateTableSpec.resolve(mixed, Collections.emptyMap(), null));
+    assertTrue(ex.getMessage().contains("legacy_blob"), ex.getMessage());
+    assertTrue(ex.getMessage().contains("modern_blob"), ex.getMessage());
   }
 
   @Test
@@ -165,6 +259,82 @@ public class CreateTableSpecTest {
     assertEquals(BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION, spec.fileFormatVersion());
     assertTrue(BlobUtils.isBlobV2SparkField(spec.schema().apply("fresh")));
     assertFalse(BlobUtils.isBlobSparkField(spec.schema().apply("fresh")));
+  }
+
+  @Test
+  public void nestedBlobV2CreateResolvesMinimumBlobV2VersionAndRejectsTwoOne() {
+    CreateTableSpec created =
+        CreateTableSpec.resolve(nestedBlobV2QuerySchema(), Collections.emptyMap(), "2.0");
+    assertEquals(BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION, created.fileFormatVersion());
+    assertEquals(BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION, created.fragmentFileFormatVersion());
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            CreateTableSpec.resolve(
+                nestedBlobV2QuerySchema(), props("file_format_version", "2.1"), null));
+  }
+
+  @Test
+  public void replacePreservesDatasetDefaultWhileUpgradingBlobV2Fragments() {
+    CreateTableSpec topLevel =
+        CreateTableSpec.resolveForReplace(blobV2QuerySchema(), Collections.emptyMap(), null, "2.1");
+    assertNull(topLevel.fileFormatVersion());
+    assertEquals(BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION, topLevel.fragmentFileFormatVersion());
+
+    CreateTableSpec nested =
+        CreateTableSpec.resolveForReplace(
+            nestedBlobV2QuerySchema(), Collections.emptyMap(), null, "2.1");
+    assertNull(nested.fileFormatVersion());
+    assertEquals(BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION, nested.fragmentFileFormatVersion());
+
+    CreateTableSpec plainLegacy =
+        CreateTableSpec.resolveForReplace(SCHEMA, Collections.emptyMap(), null, "0.1");
+    assertNull(plainLegacy.fileFormatVersion());
+    assertEquals("0.1", plainLegacy.fragmentFileFormatVersion());
+
+    CreateTableSpec propertyDrivenBlob =
+        CreateTableSpec.resolveForReplace(
+            SCHEMA, props("data.lance.encoding", "blob"), null, "2.1");
+    assertEquals(BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION, propertyDrivenBlob.fileFormatVersion());
+    assertTrue(BlobUtils.isBlobV2SparkField(propertyDrivenBlob.schema().apply("data")));
+
+    CreateTableSpec explicitOverride =
+        CreateTableSpec.resolveForReplace(
+            blobV2QuerySchema(), props("file_format_version", "2.2"), null, "2.1");
+    assertEquals("2.2", explicitOverride.fileFormatVersion());
+    assertEquals("2.2", explicitOverride.fragmentFileFormatVersion());
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            CreateTableSpec.resolveForReplace(
+                blobV2QuerySchema(), Collections.emptyMap(), null, "0.1"));
+  }
+
+  private static StructType nestedBlobV2QuerySchema() {
+    Metadata v2 =
+        new MetadataBuilder()
+            .putString(BlobUtils.ARROW_EXTENSION_NAME_KEY, BlobUtils.ARROW_EXTENSION_BLOB_V2)
+            .build();
+    StructType payload =
+        new StructType(new StructField[] {new StructField("data", DataTypes.BinaryType, true, v2)});
+    return new StructType(
+        new StructField[] {
+          new StructField("id", DataTypes.IntegerType, false, Metadata.empty()),
+          new StructField("payload", payload, true, Metadata.empty()),
+        });
+  }
+
+  private static StructType blobV1Schema() {
+    Metadata v1 =
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build();
+    return new StructType(
+        new StructField[] {
+          new StructField("id", DataTypes.IntegerType, false, Metadata.empty()),
+          new StructField("data", DataTypes.BinaryType, true, v1),
+        });
   }
 
   private static StructType blobV2QuerySchema() {

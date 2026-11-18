@@ -47,12 +47,22 @@ public class LanceSparkCatalogConfig {
 
   public static final String TABLE_OPT_FILE_FORMAT_VERSION = "file_format_version";
 
+  /** Catalog option selecting the registered index cache backend by URI. */
+  public static final String CACHE_OPT_INDEX_BACKEND = "index_cache_backend";
+
+  /** Catalog option selecting the registered metadata cache backend by URI. */
+  public static final String CACHE_OPT_METADATA_BACKEND = "metadata_cache_backend";
+
   private final Map<String, String> storageOptions;
   private final Map<String, String> tableOptions;
+  private final String indexCacheBackend;
+  private final String metadataCacheBackend;
 
   private LanceSparkCatalogConfig(Builder builder) {
     this.storageOptions = Collections.unmodifiableMap(new HashMap<>(builder.storageOptions));
     this.tableOptions = Collections.unmodifiableMap(new HashMap<>(builder.tableOptions));
+    this.indexCacheBackend = builder.indexCacheBackend;
+    this.metadataCacheBackend = builder.metadataCacheBackend;
   }
 
   /** Creates a new builder for LanceSparkCatalogConfig. */
@@ -82,8 +92,7 @@ public class LanceSparkCatalogConfig {
       if (fullKey.startsWith(STORAGE_PREFIX)) {
         String nativeKey = fullKey.substring(STORAGE_PREFIX.length());
         nativeOptions.put(nativeKey, value);
-      } else if (!TABLE_OPT_ENABLE_STABLE_ROW_IDS.equals(fullKey)
-          && !TABLE_OPT_FILE_FORMAT_VERSION.equals(fullKey)) {
+      } else if (!isConnectorOption(fullKey)) {
         // Keep table options out of storageOptions, as writes merge those in.
         nativeOptions.put(fullKey, value);
       }
@@ -99,7 +108,19 @@ public class LanceSparkCatalogConfig {
       tableOpts.put(TABLE_OPT_FILE_FORMAT_VERSION, fileFormatVersion);
     }
 
-    return builder().storageOptions(nativeOptions).tableOptions(tableOpts).build();
+    return builder()
+        .storageOptions(nativeOptions)
+        .tableOptions(tableOpts)
+        .indexCacheBackend(catalogOptions.get(CACHE_OPT_INDEX_BACKEND))
+        .metadataCacheBackend(catalogOptions.get(CACHE_OPT_METADATA_BACKEND))
+        .build();
+  }
+
+  private static boolean isConnectorOption(String key) {
+    return TABLE_OPT_ENABLE_STABLE_ROW_IDS.equals(key)
+        || TABLE_OPT_FILE_FORMAT_VERSION.equals(key)
+        || CACHE_OPT_INDEX_BACKEND.equals(key)
+        || CACHE_OPT_METADATA_BACKEND.equals(key);
   }
 
   /**
@@ -118,6 +139,16 @@ public class LanceSparkCatalogConfig {
    */
   public Map<String, String> getTableOptions() {
     return tableOptions;
+  }
+
+  /** Returns the registered index cache backend URI, or null if not configured. */
+  public String getIndexCacheBackend() {
+    return indexCacheBackend;
+  }
+
+  /** Returns the registered metadata cache backend URI, or null if not configured. */
+  public String getMetadataCacheBackend() {
+    return metadataCacheBackend;
   }
 
   /**
@@ -159,18 +190,22 @@ public class LanceSparkCatalogConfig {
     if (o == null || getClass() != o.getClass()) return false;
     LanceSparkCatalogConfig that = (LanceSparkCatalogConfig) o;
     return Objects.equals(storageOptions, that.storageOptions)
-        && Objects.equals(tableOptions, that.tableOptions);
+        && Objects.equals(tableOptions, that.tableOptions)
+        && Objects.equals(indexCacheBackend, that.indexCacheBackend)
+        && Objects.equals(metadataCacheBackend, that.metadataCacheBackend);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(storageOptions, tableOptions);
+    return Objects.hash(storageOptions, tableOptions, indexCacheBackend, metadataCacheBackend);
   }
 
   /** Builder for creating LanceSparkCatalogConfig instances. */
   public static class Builder {
     private Map<String, String> storageOptions = new HashMap<>();
     private Map<String, String> tableOptions = new HashMap<>();
+    private String indexCacheBackend;
+    private String metadataCacheBackend;
 
     private Builder() {}
 
@@ -193,6 +228,18 @@ public class LanceSparkCatalogConfig {
      */
     public Builder tableOptions(Map<String, String> tableOptions) {
       this.tableOptions = new HashMap<>(tableOptions);
+      return this;
+    }
+
+    /** Sets the registered index cache backend URI. */
+    public Builder indexCacheBackend(String indexCacheBackend) {
+      this.indexCacheBackend = indexCacheBackend;
+      return this;
+    }
+
+    /** Sets the registered metadata cache backend URI. */
+    public Builder metadataCacheBackend(String metadataCacheBackend) {
+      this.metadataCacheBackend = metadataCacheBackend;
       return this;
     }
 

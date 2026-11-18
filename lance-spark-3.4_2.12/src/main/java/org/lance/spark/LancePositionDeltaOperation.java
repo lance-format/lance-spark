@@ -26,9 +26,12 @@ import org.apache.spark.sql.connector.write.SupportsDelta;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 
-public class LancePositionDeltaOperation implements RowLevelOperation, SupportsDelta {
+public class LancePositionDeltaOperation
+    implements RowLevelOperation, SupportsDelta, TransactionPropertiesOperation {
   private final Command command;
   private final StructType sparkSchema;
   private final LanceSparkReadOptions readOptions;
@@ -49,6 +52,7 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
   private final String fileFormatVersion;
 
   private final Map<String, String> tableProperties;
+  private final Map<String, String> transactionProperties;
 
   public LancePositionDeltaOperation(
       Command command,
@@ -60,6 +64,30 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
       boolean managedVersioning,
       String fileFormatVersion,
       Map<String, String> tableProperties) {
+    this(
+        command,
+        sparkSchema,
+        readOptions,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        managedVersioning,
+        fileFormatVersion,
+        tableProperties,
+        Collections.emptyMap());
+  }
+
+  private LancePositionDeltaOperation(
+      Command command,
+      StructType sparkSchema,
+      LanceSparkReadOptions readOptions,
+      Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      Map<String, String> namespaceProperties,
+      boolean managedVersioning,
+      String fileFormatVersion,
+      Map<String, String> tableProperties,
+      Map<String, String> transactionProperties) {
     this.command = command;
     this.sparkSchema = sparkSchema;
     this.readOptions = readOptions;
@@ -69,6 +97,22 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
     this.managedVersioning = managedVersioning;
     this.fileFormatVersion = fileFormatVersion;
     this.tableProperties = tableProperties;
+    this.transactionProperties = TransactionProperties.snapshot(transactionProperties);
+  }
+
+  @Override
+  public LancePositionDeltaOperation withTransactionProperties(Map<String, String> properties) {
+    return new LancePositionDeltaOperation(
+        command,
+        sparkSchema,
+        readOptions,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        managedVersioning,
+        fileFormatVersion,
+        tableProperties,
+        properties);
   }
 
   @Override
@@ -84,22 +128,38 @@ public class LancePositionDeltaOperation implements RowLevelOperation, SupportsD
 
   @Override
   public DeltaWriteBuilder newWriteBuilder(LogicalWriteInfo logicalWriteInfo) {
-    // Create write options from read options for delta operations
+    // Mirror LanceDataset#newWriteBuilder: the option map has to go through fromOptions so that
+    // catalog-level and per-write settings (max_row_per_file, use_large_var_types, batch_size, ...)
+    // reach their typed Builder fields. Passing it to storageOptions alone left every typed field
+    // at its default, so options that took effect on INSERT were dropped on UPDATE/DELETE/MERGE.
+    Map<String, String> mergedOptions = new HashMap<>(readOptions.getStorageOptions());
+    mergedOptions.putAll(logicalWriteInfo.options().asCaseSensitiveMap());
+    // Internal-only option (see LanceBlobSourceContextRule); never forward it as a storage option.
+    mergedOptions.remove(LanceConstant.BLOB_SOURCE_CONTEXTS_KEY);
     LanceSparkWriteOptions.Builder writeOptionsBuilder =
         LanceSparkWriteOptions.builder()
             .datasetUri(readOptions.getDatasetUri())
-            .storageOptions(readOptions.getStorageOptions())
             .namespace(readOptions.getNamespace())
-            .tableId(readOptions.getTableId());
-    if (fileFormatVersion != null) {
-      writeOptionsBuilder.fileFormatVersion(fileFormatVersion);
+            .tableId(readOptions.getTableId())
+            .catalogName(readOptions.getCatalogName())
+            .indexCacheBackend(readOptions.getIndexCacheBackend())
+            .metadataCacheBackend(readOptions.getMetadataCacheBackend())
+            .fromOptions(mergedOptions);
+    // Use the table's file format version unless the options set one explicitly.
+    if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)
+        && fileFormatVersion != null) {
+      writeOptionsBuilder.fallbackFileFormatVersion(sparkSchema, fileFormatVersion);
     }
-    if (tableProperties != null) {
+    if (tableProperties != null
+        && !mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS)) {
       String stableRowIds =
           tableProperties.get(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS);
       if (stableRowIds != null) {
         writeOptionsBuilder.enableStableRowIds(Boolean.parseBoolean(stableRowIds));
       }
+    }
+    if (!transactionProperties.isEmpty()) {
+      writeOptionsBuilder.transactionProperties(transactionProperties);
     }
     LanceSparkWriteOptions writeOptions = writeOptionsBuilder.build();
     return new SparkPositionDeltaWriteBuilder(
