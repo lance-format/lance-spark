@@ -21,6 +21,26 @@
             <artifactId>lance-namespace-hive2</artifactId>
             <version>${lance-namespace-impl.version}</version>
             <scope>test</scope>
+            <exclusions>
+                <!-- The unclassified Hive exec jar bundles an old Jackson version. -->
+                <exclusion>
+                    <groupId>org.apache.hive</groupId>
+                    <artifactId>hive-exec</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hive</groupId>
+            <artifactId>hive-exec</artifactId>
+            <version>2.3.9</version>
+            <classifier>core</classifier>
+            <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>*</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <dependency>
             <groupId>org.apache.spark</groupId>
