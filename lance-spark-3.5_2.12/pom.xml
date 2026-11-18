@@ -17,6 +17,12 @@
 
     <dependencies>
         <dependency>
+            <groupId>org.lance</groupId>
+            <artifactId>lance-namespace-hive2</artifactId>
+            <version>${lance-namespace-impl.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>org.apache.spark</groupId>
             <artifactId>spark-sql_${scala.compat.version}</artifactId>
             <version>${spark35.version}</version>

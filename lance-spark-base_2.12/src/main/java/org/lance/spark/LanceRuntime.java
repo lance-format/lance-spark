@@ -22,6 +22,7 @@ import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.metrics.MeterProvider;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.spark.SparkEnv;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -589,6 +590,28 @@ public final class LanceRuntime {
       return null;
     }
     registerKnownNamespaceImpl(namespaceImpl);
+    String className = EXTERNAL_NAMESPACE_IMPLS.getOrDefault(namespaceImpl, namespaceImpl);
+    if (className.equals(EXTERNAL_NAMESPACE_IMPLS.get("hive2"))
+        || className.equals(EXTERNAL_NAMESPACE_IMPLS.get("hive3"))) {
+      try {
+        LanceNamespace namespace =
+            (LanceNamespace) Class.forName(className).getConstructor().newInstance();
+        Configuration conf = new Configuration();
+        if (namespaceProperties != null) {
+          namespaceProperties.forEach(
+              (key, value) -> {
+                if (key.startsWith("hadoop.")) {
+                  conf.set(key.substring("hadoop.".length()), value);
+                }
+              });
+        }
+        namespace.getClass().getMethod("setHadoopConf", Configuration.class).invoke(namespace, conf);
+        namespace.initialize(namespaceProperties, allocator());
+        return namespace;
+      } catch (ReflectiveOperationException e) {
+        throw new IllegalArgumentException("Failed to initialize Hive namespace " + className, e);
+      }
+    }
     return LanceNamespace.connect(namespaceImpl, namespaceProperties, allocator());
   }
 

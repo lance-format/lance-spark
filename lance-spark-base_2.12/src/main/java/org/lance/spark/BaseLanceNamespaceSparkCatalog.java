@@ -243,10 +243,20 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     // Initialize the namespace with proper configuration
     Map<String, String> namespaceOptions = new HashMap<>(options);
-    String metastoreUris =
-        SparkSession.active().sparkContext().hadoopConfiguration().get("hive.metastore.uris");
-    if (metastoreUris != null && !options.containsKey("hadoop.hive.metastore.uris")) {
-      namespaceOptions.put("hadoop.hive.metastore.uris", metastoreUris);
+    if ("hive2".equals(impl)
+        || "hive3".equals(impl)
+        || "org.lance.namespace.hive2.Hive2Namespace".equals(impl)
+        || "org.lance.namespace.hive3.Hive3Namespace".equals(impl)) {
+      SparkSession.active()
+          .sparkContext()
+          .hadoopConfiguration()
+          .forEach(
+              entry -> {
+                String key = "hadoop." + entry.getKey();
+                if (!options.containsKey(key)) {
+                  namespaceOptions.put(key, entry.getValue());
+                }
+              });
     }
 
     // Save namespace impl and properties for serialization to workers
@@ -254,8 +264,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     this.namespaceProperties = new HashMap<>(namespaceOptions);
 
     // Use the global buffer allocator
-    LanceRuntime.registerKnownNamespaceImpl(impl);
-    this.namespace = LanceNamespace.connect(impl, namespaceOptions, LanceRuntime.allocator());
+    this.namespace = LanceRuntime.getOrCreateNamespace(impl, namespaceOptions);
 
     // Handle single-level namespace configuration
     if (options.containsKey(CONFIG_SINGLE_LEVEL_NS)) {

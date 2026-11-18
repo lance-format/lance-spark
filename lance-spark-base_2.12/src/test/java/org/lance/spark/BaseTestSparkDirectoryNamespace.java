@@ -14,7 +14,6 @@
 package org.lance.spark;
 
 import org.apache.spark.sql.AnalysisException;
-import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -52,34 +51,6 @@ public abstract class BaseTestSparkDirectoryNamespace extends SparkLanceNamespac
     // Create the "default" namespace explicitly so that DirectoryNamespace uses manifest mode
     // instead of directory listing mode. This is required for deregisterTable to work correctly.
     spark.sql("CREATE NAMESPACE " + catalogName + ".default");
-  }
-
-  @Test
-  public void testGlobalMetastoreUrisAndCatalogOverride() throws Exception {
-    String key = "hive.metastore.uris";
-    String original = spark.sparkContext().hadoopConfiguration().get(key);
-    try {
-      spark.sparkContext().hadoopConfiguration().set(key, "thrift://global:9083");
-      Map<String, String> options = new HashMap<>();
-      options.put("impl", "dir");
-      options.put("root", tempDir.toString());
-      BaseLanceNamespaceSparkCatalog inherited =
-          (BaseLanceNamespaceSparkCatalog) catalog.getClass().getDeclaredConstructor().newInstance();
-      inherited.initialize("inherited", new CaseInsensitiveStringMap(options));
-      assertEquals("thrift://global:9083", inherited.getNamespaceProperties().get("hadoop." + key));
-
-      options.put("hadoop." + key, "thrift://catalog:9083");
-      BaseLanceNamespaceSparkCatalog overridden =
-          (BaseLanceNamespaceSparkCatalog) catalog.getClass().getDeclaredConstructor().newInstance();
-      overridden.initialize("overridden", new CaseInsensitiveStringMap(options));
-      assertEquals("thrift://catalog:9083", overridden.getNamespaceProperties().get("hadoop." + key));
-    } finally {
-      if (original == null) {
-        spark.sparkContext().hadoopConfiguration().unset(key);
-      } else {
-        spark.sparkContext().hadoopConfiguration().set(key, original);
-      }
-    }
   }
 
   @Test
