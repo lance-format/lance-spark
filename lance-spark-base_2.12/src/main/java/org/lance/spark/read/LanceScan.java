@@ -464,7 +464,8 @@ public class LanceScan
         if (split.getFragments().size() == 1) {
           int fragmentId = split.getFragments().get(0);
           if (!zonemapScanPlan.scansFullFragment(fragmentId)) {
-            split = new LanceSplit(split.getFragments(), zonemapScanPlan.getFragmentSlices(fragmentId));
+            split =
+                new LanceSplit(split.getFragments(), zonemapScanPlan.getFragmentSlices(fragmentId));
           }
         }
         slicedSplits.add(split);

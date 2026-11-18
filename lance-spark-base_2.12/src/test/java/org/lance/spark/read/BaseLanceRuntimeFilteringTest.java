@@ -448,6 +448,7 @@ public abstract class BaseLanceRuntimeFilteringTest {
         Collections.emptyMap(),
         true,
         null,
+        null,
         null);
   }
 

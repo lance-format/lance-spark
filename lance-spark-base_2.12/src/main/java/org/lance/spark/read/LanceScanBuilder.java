@@ -246,7 +246,7 @@ public class LanceScanBuilder
       // detection and pins the resolved version onto the read options shipped to workers, so the
       // zonemap stats and splits come from the same snapshot. The version is kept as a long
       // end-to-end so long-lived high-write-frequency datasets do not silently truncate it.
-
+      LanceSplit.ScanPlanResult scanPlan = LanceSplit.planScan(dataset, readOptions);
       boolean rowIdIsRowAddress = !dataset.hasStableRowIds();
       Set<Integer> liveFragmentIds = new HashSet<>(scanPlan.getFragmentRowCounts().keySet());
 
@@ -302,18 +302,6 @@ public class LanceScanBuilder
                   activeShardingColumn)
               : Collections.emptySet();
 
-      // Pre-compute fragment pruning so we can (a) estimate post-pruning statistics for
-      // JoinSelection (BroadcastHashJoin vs SortMergeJoin) and (b) pass the cached result
-      // to LanceScan to avoid re-computing during planInputPartitions().
-      // Pre-compute splits from the same dataset handle used for manifest and zonemap loading.
-      // Besides pinning the resolved version, this gives zonemap planning the complete fragment
-      // domain so uncovered fragments can safely fall back to full scans.
-      LanceSplit.ScanPlanResult scanPlan = LanceSplit.planScan(dataset, readOptions);
-      Set<Integer> allFragmentIds =
-          scanPlan.getSplits().stream()
-              .flatMap(split -> split.getFragments().stream())
-              .collect(Collectors.toSet());
-
       // Pre-compute physical slice pruning so we can (a) estimate post-pruning statistics and (b)
       // ship the exact driver plan to executors without re-reading zonemap metadata there.
       ZonemapScanPlan zonemapScanPlan = null;
@@ -324,7 +312,7 @@ public class LanceScanBuilder
                     pushedPredicates,
                     zonemapStats,
                     zonemapLoad.uncoveredByColumn,
-                    allFragmentIds,
+                    liveFragmentIds,
                     scanPlan.getPhysicalFragmentRowCounts())
                 .orElse(null);
         if (zonemapScanPlan != null) {

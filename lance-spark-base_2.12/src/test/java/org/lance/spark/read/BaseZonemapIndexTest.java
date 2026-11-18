@@ -13,13 +13,15 @@
  */
 package org.lance.spark.read;
 
-import org.apache.spark.sql.RowFactory;
 import org.lance.ipc.FragmentSlice;
 import org.lance.spark.LanceSparkReadOptions;
 
+import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.connector.expressions.filter.Predicate;
 import org.apache.spark.sql.connector.read.InputPartition;
+import org.apache.spark.sql.connector.read.PartitionReader;
+import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -27,6 +29,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -152,13 +155,35 @@ public abstract class BaseZonemapIndexTest {
             Collections.emptyMap());
     builder.pushPredicates(
         new Predicate[] {TestPredicates.gte("id", 4L), TestPredicates.lt("id", 8L)});
-    InputPartition[] partitions = ((LanceScan) builder.build()).planInputPartitions();
+    LanceScan scan = (LanceScan) builder.build();
+    InputPartition[] partitions = scan.planInputPartitions();
     assertEquals(1, partitions.length);
     LanceSplit split = ((LanceInputPartition) partitions[0]).getLanceSplit();
     assertEquals(1, split.getFragments().size());
     assertEquals(
         Arrays.asList(new FragmentSlice(split.getFragments().get(0), 4, 4)),
         split.getFragmentSlices());
+
+    // Arrow consumers copy a planned scan. Preserve its physical slices through that copy,
+    // and verify both reader paths return only the selected rows.
+    for (LanceScan readerScan : Arrays.asList(scan, scan.withArrowBatches())) {
+      InputPartition[] readerPartitions = readerScan.planInputPartitions();
+      assertEquals(1, readerPartitions.length);
+      assertEquals(
+          split.getFragmentSlices(),
+          ((LanceInputPartition) readerPartitions[0]).getLanceSplit().getFragmentSlices());
+      List<Integer> readIds = new ArrayList<>();
+      try (PartitionReader<ColumnarBatch> reader =
+          readerScan.createReaderFactory().createColumnarReader(readerPartitions[0])) {
+        while (reader.next()) {
+          ColumnarBatch batch = reader.get();
+          for (int row = 0; row < batch.numRows(); row++) {
+            readIds.add(batch.column(0).getInt(row));
+          }
+        }
+      }
+      assertEquals(Arrays.asList(4, 5, 6, 7), readIds);
+    }
 
     List<Integer> ids =
         spark

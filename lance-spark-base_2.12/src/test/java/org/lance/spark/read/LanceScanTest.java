@@ -177,13 +177,20 @@ public class LanceScanTest {
             new Predicate[0],
             null,
             null,
+            Collections.emptyMap(),
+            Collections.emptyMap(),
+            new org.apache.spark.sql.connector.expressions.NamedReference[0],
             splits,
             rowCounts,
             null,
             null,
+            null,
             Collections.emptyMap(),
             null,
             Collections.emptyMap(),
+            false,
+            null,
+            null,
             new ZonemapScanPlan(Set.of(), slices));
 
     InputPartition[] partitions = scan.planInputPartitions();
@@ -274,6 +281,7 @@ public class LanceScanTest {
             Collections.emptyMap(),
             true,
             null,
+            null,
             null);
 
     // Plan partitions to set numPartitions
@@ -334,6 +342,7 @@ public class LanceScanTest {
             null,
             Collections.emptyMap(),
             true,
+            null,
             null,
             null);
 
@@ -422,6 +431,7 @@ public class LanceScanTest {
             null,
             Collections.emptyMap(),
             true,
+            null,
             null,
             null);
 

@@ -13,7 +13,7 @@
     <properties>
         <spark.compat.version>3.5</spark.compat.version>
         <scala.compat.version>2.12</scala.compat.version>
-        <lance.version>12.0.0-beta.11</lance.version>
+        <lance.version>14.0.3</lance.version>
         <kyuubi.version>1.11.0</kyuubi.version>
         <java.release>11</java.release>
         <maven.compiler.release>${java.release}</maven.compiler.release>
