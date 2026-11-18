@@ -14,6 +14,7 @@
 package org.apache.spark.sql.catalyst.optimizer
 
 import org.apache.spark.internal.Logging
+import org.apache.spark.sql.catalyst.CatalystCompat.TreeNodeArgs
 import org.apache.spark.sql.catalyst.analysis.NamedRelation
 import org.apache.spark.sql.catalyst.optimizer.BlobPlanUtils.{LanceRelation, V2BlobWrite}
 import org.apache.spark.sql.catalyst.plans.logical._
@@ -58,7 +59,7 @@ case class LanceBlobSourceContextRule() extends Rule[LogicalPlan] {
             val merged =
               new java.util.HashMap[String, String](relation.options.asCaseSensitiveMap())
             merged.put(key, encoded)
-            relation.copy(options = new CaseInsensitiveStringMap(merged))
+            relation.withArg(_.options)(new CaseInsensitiveStringMap(merged))
           case other => other
         }
         val annotatedWriteOptions =
