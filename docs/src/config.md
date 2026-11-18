@@ -701,6 +701,56 @@ Select columns compatible with the snapshot; missing columns or incompatible typ
 including nested fields, fail during planning. Use SQL `VERSION AS OF 'release_candidate'`
 to analyze the query against the historical schema instead.
 
+## Exact Random Sampling
+
+Use `sample_size` and `sample_seed` together to read exactly that many rows,
+uniformly without replacement, from an explicitly versioned snapshot. The result
+remains distributed across Spark executors. These are per-read options:
+
+- `sample_size`: required number of live rows, from `0` through `1,000,000` and no
+  larger than the snapshot's live row count. Oversized requests fail rather than
+  returning fewer rows.
+- `sample_seed`: required signed 64-bit integer; zero and negative values are valid.
+- `sample_batch_size`: optional positive integer, default `1024`. Bounds the number
+  of rows in each native `take` request; changing it does not change the chosen rows.
+- `version`: required concrete snapshot version, unless the catalog table reference
+  is already pinned to a version. Unversioned reads and moving branch/tag references
+  are rejected in sampling mode.
+
+```python
+sampled = (
+    spark.read.format("lance")
+    .option("version", "123")  # Use an actual retained version of this dataset.
+    .option("sample_size", "10000")
+    .option("sample_seed", "42")
+    .option("sample_batch_size", "1024")
+    .load("s3://bucket/train.lance")
+    .select("id", "embedding")
+)
+```
+
+The same dataset snapshot, sample size, seed, and sampling algorithm version
+(`floyd-v1`) select the same row positions across retries, projections, partition
+counts, and read batch sizes. Output order is unspecified. Different seeds can
+select the same set; the portable Java random generator uses 48 effective seed bits.
+Rows with identical values remain distinct population members.
+
+Filters, limits, sorting, and aggregation run **after** sampling in Spark. A filter
+can therefore leave fewer than `sample_size` rows. This mode does not change the
+behavior of Spark's fraction-based `DataFrame.sample()`.
+
+Projected blob columns, blob virtual columns, `arrow_batch_reads=true`, and native
+full-text search options are unsupported in sampling mode. Tables containing blob
+columns can still be sampled when the projection excludes those columns. An old
+snapshot must remain retained for repeatable reads.
+
+The one-million-row planning cap bounds driver-side position planning. Native take
+requests are bounded by row count, not bytes, and use Arrow IPC; very wide rows can
+still require substantial memory. Random reads are intended for sparse samples;
+their performance depends on file layout, deletion metadata, storage, and batch size.
+
+See [sampling examples](operations/dql/select.md#exact-random-sampling).
+
 ## Arrow Batch Reads
 
 Set `arrow_batch_reads` to `true` to expose supported scans as Spark `ArrowColumnVector`

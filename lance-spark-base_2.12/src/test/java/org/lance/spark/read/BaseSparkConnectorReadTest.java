@@ -18,12 +18,15 @@ import org.lance.spark.LanceDataSource;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.MetadataBuilder;
+import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -32,12 +35,15 @@ import org.junit.jupiter.api.io.TempDir;
 import scala.collection.JavaConverters;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -668,5 +674,139 @@ public abstract class BaseSparkConnectorReadTest {
     Row secondElement = (Row) ((scala.collection.Seq<?>) second.getStruct(1).get(0)).apply(0);
     assertEquals("val4", secondElement.getString(0));
     assertEquals(4, secondElement.getStruct(1).getInt(0));
+  }
+
+  private long sampleSnapshot(String path) {
+    try (var nativeDataset = Utils.openDatasetBuilder(LanceSparkReadOptions.from(path)).build()) {
+      return nativeDataset.version();
+    }
+  }
+
+  private Dataset<Row> sample(String path, long version, long size, int batchSize) {
+    return spark
+        .read()
+        .format("lance")
+        .option("version", version)
+        .option("sample_size", size)
+        .option("sample_seed", -42)
+        .option("sample_batch_size", batchSize)
+        .load(path);
+  }
+
+  @Test
+  public void exactSampleSurvivesDeletionsAndLaterWrites() {
+    String path = tempDir.resolve("exact-sample-deleted").toString();
+    // Separate appends deliberately create unequal fragments.
+    spark.range(0, 13).coalesce(1).write().format("lance").save(path);
+    spark.range(13, 100).coalesce(1).write().format("lance").mode("append").save(path);
+    try (var nativeDataset = Utils.openDatasetBuilder(LanceSparkReadOptions.from(path)).build()) {
+      nativeDataset.delete("id % 7 = 0");
+    }
+    long version = sampleSnapshot(path);
+    Dataset<Row> sampled = sample(path, version, 31, 3);
+    List<Row> expected = sampled.select("id").orderBy("id").collectAsList();
+    assertEquals(31, expected.size());
+    assertEquals(31, new HashSet<>(expected).size());
+    assertTrue(expected.stream().allMatch(row -> row.getLong(0) % 7 != 0));
+    assertEquals(expected, sample(path, version, 31, 17).orderBy("id").collectAsList());
+
+    spark.range(100, 110).write().format("lance").mode("append").save(path);
+    try (var nativeDataset = Utils.openDatasetBuilder(LanceSparkReadOptions.from(path)).build()) {
+      nativeDataset.delete("id < 50");
+    }
+    assertEquals(expected, sampled.orderBy("id").collectAsList());
+    assertEquals(expected, sample(path, version, 31, 1).orderBy("id").collectAsList());
+    assertEquals(31L, sampled.count());
+    assertEquals(5L, sampled.limit(5).count());
+    assertEquals(
+        expected.stream().filter(row -> row.getLong(0) < 50).count(),
+        sampled.filter("id < 50").count());
+    assertEquals(31L, sampled.join(sampled, "id").count());
+    assertTrue(sampled.queryExecution().executedPlan().toString().contains("LanceSampleScan"));
+  }
+
+  @Test
+  public void exactSamplePreservesNestedVectorsNullsAndMetadata() {
+    String path = tempDir.resolve("exact-sample-values").toString();
+    StructType nested =
+        new StructType().add("name", DataTypes.StringType, true).add("unused", DataTypes.LongType);
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.LongType, false)
+            .add("nested", nested, true)
+            .add(
+                new StructField(
+                    "embedding",
+                    DataTypes.createArrayType(DataTypes.FloatType),
+                    true,
+                    new MetadataBuilder().putLong("arrow.fixed-size-list.size", 2).build()));
+    List<Row> rows = new ArrayList<>();
+    for (long id = 0; id < 30; id++) {
+      rows.add(
+          RowFactory.create(
+              id,
+              id % 3 == 0 ? null : RowFactory.create("row-" + id, id),
+              id % 5 == 0 ? null : Arrays.asList((float) id, (float) -id)));
+    }
+    spark.createDataFrame(rows, schema).repartition(3).write().format("lance").save(path);
+    long version = sampleSnapshot(path);
+    Dataset<Row> sampled = sample(path, version, 17, 2);
+    Dataset<Row> baseline = spark.read().format("lance").option("version", version).load(path);
+    List<Row> selected = sampled.orderBy("id").collectAsList();
+    assertEquals(17, selected.size());
+    assertTrue(new HashSet<>(baseline.collectAsList()).containsAll(selected));
+    assertEquals(
+        sampled.select("id", "nested.name").orderBy("id").collectAsList(),
+        sample(path, version, 17, 11).select("id", "nested.name").orderBy("id").collectAsList());
+    for (Row row : sampled.select("_rowid", "_rowaddr", "_fragid").collectAsList()) {
+      assertEquals((int) (row.getLong(1) >>> 32), row.getInt(2));
+    }
+    assertEquals(17L, sampled.selectExpr("1 AS constant").count());
+  }
+
+  @Test
+  public void exactSampleValidatesCardinalityAndSnapshot() {
+    String path = tempDir.resolve("exact-sample-boundary").toString();
+    spark.range(9).write().format("lance").save(path);
+    long version = sampleSnapshot(path);
+    assertEquals(0L, sample(path, version, 0, 1).count());
+    assertEquals(
+        spark.range(9).selectExpr("id").collectAsList(),
+        sample(path, version, 9, 2).orderBy("id").collectAsList());
+    assertThrows(Exception.class, () -> sample(path, version, 10, 2).collectAsList());
+    assertThrows(
+        Exception.class,
+        () ->
+            spark
+                .read()
+                .format("lance")
+                .option("sample_size", 3)
+                .option("sample_seed", 42)
+                .load(path)
+                .collectAsList());
+    String empty = tempDir.resolve("exact-sample-empty").toString();
+    spark.range(0).write().format("lance").save(empty);
+    assertEquals(0L, sample(empty, sampleSnapshot(empty), 0, 1).count());
+    String duplicates = tempDir.resolve("exact-sample-duplicate-values").toString();
+    spark.range(20).selectExpr("CAST(1 AS BIGINT) AS id").write().format("lance").save(duplicates);
+    assertEquals(10L, sample(duplicates, sampleSnapshot(duplicates), 10, 3).count());
+  }
+
+  @Test
+  public void exactSamplePreservesCdfVersionMetadata() {
+    String path = TestUtils.getDatasetUri(dbPath, TestUtils.TestTable1Config.datasetName);
+    String[] columns = {"x", "_row_created_at_version", "_row_last_updated_at_version"};
+    assertEquals(
+        data.selectExpr(columns).orderBy("x").collectAsList(),
+        sample(path, sampleSnapshot(path), 4, 2).selectExpr(columns).orderBy("x").collectAsList());
+  }
+
+  @Test
+  public void exactSampleRejectsNestedLegacyBlobProjection() {
+    String path = getClass().getResource("/blob_v1_in_22_files/nested.lance").toString();
+    long version = sampleSnapshot(path);
+    assertEquals(1, sample(path, version, 1, 1).select("id").collectAsList().size());
+    assertThrows(
+        Exception.class, () -> sample(path, version, 1, 1).select("payload").collectAsList());
   }
 }

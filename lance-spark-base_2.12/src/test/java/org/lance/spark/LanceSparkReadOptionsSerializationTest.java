@@ -490,4 +490,58 @@ public class LanceSparkReadOptionsSerializationTest {
 
     Assertions.assertFalse(deserializedOptions.isUseScalarIndex());
   }
+
+  @Test
+  public void testSamplingCopiesAndSerialization() throws IOException, ClassNotFoundException {
+    Map<String, String> properties = new HashMap<>();
+    properties.put("sample_size", "23");
+    properties.put("sample_seed", "-42");
+    properties.put("sample_batch_size", "7");
+    properties.put("version", "2");
+    LanceSparkReadOptions options = LanceSparkReadOptions.from(properties, "s3://bucket/path");
+    Assertions.assertEquals(23L, options.getSampleSize().longValue());
+    Assertions.assertEquals(-42L, options.getSampleSeed().longValue());
+    Assertions.assertEquals(7, options.getSampleBatchSize());
+    Assertions.assertEquals(options, options.toBuilder().build());
+    Assertions.assertEquals(options.hashCode(), options.toBuilder().build().hashCode());
+    LanceSparkReadOptions versioned = options.withRef(LanceRef.ofMain(3));
+    Assertions.assertEquals(options.getSampleSize(), versioned.getSampleSize());
+    Assertions.assertEquals(options.getSampleSeed(), versioned.getSampleSeed());
+    Assertions.assertEquals(7, versioned.getSampleBatchSize());
+    Assertions.assertFalse(options.getStorageOptions().containsKey("sample_size"));
+    Assertions.assertFalse(options.getStorageOptions().containsKey("sample_seed"));
+    Assertions.assertFalse(options.getStorageOptions().containsKey("sample_batch_size"));
+
+    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    try (ObjectOutputStream output = new ObjectOutputStream(bytes)) {
+      output.writeObject(options);
+    }
+    try (ObjectInputStream input =
+        new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
+      Assertions.assertEquals(options, input.readObject());
+    }
+  }
+
+  @Test
+  public void testSamplingRejectsInvalidOptions() {
+    for (Map<String, String> properties :
+        Arrays.asList(
+            Collections.singletonMap("sample_size", "1"),
+            Collections.singletonMap("sample_seed", "42"),
+            Collections.singletonMap("sample_batch_size", "1"),
+            Map.of("sample_size", "-1", "sample_seed", "42"),
+            Map.of("sample_size", "1000001", "sample_seed", "42"),
+            Map.of("sample_size", "1", "sample_seed", "42", "sample_batch_size", "0"),
+            Map.of("sample_size", "1", "sample_seed", "9223372036854775808"))) {
+      Assertions.assertThrows(
+          IllegalArgumentException.class,
+          () -> LanceSparkReadOptions.from(properties, "s3://bucket/path"),
+          properties.toString());
+    }
+    LanceSparkReadOptions zero =
+        LanceSparkReadOptions.from(
+            Map.of("sample_size", "0", "sample_seed", "0"), "s3://bucket/path");
+    Assertions.assertEquals(0L, zero.getSampleSize().longValue());
+    Assertions.assertEquals(1024, zero.getSampleBatchSize());
+  }
 }
