@@ -25,6 +25,7 @@ import org.lance.operation.Overwrite;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.TransactionProperties;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
+import org.lance.spark.utils.FileFormatVersionResolver;
 
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.slf4j.Logger;
@@ -55,6 +56,7 @@ public class StagedCommit {
   // "user didn't specify" and lets lance-core inherit the flag from the manifest.
   private boolean enableStableRowIds;
   private String fileFormatVersion;
+  private final String existingDatasetFileFormatVersion;
   private Map<String, String> transactionProperties = Collections.emptyMap();
 
   public void setTransactionProperties(Map<String, String> properties) {
@@ -105,6 +107,8 @@ public class StagedCommit {
     this.isNewTable = datasetUri != null;
     this.enableStableRowIds = options.isEnableStableRowIds();
     this.fileFormatVersion = options.getFileFormatVersion();
+    this.existingDatasetFileFormatVersion =
+        dataset.map(Dataset::getLanceFileFormatVersion).orElse(null);
     this.namespace = options.getNamespace();
     this.tableId = options.getTableId();
     this.managedVersioning = options.isManagedVersioning();
@@ -151,6 +155,18 @@ public class StagedCommit {
   /** Returns the file format version currently set, or null for Lance's default. */
   String getFileFormatVersion() {
     return fileFormatVersion;
+  }
+
+  /**
+   * Returns the physical data-file version to write for fragments produced for this staged commit:
+   * the explicit version if set, otherwise a compatible version resolved from the existing
+   * dataset's default and target schema.
+   */
+  String getFragmentFileFormatVersion() {
+    if (fileFormatVersion != null) {
+      return fileFormatVersion;
+    }
+    return FileFormatVersionResolver.resolveForDataFiles(schema, existingDatasetFileFormatVersion);
   }
 
   /** Performs the actual commit using the stored dataset and fragments. */
