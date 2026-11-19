@@ -13,6 +13,7 @@
  */
 package org.apache.spark.sql.catalyst.optimizer
 
+import org.apache.spark.sql.catalyst.CatalystCompat.TreeNodeArgs
 import org.apache.spark.sql.catalyst.plans.logical.{DeleteFromTable, LogicalPlan, MergeIntoTable, UpdateTable}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.connector.catalog.{MetadataColumn, SupportsMetadataColumns, SupportsRead, SupportsRowLevelOperations, Table, TableCapability}
@@ -34,9 +35,9 @@ import java.util
 case class LanceBlobV2RowLevelResolutionRule() extends Rule[LogicalPlan] {
 
   override def apply(plan: LogicalPlan): LogicalPlan = plan.resolveOperatorsDown {
-    case m: MergeIntoTable => m.copy(targetTable = mask(m.targetTable))
-    case u: UpdateTable => u.copy(table = mask(u.table))
-    case d: DeleteFromTable => d.copy(table = mask(d.table))
+    case m: MergeIntoTable => m.withArg(_.targetTable)(mask(m.targetTable))
+    case u: UpdateTable => u.withArg(_.table)(mask(u.table))
+    case d: DeleteFromTable => d.withArg(_.table)(mask(d.table))
   }
 
   private def mask(target: LogicalPlan): LogicalPlan = target.resolveOperators {
@@ -45,7 +46,7 @@ case class LanceBlobV2RowLevelResolutionRule() extends Rule[LogicalPlan] {
         case _: RowLevelMaskedLanceTable => r
         case ds: LanceDataset with SupportsRowLevelOperations
             if BlobUtils.hasBlobV2Fields(ds.schema()) =>
-          r.copy(table = new RowLevelMaskedLanceTable(ds))
+          r.withArg(_.table)(new RowLevelMaskedLanceTable(ds))
         case _ => r
       }
   }

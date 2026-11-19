@@ -111,6 +111,7 @@
                         <configuration>
                             <sources>
                                 <source>../lance-spark-base_2.12/src/test/java</source>
+                                <source>../lance-spark-base_2.12/src/test/scala-integration</source>
                                 <source>src/test/java</source>
                             </sources>
                         </configuration>

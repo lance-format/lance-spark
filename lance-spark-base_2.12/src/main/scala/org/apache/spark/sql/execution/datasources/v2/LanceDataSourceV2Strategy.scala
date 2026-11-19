@@ -22,8 +22,7 @@ import org.apache.spark.sql.execution.{SparkPlan, SparkStrategy}
 
 import java.util.Locale
 
-case class LanceDataSourceV2Strategy(session: SparkSession) extends SparkStrategy
-  with PredicateHelper {
+case class LanceDataSourceV2Strategy(session: SparkSession) extends SparkStrategy {
 
   override def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
     case AddColumnsBackfill(

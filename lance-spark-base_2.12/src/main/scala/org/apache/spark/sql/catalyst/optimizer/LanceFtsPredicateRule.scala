@@ -13,11 +13,11 @@
  */
 package org.apache.spark.sql.catalyst.optimizer
 
+import org.apache.spark.sql.catalyst.CatalystCompat.TreeNodeArgs
 import org.apache.spark.sql.catalyst.expressions.{And, ApplyFunctionExpression, AttributeReference, Expression, Literal, Or}
 import org.apache.spark.sql.catalyst.optimizer.BlobPlanUtils.LanceRelation
 import org.apache.spark.sql.catalyst.plans.logical.{Filter, LogicalPlan}
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.types.IntegerType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.lance.ipc.FullTextQuery
@@ -50,17 +50,8 @@ import java.util.{ArrayList, HashMap, Locale, Optional}
  * <p>When a valid FTS predicate is found, it is extracted from the condition, the serialized
  * {@code FullTextQuery} is injected into the relation options map, and any remaining non-FTS
  * sub-expressions are retained as a residual {@code Filter} node.
- *
- * <p>Subclasses implement {@link #rewriteRelation} to supply the version-specific
- * {@code DataSourceV2Relation.copy()} call, which differs in arity between Spark 3.x/4.0
- * (5-arg) and Spark 4.1 (6-arg).
  */
-abstract class AbstractLanceFtsPredicateRule extends Rule[LogicalPlan] {
-
-  /** Rewrites the relation with the new options map. Version-specific copy() arity lives here. */
-  protected def rewriteRelation(
-      rel: DataSourceV2Relation,
-      newOptions: CaseInsensitiveStringMap): DataSourceV2Relation
+class LanceFtsPredicateRule extends Rule[LogicalPlan] {
 
   override def apply(plan: LogicalPlan): LogicalPlan = plan.transformDown {
     case filter @ Filter(condition, LanceRelation(rel, _)) =>
@@ -97,7 +88,7 @@ abstract class AbstractLanceFtsPredicateRule extends Rule[LogicalPlan] {
         newOptionsMap.put(LanceSparkReadOptions.CONFIG_FULL_TEXT_QUERY, ftsJson)
         val newOptions = new CaseInsensitiveStringMap(newOptionsMap)
 
-        val newRel = rewriteRelation(rel, newOptions)
+        val newRel = rel.withArg(_.options)(newOptions)
 
         val residual = removeExpression(condition, ftsExpr)
         residual match {

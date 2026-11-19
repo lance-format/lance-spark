@@ -13,11 +13,14 @@
  */
 package org.lance.spark.update;
 
+import org.lance.BlobFile;
+import org.lance.Dataset;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceSpark;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.utils.Utils;
 import org.lance.spark.write.LanceBatchWrite;
 import org.lance.spark.write.UpdateColumnsBackfillBatchWrite;
 
@@ -47,11 +50,14 @@ import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.stream.Collectors;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -283,6 +289,59 @@ public abstract class BaseUpdateColumnsBackfillTest {
                     "alter table %s update columns non_existent_col from update_source",
                     fullTable)),
         "Can't update non-existent columns: non_existent_col");
+  }
+
+  @Test
+  public void testUpdateRejectsDifferentDataTypeWithoutMutation() {
+    prepareDataset();
+    List<Row> before = spark.sql("SELECT * FROM " + fullTable + " ORDER BY id").collectAsList();
+    spark.sql(
+        "CREATE TEMPORARY VIEW wrong_type_source AS SELECT _rowaddr, _fragid, CAST(value AS DOUBLE) AS value FROM "
+            + fullTable);
+    IllegalArgumentException error =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                spark.sql(
+                    "ALTER TABLE " + fullTable + " UPDATE COLUMNS value FROM wrong_type_source"));
+    assertTrue(error.getMessage().contains("value"));
+    assertTrue(error.getMessage().contains("expected"));
+    assertEquals(before, spark.sql("SELECT * FROM " + fullTable + " ORDER BY id").collectAsList());
+  }
+
+  @Test
+  public void testUpdateBlobPayloadPreservesUnmatchedRows() throws Exception {
+    spark.sql(
+        "CREATE TABLE "
+            + fullTable
+            + " (id INT, payload BINARY) USING lance TBLPROPERTIES ('payload.lance.encoding' = 'blob', 'file_format_version' = '2.2')");
+    spark.sql(
+        "INSERT INTO "
+            + fullTable
+            + " VALUES (1, CAST('one' AS BINARY)), (2, CAST('two' AS BINARY))");
+    spark.sql(
+        "CREATE TEMPORARY VIEW blob_update_source AS SELECT _rowaddr, _fragid, CAST('updated' AS BINARY) AS payload FROM "
+            + fullTable
+            + " WHERE id = 2");
+    spark.sql("ALTER TABLE " + fullTable + " UPDATE COLUMNS payload FROM blob_update_source");
+
+    List<Long> rowAddresses =
+        spark.sql("SELECT _rowaddr FROM " + fullTable + " ORDER BY id").collectAsList().stream()
+            .map(row -> row.getLong(0))
+            .collect(Collectors.toList());
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    LanceDataset table =
+        (LanceDataset) catalog.loadTable(Identifier.of(new String[] {"default"}, tableName));
+    try (Dataset dataset = Utils.openDatasetBuilder(table.readOptions()).build()) {
+      List<BlobFile> blobs = dataset.takeBlobs(rowAddresses, "payload");
+      assertEquals(2, blobs.size());
+      try (BlobFile first = blobs.get(0);
+          BlobFile second = blobs.get(1)) {
+        assertArrayEquals("one".getBytes(StandardCharsets.UTF_8), first.read());
+        assertArrayEquals("updated".getBytes(StandardCharsets.UTF_8), second.read());
+      }
+    }
   }
 
   @Test

@@ -2,6 +2,19 @@
 
 Changes the schema or properties of a table.
 
+## ADD COLUMNS
+
+Add nullable columns without rewriting existing data. Existing rows read the new columns as null:
+
+```sql
+ALTER TABLE users ADD COLUMNS (score FLOAT, details STRUCT<label: STRING>);
+```
+
+This requires Lance file format version 2.0 or later. Adding nested fields to an existing column,
+non-nullable columns, defaults, column positions, and types that cannot be preserved by the
+connector are not supported. To add columns and populate them from a source view, use
+[ADD COLUMNS FROM](../dml/add-columns.md).
+
 ## SET TBLPROPERTIES
 
 Add or update key-value properties on a table:

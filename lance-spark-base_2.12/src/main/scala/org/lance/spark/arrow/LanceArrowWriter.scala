@@ -229,9 +229,17 @@ private[arrow] class FixedSizeListWriter(
     val elementWriter: LanceArrowFieldWriter) extends LanceArrowFieldWriter {
 
   override def setNull(): Unit = {
-    // Child vector must reserve listSize slots even for null rows,
-    // otherwise subsequent rows write to wrong offsets.
-    elementWriter.count += valueVector.getListSize()
+    val end = elementWriter.count + valueVector.getListSize()
+    if (!elementWriter.nullable) {
+      // Keep masked child slots valid when the encoder extracts the parent's validity bitmap.
+      val childVector = elementWriter.valueVector.asInstanceOf[BaseFixedWidthVector]
+      while (elementWriter.count < end) {
+        childVector.setIndexDefined(elementWriter.count)
+        elementWriter.count += 1
+      }
+    } else {
+      elementWriter.count = end
+    }
     valueVector.setNull(count)
   }
 
@@ -247,6 +255,10 @@ private[arrow] class FixedSizeListWriter(
     valueVector.setNotNull(count)
     var i = 0
     while (i < array.numElements()) {
+      if (!elementWriter.nullable && array.isNullAt(i)) {
+        throw new IllegalArgumentException(
+          s"Fixed-size list '$name' has a null element at index $i")
+      }
       elementWriter.write(array, i)
       i += 1
     }

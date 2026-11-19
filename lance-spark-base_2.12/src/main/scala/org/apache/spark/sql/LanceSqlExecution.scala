@@ -13,6 +13,7 @@
  */
 package org.apache.spark.sql
 
+import org.apache.spark.sql.catalyst.CatalystCompat.TreeNodeArgs
 import org.apache.spark.sql.catalyst.analysis.{NamedRelation, ResolvedIdentifier}
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.connector.write.RowLevelOperationTable
@@ -78,7 +79,7 @@ object LanceSqlExecution {
             table.operation match {
               case operation: TransactionPropertiesOperation =>
                 boundOperation = true
-                relation.copy(table =
+                relation.withArg(_.table)(
                   table.copy(operation = operation.withTransactionProperties(properties)))
               case _ => relation
             }
@@ -91,13 +92,13 @@ object LanceSqlExecution {
       case write: RowLevelWrite => write.withNewTable(bindRowLevelTarget(write.table))
       case append: AppendData if isLanceTarget(append.table) =>
         boundOperation = true
-        append.copy(writeOptions = withTransactionProperties(append.writeOptions))
+        append.withArg(_.writeOptions)(withTransactionProperties(append.writeOptions))
       case overwrite: OverwriteByExpression if isLanceTarget(overwrite.table) =>
         boundOperation = true
-        overwrite.copy(writeOptions = withTransactionProperties(overwrite.writeOptions))
+        overwrite.withArg(_.writeOptions)(withTransactionProperties(overwrite.writeOptions))
       case overwrite: OverwritePartitionsDynamic if isLanceTarget(overwrite.table) =>
         boundOperation = true
-        overwrite.copy(writeOptions = withTransactionProperties(overwrite.writeOptions))
+        overwrite.withArg(_.writeOptions)(withTransactionProperties(overwrite.writeOptions))
       case write: V2WriteCommand =>
         write.table match {
           case relation: DataSourceV2Relation if isLanceTarget(relation) =>
@@ -107,15 +108,15 @@ object LanceSqlExecution {
               "Specify transaction properties only once")
             options.put(TransactionProperties.option, encodedProperties)
             boundOperation = true
-            write.withNewTable(relation.copy(options = new CaseInsensitiveStringMap(options)))
+            write.withNewTable(relation.withArg(_.options)(new CaseInsensitiveStringMap(options)))
           case _ => write
         }
       case create: CreateTableAsSelect if isLanceCatalog(create.name) =>
         boundOperation = true
-        create.copy(writeOptions = withTransactionProperties(create.writeOptions))
+        create.withArg(_.writeOptions)(withTransactionProperties(create.writeOptions))
       case replace: ReplaceTableAsSelect if isLanceCatalog(replace.name) =>
         boundOperation = true
-        replace.copy(writeOptions = withTransactionProperties(replace.writeOptions))
+        replace.withArg(_.writeOptions)(withTransactionProperties(replace.writeOptions))
       case add: AddColumnsBackfill if isLanceCatalog(add.table) =>
         boundOperation = true
         add.copy(writeOptions = withTransactionProperties(add.writeOptions))

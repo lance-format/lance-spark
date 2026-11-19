@@ -14,6 +14,9 @@
 package org.lance.spark;
 
 import org.apache.spark.sql.AnalysisException;
+import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.TableChange;
+import org.apache.spark.sql.types.DataTypes;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -51,6 +54,24 @@ public abstract class BaseTestSparkDirectoryNamespace extends SparkLanceNamespac
     // Create the "default" namespace explicitly so that DirectoryNamespace uses manifest mode
     // instead of directory listing mode. This is required for deregisterTable to work correctly.
     spark.sql("CREATE NAMESPACE " + catalogName + ".default");
+  }
+
+  @Test
+  public void testAddColumnsRejectsLegacyFormat() throws Exception {
+    String tableName = generateTableName("add_legacy");
+    String fullName = catalogName + ".default." + tableName;
+    spark.sql(
+        "CREATE TABLE " + fullName + " (id INT) TBLPROPERTIES ('file_format_version' = 'LEGACY')");
+    spark.sql("INSERT INTO " + fullName + " VALUES (1)");
+
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    assertThrows(
+        RuntimeException.class,
+        () ->
+            catalog.alterTable(
+                ident, TableChange.addColumn(new String[] {"extra"}, DataTypes.StringType)));
+    assertEquals(1, spark.table(fullName).count());
+    assertEquals(1, spark.table(fullName).columns().length);
   }
 
   @Test

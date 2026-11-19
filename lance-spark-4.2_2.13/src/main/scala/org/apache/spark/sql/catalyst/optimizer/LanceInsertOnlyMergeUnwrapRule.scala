@@ -13,6 +13,7 @@
  */
 package org.apache.spark.sql.catalyst.optimizer
 
+import org.apache.spark.sql.catalyst.CatalystCompat
 import org.apache.spark.sql.catalyst.plans.logical.{AppendData, InsertOnlyMerge, LogicalPlan}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
@@ -36,6 +37,6 @@ case class LanceInsertOnlyMergeUnwrapRule() extends Rule[LogicalPlan] {
   override def apply(plan: LogicalPlan): LogicalPlan = plan.transformDown {
     case InsertOnlyMerge(r: DataSourceV2Relation, query, None, _)
         if r.table.isInstanceOf[RowLevelMaskedLanceTable] =>
-      AppendData.byPosition(r, query)
+      CatalystCompat.appendDataByPosition(r, query, Map.empty)
   }
 }
