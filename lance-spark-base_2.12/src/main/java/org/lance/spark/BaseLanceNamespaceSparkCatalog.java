@@ -48,6 +48,7 @@ import org.lance.spark.write.StagedCommit;
 import org.lance.spark.write.StagedCommitOptions;
 
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchFunctionException;
@@ -269,16 +270,18 @@ public abstract class BaseLanceNamespaceSparkCatalog
         || "hive3".equals(impl)
         || "org.lance.namespace.hive2.Hive2Namespace".equals(impl)
         || "org.lance.namespace.hive3.Hive3Namespace".equals(impl)) {
-      SparkSession.active()
-          .sessionState()
-          .newHadoopConf()
+      Configuration conf = SparkSession.active().sessionState().newHadoopConf();
+      // Discard the case-folded copies before preserving the original Hadoop property names.
+      namespaceOptions.keySet().removeIf(key -> key.startsWith("hadoop."));
+      options
+          .asCaseSensitiveMap()
           .forEach(
-              entry -> {
-                String key = "hadoop." + entry.getKey();
-                if (!options.containsKey(key)) {
-                  namespaceOptions.put(key, entry.getValue());
+              (key, value) -> {
+                if (key.startsWith("hadoop.") && value != null) {
+                  conf.set(key.substring("hadoop.".length()), value);
                 }
               });
+      conf.forEach(entry -> namespaceOptions.put("hadoop." + entry.getKey(), entry.getValue()));
     }
 
     return namespaceOptions;

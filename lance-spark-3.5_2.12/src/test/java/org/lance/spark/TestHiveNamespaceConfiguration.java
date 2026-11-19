@@ -19,37 +19,47 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 public class TestHiveNamespaceConfiguration {
   @ParameterizedTest
   @CsvSource({
-    "thrift://global:9083,,",
-    "thrift://session:9083,thrift://session:9083,",
-    "thrift://catalog:9083,thrift://session:9083,thrift://catalog:9083"
+    "hive.metastore.uris,thrift://global:9083,,,thrift://global:9083",
+    "hive.metastore.uris,thrift://global:9083,thrift://session:9083,,thrift://session:9083",
+    "hive.metastore.uris,thrift://global:9083,thrift://session:9083,thrift://catalog:9083,thrift://catalog:9083",
+    "fs.AbstractFileSystem.s3a.impl,GlobalFs,SessionFs,CatalogFs,CatalogFs"
   })
   public void testHadoopConfigurationAndCatalogOverride(
-      String expectedUri, String sessionUri, String catalogUri) {
+      String key,
+      String globalValue,
+      String sessionValue,
+      String catalogValue,
+      String expectedValue) {
     SparkSession spark =
         SparkSession.builder()
             .master("local")
             .appName("hive-namespace-config-test")
-            .config("spark.hadoop.hive.metastore.uris", "thrift://global:9083")
+            .config("spark.hadoop." + key, globalValue)
             .getOrCreate();
     try {
-      if (sessionUri != null) {
-        spark.sql("SET hive.metastore.uris=" + sessionUri);
+      if (sessionValue != null) {
+        spark.sql("SET " + key + "=" + sessionValue);
       }
       Map<String, String> options = new HashMap<>();
-      if (catalogUri != null) {
-        options.put("hadoop.hive.metastore.uris", catalogUri);
+      if (catalogValue != null) {
+        options.put("hadoop." + key, catalogValue);
       }
       Map<String, String> namespaceOptions =
           BaseLanceNamespaceSparkCatalog.buildNamespaceOptions(
               "hive2", new CaseInsensitiveStringMap(options));
-      assertEquals(expectedUri, namespaceOptions.get("hadoop.hive.metastore.uris"));
+      assertEquals(expectedValue, namespaceOptions.get("hadoop." + key));
+      if (!key.equals(key.toLowerCase(Locale.ROOT))) {
+        assertFalse(namespaceOptions.containsKey("hadoop." + key.toLowerCase(Locale.ROOT)));
+      }
     } finally {
       spark.stop();
     }
