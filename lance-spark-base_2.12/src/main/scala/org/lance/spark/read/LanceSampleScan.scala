@@ -17,7 +17,7 @@ import org.apache.arrow.vector.{IntVector, VectorSchemaRoot}
 import org.apache.arrow.vector.ipc.ArrowReader
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.connector.metric.{CustomMetric, CustomSumMetric, CustomTaskMetric}
+import org.apache.spark.sql.connector.metric.{CustomMetric, CustomTaskMetric}
 import org.apache.spark.sql.connector.read.{Batch, InputPartition, PartitionReader, PartitionReaderFactory, Scan, SupportsPushDownRequiredColumns}
 import org.apache.spark.sql.internal.connector.SupportsMetadata
 import org.apache.spark.sql.types.{ArrayType, DataType, MapType, StructField, StructType}
@@ -25,7 +25,7 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 import org.lance.Dataset
 import org.lance.spark.{LanceConstant, LanceRuntime, LanceSparkReadOptions}
 import org.lance.spark.internal.ExecutorNamespace
-import org.lance.spark.read.metric.CustomNsTimeMetric
+import org.lance.spark.read.metric.LanceCustomMetrics
 import org.lance.spark.utils.{BlobUtils, Utils}
 import org.lance.spark.vectorized.LanceArrowColumnVector
 
@@ -38,6 +38,7 @@ import scala.collection.JavaConverters._
 class LanceSampleScanBuilder(
     tableSchema: StructType,
     options: LanceSparkReadOptions,
+    population: Long,
     initialStorageOptions: JMap[String, String],
     namespaceImpl: String,
     namespaceProperties: JMap[String, String])
@@ -47,20 +48,8 @@ class LanceSampleScanBuilder(
   private var schema = fullSchema
   private var scan: LanceSampleScan = _
 
-  private lazy val selection = {
-    val dataset = Utils.openDatasetBuilder(options)
-      .initialStorageOptions(initialStorageOptions)
-      .runtimeNamespace(namespaceImpl, namespaceProperties, options.getTableId)
-      .build()
-    try {
-      val population = dataset.countRows()
-      val pinned = options.withRef(Utils.pinOpenedRef(dataset, options.getRef))
-      (
-        pinned,
-        population,
-        ExactKSampler.sample(population, options.getSampleSize.longValue(), options.getSampleSeed))
-    } finally dataset.close()
-  }
+  private lazy val selection =
+    ExactKSampler.sample(population, options.getSampleSize.longValue(), options.getSampleSeed)
 
   override def pruneColumns(requiredSchema: StructType): Unit = {
     ReadSchemaNestedStructWidening.validateRequiredSchema(requiredSchema, fullSchema)
@@ -80,7 +69,7 @@ class LanceSampleScanBuilder(
           s"Exact sampling does not support projected blob column '${field.name}'")
         require(!Utils.isScoreMetadataColumn(field), "Exact sampling does not support _score")
       }
-      val (pinned, population, positions) = selection
+      val positions = selection
       val parallelism = math.max(1, SparkSession.active.sparkContext.defaultParallelism)
       val partitions = if (positions.isEmpty) Array.empty[InputPartition]
       else {
@@ -91,14 +80,14 @@ class LanceSampleScanBuilder(
           val end = (positions.length.toLong * (index + 1) / count).toInt
           LanceSampleInputPartition(
             schema,
-            pinned,
+            options,
             positions.slice(start, end),
             initialStorageOptions,
             namespaceImpl,
             namespaceProperties): InputPartition
         }.toArray
       }
-      scan = new LanceSampleScan(schema, pinned, population, partitions)
+      scan = new LanceSampleScan(schema, options, population, partitions)
     }
     scan
   }
@@ -141,13 +130,10 @@ class LanceSampleScan(
 
   override def planInputPartitions(): Array[InputPartition] = partitions.clone()
   override def createReaderFactory(): PartitionReaderFactory = new LanceSampleReaderFactory
-  override def supportedCustomMetrics(): Array[CustomMetric] = Array(
-    new SampleTakeCallsMetric,
-    new SampleRowsRequestedMetric,
-    new SampleRowsReturnedMetric,
-    new SampleTakeTimeMetric)
+  override def supportedCustomMetrics(): Array[CustomMetric] = LanceCustomMetrics.samplingMetrics()
 }
 
+@SerialVersionUID(1L)
 case class LanceSampleInputPartition(
     schema: StructType,
     options: LanceSparkReadOptions,
@@ -184,6 +170,8 @@ class LanceSamplePartitionReader(partition: LanceSampleInputPartition)
   private var takeTimeNs = 0L
   private val columns = {
     val requested = partition.schema.fields.map(_.name).filterNot(_ == LanceConstant.FRAGMENT_ID)
+    // Keep row counts for cardinality-only scans without relying on native empty-projection
+    // defaults; deriving _fragid also requires each selected row's address.
     val withAddress =
       if (requested.isEmpty ||
         partition.schema.fieldNames.contains(LanceConstant.FRAGMENT_ID)) {
@@ -193,10 +181,10 @@ class LanceSamplePartitionReader(partition: LanceSampleInputPartition)
   }
 
   private val metrics = Array[CustomTaskMetric](
-    taskMetric("numTakeCalls", () => takeCalls),
-    taskMetric("numRowsRequested", () => rowsRequested),
-    taskMetric("numRowsReturned", () => rowsReturned),
-    taskMetric("takeTimeNs", () => takeTimeNs))
+    taskMetric(LanceCustomMetrics.NUM_TAKE_CALLS, () => takeCalls),
+    taskMetric(LanceCustomMetrics.NUM_ROWS_REQUESTED, () => rowsRequested),
+    taskMetric(LanceCustomMetrics.NUM_ROWS_RETURNED, () => rowsReturned),
+    taskMetric(LanceCustomMetrics.TAKE_TIME_NS, () => takeTimeNs))
 
   private def taskMetric(metricName: String, readValue: () => Long): CustomTaskMetric =
     new CustomTaskMetric {
@@ -207,13 +195,13 @@ class LanceSamplePartitionReader(partition: LanceSampleInputPartition)
   override def currentMetricsValues(): Array[CustomTaskMetric] = metrics
   override def get(): ColumnarBatch = current
 
+  @throws[IOException]
   override def next(): Boolean = {
     if (closed) return false
     try nextBatch()
     catch {
       case error: Throwable =>
-        closeResources(error)
-        throw error
+        throw LanceColumnarPartitionReader.asIOException(closeResources(error))
     }
   }
 
@@ -310,9 +298,10 @@ class LanceSamplePartitionReader(partition: LanceSampleInputPartition)
     }
   }
 
+  @throws[IOException]
   override def close(): Unit = {
     val error = closeResources(null)
-    if (error != null) throw error
+    if (error != null) throw LanceColumnarPartitionReader.asIOException(error)
   }
 
   private def closeResources(original: Throwable): Throwable = {
@@ -337,21 +326,4 @@ class LanceSamplePartitionReader(partition: LanceSampleInputPartition)
     namespace = null
     error
   }
-}
-
-class SampleTakeCallsMetric extends CustomSumMetric {
-  override def name(): String = "numTakeCalls"
-  override def description(): String = "number of native Lance take calls"
-}
-class SampleRowsRequestedMetric extends CustomSumMetric {
-  override def name(): String = "numRowsRequested"
-  override def description(): String = "number of logical positions requested"
-}
-class SampleRowsReturnedMetric extends CustomSumMetric {
-  override def name(): String = "numRowsReturned"
-  override def description(): String = "number of sampled rows returned"
-}
-class SampleTakeTimeMetric extends CustomNsTimeMetric {
-  override def name(): String = "takeTimeNs"
-  override def description(): String = "time spent in native Lance take calls"
 }

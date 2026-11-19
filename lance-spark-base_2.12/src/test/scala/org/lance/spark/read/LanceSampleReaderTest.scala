@@ -13,15 +13,12 @@
  */
 package org.lance.spark.read
 
-import org.apache.spark.{SparkConf, SparkContext, TaskContext}
 import org.apache.spark.sql.types.{DataTypes, StructType}
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.Test
-import org.lance.spark.{LanceConstant, LanceRef, LanceRuntime, LanceSparkReadOptions}
-import org.lance.spark.utils.Utils
+import org.lance.spark.{LanceConstant, LanceRuntime}
 
-import java.io.{ByteArrayInputStream, ByteArrayOutputStream, ObjectInputStream, ObjectOutputStream}
-import java.util.Collections
+import java.io.{ByteArrayInputStream, ByteArrayOutputStream, IOException, ObjectInputStream, ObjectOutputStream, ObjectStreamClass}
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -30,29 +27,14 @@ class LanceSampleReaderTest {
       schema: StructType,
       positions: Array[Long],
       batchSize: Int = 3): LanceSampleInputPartition = {
-    val uri = getClass.getResource("/example_db/test_dataset1.lance").toString
-    val dataset = Utils.openDatasetBuilder(LanceSparkReadOptions.from(uri)).build()
-    val version =
-      try dataset.version()
-      finally dataset.close()
-    val options = LanceSparkReadOptions.builder()
-      .datasetUri(uri)
-      .ref(LanceRef.ofMain(version))
-      .sampleSize(positions.length.toLong)
-      .sampleSeed(42L)
-      .sampleBatchSize(batchSize)
-      .build()
-    LanceSampleInputPartition(
-      schema,
-      options,
-      positions,
-      Collections.emptyMap[String, String](),
-      null,
-      Collections.emptyMap[String, String]())
+    LanceSampleTestProcess.partition(schema, positions, batchSize)
   }
 
   @Test
   def serializedTaskReplayPreservesRowsAcrossFragments(): Unit = {
+    assertEquals(
+      1L,
+      ObjectStreamClass.lookup(classOf[LanceSampleInputPartition]).getSerialVersionUID)
     val schema = new StructType().add("x", DataTypes.LongType)
       .add(LanceConstant.FRAGMENT_ID, DataTypes.IntegerType)
       .add(LanceConstant.ROW_ADDRESS, DataTypes.LongType)
@@ -132,29 +114,33 @@ class LanceSampleReaderTest {
 
   @Test
   def sparkTaskRetriesReplayTheSamePositions(): Unit = {
-    val input = partition(new StructType().add("x", DataTypes.LongType), Array[Long](1, 3), 1)
-    val context = new SparkContext(new SparkConf()
-      .setAppName("exact-sampling-retry-test")
-      .setMaster("local[1,2]")
-      .set("spark.ui.enabled", "false"))
-    try {
-      val replayed = context.parallelize(Seq(input), 1).mapPartitions { inputs =>
-        inputs.flatMap { partition =>
-          val reader = new LanceSamplePartitionReader(partition)
-          val values = ArrayBuffer.empty[Long]
-          try {
-            while (reader.next()) {
-              val batch = reader.get()
-              for (row <- 0 until batch.numRows()) values += batch.column(0).getLong(row)
-            }
-          } finally reader.close()
-          val attempt = TaskContext.get().attemptNumber()
-          if (attempt == 0)
-            throw new IllegalStateException("Fail after consuming the first attempt")
-          values.iterator.map(value => (value, attempt))
-        }
-      }.collect().toSeq
-      assertEquals(Seq((1L, 1), (3L, 1)), replayed)
-    } finally context.stop()
+    val output = LanceSampleTestProcess.run("org.lance.spark.read.SampleRetryProbe")
+    assertTrue(output.contains("RETRY_OK"), output)
+  }
+
+  @Test
+  def exceptionBoundaryMatchesTheOrdinaryReader(): Unit = {
+    val io = new IOException("io")
+    assertSame(io, LanceColumnarPartitionReader.asIOException(io))
+    val checked = new Exception("checked")
+    assertSame(checked, LanceColumnarPartitionReader.asIOException(checked).getCause)
+    val runtime = new IllegalStateException("runtime")
+    assertSame(
+      runtime,
+      assertThrows(
+        classOf[IllegalStateException],
+        () =>
+          LanceColumnarPartitionReader.asIOException(runtime)))
+    val error = new AssertionError("error")
+    assertSame(
+      error,
+      assertThrows(
+        classOf[AssertionError],
+        () =>
+          LanceColumnarPartitionReader.asIOException(error)))
+    for (method <- Seq("next", "close")) {
+      assertTrue(classOf[LanceSamplePartitionReader].getMethod(method)
+        .getExceptionTypes.contains(classOf[IOException]))
+    }
   }
 }

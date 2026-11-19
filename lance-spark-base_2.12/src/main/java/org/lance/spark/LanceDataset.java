@@ -324,7 +324,7 @@ public class LanceDataset
       Preconditions.checkArgument(
           scanRef != null && scanRef.getVersionNumber().isPresent(),
           "Exact sampling requires an explicit version; "
-              + "unversioned latest, branch, and tag are unsupported");
+              + "unversioned latest, branch heads, and tags are unsupported");
     }
     if (scanRef != null && (scanRef.isBranchOrTag() || scanRef.getVersionNumber().isPresent())) {
       try (Dataset dataset =
@@ -334,11 +334,16 @@ public class LanceDataset
               .build()) {
         scanOptions = scanOptions.withRef(Utils.pinOpenedRef(dataset, scanRef));
         scanSchema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
+        if (scanOptions.isSampling()) {
+          return new LanceSampleScanBuilder(
+              scanSchema,
+              scanOptions,
+              dataset.countRows(),
+              initialStorageOptions,
+              namespaceImpl,
+              namespaceProperties);
+        }
       }
-    }
-    if (scanOptions.isSampling()) {
-      return new LanceSampleScanBuilder(
-          scanSchema, scanOptions, initialStorageOptions, namespaceImpl, namespaceProperties);
     }
     return new LanceScanBuilder(
         scanSchema,

@@ -730,7 +730,7 @@ sampled = (
 ```
 
 The same dataset snapshot, sample size, seed, and sampling algorithm version
-(`floyd-v1`) select the same row positions across retries, projections, partition
+(`floyd-v2`) select the same row positions across retries, projections, partition
 counts, and read batch sizes. Output order is unspecified. Different seeds can
 select the same set; the portable Java random generator uses 48 effective seed bits.
 Rows with identical values remain distinct population members.

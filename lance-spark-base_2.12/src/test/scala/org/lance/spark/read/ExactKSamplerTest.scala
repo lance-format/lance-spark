@@ -24,8 +24,14 @@ import scala.collection.mutable
 class ExactKSamplerTest {
   @Test
   def goldenSelection(): Unit = {
-    assertEquals("floyd-v1", ExactKSampler.Version)
+    assertEquals("floyd-v2", ExactKSampler.Version)
     assertArrayEquals(Array[Long](5, 7, 9, 13, 36, 63, 95), ExactKSampler.sample(100, 7, 42))
+    assertArrayEquals(Array[Long](1, 3, 5, 6, 12, 13, 15), ExactKSampler.sample(16, 7, 42))
+    assertArrayEquals(Array[Long](23, 47, 64, 65, 71, 111, 120), ExactKSampler.sample(128, 7, 42))
+    assertArrayEquals(
+      Array[Long](405481101665L, 408229177271L, 489512234525L, 663726459471L,
+        830455457952L, 956606868897L, 1033071240037L),
+      ExactKSampler.sample(1L << 40, 7, 42))
     assertArrayEquals(
       Array[Long](93830867483L, 197458609219L, 300221710454L, 333214231862L, 682877160444L),
       ExactKSampler.sample((1L << 40) + 99, 5, -7))
@@ -91,5 +97,26 @@ class ExactKSamplerTest {
         assertTrue(value >= 0 && value < bound)
       }
     }
+  }
+
+  @Test
+  def powersOfTwoUseHighBits(): Unit = {
+    val highBit = new Random(0) {
+      override def nextLong(): Long = Long.MinValue
+    }
+    assertEquals(0L, ExactKSampler.nextLong(highBit, 1))
+    assertEquals(1L, ExactKSampler.nextLong(highBit, 2))
+    assertEquals(4L, ExactKSampler.nextLong(highBit, 8))
+    assertEquals(1L << 61, ExactKSampler.nextLong(highBit, 1L << 62))
+    val lowBits = new Random(0) {
+      override def nextLong(): Long = 6L
+    }
+    assertEquals(0L, ExactKSampler.nextLong(lowBits, 8))
+  }
+
+  @Test
+  def maximumSampleFitsBoundedHeap(): Unit = {
+    val output = LanceSampleTestProcess.run("org.lance.spark.read.SampleHeapProbe", Some("64m"))
+    assertTrue(output.contains("MAX_SAMPLE_OK rows=1000000"), output)
   }
 }

@@ -158,7 +158,7 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
     return primary;
   }
 
-  private static IOException asIOException(Throwable failure) {
+  static IOException asIOException(Throwable failure) {
     if (failure instanceof IOException) {
       return (IOException) failure;
     }

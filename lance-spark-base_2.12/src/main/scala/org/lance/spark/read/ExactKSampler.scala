@@ -15,13 +15,14 @@ package org.lance.spark.read
 
 import org.lance.spark.LanceSparkReadOptions
 
-import java.util.Random
+import java.lang.Long.numberOfLeadingZeros
+import java.util.{Arrays, Random}
 
 import scala.collection.mutable
 
 /** Samples logical positions; the PRNG and bounded draws are part of the replay contract. */
 object ExactKSampler {
-  val Version = "floyd-v1"
+  val Version = "floyd-v2"
 
   def sample(population: Long, size: Long, seed: Long): Array[Long] = {
     val random = new Random(seed)
@@ -37,14 +38,23 @@ object ExactKSampler {
     require(
       size <= LanceSparkReadOptions.MAX_SAMPLE_SIZE,
       "sample_size exceeds driver planning limit")
-    val selected = mutable.HashSet.empty[Long]
+    // Primitive keys avoid retaining a boxed Long for every selected position.
+    val selected = new mutable.LongMap[Unit](math.max(16, size.toInt * 2))
     var j = population - size
     while (j < population) {
       val candidate = draw(j + 1)
-      selected += (if (selected.contains(candidate)) j else candidate)
+      selected.update(if (selected.contains(candidate)) j else candidate, ())
       j += 1
     }
-    selected.toArray.sorted
+    // The final size is known; avoid iterator.toArray's growing temporary buffers.
+    val positions = new Array[Long](size.toInt)
+    var index = 0
+    selected.foreachKey { position =>
+      positions(index) = position
+      index += 1
+    }
+    Arrays.sort(positions)
+    positions
   }
 
   // Rejection avoids modulo bias; >>> avoids abs(Long.MinValue) and retains 63 random bits.
@@ -53,7 +63,8 @@ object ExactKSampler {
     val mask = bound - 1
     var bits = random.nextLong() >>> 1
     if ((bound & mask) == 0) {
-      bits & mask
+      // Prefer the high bits of the LCG output, as Random.nextInt does for powers of two.
+      bits >>> numberOfLeadingZeros(bound)
     } else {
       var value = bits % bound
       while (bits - value + mask < 0) {

@@ -13,13 +13,19 @@
  */
 package org.lance.spark.read;
 
+import org.lance.namespace.LanceNamespace;
+import org.lance.namespace.model.DescribeTableRequest;
+import org.lance.namespace.model.DescribeTableResponse;
 import org.lance.otel.LanceMetrics;
 import org.lance.spark.LanceDataSource;
+import org.lance.spark.LanceDataset;
+import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 import org.lance.spark.utils.Utils;
 
+import org.apache.arrow.memory.BufferAllocator;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
@@ -28,6 +34,7 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -37,8 +44,11 @@ import scala.collection.JavaConverters;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -808,5 +818,58 @@ public abstract class BaseSparkConnectorReadTest {
     assertEquals(1, sample(path, version, 1, 1).select("id").collectAsList().size());
     assertThrows(
         Exception.class, () -> sample(path, version, 1, 1).select("payload").collectAsList());
+  }
+
+  @Test
+  public void exactSampleReusesTheSchemaAndCountOpen() {
+    String path = TestUtils.TestTable1Config.datasetUri;
+    AtomicInteger describes = new AtomicInteger();
+    // Count namespace metadata calls while using the real fixture dataset for all storage reads.
+    LanceNamespace namespace =
+        new LanceNamespace() {
+          @Override
+          public void initialize(Map<String, String> properties, BufferAllocator allocator) {}
+
+          @Override
+          public String namespaceId() {
+            return "sampling-open-count";
+          }
+
+          @Override
+          public DescribeTableResponse describeTable(DescribeTableRequest request) {
+            describes.incrementAndGet();
+            return new DescribeTableResponse()
+                .location(path)
+                .storageOptions(Collections.emptyMap());
+          }
+        };
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder()
+            .datasetUri(path)
+            .ref(LanceRef.ofMain(sampleSnapshot(path)))
+            .namespace(namespace)
+            .tableId(Collections.singletonList("fixture"))
+            .sampleSize(2L)
+            .sampleSeed(42L)
+            .build();
+    LanceDataset table =
+        new LanceDataset(
+            options,
+            TestUtils.TestTable1Config.schema,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            false,
+            null);
+    LanceSampleScanBuilder builder =
+        (LanceSampleScanBuilder)
+            table.newScanBuilder(new CaseInsensitiveStringMap(Collections.emptyMap()));
+    int initialDescribes = describes.get();
+    assertTrue(initialDescribes > 0);
+    builder.build();
+    builder.pruneColumns(new StructType().add("x", DataTypes.LongType));
+    builder.build();
+    assertEquals(
+        initialDescribes, describes.get(), "Sampling planning must not reopen the dataset");
   }
 }

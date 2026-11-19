@@ -28,6 +28,7 @@ public class LanceRowPartitionReader implements PartitionReader<InternalRow> {
   private InternalRow currentRecord;
 
   public LanceRowPartitionReader(LanceColumnarPartitionReader reader) {
+    // Keep this constructor descriptor for callers compiled against the original reader API.
     this((PartitionReader<ColumnarBatch>) reader);
   }
 
