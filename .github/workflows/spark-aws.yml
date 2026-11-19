@@ -71,6 +71,12 @@ jobs:
           distribution: temurin
           java-version: 17
           cache: "maven"
+          cache-read-only: true
+          cache-dependency-path: |
+            **/pom.xml
+            **/.mvn/wrapper/maven-wrapper.properties
+            **/.mvn/extensions.xml
+            .github/workflows/spark.yml
       - name: Verify AWS Glue/S3 targets
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
