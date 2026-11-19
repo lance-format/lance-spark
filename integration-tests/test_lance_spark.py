@@ -360,8 +360,8 @@ class TestDDLStagingTable:
         assert result[0].name == "Alice"
         assert result[2].id == 3
 
-    @pytest.mark.parametrize("create_as_select", [False, True])
-    def test_table_properties_survive_create_and_replace(self, spark, create_as_select):
+    @pytest.mark.parametrize("create_as_select", [False, True], ids=["create", "ctas"])
+    def test_create_and_replace_table_properties(self, spark, create_as_select):
         schema = "" if create_as_select else "(id INT)"
         query = "AS SELECT 1 AS id" if create_as_select else ""
         spark.sql(f"""
@@ -384,7 +384,7 @@ class TestDDLStagingTable:
         assert props["app.owner"] == "new"
         assert props["app.retained"] == "keep"
         assert props["app.option"] == "persisted"
-        assert spark.table("default.test_table").first().id == 2
+        assert [row.id for row in spark.table("default.test_table").collect()] == [2]
 
     def test_replace_table_as_select(self, spark, test_table):
         """Test REPLACE TABLE AS SELECT (RTAS) replaces data."""

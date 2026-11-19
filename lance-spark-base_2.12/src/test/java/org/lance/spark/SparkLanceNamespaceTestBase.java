@@ -22,6 +22,7 @@ import org.lance.spark.utils.Utils;
 import org.apache.spark.sql.AnalysisException;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
@@ -1126,7 +1127,7 @@ public abstract class SparkLanceNamespaceTestBase {
     assertEquals("TABLE_ALREADY_EXISTS", ex.getErrorClass());
   }
 
-  @ParameterizedTest
+  @ParameterizedTest(name = "pathBased={0}, operation={1}")
   @CsvSource({
     "false, CREATE",
     "true, CREATE",
@@ -1135,7 +1136,7 @@ public abstract class SparkLanceNamespaceTestBase {
     "false, CORTAS",
     "true, CORTAS"
   })
-  public void testCreateTablePropertiesPersist(boolean pathBased, String operation)
+  public void testCreatePersistsTableProperties(boolean pathBased, String operation)
       throws Exception {
     String tableName = generateTableName("create_properties");
     String path = tempDir.resolve(tableName + ".lance").toString();
@@ -1168,9 +1169,9 @@ public abstract class SparkLanceNamespaceTestBase {
     }
   }
 
-  @ParameterizedTest
+  @ParameterizedTest(name = "pathBased={0}, createOrReplace={1}")
   @CsvSource({"false, false", "true, false", "false, true", "true, true"})
-  public void testReplaceTablePropertiesPersist(boolean pathBased, boolean createOrReplace)
+  public void testReplaceMergesTableProperties(boolean pathBased, boolean createOrReplace)
       throws Exception {
     String tableName = generateTableName("replace_properties");
     String path = tempDir.resolve(tableName + ".lance").toString();
@@ -1213,7 +1214,7 @@ public abstract class SparkLanceNamespaceTestBase {
       assertEquals("yes", dataset.getConfig().get("app.added"));
       assertEquals(2, dataset.version());
     }
-    assertEquals(2, spark.table(fullName).first().getInt(0));
+    assertEquals(List.of(RowFactory.create(2)), spark.table(fullName).collectAsList());
   }
 
   @Test
