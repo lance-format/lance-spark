@@ -34,8 +34,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # S3 roots are isolated per run, but Glue tables share the same catalog and names.
+  group: spark-aws-glue-shared-catalog
+  cancel-in-progress: false
 
 env:
   # This env var is used by Swatinem/rust-cache@v2 for the cache
