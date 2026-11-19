@@ -19,7 +19,7 @@ import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, Sor
 import org.apache.spark.sql.catalyst.trees.TreeNode
 
 import java.lang.invoke.MethodType
-import java.lang.reflect.{InvocationTargetException, Method}
+import java.lang.reflect.{Constructor, InvocationTargetException, Method}
 
 /**
  * Builds and modifies Catalyst nodes without binding to their exact constructor signature.
@@ -36,7 +36,7 @@ object CatalystCompat {
   implicit class TreeNodeArgs[T <: TreeNode[_]](node: T) {
 
     /**
-     * Returns a copy of this node with the constructor argument read by `field` replaced by
+     * Returns a copy of this node with the product argument read by `field` replaced by
      * `value`, like a compiled `copy(field = value)`.
      *
      * The copy goes through [[TreeNode.makeCopy]], the reflective path Spark itself uses for every
@@ -51,9 +51,12 @@ object CatalystCompat {
       }
       val args = node.productIterator.map(_.asInstanceOf[AnyRef]).toArray
       val candidates = args.indices.filter(index => args(index) eq current)
+      val constructors = node.getClass.getConstructors.filter(_.getParameterCount >= args.length)
       // Several arguments may share the same instance (e.g. Nil or None); keep the one that the
       // accessor reads back from the copy.
-      val copies = candidates.map(index => copyReplacing(args, index, value))
+      val copies = candidates
+        .filter(index => acceptsReplacement(constructors, args, index, value))
+        .map(index => copyReplacing(args, index, value))
         .filter(copy => field(copy) eq value)
       copies match {
         case Seq(copy) => copy
@@ -68,6 +71,26 @@ object CatalystCompat {
 
     private def copyReplacing(args: Array[AnyRef], index: Int, value: AnyRef): T =
       node.makeCopy(args.updated(index, value)).asInstanceOf[T]
+
+    private def acceptsReplacement(
+        constructors: Array[Constructor[_]],
+        args: Array[AnyRef],
+        index: Int,
+        value: AnyRef): Boolean =
+      constructors.exists { constructor =>
+        constructor.getParameterTypes.take(args.length).zipWithIndex.forall {
+          case (parameterType, argumentIndex) =>
+            val argument = if (argumentIndex == index) value else args(argumentIndex)
+            accepts(parameterType, argument)
+        }
+      }
+
+    private def accepts(parameterType: Class[_], value: AnyRef): Boolean =
+      if (value == null) {
+        !parameterType.isPrimitive
+      } else {
+        MethodType.methodType(parameterType).wrap().returnType().isInstance(value)
+      }
   }
 
   def sort(order: Seq[SortOrder], global: Boolean, child: LogicalPlan): Sort =

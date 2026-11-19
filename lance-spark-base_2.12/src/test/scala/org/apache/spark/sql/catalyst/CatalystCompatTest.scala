@@ -15,9 +15,9 @@ package org.apache.spark.sql.catalyst
 
 import org.apache.spark.sql.catalyst.CatalystCompat.TreeNodeArgs
 import org.apache.spark.sql.catalyst.analysis.UnresolvedRelation
-import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, AttributeReference, SortOrder}
-import org.apache.spark.sql.catalyst.plans.logical.{LeafNode, LocalRelation, LogicalPlan, UnaryNode}
-import org.apache.spark.sql.types.IntegerType
+import org.apache.spark.sql.catalyst.expressions.{Alias, Ascending, Attribute, AttributeReference, SortOrder}
+import org.apache.spark.sql.catalyst.plans.logical.{LeafNode, LocalRelation, LogicalPlan, Project, UnaryNode}
+import org.apache.spark.sql.types.{IntegerType, MetadataBuilder}
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.Test
 
@@ -86,10 +86,39 @@ class CatalystCompatTest {
   }
 
   @Test
+  def withArgSelectsTheCompatibleConstructorArgumentWhenFieldsShareAnInstance(): Unit = {
+    val sharedRelation = UnresolvedRelation(Seq("target"))
+    val original =
+      CatalystCompat.appendDataByPosition(sharedRelation, sharedRelation, Map.empty[String, String])
+    val replacementQuery = Project(query.output, query)
+
+    val updated = original.withArg(_.query)(replacementQuery)
+
+    assertSame(sharedRelation, updated.table)
+    assertSame(replacementQuery, updated.query)
+  }
+
+  @Test
   def withArgReturnsTheSameNodeWhenTheValueIsUnchanged(): Unit = {
     val original = vendorWrite(writeOptions = Map("k" -> "v"))
 
     assertSame(original, original.withArg(_.writeOptions)(original.writeOptions))
+  }
+
+  @Test
+  def withArgPreservesArgumentsOutsideProductIterator(): Unit = {
+    val metadata = new MetadataBuilder().putString("marker", "preserved").build()
+    val original = Alias(query.output.head, "before")(
+      qualifier = Seq("source"),
+      explicitMetadata = Some(metadata))
+
+    val updated = original.withArg(_.name)("after")
+
+    assertEquals("after", updated.name)
+    assertSame(original.child, updated.child)
+    assertEquals(original.exprId, updated.exprId)
+    assertEquals(original.qualifier, updated.qualifier)
+    assertEquals(original.explicitMetadata, updated.explicitMetadata)
   }
 
   @Test
