@@ -59,6 +59,136 @@ public class LanceSparkWriteOptionsTest {
   private final String TEMP_URL = "file:///tmp/test";
 
   @Test
+  public void tableDefaults() {
+    Map<String, String> tuning = new HashMap<>();
+    tuning.put("max_row_per_file", "3");
+    tuning.put("max_rows_per_group", "2");
+    tuning.put("max_bytes_per_file", "4096");
+    tuning.put("batch_size", "16");
+    tuning.put("max_batch_bytes", "1024");
+    tuning.put("use_queued_write_buffer", "true");
+    tuning.put("queue_depth", "2");
+    tuning.put("use_large_var_types", "true");
+    tuning.put("blob_pack_file_size_threshold", "2048");
+    Map<String, String> properties = new HashMap<>(tuning);
+    properties.put("MAX_ROW_PER_FILE", properties.remove("max_row_per_file"));
+    properties.put("write_mode", "overwrite");
+    properties.put("branch", "audit");
+    properties.put("path", "different-path");
+    properties.put("secret_access_key", "not-a-storage-option");
+    properties.put("custom.Property", "metadata-only");
+    properties.put("transaction_properties", "not-json");
+    Map<String, String> catalog = Map.of("max_row_per_file", "1", "endpoint", "http://localhost");
+    Map<String, String> expected = new HashMap<>(catalog);
+    expected.putAll(tuning);
+    LanceSparkWriteOptions.Builder builder = LanceSparkWriteOptions.builder().datasetUri(TEMP_URL);
+    LanceSparkWriteOptions options =
+        builder.fromOptions(catalog, properties, Collections.emptyMap()).build();
+    assertEquals(expected, options.getStorageOptions());
+    assertEquals(LanceSparkWriteOptions.from(expected, TEMP_URL), options);
+    LanceSparkWriteOptions overridden =
+        builder
+            .fromOptions(
+                catalog,
+                properties,
+                Map.of("Max_Row_Per_File", "5", LanceConstant.BLOB_SOURCE_CONTEXTS_KEY, "internal"))
+            .build();
+    assertEquals(5, overridden.getMaxRowsPerFile());
+    assertFalse(overridden.getStorageOptions().containsKey(LanceConstant.BLOB_SOURCE_CONTEXTS_KEY));
+    assertEquals("3", properties.get("MAX_ROW_PER_FILE"));
+  }
+
+  @Test
+  public void tableDefaultValidation() {
+    Map<String, String> properties = new HashMap<>();
+    properties.put("option.batch_size", "0");
+    LanceSparkWriteOptions.Builder builder = LanceSparkWriteOptions.builder().datasetUri(TEMP_URL);
+    assertEquals(
+        8192,
+        builder
+            .fromOptions(Collections.emptyMap(), properties, Collections.emptyMap())
+            .build()
+            .getBatchSize());
+    properties.put("batch_size", "0");
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> builder.fromOptions(Collections.emptyMap(), properties, Collections.emptyMap()));
+    assertEquals(
+        4,
+        builder
+            .fromOptions(
+                Collections.emptyMap(), properties, Collections.singletonMap("BATCH_SIZE", "4"))
+            .build()
+            .getBatchSize());
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"catalog", "table", "operation"})
+  public void sourceValidation(String source) {
+    for (String key : Arrays.asList("batch_size", "max_batch_bytes")) {
+      String invalid = "0";
+      Map<String, String> catalog = new HashMap<>();
+      Map<String, String> table = new HashMap<>();
+      Map<String, String> operation = new HashMap<>();
+      Map<String, String> input =
+          source.equals("catalog") ? catalog : source.equals("table") ? table : operation;
+      input.put(key, invalid);
+      LanceSparkWriteOptions.Builder builder =
+          LanceSparkWriteOptions.builder().datasetUri(TEMP_URL);
+      IllegalArgumentException error =
+          assertThrows(
+              IllegalArgumentException.class, () -> builder.fromOptions(catalog, table, operation));
+      assertTrue(error.getMessage().contains(key), error.getMessage());
+      assertTrue(error.getMessage().contains(invalid), error.getMessage());
+      operation.put(key, "4");
+      LanceSparkWriteOptions options = builder.fromOptions(catalog, table, operation).build();
+      if (key.equals("batch_size")) {
+        assertEquals(4, options.getBatchSize());
+      } else {
+        assertEquals(4L, options.getMaxBatchBytes());
+      }
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"catalog", "table", "operation"})
+  public void booleanValues(String source) {
+    Map<String, String> catalog = new HashMap<>();
+    Map<String, String> table = new HashMap<>();
+    Map<String, String> operation = new HashMap<>();
+    Map<String, String> input =
+        source.equals("catalog") ? catalog : source.equals("table") ? table : operation;
+    input.put("use_queued_write_buffer", "not-a-boolean");
+    LanceSparkWriteOptions.Builder builder = LanceSparkWriteOptions.builder().datasetUri(TEMP_URL);
+    assertFalse(builder.fromOptions(catalog, table, operation).build().isUseQueuedWriteBuffer());
+    operation.put("use_queued_write_buffer", "TrUe");
+    assertTrue(builder.fromOptions(catalog, table, operation).build().isUseQueuedWriteBuffer());
+  }
+
+  @Test
+  public void conflictingDefaults() {
+    Map<String, String> properties = new HashMap<>();
+    properties.put("batch_size", "16");
+    properties.put("BATCH_SIZE", "32");
+    IllegalArgumentException error =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                LanceSparkWriteOptions.builder()
+                    .datasetUri(TEMP_URL)
+                    .fromOptions(Collections.emptyMap(), properties, Collections.emptyMap()));
+    assertTrue(error.getMessage().contains("Conflicting table defaults for batch_size"));
+    properties.put("BATCH_SIZE", "16");
+    assertEquals(
+        16,
+        LanceSparkWriteOptions.builder()
+            .datasetUri(TEMP_URL)
+            .fromOptions(Collections.emptyMap(), properties, Collections.emptyMap())
+            .build()
+            .getBatchSize());
+  }
+
+  @Test
   public void transactionPropertiesAreImmutableAndSerializable() throws Exception {
     Map<String, String> properties = new HashMap<>();
     properties.put("RequestID", "Case-Sensitive");

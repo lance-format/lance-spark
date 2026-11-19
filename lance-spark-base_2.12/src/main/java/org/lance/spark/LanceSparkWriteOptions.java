@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 
 /**
  * Write-specific options for Lance Spark connector.
@@ -131,6 +132,8 @@ public class LanceSparkWriteOptions implements Serializable {
     this.blobPackFileSizeThreshold = builder.blobPackFileSizeThreshold;
     this.storageOptions = new HashMap<>(builder.storageOptions);
     this.storageOptions.keySet().removeIf(TransactionProperties::isOption);
+    // Internal-only context is decoded by the writer, never forwarded to Lance storage.
+    this.storageOptions.remove(LanceConstant.BLOB_SOURCE_CONTEXTS_KEY);
     this.transactionProperties = builder.transactionProperties;
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
@@ -590,65 +593,103 @@ public class LanceSparkWriteOptions implements Serializable {
     }
 
     /**
-     * Parses options from a map, extracting write-specific settings.
+     * Resolves catalog defaults, supported table defaults, and per-operation options, in that
+     * order.
      *
-     * @param options the options map
+     * <p>Only tuning options are read from table properties. Spark's {@code option.} aliases,
+     * storage credentials, and operation selectors are not table defaults.
+     *
+     * @param defaults catalog options, including storage options
+     * @param tableProperties persisted table properties (or the staged table's properties)
+     * @param options explicit options for this operation
      * @return this builder
      */
-    public Builder fromOptions(Map<String, String> options) {
-      CaseInsensitiveStringMap references = new CaseInsensitiveStringMap(options);
+    public Builder fromOptions(
+        Map<String, String> defaults,
+        Map<String, String> tableProperties,
+        Map<String, String> options) {
+      Map<String, String> catalog = new HashMap<>(defaults);
+      catalog.keySet().removeIf(TransactionProperties::isOption);
+      return parseOptions(new LanceOptionParser(catalog, tableProperties, options), options);
+    }
+
+    /**
+     * Parses options from a map, extracting write-specific settings.
+     *
+     * @param rawOptions the options map
+     * @return this builder
+     */
+    public Builder fromOptions(Map<String, String> rawOptions) {
+      return parseOptions(
+          new LanceOptionParser(Collections.emptyMap(), Collections.emptyMap(), rawOptions),
+          rawOptions);
+    }
+
+    private Builder parseOptions(LanceOptionParser parser, Map<String, String> operationOptions) {
+      Map<String, String> rawOptions = parser.resolvedOptions();
+      CaseInsensitiveStringMap options = new CaseInsensitiveStringMap(rawOptions);
       Preconditions.checkArgument(
-          !references.containsKey(LanceSparkReadOptions.CONFIG_BRANCH),
+          !options.containsKey(LanceSparkReadOptions.CONFIG_BRANCH),
           "The branch option is read-only");
       Preconditions.checkArgument(
-          !references.containsKey(LanceSparkReadOptions.CONFIG_TAG), "The tag option is read-only");
-      this.storageOptions = new HashMap<>(options);
-      this.storageOptions.keySet().removeIf(TransactionProperties::isOption);
+          !options.containsKey(LanceSparkReadOptions.CONFIG_TAG), "The tag option is read-only");
       this.transactionProperties = Collections.emptyMap();
-      this.transactionProperties = TransactionProperties.fromOptions(options);
-      if (options.containsKey(CONFIG_WRITE_MODE)) {
-        this.writeMode = WriteMode.valueOf(options.get(CONFIG_WRITE_MODE).toUpperCase(Locale.ROOT));
-      }
-      if (options.containsKey(CONFIG_MAX_ROWS_PER_FILE)) {
-        this.maxRowsPerFile = Integer.parseInt(options.get(CONFIG_MAX_ROWS_PER_FILE));
-      }
-      if (options.containsKey(CONFIG_MAX_ROWS_PER_GROUP)) {
-        this.maxRowsPerGroup = Integer.parseInt(options.get(CONFIG_MAX_ROWS_PER_GROUP));
-      }
-      if (options.containsKey(CONFIG_MAX_BYTES_PER_FILE)) {
-        this.maxBytesPerFile = Long.parseLong(options.get(CONFIG_MAX_BYTES_PER_FILE));
-      }
-      if (options.containsKey(CONFIG_FILE_FORMAT_VERSION)) {
-        this.fileFormatVersion = options.get(CONFIG_FILE_FORMAT_VERSION);
-      }
-      if (options.containsKey(CONFIG_USE_QUEUED_WRITE_BUFFER)) {
-        this.useQueuedWriteBuffer =
-            Boolean.parseBoolean(options.get(CONFIG_USE_QUEUED_WRITE_BUFFER));
-      }
-      if (options.containsKey(CONFIG_QUEUE_DEPTH)) {
-        this.queueDepth = Integer.parseInt(options.get(CONFIG_QUEUE_DEPTH));
-      }
-      if (options.containsKey(CONFIG_BATCH_SIZE)) {
-        int parsedBatchSize = Integer.parseInt(options.get(CONFIG_BATCH_SIZE));
-        Preconditions.checkArgument(parsedBatchSize > 0, "batch_size must be positive");
-        this.batchSize = parsedBatchSize;
-      }
-      if (options.containsKey(CONFIG_ENABLE_STABLE_ROW_IDS)) {
-        this.enableStableRowIds = Boolean.parseBoolean(options.get(CONFIG_ENABLE_STABLE_ROW_IDS));
-      }
-      if (options.containsKey(CONFIG_USE_LARGE_VAR_TYPES)) {
-        this.useLargeVarTypes = Boolean.parseBoolean(options.get(CONFIG_USE_LARGE_VAR_TYPES));
-      }
-      if (options.containsKey(CONFIG_MAX_BATCH_BYTES)) {
-        long parsedMaxBatchBytes = Long.parseLong(options.get(CONFIG_MAX_BATCH_BYTES));
-        Preconditions.checkArgument(parsedMaxBatchBytes > 0, "max_batch_bytes must be positive");
-        this.maxBatchBytes = parsedMaxBatchBytes;
-      }
-      if (options.containsKey(CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD)) {
-        long parsed = Long.parseLong(options.get(CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD));
-        Preconditions.checkArgument(parsed > 0, "blob_pack_file_size_threshold must be positive");
-        this.blobPackFileSizeThreshold = parsed;
-      }
+      this.transactionProperties = TransactionProperties.fromOptions(operationOptions);
+      this.writeMode =
+          parser
+              .option(CONFIG_WRITE_MODE)
+              .parse(this.writeMode, raw -> WriteMode.valueOf(raw.toUpperCase(Locale.ROOT)));
+      this.maxRowsPerFile =
+          parser
+              .option(CONFIG_MAX_ROWS_PER_FILE)
+              .tableProperty(CONFIG_MAX_ROWS_PER_FILE)
+              .intValue(this.maxRowsPerFile);
+      this.maxRowsPerGroup =
+          parser
+              .option(CONFIG_MAX_ROWS_PER_GROUP)
+              .tableProperty(CONFIG_MAX_ROWS_PER_GROUP)
+              .intValue(this.maxRowsPerGroup);
+      this.maxBytesPerFile =
+          parser
+              .option(CONFIG_MAX_BYTES_PER_FILE)
+              .tableProperty(CONFIG_MAX_BYTES_PER_FILE)
+              .longValue(this.maxBytesPerFile);
+      this.fileFormatVersion =
+          parser.option(CONFIG_FILE_FORMAT_VERSION).stringValue(this.fileFormatVersion);
+      this.useQueuedWriteBuffer =
+          parser
+              .option(CONFIG_USE_QUEUED_WRITE_BUFFER)
+              .tableProperty(CONFIG_USE_QUEUED_WRITE_BUFFER)
+              .booleanValue(this.useQueuedWriteBuffer);
+      this.queueDepth =
+          parser
+              .option(CONFIG_QUEUE_DEPTH)
+              .tableProperty(CONFIG_QUEUE_DEPTH)
+              .intValue(this.queueDepth);
+      this.batchSize =
+          parser
+              .option(CONFIG_BATCH_SIZE)
+              .tableProperty(CONFIG_BATCH_SIZE)
+              .positiveIntValue(this.batchSize);
+      this.enableStableRowIds =
+          parser.option(CONFIG_ENABLE_STABLE_ROW_IDS).booleanValue(this.enableStableRowIds);
+      this.useLargeVarTypes =
+          parser
+              .option(CONFIG_USE_LARGE_VAR_TYPES)
+              .tableProperty(CONFIG_USE_LARGE_VAR_TYPES)
+              .booleanValue(this.useLargeVarTypes);
+      this.maxBatchBytes =
+          parser
+              .option(CONFIG_MAX_BATCH_BYTES)
+              .tableProperty(CONFIG_MAX_BATCH_BYTES)
+              .positiveLongValue(this.maxBatchBytes);
+      this.blobPackFileSizeThreshold =
+          parser
+              .option(CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD)
+              .tableProperty(CONFIG_BLOB_PACK_FILE_SIZE_THRESHOLD)
+              .positiveLongValue(this.blobPackFileSizeThreshold);
+      this.storageOptions = parser.resolvedOptions();
+      this.storageOptions.keySet().removeIf(TransactionProperties::isOption);
       return this;
     }
 
@@ -670,7 +711,8 @@ public class LanceSparkWriteOptions implements Serializable {
      */
     public Builder withCatalogDefaults(LanceSparkCatalogConfig catalogConfig) {
       // Merge storage options: catalog options are defaults, current options override
-      Map<String, String> merged = new HashMap<>(catalogConfig.getStorageOptions());
+      Map<String, String> merged = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+      merged.putAll(catalogConfig.getStorageOptions());
       merged.keySet().removeIf(TransactionProperties::isOption);
       merged.putAll(this.storageOptions);
       this.indexCacheBackend = catalogConfig.getIndexCacheBackend();

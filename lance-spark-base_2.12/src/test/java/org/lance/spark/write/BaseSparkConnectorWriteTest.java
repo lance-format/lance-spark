@@ -674,6 +674,36 @@ public abstract class BaseSparkConnectorWriteTest {
   }
 
   @Test
+  public void replaceDefaults() throws Exception {
+    String path = TestUtils.getDatasetUri(dbPath.toString(), "table_defaults");
+    String table = "lance.`" + path + "`";
+    spark.sql(
+        "CREATE TABLE "
+            + table
+            + " USING lance TBLPROPERTIES ('max_row_per_file'='3') "
+            + "AS SELECT * FROM range(0, 6, 1, 1)");
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(path)).build()) {
+      assertEquals(2, dataset.getFragments().size());
+    }
+    spark.sql("ALTER TABLE " + table + " SET TBLPROPERTIES ('max_row_per_file'='6')");
+    spark.sql("REPLACE TABLE " + table + " AS SELECT * FROM range(0, 6, 1, 1)");
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(path)).build()) {
+      assertEquals(1, dataset.getFragments().size());
+      assertEquals("6", dataset.getConfig().get("max_row_per_file"));
+    }
+    spark.sql("ALTER TABLE " + table + " UNSET TBLPROPERTIES ('max_row_per_file')");
+    spark.sql("INSERT INTO " + table + " SELECT * FROM range(0, 6, 1, 1)");
+    try (org.lance.Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(path)).build()) {
+      // The append inherits the catalog limit of one row per file after UNSET.
+      assertEquals(7, dataset.getFragments().size());
+    }
+    assertEquals(12, spark.table(table).count());
+  }
+
+  @Test
   public void replaceTableAsSelect(TestInfo testInfo) {
     String datasetName = testInfo.getTestMethod().get().getName();
     String path = TestUtils.getDatasetUri(dbPath.toString(), datasetName);

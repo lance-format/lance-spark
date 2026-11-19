@@ -32,6 +32,54 @@ import java.util.Optional;
 public class LanceSparkReadOptionsSerializationTest {
 
   @Test
+  public void tableDefaults() {
+    Map<String, String> tuning = new HashMap<>();
+    tuning.put("pushDownFilters", "false");
+    tuning.put("block_size", "4096");
+    tuning.put("index_cache_size", "12");
+    tuning.put("metadata_cache_size", "24");
+    tuning.put("batch_size", "16");
+    tuning.put("use_scalar_index", "false");
+    tuning.put("topN_push_down", "false");
+    tuning.put("runtime_filter_max_keys", "17");
+    tuning.put("runtime_filter_max_bytes", "2048");
+    tuning.put("arrow_batch_reads", "true");
+    Map<String, String> properties = new HashMap<>(tuning);
+    properties.put("BATCH_SIZE", properties.remove("batch_size"));
+    properties.put("tag", "missing-tag");
+    properties.put("version", "999");
+    properties.put("fullTextQuery", "not-json");
+    properties.put("executor_credential_refresh", "false");
+    properties.put("secret_access_key", "not-a-storage-option");
+    Map<String, String> catalog = Collections.singletonMap("batch_size", "8");
+    Map<String, String> expected = new HashMap<>(catalog);
+    expected.putAll(tuning);
+    LanceSparkReadOptions.Builder builder =
+        LanceSparkReadOptions.builder().datasetUri("/tmp/test.lance");
+    LanceSparkReadOptions options =
+        builder.fromOptions(catalog, properties, Collections.emptyMap()).build();
+    Assertions.assertEquals(expected, options.getStorageOptions());
+    Assertions.assertEquals(LanceSparkReadOptions.from(expected, "/tmp/test.lance"), options);
+    LanceSparkReadOptions overridden =
+        builder
+            .fromOptions(
+                catalog,
+                properties,
+                Map.of(
+                    "Batch_Size",
+                    "32",
+                    "runtime_filter_max_keys",
+                    "19",
+                    "arrow_batch_reads",
+                    "false"))
+            .build();
+    Assertions.assertEquals(32, overridden.getBatchSize());
+    Assertions.assertEquals(19, overridden.getRuntimeFilterMaxKeys());
+    Assertions.assertFalse(overridden.isArrowBatchReadsEnabled());
+    Assertions.assertEquals("16", properties.get("BATCH_SIZE"));
+  }
+
+  @Test
   public void testFullTextQuerySerializationRoundTrip() throws IOException, ClassNotFoundException {
     FullTextQuery fts =
         FullTextQuery.match(
