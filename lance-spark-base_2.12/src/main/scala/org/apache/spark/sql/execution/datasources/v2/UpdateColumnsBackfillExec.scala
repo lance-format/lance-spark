@@ -17,8 +17,9 @@ import org.apache.spark.sql.catalyst.{CatalystCompat, InternalRow}
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, Project}
 import org.apache.spark.sql.connector.catalog._
-import org.apache.spark.sql.types.{MetadataBuilder, StructType}
+import org.apache.spark.sql.types.{BinaryType, DataType, MetadataBuilder, StructType}
 import org.lance.spark.{LanceConstant, LanceDataset}
+import org.lance.spark.utils.BlobUtils
 
 /**
  * Execution plan for UPDATE COLUMNS FROM command.
@@ -105,7 +106,15 @@ object UpdateColumnsBackfillExec {
             .withMetadata(sourceField.metadata)
             .withMetadata(targetField.metadata)
             .build()
-          sourceField.copy(metadata = metadata)
+          val writeType =
+            if (BlobUtils.isBlobV2SparkField(targetField)) BinaryType else targetField.dataType
+          require(
+            DataType.equalsIgnoreNullability(sourceField.dataType, writeType),
+            s"UPDATE COLUMNS source '${sourceField.name}' has type ${sourceField.dataType}, expected $writeType")
+          sourceField.copy(
+            dataType = writeType,
+            nullable = targetField.nullable,
+            metadata = metadata)
         case _ =>
           sourceField
       }

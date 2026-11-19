@@ -18,11 +18,13 @@ import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceSpark;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.utils.Utils;
 import org.lance.spark.write.AddColumnsBackfillBatchWrite;
 import org.lance.spark.write.LanceBatchWrite;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.types.FloatingPointPrecision;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
@@ -38,7 +40,10 @@ import org.apache.spark.sql.connector.write.DataWriter;
 import org.apache.spark.sql.connector.write.DataWriterFactory;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
 import org.apache.spark.sql.functions;
+import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 import org.junit.jupiter.api.AfterEach;
@@ -205,6 +210,83 @@ public abstract class BaseAddColumnsBackfillTest {
             spark.sql(
                 String.format("alter table %s add columns id, new_col2 from tmp_view", fullTable)),
         "Can't add existed columns: id");
+  }
+
+  @Test
+  public void testNullFloat32VectorsPreserveRowsAndSupportUpdates() throws Exception {
+    prepareDataset();
+    spark.sql("INSERT INTO " + fullTable + " VALUES (10, 'text_10')");
+    List<Row> before =
+        spark.sql("SELECT id, text FROM " + fullTable + " ORDER BY id").collectAsList();
+    Metadata metadata = new MetadataBuilder().putLong("arrow.fixed-size-list.size", 1024L).build();
+    ArrayType floatArray = DataTypes.createArrayType(DataTypes.FloatType, false);
+    spark
+        .table(fullTable)
+        .where("id < 5")
+        .select(
+            functions.col("_rowaddr"),
+            functions.col("_fragid"),
+            functions.lit(null).cast(floatArray).as("embedding", metadata),
+            functions.lit(null).cast(floatArray).as("sparse_weights"))
+        .createOrReplaceTempView("null_vectors_source");
+    spark.sql(
+        "ALTER TABLE "
+            + fullTable
+            + " ADD COLUMNS embedding, sparse_weights FROM null_vectors_source");
+
+    assertEquals(
+        before, spark.sql("SELECT id, text FROM " + fullTable + " ORDER BY id").collectAsList());
+    for (Row row :
+        spark.sql("SELECT embedding, sparse_weights FROM " + fullTable).collectAsList()) {
+      assertTrue(row.isNullAt(0));
+      assertTrue(row.isNullAt(1));
+    }
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    LanceDataset table =
+        (LanceDataset) catalog.loadTable(Identifier.of(new String[] {"default"}, tableName));
+    try (org.lance.Dataset dataset = Utils.openDatasetBuilder(table.readOptions()).build()) {
+      assertTrue(dataset.getFragments().size() > 1);
+      Field embedding = dataset.getSchema().findField("embedding");
+      assertEquals(new ArrowType.FixedSizeList(1024), embedding.getType());
+      assertEquals(
+          new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE),
+          embedding.getChildren().get(0).getType());
+      Field sparseWeights = dataset.getSchema().findField("sparse_weights");
+      assertEquals(ArrowType.List.INSTANCE, sparseWeights.getType());
+      assertEquals(
+          new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE),
+          sparseWeights.getChildren().get(0).getType());
+    }
+
+    spark
+        .table(fullTable)
+        .where("id = 2")
+        .select(
+            functions.col("_rowaddr"),
+            functions.col("_fragid"),
+            functions.expr("array_repeat(CAST(0.25 AS FLOAT), 1024)").as("embedding", metadata),
+            functions.expr("array(CAST(0.5 AS FLOAT))").as("sparse_weights"))
+        .createOrReplaceTempView("vectors_update_source");
+    spark.sql(
+        "ALTER TABLE "
+            + fullTable
+            + " UPDATE COLUMNS embedding, sparse_weights FROM vectors_update_source");
+    List<Row> after =
+        spark
+            .sql("SELECT id, text, embedding, sparse_weights FROM " + fullTable + " ORDER BY id")
+            .collectAsList();
+    assertEquals(before.size(), after.size());
+    for (Row row : after) {
+      assertEquals("text_" + row.getInt(0), row.getString(1));
+      if (row.getInt(0) == 2) {
+        assertEquals(Collections.nCopies(1024, 0.25f), row.getList(2));
+        assertEquals(Collections.singletonList(0.5f), row.getList(3));
+      } else {
+        assertTrue(row.isNullAt(2));
+        assertTrue(row.isNullAt(3));
+      }
+    }
   }
 
   @Test
