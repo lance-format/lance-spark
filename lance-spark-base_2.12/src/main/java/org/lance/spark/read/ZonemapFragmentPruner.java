@@ -660,6 +660,34 @@ public final class ZonemapFragmentPruner {
     }
   }
 
+  /**
+   * Compares {@code a} with {@code b}, strings by code point, which is how Lance orders zone
+   * bounds. Java's {@link String#compareTo} compares UTF-16 code units, which orders a character
+   * above U+FFFF, stored as a surrogate pair, below U+E000 to U+FFFF.
+   */
+  @SuppressWarnings("unchecked")
+  private static int compare(Object a, Object b) {
+    if (a instanceof String && b instanceof String) {
+      return compareCodePoints((String) a, (String) b);
+    }
+    return ((Comparable<Object>) a).compareTo(b);
+  }
+
+  static int compareCodePoints(String a, String b) {
+    int i = 0;
+    int j = 0;
+    while (i < a.length() && j < b.length()) {
+      int x = a.codePointAt(i);
+      int y = b.codePointAt(j);
+      if (x != y) {
+        return Integer.compare(x, y);
+      }
+      i += Character.charCount(x);
+      j += Character.charCount(y);
+    }
+    return Integer.compare(a.length() - i, b.length() - j);
+  }
+
   @SuppressWarnings("unchecked")
   private static boolean zoneMatchesComparison(
       ZoneStats zone, Comparable<Object> target, ComparisonType type) {
@@ -676,15 +704,15 @@ public final class ZonemapFragmentPruner {
     // Let matchingRanges fall back for the whole fragment when the types cannot be compared.
     switch (type) {
       case EQUALS:
-        return target.compareTo(min) >= 0 && target.compareTo(max) <= 0;
+        return compare(target, min) >= 0 && compare(target, max) <= 0;
       case LESS_THAN:
-        return min.compareTo(target) < 0;
+        return compare(min, target) < 0;
       case LESS_THAN_OR_EQUAL:
-        return min.compareTo(target) <= 0;
+        return compare(min, target) <= 0;
       case GREATER_THAN:
-        return max.compareTo(target) > 0;
+        return compare(max, target) > 0;
       case GREATER_THAN_OR_EQUAL:
-        return max.compareTo(target) >= 0;
+        return compare(max, target) >= 0;
       default:
         return true;
     }
@@ -700,13 +728,12 @@ public final class ZonemapFragmentPruner {
    * materializes {@code ZoneStats.min/max} with every integer width boxed as {@code Long} and every
    * floating-point width as {@code Double}. Widen narrow Java boxed primitives (Byte / Short /
    * Integer / Float) to match — otherwise an Integer literal against a Long zone bound would throw
-   * {@code ClassCastException} from {@code Comparable.compareTo}. Also normalizes {@code String} →
-   * {@code UTF8String} so string comparisons use Spark's UTF-8 binary ordering, including
-   * supplementary Unicode characters.
+   * {@code ClassCastException} from {@code Comparable.compareTo}. Also normalizes {@code
+   * UTF8String} → {@code String} for the same reason.
    */
   private static Object normalizeLiteral(Object value) {
-    if (value instanceof String) {
-      return UTF8String.fromString((String) value);
+    if (value instanceof UTF8String) {
+      return value.toString();
     }
     if (value instanceof Byte || value instanceof Short || value instanceof Integer) {
       return ((Number) value).longValue();
