@@ -277,7 +277,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
           .asCaseSensitiveMap()
           .forEach(
               (key, value) -> {
-                if (key.startsWith("hadoop.") && value != null) {
+                if (key.regionMatches(true, 0, "hadoop.", 0, "hadoop.".length()) && value != null) {
                   conf.set(key.substring("hadoop.".length()), value);
                 }
               });

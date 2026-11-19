@@ -446,7 +446,8 @@ spark-shell \
 Lance supports both Hive 2.x and Hive 3.x metastores for metadata management. Hive namespaces inherit
 Spark's Hadoop configuration at catalog initialization. Use `spark.hadoop.*` for global settings and
 `spark.sql.catalog.<name>.hadoop.*` for catalog-specific settings. Catalog-specific settings take
-precedence and apply only to that catalog. Preserve the original case of Hadoop property names.
+precedence and apply only to that catalog. The `hadoop.` prefix is case-insensitive; preserve the original
+case of the Hadoop property name after the prefix.
 
 ```ini
 spark.hadoop.hive.metastore.uris=thrift://global-hms:9083

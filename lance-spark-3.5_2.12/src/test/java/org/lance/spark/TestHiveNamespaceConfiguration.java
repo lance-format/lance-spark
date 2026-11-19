@@ -28,12 +28,15 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 public class TestHiveNamespaceConfiguration {
   @ParameterizedTest
   @CsvSource({
-    "hive.metastore.uris,thrift://global:9083,,,thrift://global:9083",
-    "hive.metastore.uris,thrift://global:9083,thrift://session:9083,,thrift://session:9083",
-    "hive.metastore.uris,thrift://global:9083,thrift://session:9083,thrift://catalog:9083,thrift://catalog:9083",
-    "fs.AbstractFileSystem.s3a.impl,GlobalFs,SessionFs,CatalogFs,CatalogFs"
+    "hadoop.,hive.metastore.uris,thrift://global:9083,,,thrift://global:9083",
+    "hadoop.,hive.metastore.uris,thrift://global:9083,thrift://session:9083,,thrift://session:9083",
+    "hadoop.,hive.metastore.uris,thrift://global:9083,thrift://session:9083,thrift://catalog:9083,thrift://catalog:9083",
+    "hadoop.,fs.AbstractFileSystem.s3a.impl,GlobalFs,SessionFs,CatalogFs,CatalogFs",
+    "HADOOP.,hive.metastore.uris,thrift://global:9083,thrift://session:9083,thrift://catalog:9083,thrift://catalog:9083",
+    "HaDoOp.,fs.AbstractFileSystem.s3a.impl,GlobalFs,SessionFs,CatalogFs,CatalogFs"
   })
   public void testHadoopConfigurationAndCatalogOverride(
+      String prefix,
       String key,
       String globalValue,
       String sessionValue,
@@ -51,7 +54,7 @@ public class TestHiveNamespaceConfiguration {
       }
       Map<String, String> options = new HashMap<>();
       if (catalogValue != null) {
-        options.put("hadoop." + key, catalogValue);
+        options.put(prefix + key, catalogValue);
       }
       Map<String, String> namespaceOptions =
           BaseLanceNamespaceSparkCatalog.buildNamespaceOptions(
