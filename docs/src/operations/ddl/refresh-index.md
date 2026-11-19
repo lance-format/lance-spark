@@ -176,8 +176,15 @@ rebuild is the fix there.
   that costs the index its coverage depends on what the index stores. `zonemap` and `bloomfilter`
   record physical row addresses, which the rewrite invalidates, so they lose coverage and need a
   refresh afterwards. `btree`, `bitmap`, `label_list`, `ngram`, `rtree` and `fts` record row ids,
-  which follow their rows, so compaction carries their coverage over and a refresh reports
+  which follow their rows, or, for `btree` on tables with stable row ids, row addresses that
+  compaction remaps, so compaction carries their coverage over and a refresh reports
   `fragments_indexed = 0`.
+- **Upgrading `btree` Indexes on Stable-Row-ID Tables to Lance 14+**: on tables with
+  `enable_stable_row_ids = true`, BTree segments built before Lance 14 store row ids while Lance 14+
+  segments store physical row addresses. Existing indexes remain readable, but `REFRESH INDEX` fails
+  with `mixes row-ID and row-address segments`. Rebuild each such index once under the same name with
+  [CREATE INDEX](./create-index.md) (which scans the entire table) before resuming incremental
+  `REFRESH INDEX`.
 - **Stale `zonemap` Coverage**: a partially covered `zonemap` index falls back to scanning uncovered
   fragments in full, so query results stay complete but filtered queries do more I/O than a fully
   covered index. Refresh after appending or compacting to restore selective reads.

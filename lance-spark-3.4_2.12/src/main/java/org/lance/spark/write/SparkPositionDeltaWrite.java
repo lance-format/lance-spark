@@ -211,9 +211,9 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
                 .writeParams(
                     LanceRuntime.mergeStorageOptions(
                         writeOptions.getStorageOptions(), initialStorageOptions));
-        String fileFormatVersion = writeOptions.getFileFormatVersion();
-        if (fileFormatVersion != null) {
-          commitBuilder.storageFormat(fileFormatVersion);
+        String explicitFileFormatVersion = writeOptions.getExplicitFileFormatVersion();
+        if (explicitFileFormatVersion != null) {
+          commitBuilder.storageFormat(explicitFileFormatVersion);
         }
         if (dataset.hasStableRowIds()
             || Boolean.TRUE.equals(writeOptions.getEnableStableRowIds())) {
@@ -228,7 +228,11 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
               .namespaceClientManagedVersioning(true);
         }
         try (Transaction txn =
-                new Transaction.Builder().readVersion(version).operation(update).build();
+                new Transaction.Builder()
+                    .readVersion(version)
+                    .operation(update)
+                    .transactionProperties(writeOptions.getTransactionProperties())
+                    .build();
             Dataset committed = commitBuilder.execute(txn)) {
           // auto-close txn and committed dataset
         }
@@ -295,7 +299,11 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
             try (ArrowArrayStream arrowStream =
                 ArrowArrayStream.allocateNew(LanceRuntime.allocator())) {
               Data.exportArrayStream(LanceRuntime.allocator(), writeBuffer, arrowStream);
-              return Fragment.create(writeOptions.getDatasetUri(), arrowStream, params);
+              return Fragment.write()
+                  .datasetUri(writeOptions.getDatasetUri())
+                  .data(arrowStream)
+                  .writeParams(params)
+                  .execute();
             }
           };
       FutureTask<List<FragmentMetadata>> fragmentCreationTask =

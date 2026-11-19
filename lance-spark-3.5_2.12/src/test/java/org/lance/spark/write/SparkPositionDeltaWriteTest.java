@@ -16,7 +16,6 @@ package org.lance.spark.write;
 import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.FragmentMetadata;
-import org.lance.WriteParams;
 import org.lance.fragment.RowIdMeta;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LancePositionDeltaOperation;
@@ -166,8 +165,7 @@ public class SparkPositionDeltaWriteTest {
     String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
 
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
-      Dataset.create(allocator, datasetUri, ARROW_SCHEMA, new WriteParams.Builder().build())
-          .close();
+      Dataset.write().allocator(allocator).uri(datasetUri).schema(ARROW_SCHEMA).execute().close();
 
       StructType sparkSchema = LanceArrowUtils.fromArrowSchema(ARROW_SCHEMA);
       SparkPositionDeltaWrite write =
@@ -432,11 +430,12 @@ public class SparkPositionDeltaWriteTest {
     String name = testInfo.getTestMethod().get().getName() + "_" + stableRowIds;
     String uri = TestUtils.getDatasetUri(tempDir.toString(), name);
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
-      Dataset.create(
-              allocator,
-              uri,
-              ARROW_SCHEMA,
-              new WriteParams.Builder().withEnableStableRowIds(stableRowIds).build())
+      Dataset.write()
+          .allocator(allocator)
+          .uri(uri)
+          .schema(ARROW_SCHEMA)
+          .enableStableRowIds(stableRowIds)
+          .execute()
           .close();
     }
     for (int fragment = 0; fragment < 2; fragment++) {

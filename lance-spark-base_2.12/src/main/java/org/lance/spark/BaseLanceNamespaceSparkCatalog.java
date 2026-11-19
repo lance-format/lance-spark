@@ -173,6 +173,21 @@ public abstract class BaseLanceNamespaceSparkCatalog
     return CreateTableSpec.resolve(schema, properties, catalogConfig.getFileFormatVersion());
   }
 
+  /** Replace-time schema and file format version resolution for an existing dataset. */
+  private CreateTableSpec resolveReplaceSpec(
+      StructType schema, Map<String, String> properties, Dataset existingDataset) {
+    try {
+      return CreateTableSpec.resolveForReplace(
+          schema,
+          properties,
+          catalogConfig.getFileFormatVersion(),
+          existingDataset.getLanceFileFormatVersion());
+    } catch (RuntimeException e) {
+      existingDataset.close();
+      throw e;
+    }
+  }
+
   /**
    * Extracts the full dataset URI from an identifier. For LanceIdentifier, uses location(). For
    * path-based regular identifiers, reconstructs the path from namespace and name.
@@ -1305,25 +1320,20 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     ResolvedTable resolved = resolveIdentifier(ident);
     DescribeTableResponse describeResponse = resolved.describeResponse;
-    CreateTableSpec spec = resolveCreateSpec(schema, properties);
-    StructType processedSchema = spec.schema();
-    String fileFormatVersion = spec.fileFormatVersion();
     Map<String, String> initialStorageOptions = describeResponse.getStorageOptions();
     boolean managedVersioning = Boolean.TRUE.equals(describeResponse.getManagedVersioning());
 
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     Dataset ds = Utils.openDatasetBuilder(resolved.readOptions).build();
+    CreateTableSpec spec = resolveReplaceSpec(schema, properties, ds);
+    StructType processedSchema = spec.schema();
+    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
-    // Use specified file format version, or fall back to existing table's version
-    if (fileFormatVersion == null) {
-      fileFormatVersion = ds.getLanceFileFormatVersion();
-    }
     final StagedCommitOptions commitOptions =
         StagedCommitOptions.of(
             merged,
             catalogConfig.isEnableStableRowIds(properties),
-            fileFormatVersion,
+            spec.fileFormatVersion(),
             namespace,
             resolved.tableIdList,
             managedVersioning);
@@ -1337,7 +1347,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         namespaceProperties,
         managedVersioning,
         stagedCommit,
-        fileFormatVersion,
+        spec.fragmentFileFormatVersion(),
         copyUserTableProperties(properties),
         shardingSpec);
   }
@@ -1350,9 +1360,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
       ShardingSpec shardingSpec)
       throws NoSuchTableException {
     String datasetUri = getDatasetUri(ident);
-    CreateTableSpec spec = resolveCreateSpec(schema, properties);
-    StructType processedSchema = spec.schema();
-    String fileFormatVersion = spec.fileFormatVersion();
 
     LanceSparkReadOptions readOptions =
         createReadOptions(
@@ -1365,16 +1372,14 @@ public abstract class BaseLanceNamespaceSparkCatalog
       throw new NoSuchTableException(ident);
     }
 
-    // Use specified file format version, or fall back to existing table's version
-    if (fileFormatVersion == null) {
-      fileFormatVersion = ds.getLanceFileFormatVersion();
-    }
+    CreateTableSpec spec = resolveReplaceSpec(schema, properties, ds);
+    StructType processedSchema = spec.schema();
     Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     final StagedCommitOptions commitOptions =
         StagedCommitOptions.pathBased(
             catalogConfig.getStorageOptions(),
             catalogConfig.isEnableStableRowIds(properties),
-            fileFormatVersion);
+            spec.fileFormatVersion());
     StagedCommit stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
     stagedCommit.setShardingSpec(shardingSpec);
     return createStagedDataset(
@@ -1385,7 +1390,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
         null,
         false,
         stagedCommit,
-        fileFormatVersion,
+        spec.fragmentFileFormatVersion(),
         copyUserTableProperties(properties),
         shardingSpec);
   }
@@ -1412,16 +1417,15 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     Identifier actualIdent = transformIdentifierForApi(ident);
     List<String> tableIdList = buildTableId(actualIdent);
-    CreateTableSpec spec = resolveCreateSpec(schema, properties);
-    StructType processedSchema = spec.schema();
-    String fileFormatVersion = spec.fileFormatVersion();
 
     boolean exists = tableExists(ident);
     String location;
     Map<String, String> initialStorageOptions;
     boolean managedVersioning;
+    CreateTableSpec createSpec = null;
 
     if (!exists) {
+      createSpec = resolveCreateSpec(schema, properties);
       DeclareTableRequest declareRequest = new DeclareTableRequest();
       tableIdList.forEach(declareRequest::addIdItem);
       if (userLocation != null && !userLocation.trim().isEmpty()) {
@@ -1449,30 +1453,31 @@ public abstract class BaseLanceNamespaceSparkCatalog
             Optional.of(tableIdList),
             name);
 
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
     Map<String, String> merged =
         LanceRuntime.mergeStorageOptions(catalogConfig.getStorageOptions(), initialStorageOptions);
+    CreateTableSpec spec;
     StagedCommit stagedCommit;
     if (exists) {
       Dataset ds = Utils.openDatasetBuilder(readOptions).build();
-      if (fileFormatVersion == null) {
-        fileFormatVersion = ds.getLanceFileFormatVersion();
-      }
+      spec = resolveReplaceSpec(schema, properties, ds);
+      Schema arrowSchema = LanceArrowUtils.toArrowSchema(spec.schema(), "UTC", true);
       final StagedCommitOptions commitOptions =
           StagedCommitOptions.of(
               merged,
               catalogConfig.isEnableStableRowIds(properties),
-              fileFormatVersion,
+              spec.fileFormatVersion(),
               namespace,
               tableIdList,
               managedVersioning);
       stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
     } else {
+      spec = createSpec;
+      Schema arrowSchema = LanceArrowUtils.toArrowSchema(spec.schema(), "UTC", true);
       final StagedCommitOptions commitOptions =
           StagedCommitOptions.of(
               merged,
               catalogConfig.isEnableStableRowIds(properties),
-              fileFormatVersion,
+              spec.fileFormatVersion(),
               namespace,
               tableIdList,
               managedVersioning);
@@ -1481,13 +1486,13 @@ public abstract class BaseLanceNamespaceSparkCatalog
     stagedCommit.setShardingSpec(shardingSpec);
     return createStagedDataset(
         readOptions,
-        processedSchema,
+        spec.schema(),
         initialStorageOptions,
         namespaceImpl,
         namespaceProperties,
         managedVersioning,
         stagedCommit,
-        fileFormatVersion,
+        spec.fragmentFileFormatVersion(),
         copyUserTableProperties(properties),
         shardingSpec);
   }
@@ -1499,46 +1504,44 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Map<String, String> properties,
       ShardingSpec shardingSpec) {
     String datasetUri = getDatasetUri(ident);
-    CreateTableSpec spec = resolveCreateSpec(schema, properties);
-    StructType processedSchema = spec.schema();
-    String fileFormatVersion = spec.fileFormatVersion();
 
     LanceSparkReadOptions readOptions =
         createReadOptions(
             datasetUri, catalogConfig, Optional.empty(), Optional.empty(), Optional.empty(), name);
 
     boolean exists = tableExistsAtPath(ident);
-    Schema arrowSchema = LanceArrowUtils.toArrowSchema(processedSchema, "UTC", true);
+    CreateTableSpec spec;
     StagedCommit stagedCommit;
     if (exists) {
       Dataset ds = Utils.openDatasetBuilder(readOptions).build();
-      if (fileFormatVersion == null) {
-        fileFormatVersion = ds.getLanceFileFormatVersion();
-      }
+      spec = resolveReplaceSpec(schema, properties, ds);
+      Schema arrowSchema = LanceArrowUtils.toArrowSchema(spec.schema(), "UTC", true);
       final StagedCommitOptions commitOptions =
           StagedCommitOptions.pathBased(
               catalogConfig.getStorageOptions(),
               catalogConfig.isEnableStableRowIds(properties),
-              fileFormatVersion);
+              spec.fileFormatVersion());
       stagedCommit = StagedCommit.forExistingTable(ds, arrowSchema, commitOptions);
     } else {
+      spec = resolveCreateSpec(schema, properties);
+      Schema arrowSchema = LanceArrowUtils.toArrowSchema(spec.schema(), "UTC", true);
       final StagedCommitOptions commitOptions =
           StagedCommitOptions.pathBased(
               catalogConfig.getStorageOptions(),
               catalogConfig.isEnableStableRowIds(properties),
-              fileFormatVersion);
+              spec.fileFormatVersion());
       stagedCommit = StagedCommit.forNewTable(arrowSchema, datasetUri, commitOptions);
     }
     stagedCommit.setShardingSpec(shardingSpec);
     return createStagedDataset(
         readOptions,
-        processedSchema,
+        spec.schema(),
         null,
         null,
         null,
         false,
         stagedCommit,
-        fileFormatVersion,
+        spec.fragmentFileFormatVersion(),
         copyUserTableProperties(properties),
         shardingSpec);
   }
@@ -1746,11 +1749,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
       boolean managedVersioning,
       List<String> tableIdList,
       boolean protectSchema) {
-    if (!managedVersioning && !protectSchema) {
-      dataset.updateConfig(config);
-      return;
-    }
-
     UpdateMap updateMap = UpdateMap.builder().updates(config).replace(true).build();
     UpdateConfig.Builder updateConfig = UpdateConfig.builder().configUpdates(updateMap);
     if (protectSchema) {
