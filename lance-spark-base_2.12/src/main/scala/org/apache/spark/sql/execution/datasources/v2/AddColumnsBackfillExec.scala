@@ -15,7 +15,7 @@ package org.apache.spark.sql.execution.datasources.v2
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Attribute
-import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, Project}
+import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, Project}
 import org.apache.spark.sql.connector.catalog._
 import org.lance.spark.{LanceConstant, LanceDataset}
 import org.lance.spark.utils.SchemaConverter
@@ -76,7 +76,7 @@ case class AddColumnsBackfillExec(
       Some(ident))
 
     val append =
-      AppendData.byPosition(
+      AppendDataCompat.byPosition(
         relation,
         actualQuery,
         writeOptions + (LanceConstant.BACKFILL_COLUMNS_KEY -> columnNames.mkString(",")))
