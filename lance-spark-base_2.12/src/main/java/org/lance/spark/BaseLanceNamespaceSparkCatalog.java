@@ -248,8 +248,8 @@ public abstract class BaseLanceNamespaceSparkCatalog
         || "org.lance.namespace.hive2.Hive2Namespace".equals(impl)
         || "org.lance.namespace.hive3.Hive3Namespace".equals(impl)) {
       SparkSession.active()
-          .sparkContext()
-          .hadoopConfiguration()
+          .sessionState()
+          .newHadoopConf()
           .forEach(
               entry -> {
                 String key = "hadoop." + entry.getKey();
