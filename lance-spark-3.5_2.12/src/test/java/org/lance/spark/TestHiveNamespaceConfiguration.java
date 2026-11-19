@@ -13,14 +13,15 @@
  */
 package org.lance.spark;
 
-import org.lance.namespace.LanceNamespace;
-
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import java.util.HashMap;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class TestHiveNamespaceConfiguration {
   @ParameterizedTest
@@ -31,31 +32,24 @@ public class TestHiveNamespaceConfiguration {
   })
   public void testHadoopConfigurationAndCatalogOverride(
       String expectedUri, String sessionUri, String catalogUri) {
-    // This test source is shared with modules that do not include the Hive test dependencies.
-    assumeTrue(
-        getClass().getClassLoader().getResource("org/lance/namespace/hive2/Hive2Namespace.class")
-            != null);
     SparkSession spark =
         SparkSession.builder()
             .master("local")
             .appName("hive-namespace-config-test")
             .config("spark.hadoop.hive.metastore.uris", "thrift://global:9083")
-            .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
-            .config("spark.sql.catalog.lance.impl", "hive2")
             .getOrCreate();
     try {
       if (sessionUri != null) {
         spark.sql("SET hive.metastore.uris=" + sessionUri);
       }
+      Map<String, String> options = new HashMap<>();
       if (catalogUri != null) {
-        spark.sql("SET spark.sql.catalog.lance.hadoop.hive.metastore.uris=" + catalogUri);
+        options.put("hadoop.hive.metastore.uris", catalogUri);
       }
-      BaseLanceNamespaceSparkCatalog catalog =
-          (BaseLanceNamespaceSparkCatalog) spark.sessionState().catalogManager().catalog("lance");
-      LanceNamespace namespace =
-          LanceRuntime.getOrCreateNamespace(
-              catalog.getNamespaceImpl(), catalog.getNamespaceProperties());
-      assertTrue(namespace.namespaceId().contains(expectedUri), namespace.namespaceId());
+      Map<String, String> namespaceOptions =
+          BaseLanceNamespaceSparkCatalog.buildNamespaceOptions(
+              "hive2", new CaseInsensitiveStringMap(options));
+      assertEquals(expectedUri, namespaceOptions.get("hadoop.hive.metastore.uris"));
     } finally {
       spark.stop();
     }

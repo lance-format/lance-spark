@@ -242,22 +242,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
     }
 
     // Initialize the namespace with proper configuration
-    Map<String, String> namespaceOptions = new HashMap<>(options);
-    if ("hive2".equals(impl)
-        || "hive3".equals(impl)
-        || "org.lance.namespace.hive2.Hive2Namespace".equals(impl)
-        || "org.lance.namespace.hive3.Hive3Namespace".equals(impl)) {
-      SparkSession.active()
-          .sessionState()
-          .newHadoopConf()
-          .forEach(
-              entry -> {
-                String key = "hadoop." + entry.getKey();
-                if (!options.containsKey(key)) {
-                  namespaceOptions.put(key, entry.getValue());
-                }
-              });
-    }
+    Map<String, String> namespaceOptions = buildNamespaceOptions(impl, options);
 
     // Save namespace impl and properties for serialization to workers
     this.namespaceImpl = impl;
@@ -276,6 +261,27 @@ public abstract class BaseLanceNamespaceSparkCatalog
       // Default: multi-level namespace mode (manifest mode)
       this.singleLevelNs = false;
     }
+  }
+
+  static Map<String, String> buildNamespaceOptions(String impl, CaseInsensitiveStringMap options) {
+    Map<String, String> namespaceOptions = new HashMap<>(options);
+    if ("hive2".equals(impl)
+        || "hive3".equals(impl)
+        || "org.lance.namespace.hive2.Hive2Namespace".equals(impl)
+        || "org.lance.namespace.hive3.Hive3Namespace".equals(impl)) {
+      SparkSession.active()
+          .sessionState()
+          .newHadoopConf()
+          .forEach(
+              entry -> {
+                String key = "hadoop." + entry.getKey();
+                if (!options.containsKey(key)) {
+                  namespaceOptions.put(key, entry.getValue());
+                }
+              });
+    }
+
+    return namespaceOptions;
   }
 
   @Override
