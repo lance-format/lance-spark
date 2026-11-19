@@ -88,12 +88,6 @@ jobs:
           java-version: 17
           mvn-mirrors: google-maven-central:https://maven-central.storage-download.googleapis.com/maven2:central
           cache: "maven"
-          cache-read-only: true
-          cache-dependency-path: |
-            **/pom.xml
-            **/.mvn/wrapper/maven-wrapper.properties
-            **/.mvn/extensions.xml
-            .github/workflows/spark.yml
       - name: Resolve REST namespace
         id: rest
         if: ${{ contains(env.SEARCH_TEST_BACKENDS, 'rest-dir') }}

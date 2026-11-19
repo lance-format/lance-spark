@@ -63,12 +63,6 @@ jobs:
           java-version: 17
           mvn-mirrors: google-maven-central:https://maven-central.storage-download.googleapis.com/maven2:central
           cache: "maven"
-          cache-read-only: true
-          cache-dependency-path: |
-            **/pom.xml
-            **/.mvn/wrapper/maven-wrapper.properties
-            **/.mvn/extensions.xml
-            .github/workflows/spark.yml
       - name: Check code style
         run: make lint
 
@@ -84,13 +78,7 @@ jobs:
           distribution: temurin
           java-version: 17
           mvn-mirrors: google-maven-central:https://maven-central.storage-download.googleapis.com/maven2:central
-          # Only the full build populates the shared cache, so lint cannot save an incomplete one.
           cache: "maven"
-          cache-dependency-path: |
-            **/pom.xml
-            **/.mvn/wrapper/maven-wrapper.properties
-            **/.mvn/extensions.xml
-            .github/workflows/spark.yml
       - name: Install all modules
         run: make install-all
 
@@ -125,12 +113,6 @@ jobs:
           java-version: 17
           mvn-mirrors: google-maven-central:https://maven-central.storage-download.googleapis.com/maven2:central
           cache: "maven"
-          cache-read-only: true
-          cache-dependency-path: |
-            **/pom.xml
-            **/.mvn/wrapper/maven-wrapper.properties
-            **/.mvn/extensions.xml
-            .github/workflows/spark.yml
       - name: Install base
         run: make install-base SCALA_VERSION=${{ matrix.scala-version }}
       - name: Run tests
@@ -167,12 +149,6 @@ jobs:
           java-version: 17
           mvn-mirrors: google-maven-central:https://maven-central.storage-download.googleapis.com/maven2:central
           cache: "maven"
-          cache-read-only: true
-          cache-dependency-path: |
-            **/pom.xml
-            **/.mvn/wrapper/maven-wrapper.properties
-            **/.mvn/extensions.xml
-            .github/workflows/spark.yml
       - name: Run integration tests
         uses: ./.github/actions/pytest-integration
         with:
