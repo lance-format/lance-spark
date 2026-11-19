@@ -63,6 +63,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  MVNW_REPOURL: https://maven-central.storage-download.googleapis.com/maven2
   SPARK_VERSION: ${{ github.event.inputs['spark-version'] || '3.5' }}
   SCALA_VERSION: ${{ github.event.inputs['scala-version'] || '2.13' }}
   SEARCH_TEST_BACKENDS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.backends || 'local,rest-dir' }}
@@ -85,6 +86,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+          mvn-mirrors: google-maven-central:https://maven-central.storage-download.googleapis.com/maven2:central
           cache: "maven"
           cache-read-only: true
           cache-dependency-path: |

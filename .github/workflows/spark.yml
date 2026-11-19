@@ -35,6 +35,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  # The wrapper downloads Maven before settings.xml can configure dependency mirrors.
+  MVNW_REPOURL: https://maven-central.storage-download.googleapis.com/maven2
   # This env var is used by Swatinem/rust-cache@v2 for the cache
   # key, so we set it to make sure it is always consistent.
   CARGO_TERM_COLOR: always
@@ -59,6 +61,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+          mvn-mirrors: google-maven-central:https://maven-central.storage-download.googleapis.com/maven2:central
           cache: "maven"
           cache-read-only: true
           cache-dependency-path: |
@@ -80,6 +83,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+          mvn-mirrors: google-maven-central:https://maven-central.storage-download.googleapis.com/maven2:central
           # Only the full build populates the shared cache, so lint cannot save an incomplete one.
           cache: "maven"
           cache-dependency-path: |
@@ -119,6 +123,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+          mvn-mirrors: google-maven-central:https://maven-central.storage-download.googleapis.com/maven2:central
           cache: "maven"
           cache-read-only: true
           cache-dependency-path: |
@@ -160,6 +165,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+          mvn-mirrors: google-maven-central:https://maven-central.storage-download.googleapis.com/maven2:central
           cache: "maven"
           cache-read-only: true
           cache-dependency-path: |
