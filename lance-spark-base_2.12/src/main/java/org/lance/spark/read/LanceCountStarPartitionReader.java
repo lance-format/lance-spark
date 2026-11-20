@@ -87,6 +87,7 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
       metricsTracker.addNumFragmentsScanned(fragmentIds.size());
 
       ScanOptions.Builder scanOptionsBuilder = new ScanOptions.Builder();
+      readOptions.applyScanExecutionOptions(scanOptionsBuilder);
       scanOptionsBuilder.useScalarIndex(readOptions.isUseScalarIndex());
       if (inputPartition.getWhereCondition().isPresent()) {
         scanOptionsBuilder.filter(inputPartition.getWhereCondition().get());

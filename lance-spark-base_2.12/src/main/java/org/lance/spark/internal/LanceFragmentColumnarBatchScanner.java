@@ -125,6 +125,7 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
         return false;
       }
       VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
+      Utils.normalizeSlicedVariableWidthVectors(root);
       LanceInputPartition inputPartition = fragmentScanner.getInputPartition();
       ColumnVector[] columns =
           arrowBatchReadsEnabled

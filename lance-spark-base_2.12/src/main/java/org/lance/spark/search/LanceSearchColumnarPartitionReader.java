@@ -15,6 +15,7 @@ package org.lance.spark.search;
 
 import org.lance.namespace.LanceNamespace;
 import org.lance.spark.LanceRuntime;
+import org.lance.spark.utils.Utils;
 import org.lance.spark.vectorized.LanceArrowColumnVector;
 
 import org.apache.arrow.vector.FieldVector;
@@ -96,6 +97,7 @@ public class LanceSearchColumnarPartitionReader implements PartitionReader<Colum
   }
 
   static ColumnarBatch toColumnarBatch(VectorSchemaRoot root, StructType schema) {
+    Utils.normalizeSlicedVariableWidthVectors(root);
     Map<String, FieldVector> actualFields = new HashMap<>();
     for (FieldVector vector : root.getFieldVectors()) {
       actualFields.put(vector.getField().getName(), vector);
