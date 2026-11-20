@@ -145,15 +145,21 @@ and namespace-specific options:
 | `spark.sql.catalog.{name}.parent`           | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                             |
 | `spark.sql.catalog.{name}.parent_delimiter` | String | ✗        | Delimiter for parent prefix (default: `.`). See [Note on Namespace Levels](#note-on-namespace-levels).                           |
 
-## Distributed Vector Search
+## Distributed Search
 
-Set `spark.sql.lance.search.distributed.enabled=true` to execute `VECTOR_SEARCH` with Spark tasks
-instead of through the namespace server's `queryTable` endpoint. The default is `false`.
+Set `spark.sql.lance.search.distributed.enabled=true` to execute search with Spark tasks instead
+of through the namespace server's `queryTable` endpoint. The default is `false`. This flag applies
+to both `VECTOR_SEARCH` and full-text search (`lance_match`, `lance_match_phrase`,
+`lance_multi_match` and `SEARCH`). It is read from the active Spark session, so it can be set per
+query — toggle it with `SET spark.sql.lance.search.distributed.enabled=true` (or
+`spark.conf.set(...)`) between statements to choose the route for the next search.
 
 Distributed search opens the Lance dataset from executors, so each executor must have network
 access to the backing object store. Storage credentials may come from the configured namespace;
 the `executor_credential_refresh` catalog option controls whether executors reconstruct the
 namespace client and refresh credentials when opening the dataset.
+
+### VECTOR_SEARCH
 
 The planner creates one task for every selected vector-index segment and one flat-search task for
 each unindexed fragment. `bypass_vector_index=true` uses only flat-search tasks, while
@@ -168,6 +174,18 @@ silently changing what the filter means.
 `lower_bound` and `upper_bound` are not supported either, because lance-core's Java scanner cannot
 apply them yet. Disable `spark.sql.lance.search.distributed.enabled` to run any of these through
 the namespace.
+
+### Full-Text Search
+
+The same flag also routes full-text search through Spark tasks. Each task runs a local per-fragment
+scan: it opens the committed FTS index segments and scores every matching row. The `ORDER BY
+_score DESC LIMIT k` top-k push into `queryTable` is only available on the namespace route, so the
+distributed path has no top-k pushdown and evaluates all matches before Spark applies the limit.
+See the [FTS Cost Model](operations/dql/fts.md#cost-model).
+
+Because each task scores over the committed index segments it sees, enabling the flag can also
+change `_score` values and ranking on a query-capable namespace; see
+[Index coverage affects relevance scores](operations/dql/fts.md#index-coverage-affects-relevance-scores).
 
 ## Cache Backends
 

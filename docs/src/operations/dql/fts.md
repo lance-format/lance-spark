@@ -136,14 +136,14 @@ ORDER BY _score DESC;
 If the table has a stored column named `_score`, Spark resolves `_score` to that data column instead. It remains visible in `SELECT *` and supports ordinary reads, filters, and ordering without FTS. Full-text search, including `SEARCH` and `HYBRID_SEARCH`, rejects tables with a stored `_score` column of any type, even when the column is not projected. Rename the stored column to use FTS and access relevance scores.
 
 !!! note "Ranked retrieval depends on the scan path"
-    On a query-capable namespace, such as the directory namespace, a single `ORDER BY _score DESC LIMIT k` can push the generated relevance-score top-k into `queryTable`. Spark retains a final sort and limit. Ascending or multi-key ordering and residual filters do not use this optimization.
+    On a query-capable namespace, such as the directory namespace, and with `spark.sql.lance.search.distributed.enabled` off (its default), a single `ORDER BY _score DESC LIMIT k` can push the generated relevance-score top-k into `queryTable`. Spark retains a final sort and limit. Ascending or multi-key ordering and residual filters do not use this optimization. Enabling the flag forces the local per-fragment scan, which has no top-k push (see [Distributed Search](../../config.md#distributed-search)).
 
     Pushed scalar filters are evaluated before namespace top-k selection. Filters on `_score` remain in Spark, so they prevent top-k pushdown.
 
     Local per-fragment scans return all matching rows; Spark sorts and limits them. Pushed ranked retrieval for this path remains a future extension.
 
 !!! note "Index coverage affects relevance scores"
-    As of Lance 14.0.3, partially indexed data can produce different scores or rankings before and after index optimization, even when the data and query are unchanged ([Lance issue #9058](https://github.com/lance-format/lance/issues/9058)). Run `ALTER TABLE lance.db.documents OPTIMIZE INDEX fts_body` after appends and use a fully indexed snapshot when relying on score thresholds or corpus-relative ranking.
+    As of Lance 14.0.3, partially indexed data can produce different scores or rankings before and after index optimization, even when the data and query are unchanged ([Lance issue #9058](https://github.com/lance-format/lance/issues/9058)). Run `ALTER TABLE lance.db.documents OPTIMIZE INDEX fts_body` after appends and use a fully indexed snapshot when relying on score thresholds or corpus-relative ranking. Enabling `spark.sql.lance.search.distributed.enabled` can change scores the same way on a query-capable namespace: rows appended after indexing can score lower with the flag on, because each Spark task scores over the committed index segments it sees (see [Distributed Search](../../config.md#distributed-search)).
 
 !!! warning "Rebuild existing FTS indexes when upgrading to Lance 14+"
     Lance 14 updated stop-word lists for English and other Latin-script languages. `OPTIMIZE INDEX` merges segments without re-tokenizing existing postings, so rebuild pre-14 FTS indexes with `ALTER TABLE ... CREATE INDEX <name> USING fts (...)` when stop-word filtering (`remove_stop_words = true`) is enabled.
@@ -156,7 +156,7 @@ If the table has a stored column named `_score`, Spark resolves `_score` to that
 - **Unbounded WHERE-filter queries return every match.** Without a supported namespace top-k push, every matching row is evaluated. `wand_factor` is not exposed.
 - **One FTS predicate per query.** Only a single FTS function call is allowed per `WHERE` clause. For multi-column search, use `lance_multi_match` instead of combining multiple `lance_match` calls with OR.
 - **FTS predicates cannot appear inside OR.** `WHERE lance_match(a, 'x') OR other_condition` is not supported — OR semantics cannot be preserved when pushing a single FTS query to the scanner.
-- **Query-serving namespaces must implement structured FTS queries.** The directory namespace supports this request format. Custom REST implementations must evaluate the structured full-text query rather than ignore it. Catalog-only namespaces (Glue, Hive, Iceberg) fall back to local per-fragment scans.
+- **Query-serving namespaces must implement structured FTS queries.** The directory namespace supports this request format. Custom REST implementations must evaluate the structured full-text query rather than ignore it. For a REST server that does not serve `queryTable`, set `spark.sql.lance.search.distributed.enabled=true` to use the local per-fragment scan (see [Configuration](../../config.md#distributed-search)). Catalog-only namespaces (Glue, Hive, Iceberg) fall back to the same scan without any flag.
 
 ## Cost Model
 
