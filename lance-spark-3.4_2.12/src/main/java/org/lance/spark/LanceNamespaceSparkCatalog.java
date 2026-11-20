@@ -40,8 +40,7 @@ public class LanceNamespaceSparkCatalog extends BaseLanceNamespaceSparkCatalog {
   @Override
   public void initialize(String name, CaseInsensitiveStringMap options) {
     super.initialize(name, options);
-    if ("true"
-        .equalsIgnoreCase(options.get(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS))) {
+    if (getCatalogConfig().isEnableStableRowIds()) {
       logger.warn(CDF_UNSUPPORTED_WARNING);
     }
   }

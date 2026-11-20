@@ -234,6 +234,29 @@ public abstract class BaseSparkDistributedVectorSearchTest {
   }
 
   @Test
+  void sqlSetDistributedEnabledStripsSurroundingQuotes() {
+    Assumptions.assumeFalse(
+        spark.version().startsWith("3.4."),
+        "Spark 3.4 table-valued functions do not support named arguments");
+    String fullName = createFiveFragmentTable();
+    String filtered =
+        "SELECT id FROM VECTOR_SEARCH(table => '"
+            + fullName
+            + "', query_vector => array(0.0, 0.0, 0.0, 0.0), k => 1, filter => 'id = 4')";
+
+    spark.sql("SET spark.sql.lance.search.distributed.enabled = 'true'");
+    try {
+      Exception error = assertThrows(Exception.class, () -> spark.sql(filtered).collectAsList());
+      assertTrue(rootMessage(error).contains("requires prefilter=true"), rootMessage(error));
+
+      spark.sql("SET spark.sql.lance.search.distributed.enabled = \"false\"");
+      assertEquals(0, spark.sql(filtered).collectAsList().size());
+    } finally {
+      spark.conf().unset("spark.sql.lance.search.distributed.enabled");
+    }
+  }
+
+  @Test
   void tiedDistancesPaginateTheSameWayEveryRun() {
     Assumptions.assumeFalse(
         spark.version().startsWith("3.4."),
