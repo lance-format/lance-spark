@@ -49,6 +49,8 @@ import org.lance.spark.write.StagedCommit;
 import org.lance.spark.write.StagedCommitOptions;
 
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchFunctionException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
@@ -257,15 +259,14 @@ public abstract class BaseLanceNamespaceSparkCatalog
     }
 
     // Initialize the namespace with proper configuration
-    Map<String, String> namespaceOptions = new HashMap<>(options);
+    Map<String, String> namespaceOptions = buildNamespaceOptions(impl, options);
 
     // Save namespace impl and properties for serialization to workers
     this.namespaceImpl = impl;
     this.namespaceProperties = new HashMap<>(namespaceOptions);
 
     // Use the global buffer allocator
-    LanceRuntime.registerKnownNamespaceImpl(impl);
-    this.namespace = LanceNamespace.connect(impl, namespaceOptions, LanceRuntime.allocator());
+    this.namespace = LanceRuntime.getOrCreateNamespace(impl, namespaceOptions);
 
     // Handle single-level namespace configuration
     if (options.containsKey(CONFIG_SINGLE_LEVEL_NS)) {
@@ -277,6 +278,29 @@ public abstract class BaseLanceNamespaceSparkCatalog
       // Default: multi-level namespace mode (manifest mode)
       this.singleLevelNs = false;
     }
+  }
+
+  static Map<String, String> buildNamespaceOptions(String impl, CaseInsensitiveStringMap options) {
+    Map<String, String> namespaceOptions = new HashMap<>(options);
+    if ("hive2".equals(impl)
+        || "hive3".equals(impl)
+        || "org.lance.namespace.hive2.Hive2Namespace".equals(impl)
+        || "org.lance.namespace.hive3.Hive3Namespace".equals(impl)) {
+      Configuration conf = SparkSession.active().sessionState().newHadoopConf();
+      // Discard the case-folded copies before preserving the original Hadoop property names.
+      namespaceOptions.keySet().removeIf(key -> key.startsWith("hadoop."));
+      options
+          .asCaseSensitiveMap()
+          .forEach(
+              (key, value) -> {
+                if (key.regionMatches(true, 0, "hadoop.", 0, "hadoop.".length()) && value != null) {
+                  conf.set(key.substring("hadoop.".length()), value);
+                }
+              });
+      conf.forEach(entry -> namespaceOptions.put("hadoop." + entry.getKey(), entry.getValue()));
+    }
+
+    return namespaceOptions;
   }
 
   @Override

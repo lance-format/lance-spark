@@ -513,7 +513,28 @@ spark-shell \
 
 ### Apache Hive Namespace
 
-Lance supports both Hive 2.x and Hive 3.x metastores for metadata management.
+Lance supports both Hive 2.x and Hive 3.x metastores for metadata management. Hive namespaces inherit
+Spark's Hadoop configuration at catalog initialization. Use `spark.hadoop.*` for global settings and
+`spark.sql.catalog.<name>.hadoop.*` for catalog-specific settings. Catalog-specific settings take
+precedence and apply only to that catalog. The `hadoop.` prefix is case-insensitive; preserve the original
+case of the Hadoop property name after the prefix.
+
+```ini
+spark.hadoop.hive.metastore.uris=thrift://global-hms:9083
+spark.sql.catalog.lance.hadoop.hive.metastore.uris=thrift://catalog-hms:9083
+```
+
+With both settings, the `lance` catalog uses `thrift://catalog-hms:9083`.
+
+Current session settings are also applied before catalog-specific overrides. If no catalog-specific
+HMS address is set, you can set it in the session before the catalog is first used:
+
+```sql
+SET hive.metastore.uris=thrift://session-hms:9083;
+SHOW NAMESPACES IN lance;
+```
+
+Changing these settings after the catalog has initialized does not reconfigure its Hive client.
 
 #### Hive 3.x Namespace
 
