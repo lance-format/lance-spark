@@ -465,6 +465,18 @@ public class LanceScan
       prunedSplits = pruneByLimit(prunedSplits, precomputedFragmentRowCounts);
     }
 
+    // For unordered, non-sharded scans without LIMIT/OFFSET/TopN/FTS, schedule larger fragments
+    // first (Longest Processing Time first, matching Spark's FilePartition ordering) to avoid tail
+    // stragglers when large fragments sit near the end of the manifest.
+    if (activeShardingExpression == null
+        && !limit.isPresent()
+        && !offset.isPresent()
+        && !topNSortOrders.isPresent()
+        && !pushedAggregation.isPresent()
+        && (readOptions == null || readOptions.getFullTextQuery() == null)) {
+      prunedSplits = LanceSplit.orderByRowsDescending(prunedSplits, precomputedFragmentRowCounts);
+    }
+
     // Capture as effectively final for use in lambda
     final List<LanceSplit> finalSplits = prunedSplits;
     final DataType partitionKeyType = partitionKeyDataType();
