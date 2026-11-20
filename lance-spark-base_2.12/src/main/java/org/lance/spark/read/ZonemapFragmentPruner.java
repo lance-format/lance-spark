@@ -326,7 +326,10 @@ public final class ZonemapFragmentPruner {
           return true;
       }
     } catch (ClassCastException e) {
-      LOG.warn("Type mismatch in zonemap comparison, skipping pruning for zone", e);
+      // Runs once per zone, so no stack trace: the zone is kept either way.
+      LOG.debug(
+          "Type mismatch in zonemap comparison, keeping the zone of fragment {}",
+          zone.getFragmentId());
       return true;
     }
   }
@@ -360,7 +363,7 @@ public final class ZonemapFragmentPruner {
     try {
       normalizedValues.sort(ZonemapFragmentPruner::compare);
     } catch (ClassCastException e) {
-      LOG.warn("Cannot order IN values for zonemap pruning, skipping pruning on {}", column, e);
+      LOG.debug("Cannot order IN values for zonemap pruning, skipping pruning on {}", column, e);
       return Optional.empty();
     }
 
@@ -403,7 +406,10 @@ public final class ZonemapFragmentPruner {
       }
       return low < sortedValues.size() && compare(sortedValues.get(low), max) <= 0;
     } catch (ClassCastException e) {
-      LOG.warn("Type mismatch in zonemap comparison, skipping pruning for zone", e);
+      // Runs once per zone, so no stack trace: the zone is kept either way.
+      LOG.debug(
+          "Type mismatch in zonemap comparison, keeping the zone of fragment {}",
+          zone.getFragmentId());
       return true;
     }
   }
