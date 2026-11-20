@@ -15,9 +15,12 @@ package org.lance.spark.internal;
 
 import org.lance.Dataset;
 import org.lance.Fragment;
+import org.lance.fragment.DataFile;
+import org.lance.ipc.ColumnOrdering;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
 import org.lance.ipc.ScanStats;
+import org.lance.schema.LanceField;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.read.LanceInputPartition;
@@ -31,8 +34,11 @@ import org.apache.spark.sql.types.StructType;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -48,6 +54,13 @@ public class LanceFragmentScanner implements AutoCloseable {
   /** The names of blob columns in the projected schema. */
   private final Set<String> blobColumnNames;
 
+  /**
+   * Projected schema columns that are physically absent from all data files of this fragment and
+   * omitted from the native scan so the reader can materialize them as null {@code
+   * ConstantColumnVector}s without native allocation.
+   */
+  private final Set<String> missingColumnNames;
+
   private LanceFragmentScanner(
       Dataset dataset,
       LanceScanner scanner,
@@ -55,7 +68,8 @@ public class LanceFragmentScanner implements AutoCloseable {
       LanceInputPartition inputPartition,
       long datasetOpenTimeNs,
       long scannerCreateTimeNs,
-      Set<String> blobColumnNames) {
+      Set<String> blobColumnNames,
+      Set<String> missingColumnNames) {
     this.dataset = dataset;
     this.scanner = scanner;
     this.fragmentId = fragmentId;
@@ -63,9 +77,15 @@ public class LanceFragmentScanner implements AutoCloseable {
     this.datasetOpenTimeNs = datasetOpenTimeNs;
     this.scannerCreateTimeNs = scannerCreateTimeNs;
     this.blobColumnNames = blobColumnNames;
+    this.missingColumnNames = missingColumnNames;
   }
 
   public static LanceFragmentScanner create(int fragmentId, LanceInputPartition inputPartition) {
+    return create(fragmentId, inputPartition, false);
+  }
+
+  public static LanceFragmentScanner create(
+      int fragmentId, LanceInputPartition inputPartition, boolean omitMissingColumns) {
     Dataset dataset = null;
     LanceScanner lanceScanner = null;
     try {
@@ -83,56 +103,17 @@ public class LanceFragmentScanner implements AutoCloseable {
                 "Fragment %d not found in dataset at %s (version=%s)",
                 fragmentId, readOptions.getDatasetUri(), readOptions.getRef()));
       }
-      ScanOptions.Builder scanOptions = new ScanOptions.Builder();
-
       StructType scanSchema = inputPartition.getSchema();
       Set<String> blobColumnNames = getBlobColumnNames(scanSchema);
-      boolean hasBlobColumns = !blobColumnNames.isEmpty();
-
-      List<String> projectedColumns = getColumnNames(scanSchema);
-      if (readOptions.getFullTextQuery() != null
-          && Arrays.stream(scanSchema.fields()).anyMatch(Utils::isScoreMetadataColumn)) {
-        projectedColumns.add(LanceConstant.SCORE);
-      }
-      if (projectedColumns.isEmpty() && scanSchema.isEmpty()) {
-        scanOptions.withRowId(true);
-      }
-      if (hasField(scanSchema, LanceConstant.ROW_ID)) {
-        scanOptions.withRowId(true);
-      }
-
-      // Request _rowaddr when blob columns are present so we can build blob references.
-      boolean userRequestedRowAddr = hasField(scanSchema, LanceConstant.ROW_ADDRESS);
-      if (hasBlobColumns || userRequestedRowAddr) {
-        scanOptions.withRowAddress(true);
-      }
-
-      scanOptions.columns(projectedColumns);
-      if (inputPartition.getWhereCondition().isPresent()) {
-        scanOptions.filter(inputPartition.getWhereCondition().get());
-      }
-      scanOptions.batchSize(readOptions.getBatchSize());
-      if (readOptions.getFullTextQuery() != null) {
-        scanOptions.fullTextQuery(readOptions.getFullTextQuery());
-        scanOptions.prefilter(true);
-        scanOptions.disableScoringAutoprojection(true);
-      }
-      scanOptions.useScalarIndex(readOptions.isUseScalarIndex());
-      if (inputPartition.getLimit().isPresent()) {
-        scanOptions.limit(inputPartition.getLimit().get());
-      }
-      if (inputPartition.getOffset().isPresent()) {
-        scanOptions.offset(inputPartition.getOffset().get());
-      }
-      if (inputPartition.getTopNSortOrders().isPresent()) {
-        scanOptions.setColumnOrderings(inputPartition.getTopNSortOrders().get());
-      }
-
-      // Collect scan stats
-      scanOptions.collectStats(true);
+      Set<String> missingColumnNames =
+          omitMissingColumns
+              ? findMissingProjectedColumns(dataset, fragment, inputPartition, blobColumnNames)
+              : Collections.emptySet();
+      ScanOptions builtScanOptions =
+          buildScanOptions(inputPartition, blobColumnNames, missingColumnNames);
 
       long scanCreateStart = System.nanoTime();
-      lanceScanner = fragment.newScan(scanOptions.build());
+      lanceScanner = fragment.newScan(builtScanOptions);
       long scanCreateTimeNs = System.nanoTime() - scanCreateStart;
       return new LanceFragmentScanner(
           dataset,
@@ -141,7 +122,8 @@ public class LanceFragmentScanner implements AutoCloseable {
           inputPartition,
           dsOpenTimeNs,
           scanCreateTimeNs,
-          blobColumnNames);
+          blobColumnNames,
+          missingColumnNames);
     } catch (Throwable throwable) {
       if (lanceScanner != null) {
         try {
@@ -245,9 +227,150 @@ public class LanceFragmentScanner implements AutoCloseable {
     return blobColumnNames;
   }
 
+  /**
+   * Returns whether {@code columnName} was physically absent from all data files of this fragment
+   * and omitted from the native scan projection.
+   */
+  public boolean isMissingColumn(String columnName) {
+    return missingColumnNames.contains(columnName);
+  }
+
   /** Returns the dataset URI for blob references. */
   public String getDatasetUri() {
     return inputPartition.getReadOptions().getDatasetUri();
+  }
+
+  static ScanOptions buildScanOptions(
+      LanceInputPartition inputPartition,
+      Set<String> blobColumnNames,
+      Set<String> missingColumnNames) {
+    LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
+    StructType scanSchema = inputPartition.getSchema();
+    boolean hasBlobColumns = !blobColumnNames.isEmpty();
+
+    ScanOptions.Builder scanOptions = new ScanOptions.Builder();
+    List<String> projectedColumns = getColumnNames(scanSchema);
+    if (!missingColumnNames.isEmpty()) {
+      projectedColumns.removeIf(missingColumnNames::contains);
+    }
+    if (readOptions.getFullTextQuery() != null
+        && Arrays.stream(scanSchema.fields()).anyMatch(Utils::isScoreMetadataColumn)) {
+      projectedColumns.add(LanceConstant.SCORE);
+    }
+
+    // Request _rowaddr when blob columns are present so we can build blob references.
+    boolean userRequestedRowId = hasField(scanSchema, LanceConstant.ROW_ID);
+    boolean userRequestedRowAddr = hasField(scanSchema, LanceConstant.ROW_ADDRESS);
+    boolean needsRowAddr = hasBlobColumns || userRequestedRowAddr;
+    if (needsRowAddr) {
+      scanOptions.withRowAddress(true);
+    }
+    if (userRequestedRowId || (projectedColumns.isEmpty() && !needsRowAddr)) {
+      scanOptions.withRowId(true);
+    }
+
+    scanOptions.columns(projectedColumns);
+    if (inputPartition.getWhereCondition().isPresent()) {
+      scanOptions.filter(inputPartition.getWhereCondition().get());
+    }
+    scanOptions.batchSize(readOptions.getBatchSize());
+    if (readOptions.getFullTextQuery() != null) {
+      scanOptions.fullTextQuery(readOptions.getFullTextQuery());
+      scanOptions.prefilter(true);
+      scanOptions.disableScoringAutoprojection(true);
+    }
+    scanOptions.useScalarIndex(readOptions.isUseScalarIndex());
+    if (inputPartition.getLimit().isPresent()) {
+      scanOptions.limit(inputPartition.getLimit().get());
+    }
+    if (inputPartition.getOffset().isPresent()) {
+      scanOptions.offset(inputPartition.getOffset().get());
+    }
+    if (inputPartition.getTopNSortOrders().isPresent()) {
+      scanOptions.setColumnOrderings(inputPartition.getTopNSortOrders().get());
+    }
+
+    // Collect scan stats
+    scanOptions.collectStats(true);
+    return scanOptions.build();
+  }
+
+  static Set<String> findMissingProjectedColumns(
+      Dataset dataset,
+      Fragment fragment,
+      LanceInputPartition inputPartition,
+      Set<String> blobColumnNames) {
+    List<DataFile> dataFiles = fragment.metadata().getFiles();
+    if (dataFiles == null || dataFiles.isEmpty()) {
+      return Collections.emptySet();
+    }
+    Set<Integer> fragmentFieldIds = new HashSet<>();
+    for (DataFile dataFile : dataFiles) {
+      int[] fields = dataFile.getFields();
+      if (fields != null) {
+        for (int fieldId : fields) {
+          if (fieldId >= 0) {
+            fragmentFieldIds.add(fieldId);
+          }
+        }
+      }
+    }
+
+    StructType scanSchema = inputPartition.getSchema();
+    Set<String> excludedColumns = new HashSet<>(blobColumnNames);
+    for (StructField field : scanSchema.fields()) {
+      String blobBase = BlobUtils.blobV1VirtualColumnBaseName(field.name());
+      if (blobBase != null) {
+        excludedColumns.add(blobBase);
+      }
+    }
+    if (inputPartition.getTopNSortOrders().isPresent()) {
+      for (ColumnOrdering ordering : inputPartition.getTopNSortOrders().get()) {
+        excludedColumns.add(ordering.getColumnName());
+      }
+    }
+
+    Map<String, LanceField> topLevelLanceFields = new HashMap<>();
+    for (LanceField lanceField : dataset.getLanceSchema().fields()) {
+      topLevelLanceFields.put(lanceField.getName(), lanceField);
+    }
+
+    Set<String> missing = new HashSet<>();
+    for (StructField sparkField : scanSchema.fields()) {
+      String name = sparkField.name();
+      if (!sparkField.nullable()
+          || excludedColumns.contains(name)
+          || Utils.isScoreMetadataColumn(sparkField)
+          || name.equals(LanceConstant.FRAGMENT_ID)
+          || name.equals(LanceConstant.ROW_ID)
+          || name.equals(LanceConstant.ROW_ADDRESS)
+          || name.equals(LanceConstant.ROW_CREATED_AT_VERSION)
+          || name.equals(LanceConstant.ROW_LAST_UPDATED_AT_VERSION)
+          || name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)
+          || name.endsWith(LanceConstant.BLOB_SIZE_SUFFIX)) {
+        continue;
+      }
+      LanceField lanceField = topLevelLanceFields.get(name);
+      if (lanceField != null
+          && lanceField.isNullable()
+          && !containsAnyFieldIdInSubtree(lanceField, fragmentFieldIds)) {
+        missing.add(name);
+      }
+    }
+    return missing;
+  }
+
+  private static boolean containsAnyFieldIdInSubtree(
+      LanceField field, Set<Integer> fragmentFieldIds) {
+    if (fragmentFieldIds.contains(field.getId())) {
+      return true;
+    }
+    for (LanceField child : field.getChildren()) {
+      if (containsAnyFieldIdInSubtree(child, fragmentFieldIds)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private static Set<String> getBlobColumnNames(StructType schema) {
