@@ -20,12 +20,16 @@ import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.DateMilliVector;
 import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.TimeMicroVector;
+import org.apache.arrow.vector.TimeMilliVector;
+import org.apache.arrow.vector.TimeNanoVector;
 import org.apache.arrow.vector.TimeStampNanoTZVector;
 import org.apache.arrow.vector.TimeStampSecTZVector;
 import org.apache.arrow.vector.UInt1Vector;
 import org.apache.arrow.vector.UInt2Vector;
 import org.apache.arrow.vector.UInt4Vector;
 import org.apache.arrow.vector.UInt8Vector;
+import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import org.apache.arrow.vector.ipc.ArrowStreamWriter;
@@ -48,6 +52,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.LocalDate;
 import java.util.Arrays;
@@ -623,6 +628,71 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
       assertEquals(
           Collections.singletonList(RowFactory.create(1)), joined.collectAsList(), join[0]);
     }
+  }
+
+  @Test
+  public void testRuntimeFilteringSkipsTimeColumns() throws Exception {
+    // Below Spark 4.1, Arrow Time reads as LongType nanoseconds, and Lance cannot compare that
+    // Int64 key with a Time32 or Time64 column. Spark 4.1+ reads it as TIME, off by default.
+    spark.conf().set("spark.sql.timeType.enabled", "true");
+    Schema schema =
+        new Schema(
+            Arrays.asList(
+                new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
+                new Field(
+                    "ms", FieldType.nullable(new ArrowType.Time(TimeUnit.MILLISECOND, 32)), null),
+                new Field(
+                    "us", FieldType.nullable(new ArrowType.Time(TimeUnit.MICROSECOND, 64)), null),
+                new Field(
+                    "ns", FieldType.nullable(new ArrowType.Time(TimeUnit.NANOSECOND, 64)), null),
+                new Field("label", FieldType.nullable(new ArrowType.Utf8()), null)));
+    long fourHoursMs = 4 * 3_600_000L;
+    long oneHourMs = 3_600_000L;
+    String fact = "time_" + suffix();
+    String dim = "time_dim_" + suffix();
+    writeArrowTable(
+        tempDir.resolve(fact + ".lance").toString(), schema, timeRows(fourHoursMs, oneHourMs));
+    writeArrowTable(
+        tempDir.resolve(dim + ".lance").toString(), schema, timeRows(fourHoursMs, 2 * oneHourMs));
+    fact = defaultCatalog + ".default." + fact;
+    dim = defaultCatalog + ".default." + dim;
+    for (String column : new String[] {"ms", "us", "ns"}) {
+      spark.sql(
+          String.format(
+              "ALTER TABLE %s CREATE INDEX %s_idx USING zonemap (%s)", fact, column, column));
+    }
+
+    Dataset<Row> ordinary = spark.sql("SELECT ms, us, ns FROM " + fact);
+    ordinary.collectAsList();
+    LanceScan scan = LanceScanTestHelper.extractLanceScan(ordinary);
+    assertNotNull(scan);
+    assertEquals(0, scan.filterAttributes().length);
+
+    for (String column : new String[] {"ms", "us", "ns"}) {
+      Dataset<Row> joined =
+          spark.sql(
+              String.format(
+                  "SELECT f.id FROM %s f JOIN %s d ON f.%s = d.%s WHERE length(d.label) = 5",
+                  fact, dim, column, column));
+      assertEquals(Collections.singletonList(RowFactory.create(1)), joined.collectAsList(), column);
+    }
+  }
+
+  private static Consumer<VectorSchemaRoot> timeRows(long matchMs, long otherMs) {
+    return root -> {
+      ((IntVector) root.getVector("id")).setSafe(0, 1);
+      ((IntVector) root.getVector("id")).setSafe(1, 2);
+      long[] values = {matchMs, otherMs};
+      for (int i = 0; i < 2; i++) {
+        ((TimeMilliVector) root.getVector("ms")).setSafe(i, (int) values[i]);
+        ((TimeMicroVector) root.getVector("us")).setSafe(i, values[i] * 1_000L);
+        ((TimeNanoVector) root.getVector("ns")).setSafe(i, values[i] * 1_000_000L);
+      }
+      ((VarCharVector) root.getVector("label"))
+          .setSafe(0, "match".getBytes(StandardCharsets.UTF_8));
+      ((VarCharVector) root.getVector("label"))
+          .setSafe(1, "other-long".getBytes(StandardCharsets.UTF_8));
+    };
   }
 
   /**

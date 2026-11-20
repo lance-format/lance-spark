@@ -1093,13 +1093,17 @@ public class LanceScanBuilder
    * join keys keeps every row Spark would join. Nanosecond timestamps and {@code Date(MILLISECOND)}
    * are truncated on read, so an exact match in Lance misses values that only truncate to a key.
    * {@code UInt64} values of 2^63 or more read as negative longs, which Lance cannot compare with
-   * the column.
+   * the column. Below Spark 4.1, Arrow {@code Time} reads as {@code LongType} nanoseconds, which
+   * Lance cannot compare with a {@code Time32} or {@code Time64} column.
    */
   private static boolean hasExactSparkMapping(Field field) {
     if (field == null) {
       return false;
     }
     ArrowType type = field.getType();
+    if (type instanceof ArrowType.Time) {
+      return false;
+    }
     if (type instanceof ArrowType.Timestamp) {
       return ((ArrowType.Timestamp) type).getUnit() != TimeUnit.NANOSECOND;
     }
