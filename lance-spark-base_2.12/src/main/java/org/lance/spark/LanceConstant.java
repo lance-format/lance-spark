@@ -41,4 +41,12 @@ public class LanceConstant {
    * consumed by {@code LanceDataset.newWriteBuilder}; not a user-facing option.
    */
   public static final String BLOB_SOURCE_CONTEXTS_KEY = "__lance_blob_source_contexts";
+
+  /**
+   * Internal scan option marking the filtering side of a join, so that its scan also returns the
+   * predicates it pushes and Spark keeps them in a Filter for dynamic partition pruning to find.
+   * Set by {@code LanceDynamicPruningRule} and consumed by {@code LanceDataset.newScanBuilder}; not
+   * a user-facing option.
+   */
+  public static final String KEEP_PUSHED_FILTERS_KEY = "__lance_keep_pushed_filters";
 }
