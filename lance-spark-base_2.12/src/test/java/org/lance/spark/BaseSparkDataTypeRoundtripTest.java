@@ -41,6 +41,7 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.Period;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -193,6 +194,46 @@ public abstract class BaseSparkDataTypeRoundtripTest {
     assertEquals(new BigDecimal("100.00"), out.get(0).getDecimal(1));
     assertEquals(2, out.get(1).getInt(0));
     assertEquals(new BigDecimal("250.50"), out.get(1).getDecimal(1));
+  }
+
+  @Test
+  public void testNonFiniteFloatingPointFiltersEndToEnd() {
+    // NaN and Infinity literals are left to Spark: Lance's SQL parser reads them as column names.
+    // Spark orders NaN above every other value and treats NaN = NaN as true.
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("d", DataTypes.DoubleType, true)
+            .add("f", DataTypes.FloatType, true);
+    List<Row> data =
+        Arrays.asList(
+            RowFactory.create(0, Double.NaN, Float.NaN),
+            RowFactory.create(1, Double.POSITIVE_INFINITY, Float.POSITIVE_INFINITY),
+            RowFactory.create(2, Double.NEGATIVE_INFINITY, Float.NEGATIVE_INFINITY),
+            RowFactory.create(3, 1.5, 1.5f),
+            RowFactory.create(4, null, null));
+    Dataset<Row> table = writeAndRead(schema, data, "non_finite_pushdown");
+    for (String column : new String[] {"d", "f"}) {
+      String type = column.equals("d") ? "DOUBLE" : "FLOAT";
+      String nan = "CAST('NaN' AS " + type + ")";
+      String inf = "CAST('Infinity' AS " + type + ")";
+      String negInf = "CAST('-Infinity' AS " + type + ")";
+      assertEquals(Arrays.asList(0), ids(table, column + " = " + nan));
+      assertEquals(Arrays.asList(1), ids(table, column + " = " + inf));
+      assertEquals(Arrays.asList(2, 3), ids(table, column + " < " + inf));
+      assertEquals(Arrays.asList(0, 1, 3), ids(table, column + " > " + negInf));
+      assertEquals(Arrays.asList(0, 3), ids(table, column + " IN (" + nan + ", 1.5)"));
+      // A finite literal is still pushed down.
+      assertEquals(Arrays.asList(0, 1), ids(table, column + " > 1.5"));
+    }
+  }
+
+  private static List<Integer> ids(Dataset<Row> table, String condition) {
+    List<Integer> ids = new ArrayList<>();
+    for (Row row : table.filter(condition).orderBy("id").collectAsList()) {
+      ids.add(row.getInt(0));
+    }
+    return ids;
   }
 
   @Test
