@@ -502,6 +502,12 @@ public class ZonemapFragmentPrunerTest {
     Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
     assertTrue(result.isPresent());
     assertEquals(Set.of(1), result.get());
+
+    // SQL treats negative zero as equal to this zone's positive-zero lower bound.
+    assertEquals(
+        Set.of(0),
+        ZonemapFragmentPruner.pruneFragments(new Predicate[] {TestPredicates.eq("f", -0.0f)}, stats)
+            .orElseThrow(AssertionError::new));
   }
 
   @Test
