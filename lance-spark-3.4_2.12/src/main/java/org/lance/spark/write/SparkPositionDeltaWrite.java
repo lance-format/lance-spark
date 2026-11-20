@@ -26,6 +26,7 @@ import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
+import org.lance.spark.utils.FieldPathUtils;
 import org.lance.spark.utils.Utils;
 
 import com.google.common.collect.ImmutableList;
@@ -203,6 +204,9 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
                 .removedFragmentIds(removedFragmentIds)
                 .updatedFragments(updatedFragments)
                 .newFragments(newFragments)
+                // Rewritten rows can change any column, so no index may claim the new fragments.
+                // Lance's merge_insert passes every field id for the same reason.
+                .fieldsForPreservingFragBitmap(FieldPathUtils.allFieldIds(dataset.getLanceSchema()))
                 .updateMode(Optional.of(Update.UpdateMode.RewriteRows))
                 .build();
 
