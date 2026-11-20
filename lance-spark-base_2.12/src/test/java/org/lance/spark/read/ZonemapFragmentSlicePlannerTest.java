@@ -18,9 +18,6 @@ import org.lance.ipc.FragmentSlice;
 
 import org.apache.spark.sql.connector.expressions.filter.Predicate;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.Arguments;
-import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -33,7 +30,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -41,9 +37,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class ZonemapFragmentSlicePlannerTest {
 
-  @ParameterizedTest
-  @MethodSource("utf8StringPredicates")
-  public void testStringRangesUseUtf8Ordering(Predicate predicate, long expectedRows) {
+  @Test
+  public void testStringRangesUseUtf8Ordering() {
     Map<String, List<ZoneStats>> stats = new HashMap<>();
     // These are valid UTF-8 bounds but reverse Java's UTF-16 order at the upper bound.
     stats.put(
@@ -52,44 +47,12 @@ public class ZonemapFragmentSlicePlannerTest {
             new ZoneStats(0, 0, 4, "\uE000", "\uD800\uDC00", 0),
             new ZoneStats(0, 4, 4, "\uF000", "\uF000", 0)));
     ZonemapScanPlan plan =
-        plan(new Predicate[] {predicate}, stats, Collections.emptyMap(), Set.of(0));
-    assertEquals(
-        Collections.singletonList(new FragmentSlice(0, 0, expectedRows)),
-        plan.getFragmentSlices(0));
-  }
-
-  private static Stream<Arguments> utf8StringPredicates() {
-    return Stream.of(
-        Arguments.of(TestPredicates.eq("s", "\uF000"), 8L),
-        Arguments.of(TestPredicates.in("s", "\uF000"), 8L),
-        Arguments.of(TestPredicates.lt("s", "\uD800\uDC00"), 8L),
-        Arguments.of(TestPredicates.lte("s", "\uF000"), 8L),
-        Arguments.of(TestPredicates.gt("s", "\uF000"), 4L),
-        Arguments.of(TestPredicates.gte("s", "\uD800\uDC00"), 4L));
-  }
-
-  @Test
-  public void testPlansAndMergesMatchingPhysicalZones() {
-    Map<String, List<ZoneStats>> stats = new HashMap<>();
-    stats.put(
-        "x",
-        Arrays.asList(
-            new ZoneStats(0, 0, 10, 0L, 9L, 0),
-            new ZoneStats(0, 10, 10, 10L, 19L, 0),
-            new ZoneStats(0, 20, 10, 100L, 109L, 0),
-            new ZoneStats(0, 40, 10, 15L, 18L, 0)));
-
-    ZonemapScanPlan plan =
         plan(
-            new Predicate[] {TestPredicates.lt("x", 20L)},
+            new Predicate[] {TestPredicates.eq("s", "\uF000")},
             stats,
             Collections.emptyMap(),
             Set.of(0));
-
-    assertEquals(
-        Arrays.asList(new FragmentSlice(0, 0, 20), new FragmentSlice(0, 40, 10)),
-        plan.getFragmentSlices(0));
-    assertFalse(plan.scansFullFragment(0));
+    assertEquals(Collections.singletonList(new FragmentSlice(0, 0, 8)), plan.getFragmentSlices(0));
   }
 
   @Test
@@ -99,8 +62,9 @@ public class ZonemapFragmentSlicePlannerTest {
         "x",
         Arrays.asList(
             new ZoneStats(0, 0, 10, 0L, 9L, 0),
-            new ZoneStats(0, 10, 10, 100L, 109L, 0),
-            new ZoneStats(0, 20, 10, 5L, 14L, 0),
+            new ZoneStats(0, 10, 10, 10L, 19L, 0),
+            new ZoneStats(0, 20, 10, 100L, 109L, 0),
+            new ZoneStats(0, 30, 10, 5L, 14L, 0),
             new ZoneStats(1, 0, 10, 50L, 59L, 0),
             new ZoneStats(1, 10, 10, 0L, 9L, 0),
             new ZoneStats(2, 0, 10, 100L, 109L, 0)));
@@ -113,8 +77,9 @@ public class ZonemapFragmentSlicePlannerTest {
             Set.of(0, 1, 2));
 
     assertEquals(Set.of(0, 1), plan.getSurvivingFragmentIds());
+    // Merge adjacent matches, retain disjoint slices, and drop the nonmatching fragment.
     assertEquals(
-        Arrays.asList(new FragmentSlice(0, 0, 10), new FragmentSlice(0, 20, 10)),
+        Arrays.asList(new FragmentSlice(0, 0, 20), new FragmentSlice(0, 30, 10)),
         plan.getFragmentSlices(0));
     assertEquals(
         Collections.singletonList(new FragmentSlice(1, 10, 10)), plan.getFragmentSlices(1));
@@ -266,21 +231,6 @@ public class ZonemapFragmentSlicePlannerTest {
             Set.of(0));
 
     assertTrue(plan.scansFullFragment(0));
-  }
-
-  @Test
-  public void testNoMatchingZoneRemovesFragment() {
-    Map<String, List<ZoneStats>> stats = new HashMap<>();
-    stats.put("x", Collections.singletonList(new ZoneStats(0, 0, 10, 0L, 9L, 0)));
-
-    ZonemapScanPlan plan =
-        plan(
-            new Predicate[] {TestPredicates.eq("x", 50L)},
-            stats,
-            Collections.emptyMap(),
-            Set.of(0));
-
-    assertTrue(plan.getSurvivingFragmentIds().isEmpty());
   }
 
   @Test

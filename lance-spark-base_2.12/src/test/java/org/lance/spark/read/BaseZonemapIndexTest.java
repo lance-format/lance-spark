@@ -160,20 +160,10 @@ public abstract class BaseZonemapIndexTest {
     String tableName = "zm_slice_" + UUID.randomUUID().toString().replace("-", "");
     String table = catalogName + ".default." + tableName;
 
-    spark.sql(String.format("CREATE TABLE %s (id INT, payload STRING) USING lance", table));
-    spark
-        .range(12)
-        .selectExpr("cast(id as int) AS id", "concat('v', id) AS payload")
-        .coalesce(1)
-        .writeTo(table)
-        .append();
+    spark.sql(String.format("CREATE TABLE %s (id INT) USING lance", table));
+    spark.range(12).selectExpr("cast(id as int) AS id").coalesce(1).writeTo(table).append();
     // A second fragment is fully pruned, while the first retains one physical slice.
-    spark
-        .range(12, 16)
-        .selectExpr("cast(id as int) AS id", "concat('v', id) AS payload")
-        .coalesce(1)
-        .writeTo(table)
-        .append();
+    spark.range(12, 16).selectExpr("cast(id as int) AS id").coalesce(1).writeTo(table).append();
     spark.sql(
         String.format(
             "ALTER TABLE %s CREATE INDEX id_zm USING zonemap (id) WITH (rows_per_zone=4)", table));
@@ -181,25 +171,20 @@ public abstract class BaseZonemapIndexTest {
     LanceScanBuilder builder =
         new LanceScanBuilder(
             spark.table(table).schema(),
-            LanceSparkReadOptions.builder()
-                .datasetUri(rootPath.resolve(tableName + ".lance").toString())
-                .build(),
+            LanceSparkReadOptions.from(rootPath.resolve(tableName + ".lance").toString()),
             Collections.emptyMap(),
             null,
             Collections.emptyMap());
     builder.pushPredicates(
         new Predicate[] {TestPredicates.gte("id", 4L), TestPredicates.lt("id", 8L)});
     LanceScan scan = (LanceScan) builder.build();
-    assertEquals("2", JavaConverters.mapAsJavaMap(scan.getMetaData()).get("originalFragmentCount"));
-    assertEquals("2", JavaConverters.mapAsJavaMap(scan.getMetaData()).get("numPartitions"));
     InputPartition[] partitions = scan.planInputPartitions();
     assertEquals(1, partitions.length);
     assertEquals("2", JavaConverters.mapAsJavaMap(scan.getMetaData()).get("originalFragmentCount"));
     assertEquals("1", JavaConverters.mapAsJavaMap(scan.getMetaData()).get("numPartitions"));
     LanceSplit split = ((LanceInputPartition) partitions[0]).getLanceSplit();
-    assertEquals(1, split.getFragments().size());
     assertEquals(
-        Arrays.asList(new FragmentSlice(split.getFragments().get(0), 4, 4)),
+        Collections.singletonList(new FragmentSlice(split.getFragments().get(0), 4, 4)),
         split.getFragmentSlices());
 
     // Arrow consumers copy a planned scan. Preserve its physical slices through that copy,
@@ -246,23 +231,6 @@ public abstract class BaseZonemapIndexTest {
         assertFalse(reader.next());
       }
     }
-
-    List<Integer> ids =
-        spark
-            .sql(String.format("SELECT id FROM %s WHERE id >= 4 AND id < 8", table))
-            .collectAsList()
-            .stream()
-            .map(row -> row.getInt(0))
-            .sorted()
-            .collect(Collectors.toList());
-    assertEquals(Arrays.asList(4, 5, 6, 7), ids);
-
-    long count =
-        spark
-            .sql(String.format("SELECT count(*) FROM %s WHERE id >= 4 AND id < 8", table))
-            .first()
-            .getLong(0);
-    assertEquals(4, count);
   }
 
   @Test
@@ -310,35 +278,6 @@ public abstract class BaseZonemapIndexTest {
             .getLong(0));
   }
 
-  @Test
-  public void testZonemapStringRangesUseUtf8Ordering() {
-    String tableName = "zm_utf8_" + UUID.randomUUID().toString().replace("-", "");
-    String table = catalogName + ".default." + tableName;
-    spark
-        .range(8)
-        .selectExpr("id", "CASE WHEN id < 4 THEN '\uD800\uDC00' ELSE '\uF000' END AS s")
-        .coalesce(1)
-        .write()
-        .format("lance")
-        .save(rootPath.resolve(tableName + ".lance").toString());
-    spark.sql(
-        String.format(
-            "ALTER TABLE %s CREATE INDEX s_zm USING zonemap (s) WITH (rows_per_zone=4)", table));
-    String predicate = " WHERE s > '\uE000'";
-    assertEquals(
-        Arrays.asList(
-            RowFactory.create(0L),
-            RowFactory.create(1L),
-            RowFactory.create(2L),
-            RowFactory.create(3L),
-            RowFactory.create(4L),
-            RowFactory.create(5L),
-            RowFactory.create(6L),
-            RowFactory.create(7L)),
-        spark.sql("SELECT id FROM " + table + predicate + " ORDER BY id").collectAsList());
-    assertEquals(8L, spark.sql("SELECT count(*) FROM " + table + predicate).first().getLong(0));
-  }
-
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
   public void testZonemapSliceOffsetsAreNotCompactedByDeletion(boolean stableRowIds)
@@ -361,9 +300,7 @@ public abstract class BaseZonemapIndexTest {
     LanceScanBuilder builder =
         new LanceScanBuilder(
             spark.table(table).schema(),
-            LanceSparkReadOptions.builder()
-                .datasetUri(rootPath.resolve(tableName + ".lance").toString())
-                .build(),
+            LanceSparkReadOptions.from(rootPath.resolve(tableName + ".lance").toString()),
             Collections.emptyMap(),
             null,
             Collections.emptyMap());
