@@ -261,6 +261,70 @@ public class CreateTableSpecTest {
     assertFalse(BlobUtils.isBlobSparkField(spec.schema().apply("fresh")));
   }
 
+  @Test
+  public void nestedBlobV2CreateResolvesMinimumBlobV2VersionAndRejectsTwoOne() {
+    CreateTableSpec created =
+        CreateTableSpec.resolve(nestedBlobV2QuerySchema(), Collections.emptyMap(), "2.0");
+    assertEquals(BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION, created.fileFormatVersion());
+    assertEquals(BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION, created.fragmentFileFormatVersion());
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            CreateTableSpec.resolve(
+                nestedBlobV2QuerySchema(), props("file_format_version", "2.1"), null));
+  }
+
+  @Test
+  public void replacePreservesDatasetDefaultWhileUpgradingBlobV2Fragments() {
+    CreateTableSpec topLevel =
+        CreateTableSpec.resolveForReplace(blobV2QuerySchema(), Collections.emptyMap(), null, "2.1");
+    assertNull(topLevel.fileFormatVersion());
+    assertEquals(BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION, topLevel.fragmentFileFormatVersion());
+
+    CreateTableSpec nested =
+        CreateTableSpec.resolveForReplace(
+            nestedBlobV2QuerySchema(), Collections.emptyMap(), null, "2.1");
+    assertNull(nested.fileFormatVersion());
+    assertEquals(BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION, nested.fragmentFileFormatVersion());
+
+    CreateTableSpec plainLegacy =
+        CreateTableSpec.resolveForReplace(SCHEMA, Collections.emptyMap(), null, "0.1");
+    assertNull(plainLegacy.fileFormatVersion());
+    assertEquals("0.1", plainLegacy.fragmentFileFormatVersion());
+
+    CreateTableSpec propertyDrivenBlob =
+        CreateTableSpec.resolveForReplace(
+            SCHEMA, props("data.lance.encoding", "blob"), null, "2.1");
+    assertEquals(BlobUtils.MIN_BLOB_V2_FILE_FORMAT_VERSION, propertyDrivenBlob.fileFormatVersion());
+    assertTrue(BlobUtils.isBlobV2SparkField(propertyDrivenBlob.schema().apply("data")));
+
+    CreateTableSpec explicitOverride =
+        CreateTableSpec.resolveForReplace(
+            blobV2QuerySchema(), props("file_format_version", "2.2"), null, "2.1");
+    assertEquals("2.2", explicitOverride.fileFormatVersion());
+    assertEquals("2.2", explicitOverride.fragmentFileFormatVersion());
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            CreateTableSpec.resolveForReplace(
+                blobV2QuerySchema(), Collections.emptyMap(), null, "0.1"));
+  }
+
+  private static StructType nestedBlobV2QuerySchema() {
+    Metadata v2 =
+        new MetadataBuilder()
+            .putString(BlobUtils.ARROW_EXTENSION_NAME_KEY, BlobUtils.ARROW_EXTENSION_BLOB_V2)
+            .build();
+    StructType payload =
+        new StructType(new StructField[] {new StructField("data", DataTypes.BinaryType, true, v2)});
+    return new StructType(
+        new StructField[] {
+          new StructField("id", DataTypes.IntegerType, false, Metadata.empty()),
+          new StructField("payload", payload, true, Metadata.empty()),
+        });
+  }
+
   private static StructType blobV1Schema() {
     Metadata v1 =
         new MetadataBuilder()

@@ -521,6 +521,35 @@ public abstract class BaseLanceRuntimeFilteringIntegrationTest {
   }
 
   @Test
+  public void testSupplementaryCharacterZonemapRuntimeFilterPreservesJoinRows() {
+    // Lance orders string bounds by code point, so U+1F600 is this zone's max, while Java's UTF-16
+    // order puts it below U+FFFD.
+    String fact = defaultCatalog + ".default.string_fact_" + suffix();
+    String dim = defaultCatalog + ".default.string_dim_" + suffix();
+    spark.sql("CREATE TABLE " + fact + " (id INT, s STRING) USING lance");
+    // One fragment, so that one zone holds both values.
+    spark.sql(
+        "INSERT INTO "
+            + fact
+            + " SELECT /*+ COALESCE(1) */ * FROM VALUES (1, '\uFFFD'), (2, '\uD83D\uDE00')"
+            + " AS v(id, s)");
+    spark.sql("ALTER TABLE " + fact + " CREATE INDEX string_idx USING zonemap (s)");
+    spark.sql("CREATE TABLE " + dim + " (s STRING, label STRING) USING lance");
+    spark.sql("INSERT INTO " + dim + " VALUES ('\uFFFD', 'match'), ('zz', 'other-long')");
+
+    Dataset<Row> joined =
+        spark.sql(
+            "SELECT f.id FROM "
+                + fact
+                + " f JOIN "
+                + dim
+                + " d ON f.s = d.s "
+                + "WHERE length(d.label) = 5");
+    assertEquals(1, joined.collectAsList().size());
+    assertTrue(LanceScanTestHelper.hasLanceRuntimeFilters(joined));
+  }
+
+  @Test
   public void testRuntimeFilteringSkipsColumnsSparkReadsLossily() throws Exception {
     // Spark truncates nanosecond timestamps and Date64 values and reads UInt64 values of 2^63 or
     // more as negative longs, so Lance cannot match them exactly against Spark's join keys.

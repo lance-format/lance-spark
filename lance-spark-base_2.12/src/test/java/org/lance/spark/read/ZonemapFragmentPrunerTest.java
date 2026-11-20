@@ -21,12 +21,15 @@ import org.apache.spark.sql.connector.expressions.filter.Predicate;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Date;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Random;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -651,5 +654,123 @@ public class ZonemapFragmentPrunerTest {
         Set.of(2),
         result.get(),
         "fragment 2 is outside column x's index, so x's predicate cannot rule it out");
+  }
+
+  @Test
+  public void testComparesStringsByCodePoint() {
+    // UTF-16 puts the surrogates of U+1F600 below U+FFFD; Lance orders bounds by code point.
+    assertTrue(ZonemapFragmentPruner.compareCodePoints("\uFFFD", "\uD83D\uDE00") < 0);
+    assertTrue("\uFFFD".compareTo("\uD83D\uDE00") > 0);
+    assertEquals(0, ZonemapFragmentPruner.compareCodePoints("ab", "ab"));
+    assertTrue(ZonemapFragmentPruner.compareCodePoints("ab", "abc") < 0);
+    assertTrue(ZonemapFragmentPruner.compareCodePoints("\uD83D\uDE00", "\uD83D\uDE00a") < 0);
+  }
+
+  @Test
+  public void testStringBoundsWithSupplementaryCharacters() {
+    // Fragment 1's zone holds U+FFFD and U+1F600; by code point U+FFFD is its min.
+    Map<String, List<ZoneStats>> stats = new HashMap<>();
+    stats.put(
+        "s",
+        Arrays.asList(
+            new ZoneStats(0, 0, 100, "\uD83D\uDE00", "\uD83D\uDE00", 0),
+            new ZoneStats(1, 0, 100, "\uFFFD", "\uD83D\uDE00", 0),
+            new ZoneStats(2, 0, 100, "a", "b", 0)));
+
+    assertEquals(
+        Set.of(1),
+        ZonemapFragmentPruner.pruneFragments(
+                new Predicate[] {TestPredicates.eq("s", "\uFFFD")}, stats)
+            .get());
+    assertEquals(
+        Set.of(0, 1),
+        ZonemapFragmentPruner.pruneFragments(
+                new Predicate[] {TestPredicates.gt("s", "\uFFFD")}, stats)
+            .get());
+    assertEquals(
+        Set.of(1, 2),
+        ZonemapFragmentPruner.pruneFragments(
+                new Predicate[] {TestPredicates.lt("s", "\uD83D\uDE00")}, stats)
+            .get());
+    assertEquals(
+        Set.of(1, 2),
+        ZonemapFragmentPruner.pruneFragments(
+                new Predicate[] {TestPredicates.in("s", "\uFFFD", "a")}, stats)
+            .get());
+  }
+
+  @Test
+  public void testInKeepsEveryZoneHoldingOneOfManyValues() {
+    // Unsorted values with duplicates, against overlapping zones, zones of only nulls, and zones
+    // without bounds that hold values (as Lance reports for decimals).
+    Random random = new Random(42);
+    List<ZoneStats> zones = new ArrayList<>();
+    for (int z = 0; z < 500; z++) {
+      long min = random.nextInt(100_000);
+      if (z % 50 == 0) {
+        zones.add(new ZoneStats(z, 0, 100, null, null, 100));
+      } else if (z % 50 == 1) {
+        zones.add(new ZoneStats(z, 0, 100, null, null, 0));
+      } else {
+        zones.add(new ZoneStats(z, 0, 100, min, min + random.nextInt(200), 0));
+      }
+    }
+    Object[] values = new Object[2_000];
+    for (int i = 0; i < values.length; i++) {
+      values[i] = (long) random.nextInt(100_000);
+    }
+    Set<Integer> expected = new HashSet<>();
+    for (ZoneStats zone : zones) {
+      for (Object value : values) {
+        boolean matches =
+            zone.getMin() == null
+                ? zone.getNullCount() < zone.getZoneLength()
+                : (long) value >= (Long) zone.getMin() && (long) value <= (Long) zone.getMax();
+        if (matches) {
+          expected.add(zone.getFragmentId());
+        }
+      }
+    }
+
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(
+            new Predicate[] {TestPredicates.in("x", values)}, Map.of("x", zones));
+
+    assertTrue(result.isPresent());
+    assertEquals(expected, result.get());
+  }
+
+  @Test
+  public void testInWithOnlyNullValuesKeepsOnlyZonesWithNulls() {
+    Map<String, List<ZoneStats>> stats = new HashMap<>();
+    stats.put(
+        "x",
+        Arrays.asList(
+            new ZoneStats(0, 0, 100, 0L, 99L, 0),
+            new ZoneStats(1, 0, 100, 100L, 199L, 5),
+            new ZoneStats(2, 0, 100, null, null, 0)));
+
+    Optional<Set<Integer>> result =
+        ZonemapFragmentPruner.pruneFragments(
+            new Predicate[] {TestPredicates.in("x", (Object) null)}, stats);
+    assertTrue(result.isPresent());
+    assertEquals(Set.of(1), result.get());
+  }
+
+  @Test
+  public void testInOrdersStringValuesByCodePoint() {
+    // By code point U+FFFD < U+FFFE < U+FFFF < U+1F600; UTF-16 puts U+1F600 first.
+    Map<String, List<ZoneStats>> stats = new HashMap<>();
+    stats.put(
+        "s",
+        Arrays.asList(
+            new ZoneStats(0, 0, 100, "\uD83D\uDE00", "\uD83D\uDE00", 0),
+            new ZoneStats(1, 0, 100, "\uFFFD", "\uFFFD", 0),
+            new ZoneStats(2, 0, 100, "\uFFFE", "\uFFFF", 0)));
+    Predicate[] filters = new Predicate[] {TestPredicates.in("s", "\uD83D\uDE00", "\uFFFD")};
+
+    Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
+    assertTrue(result.isPresent());
+    assertEquals(Set.of(0, 1), result.get());
   }
 }
