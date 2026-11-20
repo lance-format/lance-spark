@@ -61,6 +61,20 @@ def _table_location(spark, table_name):
     return rows[0].data_type
 
 
+def _sampling_version(spark, table_name):
+    if getattr(spark, "_lance_backend", None) == "lancedb":
+        pytest.skip("exact sampling requires direct access to a retained snapshot")
+    options = getattr(spark._jvm.org.lance.spark.LanceSparkReadOptions, "from")(
+        _java_hash_map(spark, _lance_storage_options(spark)),
+        _table_location(spark, table_name),
+    )
+    dataset = spark._jvm.org.lance.spark.utils.Utils.openDatasetBuilder(options).build()
+    try:
+        return dataset.version()
+    finally:
+        dataset.close()
+
+
 def _read_options_builder(jvm):
     try:
         return jvm.org.lance.ReadOptions.Builder()
@@ -1991,6 +2005,77 @@ class TestDQLSearchTableFunctions:
 
 class TestDQLSelect:
     """Test DQL SELECT operations."""
+
+    def test_exact_sample_snapshot_and_batch_replay(self, spark, test_table):
+        spark.sql(f"CREATE TABLE {test_table} (id BIGINT, label STRING)")
+        spark.range(13).selectExpr("id", "CAST(id AS STRING) AS label") \
+            .coalesce(1).writeTo(test_table).append()
+        spark.range(13, 100).selectExpr("id", "CAST(id AS STRING) AS label") \
+            .coalesce(1).writeTo(test_table).append()
+        spark.sql(f"DELETE FROM {test_table} WHERE id % 7 = 0")
+        version = _sampling_version(spark, test_table)
+
+        def sample(batch_size):
+            return spark.read.option("version", str(version)) \
+                .option("sample_size", "31").option("sample_seed", "-42") \
+                .option("sample_batch_size", str(batch_size)).table(test_table)
+
+        sampled = sample(3)
+        expected = sampled.orderBy("id").collect()
+        assert len(expected) == len({row.id for row in expected}) == 31
+        assert all(row.id % 7 != 0 for row in expected)
+        assert sample(17).orderBy("id").collect() == expected
+        assert sampled.select("id").orderBy("id").collect() == [(row.id,) for row in expected]
+        assert sampled.count() == 31
+        assert sampled.limit(5).count() == 5
+        assert sampled.where("id < 50").count() == sum(row.id < 50 for row in expected)
+        assert "LanceSampleScan" in sampled._jdf.queryExecution().executedPlan().toString()
+
+        spark.sql(f"INSERT INTO {test_table} VALUES (100, 'later')")
+        spark.sql(f"DELETE FROM {test_table} WHERE id < 50")
+        assert sampled.orderBy("id").collect() == expected
+        assert sample(1).orderBy("id").collect() == expected
+
+        path_sample = spark.read.format("lance").option("version", str(version)) \
+            .option("sample_size", "31").option("sample_seed", "-42") \
+            .load(_table_location(spark, test_table))
+        assert path_sample.orderBy("id").collect() == expected
+
+    def test_exact_sample_boundaries_and_blob_projection(self, spark, test_table):
+        spark.sql(f"""
+            CREATE TABLE {test_table} (id INT, content BINARY) USING lance
+            TBLPROPERTIES ('content.lance.encoding' = 'blob', 'file_format_version' = '2.2')
+        """)
+        spark.sql(f"INSERT INTO {test_table} VALUES (1, X'6162'), (2, NULL), (3, X'')")
+        version = _sampling_version(spark, test_table)
+
+        def sample(size):
+            return spark.read.option("version", str(version)) \
+                .option("sample_size", str(size)).option("sample_seed", "0").table(test_table)
+
+        assert sample(0).select("id").count() == 0
+        assert sample(3).select("id").orderBy("id").collect() == [(1,), (2,), (3,)]
+        with pytest.raises(Exception, match="blob|Blob"):
+            sample(1).select("content").collect()
+        with pytest.raises(Exception):
+            sample(4).select("id").collect()
+        with pytest.raises(Exception, match="sample_seed"):
+            spark.read.option("version", str(version)).option("sample_size", "1") \
+                .table(test_table).select("id").collect()
+        with pytest.raises(Exception, match="version"):
+            spark.read.option("sample_size", "1").option("sample_seed", "0") \
+                .table(test_table).select("id").collect()
+
+    def test_exact_sample_options_are_not_table_properties(self, spark, test_table):
+        with pytest.raises(Exception, match="[Ss]ampl|sample_"):
+            spark.sql(f"""
+                CREATE TABLE {test_table} (id INT) USING lance
+                TBLPROPERTIES ('SaMpLe_SiZe' = '1', 'sample_seed' = '42')
+            """)
+        spark.sql(f"CREATE TABLE {test_table} (id INT) USING lance")
+        for key in ("sample_size", "SaMpLe_SeEd", "sample_batch_size"):
+            with pytest.raises(Exception, match="[Ss]ampl|sample_"):
+                spark.sql(f"ALTER TABLE {test_table} SET TBLPROPERTIES ('{key}' = '1')")
 
     def test_cache_backend_catalog_session_reads_written_table(self, spark, test_table):
         """Verify catalog cache backends are used by a real Spark write/read path."""

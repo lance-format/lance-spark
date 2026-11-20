@@ -59,6 +59,11 @@ public class LanceSparkReadOptions implements Serializable {
   public static final String CONFIG_INDEX_CACHE_SIZE = "index_cache_size";
   public static final String CONFIG_METADATA_CACHE_SIZE = "metadata_cache_size";
   public static final String CONFIG_BATCH_SIZE = "batch_size";
+  public static final String CONFIG_SAMPLE_SIZE = "sample_size";
+  public static final String CONFIG_SAMPLE_SEED = "sample_seed";
+  public static final String CONFIG_SAMPLE_BATCH_SIZE = "sample_batch_size";
+  public static final long MAX_SAMPLE_SIZE = 1_000_000L;
+  private static final int DEFAULT_SAMPLE_BATCH_SIZE = 1024;
   public static final String CONFIG_USE_SCALAR_INDEX = "use_scalar_index";
   public static final String CONFIG_RUNTIME_FILTER_MAX_KEYS = "runtime_filter_max_keys";
   public static final String CONFIG_RUNTIME_FILTER_MAX_BYTES = "runtime_filter_max_bytes";
@@ -123,6 +128,9 @@ public class LanceSparkReadOptions implements Serializable {
   private final Integer indexCacheSize;
   private final Integer metadataCacheSize;
   private final int batchSize;
+  private final Long sampleSize;
+  private final Long sampleSeed;
+  private final Integer sampleBatchSize;
   private transient FullTextQuery fullTextQuery;
   private final boolean useScalarIndex;
   private final int runtimeFilterMaxKeys;
@@ -161,6 +169,9 @@ public class LanceSparkReadOptions implements Serializable {
     this.indexCacheSize = builder.indexCacheSize;
     this.metadataCacheSize = builder.metadataCacheSize;
     this.batchSize = builder.batchSize;
+    this.sampleSize = builder.sampleSize;
+    this.sampleSeed = builder.sampleSeed;
+    this.sampleBatchSize = builder.sampleBatchSize;
     this.fullTextQuery = builder.fullTextQuery;
     this.useScalarIndex = builder.useScalarIndex;
     this.runtimeFilterMaxKeys = builder.runtimeFilterMaxKeys;
@@ -168,6 +179,7 @@ public class LanceSparkReadOptions implements Serializable {
     this.topNPushDown = builder.topNPushDown;
     this.storageOptions = new HashMap<>(builder.storageOptions);
     this.storageOptions.keySet().removeIf(TransactionProperties::isOption);
+    this.storageOptions.keySet().removeIf(LanceSparkReadOptions::isSamplingOption);
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
     this.catalogName = builder.catalogName;
@@ -271,6 +283,28 @@ public class LanceSparkReadOptions implements Serializable {
     return batchSize;
   }
 
+  public boolean isSampling() {
+    return sampleSize != null;
+  }
+
+  public Long getSampleSize() {
+    return sampleSize;
+  }
+
+  public Long getSampleSeed() {
+    return sampleSeed;
+  }
+
+  public int getSampleBatchSize() {
+    return sampleBatchSize == null ? DEFAULT_SAMPLE_BATCH_SIZE : sampleBatchSize;
+  }
+
+  public static boolean isSamplingOption(String key) {
+    return CONFIG_SAMPLE_SIZE.equalsIgnoreCase(key)
+        || CONFIG_SAMPLE_SEED.equalsIgnoreCase(key)
+        || CONFIG_SAMPLE_BATCH_SIZE.equalsIgnoreCase(key);
+  }
+
   public FullTextQuery getFullTextQuery() {
     return fullTextQuery;
   }
@@ -369,6 +403,9 @@ public class LanceSparkReadOptions implements Serializable {
         .indexCacheSize(this.indexCacheSize)
         .metadataCacheSize(this.metadataCacheSize)
         .batchSize(this.batchSize)
+        .sampleSize(this.sampleSize)
+        .sampleSeed(this.sampleSeed)
+        .sampleBatchSize(this.sampleBatchSize)
         .fullTextQuery(this.fullTextQuery)
         .useScalarIndex(this.useScalarIndex)
         .runtimeFilterMaxKeys(this.runtimeFilterMaxKeys)
@@ -429,6 +466,9 @@ public class LanceSparkReadOptions implements Serializable {
     LanceSparkReadOptions that = (LanceSparkReadOptions) o;
     return pushDownFilters == that.pushDownFilters
         && batchSize == that.batchSize
+        && Objects.equals(sampleSize, that.sampleSize)
+        && Objects.equals(sampleSeed, that.sampleSeed)
+        && getSampleBatchSize() == that.getSampleBatchSize()
         && useScalarIndex == that.useScalarIndex
         && runtimeFilterMaxKeys == that.runtimeFilterMaxKeys
         && runtimeFilterMaxBytes == that.runtimeFilterMaxBytes
@@ -458,6 +498,9 @@ public class LanceSparkReadOptions implements Serializable {
         indexCacheSize,
         metadataCacheSize,
         batchSize,
+        sampleSize,
+        sampleSeed,
+        getSampleBatchSize(),
         FullTextQueryUtils.fullTextQueryToString(fullTextQuery),
         useScalarIndex,
         runtimeFilterMaxKeys,
@@ -482,6 +525,9 @@ public class LanceSparkReadOptions implements Serializable {
     private Integer indexCacheSize;
     private Integer metadataCacheSize;
     private int batchSize = DEFAULT_BATCH_SIZE;
+    private Long sampleSize;
+    private Long sampleSeed;
+    private Integer sampleBatchSize;
     private boolean useScalarIndex = DEFAULT_USE_SCALAR_INDEX;
     private int runtimeFilterMaxKeys = DEFAULT_RUNTIME_FILTER_MAX_KEYS;
     private int runtimeFilterMaxBytes = DEFAULT_RUNTIME_FILTER_MAX_BYTES;
@@ -534,6 +580,21 @@ public class LanceSparkReadOptions implements Serializable {
 
     public Builder batchSize(int batchSize) {
       this.batchSize = batchSize;
+      return this;
+    }
+
+    public Builder sampleSize(Long sampleSize) {
+      this.sampleSize = sampleSize;
+      return this;
+    }
+
+    public Builder sampleSeed(Long sampleSeed) {
+      this.sampleSeed = sampleSeed;
+      return this;
+    }
+
+    public Builder sampleBatchSize(Integer sampleBatchSize) {
+      this.sampleBatchSize = sampleBatchSize;
       return this;
     }
 
@@ -626,6 +687,10 @@ public class LanceSparkReadOptions implements Serializable {
      */
     public Builder withCatalogDefaults(LanceSparkCatalogConfig catalogConfig) {
       // Merge storage options: catalog options are defaults, current options override
+      Preconditions.checkArgument(
+          catalogConfig.getStorageOptions().keySet().stream()
+              .noneMatch(LanceSparkReadOptions::isSamplingOption),
+          "Sampling options must be specified per read, not as catalog defaults");
       Map<String, String> merged = new HashMap<>(catalogConfig.getStorageOptions());
       merged.putAll(this.storageOptions);
       this.indexCacheBackend = catalogConfig.getIndexCacheBackend();
@@ -673,6 +738,15 @@ public class LanceSparkReadOptions implements Serializable {
         Preconditions.checkArgument(parsedBatchSize > 0, "batch_size must be positive");
         this.batchSize = parsedBatchSize;
       }
+      if (references.containsKey(CONFIG_SAMPLE_SIZE)) {
+        this.sampleSize = Long.parseLong(references.get(CONFIG_SAMPLE_SIZE));
+      }
+      if (references.containsKey(CONFIG_SAMPLE_SEED)) {
+        this.sampleSeed = Long.parseLong(references.get(CONFIG_SAMPLE_SEED));
+      }
+      if (references.containsKey(CONFIG_SAMPLE_BATCH_SIZE)) {
+        this.sampleBatchSize = Integer.parseInt(references.get(CONFIG_SAMPLE_BATCH_SIZE));
+      }
       if (opts.containsKey(CONFIG_TOP_N_PUSH_DOWN)) {
         this.topNPushDown = Boolean.parseBoolean(opts.get(CONFIG_TOP_N_PUSH_DOWN));
       }
@@ -701,6 +775,24 @@ public class LanceSparkReadOptions implements Serializable {
     public LanceSparkReadOptions build() {
       if (datasetUri == null) {
         throw new IllegalArgumentException("datasetUri is required");
+      }
+      Preconditions.checkArgument(
+          (sampleSize == null) == (sampleSeed == null),
+          "sample_size and sample_seed must be specified together");
+      Preconditions.checkArgument(
+          sampleBatchSize == null || sampleSize != null,
+          "sample_batch_size requires sample_size and sample_seed");
+      if (sampleSize != null) {
+        Preconditions.checkArgument(
+            sampleSize >= 0 && sampleSize <= MAX_SAMPLE_SIZE,
+            "sample_size must be between 0 and " + MAX_SAMPLE_SIZE + " (driver planning limit)");
+        Preconditions.checkArgument(
+            sampleBatchSize == null || sampleBatchSize > 0, "sample_batch_size must be positive");
+        Preconditions.checkArgument(
+            fullTextQuery == null,
+            "Exact sampling cannot be combined with a full-text search query");
+        Preconditions.checkArgument(
+            !arrowBatchReads, "Exact sampling does not support arrow_batch_reads");
       }
       return new LanceSparkReadOptions(this);
     }

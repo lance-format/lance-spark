@@ -4,6 +4,32 @@ Runs the [TPC-DS](http://www.tpc.org/tpcds/) and [TPC-H](http://www.tpc.org/tpch
 
 `parquet` here refers to Spark's built-in Parquet reader, used as a performance baseline.
 
+## Exact Random Sampling
+
+Run the sampling microbenchmark against a retained snapshot with the matching
+Spark/Scala bundle:
+
+```bash
+spark-submit --jars /path/to/lance-spark-bundle.jar \
+  benchmark/scripts/exact-sampling.py /path/to/data.lance \
+  --version 123 --size 10000 --columns id embedding \
+  --batch-sizes 256 1024 4096 --repeats 3
+```
+
+It prints JSON Lines for seeded exact sampling, Spark's fraction-based sample,
+and native Java sampling. Spark modes consume the projected rows through an RDD
+to avoid count pushdown; their timings include Python row conversion. Native
+sampling is a driver-only reference without Spark task or Python row conversion
+cost and has no seed. Approximate sampling may return a different number of rows.
+The native reference samples all requested rows in one call, so choose a size
+that fits driver memory.
+
+The script rotates execution order across repeats but does not evict OS, native,
+or object-store caches. Record storage/layout, fragment sizes, deletion density,
+column widths, and cache preparation with results. Obtain actual requests/bytes
+and peak-memory measurements separately from storage/process instrumentation;
+these JSON timings do not estimate them.
+
 ## Architecture
 
 Data generation uses Apache Kyuubi's [TPC-DS](https://kyuubi.readthedocs.io/en/master/connector/spark/tpcds.html) and [TPC-H](https://kyuubi.readthedocs.io/en/master/connector/spark/tpch.html) connectors — pure-Spark data sources that generate test data in parallel across executors. No external `dsdgen`/`dbgen` binaries, CSV files, or intermediate formats are needed — data is written directly into the target format (Lance, Parquet, etc.) and can target any Spark-supported storage (local, S3, GCS, HDFS).
