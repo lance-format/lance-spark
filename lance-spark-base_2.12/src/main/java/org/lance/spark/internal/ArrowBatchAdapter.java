@@ -17,18 +17,32 @@ import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.BlobUtils;
+import org.lance.spark.utils.Float16Utils;
 import org.lance.spark.utils.JsonUtils;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.BigIntVector;
+import org.apache.arrow.vector.DateDayVector;
+import org.apache.arrow.vector.DateMilliVector;
 import org.apache.arrow.vector.FieldVector;
+import org.apache.arrow.vector.FixedSizeBinaryVector;
+import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.SmallIntVector;
+import org.apache.arrow.vector.TimeStampVector;
+import org.apache.arrow.vector.UInt1Vector;
+import org.apache.arrow.vector.UInt2Vector;
+import org.apache.arrow.vector.UInt4Vector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.complex.BaseRepeatedValueVector;
 import org.apache.arrow.vector.complex.FixedSizeListVector;
+import org.apache.arrow.vector.complex.LargeListVector;
 import org.apache.arrow.vector.ipc.message.ArrowFieldNode;
+import org.apache.arrow.vector.types.DateUnit;
+import org.apache.arrow.vector.types.FloatingPointPrecision;
+import org.apache.arrow.vector.types.TimeUnit;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
@@ -137,8 +151,8 @@ public final class ArrowBatchAdapter {
           vector = new BigIntVector(signed64Field(name), allocator);
           owned.add(vector);
           load(nativeVector, vector, allocator);
-        } else if (containsFixedSizeList(nativeVector.getField())) {
-          vector = toListField(nativeVector.getField()).createVector(allocator);
+        } else if (needsConversion(nativeVector.getField())) {
+          vector = toBatchField(nativeVector.getField()).createVector(allocator);
           owned.add(vector);
           load(nativeVector, vector, allocator);
         } else {
@@ -204,11 +218,11 @@ public final class ArrowBatchAdapter {
     if (isRowMetadataColumn(name)) {
       return signed64Field(name);
     }
-    if (datasetField == null || !containsFixedSizeList(datasetField)) {
+    if (datasetField == null || !needsConversion(datasetField)) {
       return datasetField;
     }
     // The field of the vector buildColumns() builds, as Arrow names list children itself.
-    try (FieldVector vector = toListField(datasetField).createVector(LanceRuntime.allocator())) {
+    try (FieldVector vector = toBatchField(datasetField).createVector(LanceRuntime.allocator())) {
       return vector.getField();
     }
   }
@@ -306,56 +320,128 @@ public final class ArrowBatchAdapter {
     return new Field(name, FieldType.nullable(new ArrowType.Int(64, true)), null);
   }
 
-  private static boolean containsFixedSizeList(Field field) {
-    return field.getType() instanceof ArrowType.FixedSizeList
-        || field.getChildren().stream().anyMatch(ArrowBatchAdapter::containsFixedSizeList);
+  /**
+   * The Arrow type of the batch column for a value of Arrow type {@code type}: the type that
+   * Spark's {@code ArrowColumnVector} reads as the Spark type the scan declares for it ({@code
+   * LanceArrowUtils}), which is {@code type} itself unless Spark does not read it. Lists of any
+   * size become Lists, fixed-size binaries become binaries, unsigned integers become the signed
+   * integers that hold them (64-bit ones keep their bits), Float16 becomes Float32, and dates and
+   * timestamps in other units become days and microseconds.
+   */
+  private static ArrowType batchType(ArrowType type) {
+    if (type instanceof ArrowType.FixedSizeList || type instanceof ArrowType.LargeList) {
+      return ArrowType.List.INSTANCE;
+    }
+    if (type instanceof ArrowType.FixedSizeBinary) {
+      return ArrowType.Binary.INSTANCE;
+    }
+    if (type instanceof ArrowType.Int && !((ArrowType.Int) type).getIsSigned()) {
+      int bitWidth = ((ArrowType.Int) type).getBitWidth();
+      return new ArrowType.Int(bitWidth == 64 ? 64 : bitWidth * 2, true);
+    }
+    if (type instanceof ArrowType.FloatingPoint
+        && ((ArrowType.FloatingPoint) type).getPrecision() == FloatingPointPrecision.HALF) {
+      return new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE);
+    }
+    if (type instanceof ArrowType.Date
+        && ((ArrowType.Date) type).getUnit() == DateUnit.MILLISECOND) {
+      return new ArrowType.Date(DateUnit.DAY);
+    }
+    if (type instanceof ArrowType.Timestamp
+        && ((ArrowType.Timestamp) type).getUnit() != TimeUnit.MICROSECOND) {
+      return new ArrowType.Timestamp(
+          TimeUnit.MICROSECOND, ((ArrowType.Timestamp) type).getTimezone());
+    }
+    return type;
   }
 
-  /** {@code field} with every FixedSizeList, at any depth, replaced by a List. */
-  private static Field toListField(Field field) {
-    if (!containsFixedSizeList(field)) {
+  /**
+   * Whether {@code field} or one of its descendants has a different type in the batch. A
+   * dictionary-encoded field holds indices rather than values, so it is not converted.
+   */
+  private static boolean needsConversion(Field field) {
+    return field.getDictionary() == null
+        && (!batchType(field.getType()).equals(field.getType())
+            || field.getChildren().stream().anyMatch(ArrowBatchAdapter::needsConversion));
+  }
+
+  /** {@code field} with the batch type ({@link #batchType}) at every depth. */
+  private static Field toBatchField(Field field) {
+    if (!needsConversion(field)) {
       return field;
     }
+    ArrowType type = batchType(field.getType());
     FieldType fieldType =
-        field.getType() instanceof ArrowType.FixedSizeList
-            ? new FieldType(
-                field.isNullable(),
-                ArrowType.List.INSTANCE,
-                field.getDictionary(),
-                field.getMetadata())
-            : field.getFieldType();
+        new FieldType(field.isNullable(), type, field.getDictionary(), field.getMetadata());
     return new Field(
         field.getName(),
         fieldType,
         field.getChildren().stream()
-            .map(ArrowBatchAdapter::toListField)
+            .map(ArrowBatchAdapter::toBatchField)
             .collect(Collectors.toList()));
   }
 
   /**
-   * Loads {@code source} into {@code target}, a vector of {@code toListField(source.getField())} or
-   * a signed 64-bit vector over an unsigned one, sharing or moving the buffers of {@code source}
-   * rather than copying values. A FixedSizeList becomes a List over the same child values: element
-   * {@code i} of a FixedSizeList of size {@code n} is child range {@code [i * n, (i + 1) * n)},
-   * also for null entries, so only an offsets buffer is new.
+   * Loads {@code source} into {@code target}, a vector of {@code toBatchField(source.getField())}
+   * or a signed 64-bit vector over an unsigned one. Where the layouts agree, the buffers of {@code
+   * source} are shared or moved rather than copied:
+   *
+   * <ul>
+   *   <li>A FixedSizeList becomes a List over the same child values: element {@code i} of a
+   *       FixedSizeList of size {@code n} is child range {@code [i * n, (i + 1) * n)}, also for
+   *       null entries, so only an offsets buffer is new. A fixed-size binary becomes a binary over
+   *       the same bytes the same way.
+   *   <li>A LargeList becomes a List over the same child values with 32-bit offsets.
+   *   <li>An unsigned 64-bit integer keeps its bits as a signed one, as the Spark reader reads it.
+   * </ul>
+   *
+   * Other converted values are copied, rescaled as the Spark reader rescales them.
    */
   private static void load(FieldVector source, FieldVector target, BufferAllocator allocator) {
-    if (!containsFixedSizeList(source.getField()) && !isUnsigned64(source.getField())) {
+    Field field = source.getField();
+    if (!needsConversion(field) && !isUnsigned64(field)) {
       // Same type on both sides: move the buffers.
       source.makeTransferPair(target).transfer();
       return;
     }
-    ArrowFieldNode node = new ArrowFieldNode(source.getValueCount(), source.getNullCount());
+    int rows = source.getValueCount();
+    ArrowFieldNode node = new ArrowFieldNode(rows, source.getNullCount());
+    long width = BaseRepeatedValueVector.OFFSET_WIDTH;
     if (source instanceof FixedSizeListVector) {
       FixedSizeListVector fixed = (FixedSizeListVector) source;
-      long width = BaseRepeatedValueVector.OFFSET_WIDTH;
-      try (ArrowBuf offsets = allocator.buffer((fixed.getValueCount() + 1L) * width)) {
-        for (int i = 0; i <= fixed.getValueCount(); i++) {
-          offsets.setInt(i * width, i * fixed.getListSize());
+      try (ArrowBuf offsets = allocator.buffer((rows + 1L) * width)) {
+        for (int i = 0; i <= rows; i++) {
+          offsets.setInt(i * width, Math.multiplyExact(i, fixed.getListSize()));
         }
         // loadFieldBuffers takes its own reference to the offsets.
         target.loadFieldBuffers(node, Arrays.asList(fixed.getValidityBuffer(), offsets));
       }
+    } else if (source instanceof LargeListVector) {
+      ArrowBuf largeOffsets = ((LargeListVector) source).getOffsetBuffer();
+      try (ArrowBuf offsets = allocator.buffer((rows + 1L) * width)) {
+        for (int i = 0; i <= rows; i++) {
+          offsets.setInt(
+              i * width,
+              Math.toIntExact(largeOffsets.getLong((long) i * LargeListVector.OFFSET_WIDTH)));
+        }
+        target.loadFieldBuffers(node, Arrays.asList(source.getValidityBuffer(), offsets));
+      }
+    } else if (source instanceof FixedSizeBinaryVector) {
+      int byteWidth = ((FixedSizeBinaryVector) source).getByteWidth();
+      try (ArrowBuf offsets = allocator.buffer((rows + 1L) * width)) {
+        for (int i = 0; i <= rows; i++) {
+          offsets.setInt(i * width, Math.multiplyExact(i, byteWidth));
+        }
+        target.loadFieldBuffers(
+            node, Arrays.asList(source.getValidityBuffer(), offsets, source.getDataBuffer()));
+      }
+      return;
+    } else if (isUnsigned64(field)) {
+      target.loadFieldBuffers(node, source.getFieldBuffers());
+      return;
+    } else if (!batchType(field.getType()).equals(field.getType())) {
+      convertValues(source, target);
+      return;
     } else {
       target.loadFieldBuffers(node, source.getFieldBuffers());
     }
@@ -363,6 +449,59 @@ public final class ArrowBatchAdapter {
     List<FieldVector> targetChildren = target.getChildrenFromFields();
     for (int i = 0; i < sourceChildren.size(); i++) {
       load(sourceChildren.get(i), targetChildren.get(i), allocator);
+    }
+  }
+
+  /**
+   * Copies the values of {@code source}, a scalar vector whose batch type differs from its own,
+   * into {@code target}, converted as the Spark reader converts them: unsigned integers widened,
+   * Float16 to Float32, milliseconds since the epoch to days by floor division, and timestamps to
+   * microseconds, multiplied exactly or divided by floor division.
+   */
+  private static void convertValues(FieldVector source, FieldVector target) {
+    int rows = source.getValueCount();
+    target.setInitialCapacity(rows);
+    target.allocateNew();
+    ArrowType type = source.getField().getType();
+    for (int i = 0; i < rows; i++) {
+      if (source.isNull(i)) {
+        continue;
+      }
+      if (source instanceof UInt1Vector) {
+        ((SmallIntVector) target).set(i, (short) Byte.toUnsignedInt(((UInt1Vector) source).get(i)));
+      } else if (source instanceof UInt2Vector) {
+        ((IntVector) target).set(i, ((UInt2Vector) source).get(i));
+      } else if (source instanceof UInt4Vector) {
+        ((BigIntVector) target).set(i, Integer.toUnsignedLong(((UInt4Vector) source).get(i)));
+      } else if (type instanceof ArrowType.FloatingPoint
+          && ((ArrowType.FloatingPoint) type).getPrecision() == FloatingPointPrecision.HALF) {
+        short halfBits = source.getDataBuffer().getShort((long) i * 2);
+        ((Float4Vector) target).set(i, Float16Utils.halfToFloat(halfBits));
+      } else if (source instanceof DateMilliVector) {
+        long millis = ((DateMilliVector) source).get(i);
+        ((DateDayVector) target).set(i, (int) Math.floorDiv(millis, MILLIS_PER_DAY));
+      } else if (source instanceof TimeStampVector) {
+        long raw = ((TimeStampVector) source).get(i);
+        ((TimeStampVector) target).set(i, toMicros(raw, ((ArrowType.Timestamp) type).getUnit()));
+      } else {
+        throw new IllegalStateException("No Arrow batch conversion for " + type);
+      }
+    }
+    target.setValueCount(rows);
+  }
+
+  private static final long MILLIS_PER_DAY = 86_400_000L;
+
+  private static long toMicros(long raw, TimeUnit unit) {
+    switch (unit) {
+      case SECOND:
+        return Math.multiplyExact(raw, 1_000_000L);
+      case MILLISECOND:
+        return Math.multiplyExact(raw, 1_000L);
+      case NANOSECOND:
+        return Math.floorDiv(raw, 1_000L);
+      default:
+        return raw;
     }
   }
 

@@ -19,26 +19,41 @@ import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 import org.lance.spark.internal.ArrowBatchAdapter;
 import org.lance.spark.utils.BlobUtils;
+import org.lance.spark.utils.Float16Utils;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.BigIntVector;
+import org.apache.arrow.vector.BitVectorHelper;
+import org.apache.arrow.vector.DateMilliVector;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.FixedSizeBinaryVector;
 import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.LargeVarBinaryVector;
+import org.apache.arrow.vector.SmallIntVector;
+import org.apache.arrow.vector.TimeMilliVector;
+import org.apache.arrow.vector.TimeStampMilliVector;
+import org.apache.arrow.vector.TimeStampNanoTZVector;
+import org.apache.arrow.vector.TimeStampSecTZVector;
 import org.apache.arrow.vector.TinyIntVector;
+import org.apache.arrow.vector.UInt1Vector;
+import org.apache.arrow.vector.UInt2Vector;
 import org.apache.arrow.vector.UInt4Vector;
+import org.apache.arrow.vector.UInt8Vector;
+import org.apache.arrow.vector.VarBinaryVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.complex.FixedSizeListVector;
+import org.apache.arrow.vector.complex.LargeListVector;
 import org.apache.arrow.vector.complex.ListVector;
 import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import org.apache.arrow.vector.ipc.ArrowStreamWriter;
+import org.apache.arrow.vector.types.DateUnit;
 import org.apache.arrow.vector.types.FloatingPointPrecision;
+import org.apache.arrow.vector.types.TimeUnit;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
@@ -335,13 +350,14 @@ public abstract class BaseArrowBatchReadTest {
   /** Columns without an Arrow batch form make the scan read as usual. */
   @Test
   public void readsAsUsualWithoutAnArrowBatchForm() throws Exception {
+    // Spark 4.1+ reads Arrow times as TIME, which it turns on with this option.
+    spark.conf().set("spark.sql.timeType.enabled", "true");
     String uri = tempDir.resolve("no-arrow-form.lance").toString();
     writeArrowDataset(uri, false);
-    assertSameRows(uri, "select id, hex(fsb) from t order by id");
-    assertSameRows(uri, "select id, u from t order by id");
+    assertSameRows(uri, "select id, tm from t order by id");
 
     read(uri, true).createOrReplaceTempView("t");
-    for (String column : Arrays.asList("fsb", "u")) {
+    for (String column : Arrays.asList("tm")) {
       LanceScan scan = lanceScan(spark.sql("select id, " + column + " from t"));
       assertFalse(scan.readOptions().isArrowBatchReadsEnabled());
       assertFalse(scan.arrowBatchSchema().isPresent());
@@ -352,6 +368,173 @@ public abstract class BaseArrowBatchReadTest {
       forEachBatch(
           scan, batch -> assertNotEquals(ArrowColumnVector.class, batch.column(1).getClass()));
     }
+  }
+
+  /**
+   * Columns of types Spark's ArrowColumnVector does not read become ones it reads, holding what the
+   * Spark reader returns for them: unsigned integers widened (64-bit ones wrapped), Float16 as
+   * Float32, fixed-size binaries and LargeLists as binaries and Lists, and dates and timestamps in
+   * other units as days and microseconds, rounded down. Also inside vectors, structs and lists.
+   */
+  @Test
+  public void readsTypesSparkDoesNotReadAsArrowBatches() throws Exception {
+    String uri = tempDir.resolve("converted-types.lance").toString();
+    boolean float16 = Float16Utils.isFloat2VectorAvailable();
+    writeConvertedTypesDataset(uri, float16);
+    assertSameRows(uri, "select * from t order by id");
+    assertSameRows(
+        uri,
+        "select id, u64 + 1, cast(dms as string), cast(ns as string), hex(fsb), size(big),"
+            + " bvec[3], doc.d, get(lst, 0) from t where u8 > 0 or u8 is null order by id");
+
+    read(uri, true).createOrReplaceTempView("t");
+    LanceScan scan = lanceScan(spark.sql("select * from t"));
+    assertTrue(
+        scan.readOptions().isArrowBatchReadsEnabled(),
+        scan.arrowBatchUnsupportedReason().toString());
+    Schema schema = scan.arrowBatchSchema().get();
+    assertEquals(new ArrowType.Int(16, true), schema.findField("u8").getType());
+    assertEquals(new ArrowType.Int(64, true), schema.findField("u64").getType());
+    assertEquals(ArrowType.Binary.INSTANCE, schema.findField("fsb").getType());
+    assertEquals(new ArrowType.Date(DateUnit.DAY), schema.findField("dms").getType());
+    assertEquals(
+        new ArrowType.Timestamp(TimeUnit.MICROSECOND, "America/Los_Angeles"),
+        schema.findField("ns").getType());
+    assertEquals(ArrowType.List.INSTANCE, schema.findField("big").getType());
+    int batches =
+        forEachArrowBatch(
+            scan,
+            batch -> {
+              assertEquals(schema, new Schema(fieldsOf(batch)));
+              assertInstanceOf(SmallIntVector.class, batch.get(1));
+              assertInstanceOf(VarBinaryVector.class, batch.get(5));
+            });
+    assertTrue(batches > 0);
+  }
+
+  /**
+   * Writes 5 rows of columns whose types Spark's ArrowColumnVector does not read, with their edge
+   * values: the largest unsigned values and those with the top bit set, negative millisecond dates
+   * and timestamps that floor division rounds down, nulls, and empty lists. Float16 columns only
+   * where Arrow has Float2Vector.
+   */
+  private static void writeConvertedTypesDataset(String uri, boolean float16) throws Exception {
+    ArrowType half = new ArrowType.FloatingPoint(FloatingPointPrecision.HALF);
+    List<Field> fields =
+        new ArrayList<>(
+            Arrays.asList(
+                new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
+                new Field("u8", FieldType.nullable(new ArrowType.Int(8, false)), null),
+                new Field("u16", FieldType.nullable(new ArrowType.Int(16, false)), null),
+                new Field("u32", FieldType.nullable(new ArrowType.Int(32, false)), null),
+                new Field("u64", FieldType.nullable(new ArrowType.Int(64, false)), null),
+                new Field("fsb", FieldType.nullable(new ArrowType.FixedSizeBinary(4)), null),
+                new Field(
+                    "dms", FieldType.nullable(new ArrowType.Date(DateUnit.MILLISECOND)), null),
+                new Field(
+                    "s", FieldType.nullable(new ArrowType.Timestamp(TimeUnit.SECOND, "UTC")), null),
+                new Field(
+                    "ms",
+                    FieldType.nullable(new ArrowType.Timestamp(TimeUnit.MILLISECOND, null)),
+                    null),
+                new Field(
+                    "ns",
+                    FieldType.nullable(
+                        new ArrowType.Timestamp(TimeUnit.NANOSECOND, "America/Los_Angeles")),
+                    null),
+                new Field(
+                    "big",
+                    FieldType.nullable(ArrowType.LargeList.INSTANCE),
+                    Collections.singletonList(element(new ArrowType.Int(32, true)))),
+                vector("bvec", 4, element(new ArrowType.Int(8, false))),
+                new Field(
+                    "doc",
+                    FieldType.nullable(ArrowType.Struct.INSTANCE),
+                    Arrays.asList(
+                        new Field("u", FieldType.nullable(new ArrowType.Int(16, false)), null),
+                        new Field(
+                            "d",
+                            FieldType.nullable(new ArrowType.Date(DateUnit.MILLISECOND)),
+                            null))),
+                new Field(
+                    "lst",
+                    FieldType.nullable(ArrowType.List.INSTANCE),
+                    Collections.singletonList(element(new ArrowType.Int(32, false))))));
+    if (float16) {
+      fields.add(new Field("f16", FieldType.nullable(half), null));
+      fields.add(vector("hvec", 2, element(half)));
+    }
+    BufferAllocator allocator = LanceRuntime.allocator();
+    try (VectorSchemaRoot root = VectorSchemaRoot.create(new Schema(fields), allocator)) {
+      root.allocateNew();
+      long[] u64 = {-1L, 0, 0, 1_234_567_890_123L, Long.MIN_VALUE};
+      long[] millis = {-1L, 0, 0, 1_700_000_000_123L, -86_400_001L};
+      long[] nanos = {-1L, 0, 0, 1_718_451_000_000_000_001L, -1_001L};
+      LargeListVector big = (LargeListVector) root.getVector("big");
+      FixedSizeListVector bvec = (FixedSizeListVector) root.getVector("bvec");
+      StructVector doc = (StructVector) root.getVector("doc");
+      ListVector lst = (ListVector) root.getVector("lst");
+      for (int r = 0; r < 5; r++) {
+        ((IntVector) root.getVector("id")).setSafe(r, r);
+        // Vector elements are not nullable, so they are set for null vectors too.
+        for (int j = 0; j < 4; j++) {
+          ((UInt1Vector) bvec.getDataVector()).setSafe(r * 4 + j, r == 0 ? 255 - j : r + j);
+        }
+        if (float16) {
+          FixedSizeListVector hvec = (FixedSizeListVector) root.getVector("hvec");
+          setHalf(hvec.getDataVector(), r * 2, Float.POSITIVE_INFINITY);
+          setHalf(hvec.getDataVector(), r * 2 + 1, 65_504f);
+        }
+        if (r == 1) {
+          // Every other column of row 1 is null.
+          continue;
+        }
+        ((UInt1Vector) root.getVector("u8")).setSafe(r, r == 0 ? 255 : r);
+        ((UInt2Vector) root.getVector("u16")).setSafe(r, r == 0 ? 65_535 : r);
+        ((UInt4Vector) root.getVector("u32")).setSafe(r, r == 0 ? -1 : 4_000_000 + r);
+        ((UInt8Vector) root.getVector("u64")).setSafe(r, u64[r]);
+        ((FixedSizeBinaryVector) root.getVector("fsb")).setSafe(r, new byte[] {(byte) r, 1, 2, -1});
+        ((DateMilliVector) root.getVector("dms")).setSafe(r, millis[r]);
+        ((TimeStampSecTZVector) root.getVector("s")).setSafe(r, millis[r] / 1000 - 1);
+        ((TimeStampMilliVector) root.getVector("ms")).setSafe(r, millis[r]);
+        ((TimeStampNanoTZVector) root.getVector("ns")).setSafe(r, nanos[r]);
+        big.startNewValue(r);
+        for (int j = 0; j < r; j++) {
+          ((IntVector) big.getDataVector())
+              .setSafe((int) big.getElementStartIndex(r) + j, r * 10 + j);
+        }
+        big.endValue(r, r);
+        if (r != 2) {
+          bvec.setNotNull(r);
+        }
+        if (r != 2) {
+          doc.setIndexDefined(r);
+          ((UInt2Vector) doc.getChild("u")).setSafe(r, 60_000 + r);
+          ((DateMilliVector) doc.getChild("d")).setSafe(r, millis[r]);
+        }
+        lst.startNewValue(r);
+        int start = lst.getOffsetBuffer().getInt((long) r * ListVector.OFFSET_WIDTH);
+        for (int j = 0; j < (r % 3); j++) {
+          ((UInt4Vector) lst.getDataVector()).setSafe(start + j, -1 - j);
+        }
+        lst.endValue(r, r % 3);
+        if (float16) {
+          // A NaN element would never equal itself in a Spark array; a scalar one does in a Row.
+          setHalf(root.getVector("f16"), r, r == 0 ? -0.0f : r == 4 ? Float.NaN : r + 0.5f);
+          ((FixedSizeListVector) root.getVector("hvec")).setNotNull(r);
+        }
+      }
+      root.setRowCount(5);
+      writeLanceDataset(root, uri, null);
+    }
+  }
+
+  /**
+   * Sets slot {@code i} of a Float16 vector without naming Float2Vector, absent before Arrow 18.
+   */
+  private static void setHalf(FieldVector vector, int i, float value) {
+    vector.getDataBuffer().setShort((long) i * 2, Float16Utils.floatToHalf(value));
+    BitVectorHelper.setBit(vector.getValidityBuffer(), i);
   }
 
   /**
@@ -571,8 +754,8 @@ public abstract class BaseArrowBatchReadTest {
                         element(new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE)))))
             : Arrays.asList(
                 id,
-                new Field("fsb", FieldType.nullable(new ArrowType.FixedSizeBinary(4)), null),
-                new Field("u", FieldType.nullable(new ArrowType.Int(32, false)), null));
+                new Field(
+                    "tm", FieldType.nullable(new ArrowType.Time(TimeUnit.MILLISECOND, 32)), null));
     BufferAllocator allocator = LanceRuntime.allocator();
     try (VectorSchemaRoot root = VectorSchemaRoot.create(new Schema(fields), allocator)) {
       root.allocateNew();
@@ -593,9 +776,7 @@ public abstract class BaseArrowBatchReadTest {
             ((Float4Vector) inner.getDataVector()).setSafe((r * 2 + j) * 2 + 1, r + j + 0.5f);
           }
         } else {
-          ((FixedSizeBinaryVector) root.getVector("fsb"))
-              .setSafe(r, new byte[] {(byte) r, 1, 2, 3});
-          ((UInt4Vector) root.getVector("u")).setSafe(r, 4_000_000 + r);
+          ((TimeMilliVector) root.getVector("tm")).setSafe(r, 3_600_000 * r + 1);
         }
       }
       root.setRowCount(3);
