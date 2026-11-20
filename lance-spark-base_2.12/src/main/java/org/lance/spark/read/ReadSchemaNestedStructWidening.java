@@ -32,9 +32,11 @@ import java.util.Map;
  * <p>When {@link org.apache.spark.sql.connector.read.SupportsPushDownRequiredColumns#pruneColumns}
  * narrows a nested {@link StructType} to a subset of fields (e.g. only one nested column),
  * vectorized execution still uses child ordinals from that pruned struct. Lance always returns the
- * full struct column from the scanner, and {@link org.lance.spark.vectorized.LanceStructAccessor}
- * indexes Arrow children by full struct ordinal. Replacing pruned nested structs with the table's
- * full struct definition restores ordinal agreement between Catalyst and Arrow.
+ * full struct column from the scanner. The regular columnar reader binds struct children by name,
+ * but Arrow batch reads (Spark's {@code ArrowColumnVector}) and the search reader, which builds
+ * {@code LanceArrowColumnVector} without a Spark type, bind them by full struct ordinal. Replacing
+ * pruned nested structs with the table's full struct definition keeps Catalyst and Arrow ordinals
+ * in agreement for those readers.
  */
 final class ReadSchemaNestedStructWidening {
 
@@ -126,7 +128,7 @@ final class ReadSchemaNestedStructWidening {
    * <p>Only widens when {@code requiredStruct} is a name-subset of {@code tableStruct} — i.e. every
    * field in the required schema also exists in the table schema. Fields present in the table but
    * absent from the required schema are filled in from the table definition unchanged, preserving
-   * the Arrow child ordinals that {@link org.lance.spark.vectorized.LanceStructAccessor} relies on.
+   * the Arrow child ordinals that readers binding struct children by position rely on.
    */
   private static DataType widenStructType(StructType requiredStruct, StructType tableStruct) {
     if (tableStruct.size() < requiredStruct.size()) {

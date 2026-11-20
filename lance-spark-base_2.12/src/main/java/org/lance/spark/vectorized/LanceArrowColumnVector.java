@@ -41,9 +41,12 @@ import org.apache.arrow.vector.complex.LargeListVector;
 import org.apache.arrow.vector.complex.ListVector;
 import org.apache.arrow.vector.complex.MapVector;
 import org.apache.arrow.vector.complex.StructVector;
+import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.Decimal;
+import org.apache.spark.sql.types.MapType;
 import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 import org.apache.spark.sql.vectorized.ArrowColumnVector;
 import org.apache.spark.sql.vectorized.ColumnVector;
@@ -83,12 +86,95 @@ public class LanceArrowColumnVector extends ColumnVector {
 
   public LanceArrowColumnVector(
       ValueVector vector, boolean closeVectorOnClose, StructField sparkField) {
-    super(
-        BlobUtils.isBlobV2SparkField(sparkField)
-            ? BlobUtils.BLOB_DESCRIPTOR_STRUCT
-            : computeDataType(vector));
+    super(reportedSparkType(vector, sparkField));
     this.closeVectorOnClose = closeVectorOnClose;
+    // Schema-aware nested projection (#499). Lance's native scan does not push down nested struct
+    // projection, so a StructVector always carries its on-disk children in physical order. When the
+    // Spark field is a plain (non-blob) struct, list or map, bind it through the Spark type so a
+    // pruned or reordered struct reads correctly at any depth. Blob v2 descriptor columns keep the
+    // by-ordinal binding handled in initFromVector.
+    if (sparkField != null
+        && !BlobUtils.isBlobV2SparkField(sparkField)
+        && initFromSparkType(vector, sparkField.dataType())) {
+      return;
+    }
+    initFromVector(vector, sparkField);
+  }
 
+  public LanceArrowColumnVector(ValueVector vector, DataType sparkType) {
+    this(vector, sparkType, true);
+  }
+
+  /**
+   * Schema-aware constructor. When {@code sparkType} describes a struct, list or map vector (other
+   * than a blob struct), struct children are bound by name in {@code sparkType}'s field order, and
+   * list elements and map keys and values through the Spark element, key and value types, at any
+   * depth, rather than by physical Arrow ordinal. This lets the same Arrow vector serve a pruned or
+   * reordered Spark schema correctly (see GitHub issue #499).
+   *
+   * <p>For all other vector / type combinations the dispatch is identical to the single-argument
+   * constructor; {@code sparkType} only changes the reported {@link #dataType()}.
+   *
+   * <p>{@code closeVectorOnClose} controls whether {@link #close()} releases the underlying Arrow
+   * vector; pass {@code false} when the vector is reused across batches (see GitHub issue #545).
+   */
+  public LanceArrowColumnVector(
+      ValueVector vector, DataType sparkType, boolean closeVectorOnClose) {
+    super(sparkType);
+    this.closeVectorOnClose = closeVectorOnClose;
+    if (!initFromSparkType(vector, sparkType)) {
+      initFromVector(vector, null);
+    }
+  }
+
+  /**
+   * Binds a plain struct, list or map vector through {@code sparkType}: struct children by name in
+   * the Spark field order, and list elements and map keys and values through the Spark element, key
+   * and value types, so the binding follows the Spark type to any depth (#499). Returns false,
+   * binding nothing, when {@code vector} is not a container that {@code sparkType} describes.
+   */
+  private boolean initFromSparkType(ValueVector vector, DataType sparkType) {
+    if (!bindsThroughSparkType(vector, sparkType)) {
+      return false;
+    }
+    if (sparkType instanceof StructType) {
+      structAccessor = new LanceStructAccessor((StructVector) vector, (StructType) sparkType);
+    } else if (sparkType instanceof MapType) {
+      MapType mapType = (MapType) sparkType;
+      mapAccessor =
+          new LanceMapAccessor((MapVector) vector, mapType.keyType(), mapType.valueType());
+    } else {
+      DataType elementType = ((ArrayType) sparkType).elementType();
+      if (vector instanceof ListVector) {
+        arrayAccessor = new LanceArrayAccessor((ListVector) vector, elementType);
+      } else if (vector instanceof LargeListVector) {
+        largeArrayAccessor = new LanceLargeArrayAccessor((LargeListVector) vector, elementType);
+      } else {
+        fixedSizeListAccessor =
+            new FixedSizeListAccessor((FixedSizeListVector) vector, elementType);
+      }
+    }
+    return true;
+  }
+
+  /** True when {@code vector} is a plain struct, list or map that {@code sparkType} describes. */
+  private static boolean bindsThroughSparkType(ValueVector vector, DataType sparkType) {
+    if (sparkType instanceof StructType) {
+      return vector instanceof StructVector && !BlobUtils.isBlobArrowField(vector.getField());
+    }
+    if (sparkType instanceof MapType) {
+      return vector instanceof MapVector;
+    }
+    if (sparkType instanceof ArrayType) {
+      // MapVector extends ListVector; a map never binds as an array.
+      return (vector instanceof ListVector && !(vector instanceof MapVector))
+          || vector instanceof LargeListVector
+          || vector instanceof FixedSizeListVector;
+    }
+    return false;
+  }
+
+  private void initFromVector(ValueVector vector, StructField sparkField) {
     if (vector instanceof UInt1Vector) {
       uInt1Accessor = new UInt1Accessor((UInt1Vector) vector);
     } else if (vector instanceof UInt2Vector) {
@@ -576,6 +662,22 @@ public class LanceArrowColumnVector extends ColumnVector {
 
   private static DataType computeDataType(ValueVector vector) {
     return LanceArrowUtils.fromArrowField(vector.getField());
+  }
+
+  /**
+   * Computes the Spark type this column reports. Blob v2 descriptor fields report the descriptor
+   * struct; a plain (non-blob) struct, list or map field reports its Spark type so a pruned or
+   * reordered nested projection is described correctly (#499); everything else derives the type
+   * from the Arrow field.
+   */
+  private static DataType reportedSparkType(ValueVector vector, StructField sparkField) {
+    if (BlobUtils.isBlobV2SparkField(sparkField)) {
+      return BlobUtils.BLOB_DESCRIPTOR_STRUCT;
+    }
+    if (sparkField != null && bindsThroughSparkType(vector, sparkField.dataType())) {
+      return sparkField.dataType();
+    }
+    return computeDataType(vector);
   }
 
   private static class LanceDecimalAccessor {
