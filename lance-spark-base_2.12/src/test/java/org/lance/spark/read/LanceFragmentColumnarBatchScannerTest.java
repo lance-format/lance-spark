@@ -16,16 +16,31 @@ package org.lance.spark.read;
 import org.lance.spark.TestUtils;
 import org.lance.spark.internal.LanceFragmentColumnarBatchScanner;
 
+import org.apache.arrow.c.ArrowArrayStream;
+import org.apache.arrow.c.Data;
+import org.apache.arrow.memory.AllocationListener;
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.ipc.ArrowReader;
+import org.apache.arrow.vector.ipc.ArrowStreamReader;
+import org.apache.arrow.vector.ipc.ArrowStreamWriter;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class LanceFragmentColumnarBatchScannerTest {
 
@@ -60,5 +75,109 @@ public class LanceFragmentColumnarBatchScannerTest {
       fragmentId++;
     }
     assertEquals(4, rowIndex);
+  }
+
+  /** Refuses the {@code refused}-th allocation and every later one. */
+  private static final class RefusingListener implements AllocationListener {
+    private final int refused;
+    private int allocations;
+
+    RefusingListener(int refused) {
+      this.refused = refused;
+    }
+
+    @Override
+    public void onPreAllocation(long size) {
+      if (++allocations >= refused) {
+        throw new IllegalStateException("refused allocation " + allocations);
+      }
+    }
+  }
+
+  /**
+   * An allocator that refuses memory before the first batch is moved out of its C array fails the
+   * import and leaves nothing behind: the exported stream and its batch are released, whether the
+   * refusal hits the stream struct, the importer's struct, the schema or the first array. The
+   * producer exports a Java stream, so it holds whatever batch is not released.
+   */
+  @Test
+  public void refusedImportReleasesTheExportedStream() throws Exception {
+    byte[] ipc = oneBatchStream();
+    for (int refused = 1; refused <= 4; refused++) {
+      try (BufferAllocator producer = new RootAllocator();
+          BufferAllocator consumer =
+              new RootAllocator(new RefusingListener(refused), Long.MAX_VALUE)) {
+        boolean[] exported = {false};
+        boolean[] released = {false};
+        // Releasing the exported stream closes the reader it exports.
+        ArrowReader source =
+            new ArrowStreamReader(new ByteArrayInputStream(ipc), producer) {
+              @Override
+              protected void closeReadSource() throws IOException {
+                released[0] = true;
+                super.closeReadSource();
+              }
+            };
+        RuntimeException failure =
+            assertThrows(
+                RuntimeException.class,
+                () -> {
+                  try (ArrowReader reader =
+                      LanceFragmentColumnarBatchScanner.importArrowStream(
+                          consumer,
+                          address -> {
+                            Data.exportArrayStream(
+                                producer, source, ArrowArrayStream.wrap(address));
+                            exported[0] = true;
+                          })) {
+                    while (reader.loadNextBatch()) {
+                      // Read until the refusal.
+                    }
+                  }
+                });
+        assertTrue(
+            causes(failure, "refused allocation " + refused),
+            "allocation " + refused + " failed otherwise: " + failure);
+        assertEquals(0, consumer.getAllocatedMemory(), "allocation " + refused);
+        if (exported[0]) {
+          assertTrue(released[0], "refusing allocation " + refused + " did not release the stream");
+        } else {
+          source.close();
+        }
+        assertEquals(
+            0,
+            producer.getAllocatedMemory(),
+            "refusing allocation " + refused + " leaked the stream");
+      }
+    }
+  }
+
+  private static boolean causes(Throwable failure, String message) {
+    for (Throwable t = failure; t != null; t = t.getCause()) {
+      if (t.getMessage() != null && t.getMessage().contains(message)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** An Arrow IPC stream of one batch of 1024 ints. */
+  private static byte[] oneBatchStream() throws IOException {
+    try (BufferAllocator allocator = new RootAllocator();
+        IntVector ids = new IntVector("id", allocator)) {
+      ids.allocateNew(1024);
+      for (int i = 0; i < 1024; i++) {
+        ids.set(i, i);
+      }
+      ids.setValueCount(1024);
+      ByteArrayOutputStream out = new ByteArrayOutputStream();
+      try (VectorSchemaRoot root = new VectorSchemaRoot(Collections.singletonList(ids));
+          ArrowStreamWriter writer = new ArrowStreamWriter(root, null, out)) {
+        writer.start();
+        writer.writeBatch();
+        writer.end();
+      }
+      return out.toByteArray();
+    }
   }
 }

@@ -13,10 +13,12 @@
  */
 package org.lance.spark.read;
 
+import org.lance.spark.LanceRuntime;
 import org.lance.spark.internal.ExecutorNamespace;
 import org.lance.spark.internal.LanceFragmentColumnarBatchScanner;
 import org.lance.spark.read.metric.LanceReadMetricsTracker;
 
+import org.apache.arrow.memory.BufferAllocator;
 import org.apache.spark.sql.connector.metric.CustomTaskMetric;
 import org.apache.spark.sql.connector.read.PartitionReader;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
@@ -32,9 +34,20 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
   private boolean currentScanStatsAdded = false;
   private ExecutorNamespace executorNamespace;
 
+  /**
+   * The allocator of this reader's Arrow batches, taken when the reader is created. Spark registers
+   * the reader's close for the end of the task after that, so it runs the close before any clean-up
+   * the allocator's provider registered for the end of the task.
+   */
+  private final BufferAllocator arrowBatchAllocator;
+
   public LanceColumnarPartitionReader(LanceInputPartition inputPartition) {
     this.inputPartition = inputPartition;
     this.fragmentIndex = 0;
+    this.arrowBatchAllocator =
+        inputPartition.getReadOptions().isArrowBatchReadsEnabled()
+            ? LanceRuntime.arrowBatchReadAllocator()
+            : null;
   }
 
   @Override
@@ -62,7 +75,9 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
       initializeExecutorNamespace();
       fragmentReader =
           LanceFragmentColumnarBatchScanner.create(
-              inputPartition.getLanceSplit().getFragments().get(fragmentIndex), inputPartition);
+              inputPartition.getLanceSplit().getFragments().get(fragmentIndex),
+              inputPartition,
+              arrowBatchAllocator);
       fragmentIndex++;
 
       currentScanStatsAdded = false;

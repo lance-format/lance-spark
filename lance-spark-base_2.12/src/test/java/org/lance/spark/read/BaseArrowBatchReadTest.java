@@ -22,6 +22,7 @@ import org.lance.spark.utils.BlobUtils;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
+import org.apache.arrow.memory.AllocationListener;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.FieldVector;
@@ -77,6 +78,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -800,5 +802,154 @@ public abstract class BaseArrowBatchReadTest {
       }
     }
     assertEquals(before, root.getAllocatedMemory());
+  }
+
+  /** Counts the bytes an allocator reports to its listener: reserved, and released again. */
+  private static final class CountingListener implements AllocationListener {
+    final AtomicLong reserved = new AtomicLong();
+    final AtomicLong released = new AtomicLong();
+
+    @Override
+    public void onPreAllocation(long size) {
+      reserved.addAndGet(size);
+    }
+
+    @Override
+    public void onRelease(long size) {
+      released.addAndGet(size);
+    }
+  }
+
+  /**
+   * A reader takes its allocator from the provider once, when it is created, and builds every batch
+   * there, both the vectors of the native scan and the ones it adds. A consumer that keeps vectors
+   * in that allocator holds them past the reader, and the allocator's listener sees every byte
+   * reserved and released again, as no memory moves between allocators.
+   */
+  @Test
+  public void providedAllocatorHoldsTheArrowBatches() throws Exception {
+    String uri = writeSparkDataset("provided");
+    LanceScan scan = lanceScan(read(uri, true).select("id", "vec", "_fragid"));
+    InputPartition partition = scan.planInputPartitions()[0];
+    BufferAllocator lanceAllocator = LanceRuntime.arrowBatchAllocator();
+    long lanceBefore = lanceAllocator.getAllocatedMemory();
+    CountingListener listener = new CountingListener();
+    try (BufferAllocator consumer =
+        ArrowUtils.rootAllocator().newChildAllocator("consumer", listener, 0, Long.MAX_VALUE)) {
+      List<FieldVector> retained = new ArrayList<>();
+      List<List<Object>> expected = new ArrayList<>();
+      LanceRuntime.setArrowBatchAllocatorProvider(() -> consumer);
+      PartitionReader<ColumnarBatch> reader;
+      try {
+        reader = scan.createReaderFactory().createColumnarReader(partition);
+      } finally {
+        LanceRuntime.setArrowBatchAllocatorProvider(null);
+      }
+      try {
+        int batches = 0;
+        while (reader.next()) {
+          ColumnarBatch batch = reader.get();
+          for (int c = 0; c < batch.numCols(); c++) {
+            FieldVector vector =
+                (FieldVector) ((ArrowColumnVector) batch.column(c)).getValueVector();
+            assertSame(consumer, vector.getAllocator());
+            if (batches == 0) {
+              List<Object> values = new ArrayList<>();
+              for (int i = 0; i < vector.getValueCount(); i++) {
+                values.add(vector.getObject(i));
+              }
+              expected.add(values);
+              TransferPair pair = vector.getTransferPair(consumer);
+              pair.transfer();
+              retained.add((FieldVector) pair.getTo());
+            }
+          }
+          batches++;
+        }
+        assertTrue(batches > 0);
+        assertTrue(consumer.getAllocatedMemory() > 0);
+      } finally {
+        reader.close();
+      }
+      assertEquals(lanceBefore, lanceAllocator.getAllocatedMemory());
+      assertEquals(3, retained.size());
+      for (int c = 0; c < retained.size(); c++) {
+        FieldVector kept = retained.get(c);
+        for (int i = 0; i < kept.getValueCount(); i++) {
+          assertEquals(expected.get(c).get(i), kept.getObject(i));
+        }
+        kept.close();
+      }
+      assertEquals(0, consumer.getAllocatedMemory());
+    }
+    assertTrue(listener.reserved.get() > 0);
+    assertEquals(listener.reserved.get(), listener.released.get());
+  }
+
+  /** A provider that has no allocator for a reader leaves it on the Arrow batch allocator. */
+  @Test
+  public void providerWithoutAnAllocatorLeavesTheArrowBatchAllocator() throws Exception {
+    String uri = writeSparkDataset("unprovided");
+    LanceScan scan = lanceScan(read(uri, true).select("id", "vec"));
+    LanceRuntime.setArrowBatchAllocatorProvider(() -> null);
+    try {
+      assertSame(LanceRuntime.arrowBatchAllocator(), LanceRuntime.arrowBatchReadAllocator());
+      assertTrue(forEachArrowBatch(scan, vectors -> {}) > 0);
+    } finally {
+      LanceRuntime.setArrowBatchAllocatorProvider(null);
+    }
+  }
+
+  /**
+   * Spark jobs over Arrow batch reads, one of them stopped early by a limit, build their batches in
+   * the provided allocator and release them all when their tasks end.
+   */
+  @Test
+  public void sparkJobsReleaseTheProvidedAllocator() throws Exception {
+    String uri = writeSparkDataset("provided-jobs");
+    Function<Boolean, Dataset<Row>> scan =
+        arrowBatches ->
+            spark
+                .read()
+                .format(LanceDataSource.name)
+                .option(LanceSparkReadOptions.CONFIG_ARROW_BATCH_READS, arrowBatches.toString())
+                .option(LanceSparkReadOptions.CONFIG_BATCH_SIZE, "4")
+                .load(uri)
+                .select("id", "vec", "_fragid");
+    List<Row> expected = scan.apply(false).orderBy("id").collectAsList();
+    CountingListener listener = new CountingListener();
+    try (BufferAllocator consumer =
+        ArrowUtils.rootAllocator().newChildAllocator("consumer", listener, 0, Long.MAX_VALUE)) {
+      LanceRuntime.setArrowBatchAllocatorProvider(() -> consumer);
+      try {
+        assertEquals(expected, scan.apply(true).orderBy("id").collectAsList());
+        assertEquals(3, scan.apply(true).limit(3).collectAsList().size());
+      } finally {
+        LanceRuntime.setArrowBatchAllocatorProvider(null);
+      }
+      assertTrue(listener.reserved.get() > 0, "no batch was built in the provided allocator");
+      assertEquals(0, consumer.getAllocatedMemory());
+    }
+    assertEquals(listener.reserved.get(), listener.released.get());
+  }
+
+  /** Reads without Arrow batches, including a pushed-down count, never ask the provider. */
+  @Test
+  public void readsWithoutArrowBatchesNeverAskTheProvider() throws Exception {
+    String uri = writeSparkDataset("unasked");
+    AtomicLong asked = new AtomicLong();
+    LanceRuntime.setArrowBatchAllocatorProvider(
+        () -> {
+          asked.incrementAndGet();
+          throw new IllegalStateException("the provider was asked");
+        });
+    try {
+      assertEquals(20, read(uri, false).select("id", "vec").collectAsList().size());
+      assertEquals(20, read(uri, false).count());
+      assertEquals(20, read(uri, true).count());
+    } finally {
+      LanceRuntime.setArrowBatchAllocatorProvider(null);
+    }
+    assertEquals(0, asked.get());
   }
 }

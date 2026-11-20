@@ -34,6 +34,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 
 /**
  * Runtime utilities for Lance Spark connector.
@@ -226,6 +227,41 @@ public final class LanceRuntime {
       }
     }
     return ARROW_BATCH_ALLOCATOR;
+  }
+
+  private static volatile Supplier<BufferAllocator> arrowBatchAllocatorProvider;
+
+  /**
+   * Sets where the Arrow batch reads of a task allocate from, for a consumer of the batches that
+   * keeps them in an allocator of its own, such as a query engine that accounts for the memory it
+   * holds. A reader asks {@code provider} for its allocator once, on the task's thread, when it is
+   * created, and builds every batch in it: the imported Lance data and the vectors the reader adds.
+   * The consumer then owns the batches without copying or transferring them. The allocator must
+   * stay open until the reader is closed and the consumer has released the batches.
+   *
+   * <p>If the allocator refuses memory, the read fails. Arrow Java up to 19.0.0 then leaks the
+   * batch being imported when the refusal comes while importing its buffers
+   * (apache/arrow-java#1239, fixed after 19.0.0) or the struct the batch moves into
+   * (apache/arrow-java#1491).
+   *
+   * <p>With no provider, or one that returns null, readers use {@link #arrowBatchAllocator()}.
+   *
+   * @param provider the allocator of the current task's Arrow batch reads, or null
+   */
+  public static void setArrowBatchAllocatorProvider(Supplier<BufferAllocator> provider) {
+    arrowBatchAllocatorProvider = provider;
+  }
+
+  /**
+   * Returns the allocator a new Arrow batch reader allocates from: the one {@link
+   * #setArrowBatchAllocatorProvider} supplies, or else {@link #arrowBatchAllocator()}.
+   *
+   * @return the allocator of an Arrow batch reader created now
+   */
+  public static BufferAllocator arrowBatchReadAllocator() {
+    Supplier<BufferAllocator> provider = arrowBatchAllocatorProvider;
+    BufferAllocator allocator = provider == null ? null : provider.get();
+    return allocator != null ? allocator : arrowBatchAllocator();
   }
 
   /**
