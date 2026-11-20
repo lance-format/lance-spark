@@ -77,6 +77,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -1907,6 +1908,11 @@ public abstract class BaseLanceNamespaceSparkCatalog
                 LanceRef.ofMain(Utils.findVersion(dataset.listVersions(), timestamp.get())));
       } catch (IllegalArgumentException e) {
         throw new NoSuchTableException(ident);
+      } catch (Exception e) {
+        if (looksLikeStorageAuthFailure(e)) {
+          throw describePathAccessError(datasetUri, e);
+        }
+        throw e;
       }
     }
 
@@ -1924,10 +1930,84 @@ public abstract class BaseLanceNamespaceSparkCatalog
       readOptions = pinLoadedBranch(readOptions, dataset);
     } catch (IllegalArgumentException e) {
       throw new NoSuchTableException(ident);
+    } catch (Exception e) {
+      // The native open throws java.io.IOException for storage errors without declaring it, so
+      // catch Exception; anything that is not an auth failure is rethrown unchanged.
+      if (looksLikeStorageAuthFailure(e)) {
+        throw describePathAccessError(datasetUri, e);
+      }
+      throw e;
     }
 
     return createDataset(
         readOptions, schema, null, null, null, false, fileFormatVersion, tableProperties, null);
+  }
+
+  // Substrings (matched case-insensitively) that indicate a native open failed on storage
+  // authentication/authorization rather than on a missing or corrupt dataset. Best-effort: a miss
+  // simply yields the raw native error, i.e. today's behavior. HTTP status codes are matched by
+  // their reason phrase, not by number: native messages also carry ports and timings (e.g. "in
+  // 403.5µs"), so a bare "403" would match unrelated errors.
+  private static final String[] STORAGE_AUTH_ERROR_MARKERS = {
+    "identity/oauth2/token",
+    "token request",
+    "managed identity",
+    "credential",
+    "authenticat",
+    "authoriz",
+    "forbidden",
+    "access denied",
+    "accessdenied",
+    "signaturedoesnotmatch",
+    "invalidaccesskeyid",
+  };
+
+  /**
+   * Returns {@code true} if {@code error} or any of its causes carries a message that looks like a
+   * storage authentication/authorization failure (e.g. a dropped SAS token falling back to the
+   * Azure MSI/IMDS credential chain). Best-effort and message-based, since the native object-store
+   * error is surfaced only as text.
+   */
+  static boolean looksLikeStorageAuthFailure(Throwable error) {
+    for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+      String message = cause.getMessage();
+      if (message == null) {
+        continue;
+      }
+      String lower = message.toLowerCase(Locale.ROOT);
+      for (String marker : STORAGE_AUTH_ERROR_MARKERS) {
+        if (lower.contains(marker)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Wraps a native open failure on path-based access that {@link #looksLikeStorageAuthFailure}
+   * classified as a storage authentication error, adding actionable guidance and keeping {@code
+   * error} as the cause.
+   *
+   * <p>Path-based access ({@code spark.read.format("lance").load(uri)}) routes through {@code
+   * SupportsCatalogOptions}, which forwards only the table identifier to the catalog — never the
+   * per-read {@code .option(...)} map. Storage credentials passed that way (e.g. an Azure SAS
+   * token) are therefore dropped before reaching the object store, and the open falls back to the
+   * default credential chain, surfacing a confusing error far from the real cause (e.g. an Azure
+   * MSI/IMDS token request failure). This points the user at the supported alternatives.
+   */
+  static IllegalStateException describePathAccessError(String datasetUri, Exception error) {
+    return new IllegalStateException(
+        "Failed to open Lance dataset at "
+            + datasetUri
+            + " and the underlying error looks like a storage authentication failure. Note that "
+            + "storage credentials passed via .option(...) are not applied to path-based access: "
+            + "only the table identifier is forwarded to the catalog, so a SAS token or account "
+            + "key set that way is dropped before reaching the object store. Configure storage "
+            + "credentials on the catalog instead — e.g. spark.sql.catalog.<name>.storage.<key> — "
+            + "or supply them via environment variables or a managed identity. Underlying error: "
+            + error.getMessage(),
+        error);
   }
 
   private static LanceSparkReadOptions pinLoadedBranch(
