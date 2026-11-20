@@ -15,6 +15,8 @@ package org.lance.spark.read;
 
 import org.lance.index.scalar.ZoneStats;
 
+import org.apache.arrow.vector.types.DateUnit;
+import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.Literal;
 import org.apache.spark.sql.connector.expressions.NamedReference;
@@ -117,6 +119,68 @@ public final class ZonemapFragmentPruner {
     return Optional.of(Collections.unmodifiableSet(result));
   }
 
+  /**
+   * Rescales Lance zonemap bounds to Spark's units (microseconds for timestamps, days for dates).
+   * Uses floor division to match the reader's rounding and avoid pruning matching fragments.
+   *
+   * <p>UInt64 bounds are skipped because signed long comparisons can break their ordering.
+   *
+   * @return rescaled zones, or null if the bounds cannot be safely converted or compared
+   */
+  public static List<ZoneStats> toSparkUnits(List<ZoneStats> zones, ArrowType type) {
+    long multiplier = 1;
+    long divisor = 1;
+    if (type instanceof ArrowType.Int
+        && !((ArrowType.Int) type).getIsSigned()
+        && ((ArrowType.Int) type).getBitWidth() == 64) {
+      return null;
+    } else if (type instanceof ArrowType.Timestamp) {
+      switch (((ArrowType.Timestamp) type).getUnit()) {
+        case SECOND:
+          multiplier = 1_000_000L;
+          break;
+        case MILLISECOND:
+          multiplier = 1_000L;
+          break;
+        case NANOSECOND:
+          divisor = 1_000L;
+          break;
+        default:
+          return zones;
+      }
+    } else if (type instanceof ArrowType.Date
+        && ((ArrowType.Date) type).getUnit() == DateUnit.MILLISECOND) {
+      divisor = 86_400_000L;
+    } else {
+      return zones;
+    }
+
+    List<ZoneStats> rescaled = new ArrayList<>(zones.size());
+    try {
+      for (ZoneStats zone : zones) {
+        rescaled.add(
+            new ZoneStats(
+                zone.getFragmentId(),
+                zone.getZoneStart(),
+                zone.getZoneLength(),
+                rescale(zone.getMin(), multiplier, divisor),
+                rescale(zone.getMax(), multiplier, divisor),
+                zone.getNullCount()));
+      }
+    } catch (ArithmeticException | ClassCastException e) {
+      return null;
+    }
+    return rescaled;
+  }
+
+  private static Long rescale(Comparable<?> bound, long multiplier, long divisor) {
+    if (bound == null) {
+      return null;
+    }
+    long value = (Long) bound;
+    return divisor > 1 ? Math.floorDiv(value, divisor) : Math.multiplyExact(value, multiplier);
+  }
+
   /** Every column referenced anywhere in a predicate tree, including nested AND/OR/NOT. */
   private static Set<String> referencedColumns(Predicate predicate) {
     Set<String> columns = new HashSet<>();
@@ -205,6 +269,34 @@ public final class ZonemapFragmentPruner {
     return Optional.of(matchingFragments);
   }
 
+  /**
+   * Compares {@code a} with {@code b}, strings by code point, which is how Lance orders zone
+   * bounds. Java's {@link String#compareTo} compares UTF-16 code units, which orders a character
+   * above U+FFFF, stored as a surrogate pair, below U+E000 to U+FFFF.
+   */
+  @SuppressWarnings("unchecked")
+  private static int compare(Object a, Object b) {
+    if (a instanceof String && b instanceof String) {
+      return compareCodePoints((String) a, (String) b);
+    }
+    return ((Comparable<Object>) a).compareTo(b);
+  }
+
+  static int compareCodePoints(String a, String b) {
+    int i = 0;
+    int j = 0;
+    while (i < a.length() && j < b.length()) {
+      int x = a.codePointAt(i);
+      int y = b.codePointAt(j);
+      if (x != y) {
+        return Integer.compare(x, y);
+      }
+      i += Character.charCount(x);
+      j += Character.charCount(y);
+    }
+    return Integer.compare(a.length() - i, b.length() - j);
+  }
+
   @SuppressWarnings("unchecked")
   private static boolean zoneMatchesComparison(
       ZoneStats zone, Comparable<Object> target, ComparisonType type) {
@@ -212,24 +304,24 @@ public final class ZonemapFragmentPruner {
     Comparable<Object> min = (Comparable<Object>) zone.getMin();
     Comparable<Object> max = (Comparable<Object>) zone.getMax();
 
-    // If min or max is null, the zone contains only nulls for the indexed range;
-    // non-null comparisons cannot match.
+    // Missing bounds mean either an all-null zone, which no comparison matches, or a type whose
+    // bounds Lance does not report (e.g. decimals), which may match anything.
     if (min == null || max == null) {
-      return false;
+      return zone.getNullCount() < zone.getZoneLength();
     }
 
     try {
       switch (type) {
         case EQUALS:
-          return target.compareTo(min) >= 0 && target.compareTo(max) <= 0;
+          return compare(target, min) >= 0 && compare(target, max) <= 0;
         case LESS_THAN:
-          return min.compareTo(target) < 0;
+          return compare(min, target) < 0;
         case LESS_THAN_OR_EQUAL:
-          return min.compareTo(target) <= 0;
+          return compare(min, target) <= 0;
         case GREATER_THAN:
-          return max.compareTo(target) > 0;
+          return compare(max, target) > 0;
         case GREATER_THAN_OR_EQUAL:
-          return max.compareTo(target) >= 0;
+          return compare(max, target) >= 0;
         default:
           return true;
       }

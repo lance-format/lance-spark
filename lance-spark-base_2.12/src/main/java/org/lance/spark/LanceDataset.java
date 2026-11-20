@@ -15,6 +15,7 @@ package org.lance.spark;
 
 import org.lance.Dataset;
 import org.lance.memwal.ShardingSpec;
+import org.lance.spark.internal.TransactionPropertiesWriteTable;
 import org.lance.spark.read.LanceScanBuilder;
 import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.BlobUtils;
@@ -32,7 +33,6 @@ import org.apache.spark.sql.connector.catalog.MetadataColumn;
 import org.apache.spark.sql.connector.catalog.StagedTable;
 import org.apache.spark.sql.connector.catalog.SupportsMetadataColumns;
 import org.apache.spark.sql.connector.catalog.SupportsRead;
-import org.apache.spark.sql.connector.catalog.SupportsWrite;
 import org.apache.spark.sql.connector.catalog.Table;
 import org.apache.spark.sql.connector.catalog.TableCapability;
 import org.apache.spark.sql.connector.read.ScanBuilder;
@@ -58,7 +58,7 @@ import java.util.stream.Collectors;
 
 /** Lance Spark Dataset. */
 public class LanceDataset
-    implements SupportsRead, SupportsWrite, SupportsMetadataColumns, StagedTable {
+    implements SupportsRead, TransactionPropertiesWriteTable, SupportsMetadataColumns, StagedTable {
 
   private static final Logger LOG = LoggerFactory.getLogger(LanceDataset.class);
 
@@ -470,7 +470,7 @@ public class LanceDataset
     // Use table's file format version if not explicitly set in write options
     if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)
         && fileFormatVersion != null) {
-      writeOptionsBuilder.fileFormatVersion(fileFormatVersion);
+      writeOptionsBuilder.fallbackFileFormatVersion(sparkSchema, fileFormatVersion);
     }
     if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS)
         && tableProperties.containsKey(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS)) {
@@ -530,7 +530,7 @@ public class LanceDataset
 
     if (stagedCommit != null) {
       builder.setStagedCommit(stagedCommit);
-      // Set write mode to OVERWRITE so that Fragment.create() infers schema from the
+      // Set write mode to OVERWRITE so that Fragment.write() infers schema from the
       // arrow stream rather than validating against the existing dataset schema. This
       // allows replacing a table with a different schema.
       builder.truncate();

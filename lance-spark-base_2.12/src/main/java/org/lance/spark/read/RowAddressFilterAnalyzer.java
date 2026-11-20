@@ -26,6 +26,7 @@ import org.apache.spark.sql.connector.expressions.filter.Predicate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Optional;
@@ -48,7 +49,11 @@ public final class RowAddressFilterAnalyzer {
 
   private static final Logger LOG = LoggerFactory.getLogger(RowAddressFilterAnalyzer.class);
 
-  private static final String ROW_ADDR_COLUMN = LanceConstant.ROW_ADDRESS;
+  private static final Set<String> ROW_ADDR_ONLY = Collections.singleton(LanceConstant.ROW_ADDRESS);
+
+  private static final Set<String> ROW_ADDR_AND_ROW_ID =
+      Collections.unmodifiableSet(
+          new HashSet<>(Arrays.asList(LanceConstant.ROW_ADDRESS, LanceConstant.ROW_ID)));
 
   private RowAddressFilterAnalyzer() {}
 
@@ -62,13 +67,24 @@ public final class RowAddressFilterAnalyzer {
    *     pruning can be applied
    */
   public static Optional<Set<Integer>> extractTargetFragmentIds(Predicate[] predicates) {
+    return extractTargetFragmentIds(predicates, false);
+  }
+
+  /**
+   * Same as {@link #extractTargetFragmentIds(Predicate[])}, optionally also treating {@code _rowid}
+   * as a row address. Only pass {@code true} for datasets without stable row IDs, where Lance emits
+   * {@code _rowid} equal to {@code _rowaddr}.
+   */
+  public static Optional<Set<Integer>> extractTargetFragmentIds(
+      Predicate[] predicates, boolean rowIdIsRowAddress) {
+    Set<String> columns = rowIdIsRowAddress ? ROW_ADDR_AND_ROW_ID : ROW_ADDR_ONLY;
     if (predicates == null || predicates.length == 0) {
       return Optional.empty();
     }
 
     Set<Integer> result = null;
     for (Predicate predicate : predicates) {
-      Optional<Set<Integer>> fragmentIds = analyzePredicate(predicate);
+      Optional<Set<Integer>> fragmentIds = analyzePredicate(predicate, columns);
       if (fragmentIds.isPresent()) {
         if (result == null) {
           result = new HashSet<>(fragmentIds.get());
@@ -92,12 +108,12 @@ public final class RowAddressFilterAnalyzer {
    * not aliased by any other reference. Callers may freely mutate it (e.g. via {@code retainAll} or
    * {@code addAll}) without affecting other results.
    */
-  private static Optional<Set<Integer>> analyzePredicate(Predicate predicate) {
+  private static Optional<Set<Integer>> analyzePredicate(Predicate predicate, Set<String> columns) {
     if (predicate instanceof And) {
-      return analyzeAnd((And) predicate);
+      return analyzeAnd((And) predicate, columns);
     }
     if (predicate instanceof Or) {
-      return analyzeOr((Or) predicate);
+      return analyzeOr((Or) predicate, columns);
     }
     if (predicate instanceof Not) {
       // Cannot safely prune for NOT predicates — any fragment might match the negation.
@@ -105,9 +121,9 @@ public final class RowAddressFilterAnalyzer {
     }
     switch (predicate.name()) {
       case "=":
-        return analyzeEqualTo(predicate);
+        return analyzeEqualTo(predicate, columns);
       case "IN":
-        return analyzeIn(predicate);
+        return analyzeIn(predicate, columns);
       default:
         // Range predicates on _rowaddr could in principle compute the range of fragment IDs
         // covered (e.g. _rowaddr >= X AND _rowaddr < Y). Conservatively skipped for now.
@@ -115,14 +131,14 @@ public final class RowAddressFilterAnalyzer {
     }
   }
 
-  private static Optional<Set<Integer>> analyzeEqualTo(Predicate predicate) {
+  private static Optional<Set<Integer>> analyzeEqualTo(Predicate predicate, Set<String> columns) {
     Expression[] children = predicate.children();
     if (children.length != 2
         || !(children[0] instanceof NamedReference)
         || !(children[1] instanceof Literal)) {
       return Optional.empty();
     }
-    if (!ROW_ADDR_COLUMN.equals(columnName((NamedReference) children[0]))) {
+    if (!columns.contains(columnName((NamedReference) children[0]))) {
       return Optional.empty();
     }
     Optional<Long> rowAddr = toLong(((Literal<?>) children[1]).value());
@@ -135,12 +151,12 @@ public final class RowAddressFilterAnalyzer {
     return Optional.of(result);
   }
 
-  private static Optional<Set<Integer>> analyzeIn(Predicate predicate) {
+  private static Optional<Set<Integer>> analyzeIn(Predicate predicate, Set<String> columns) {
     Expression[] children = predicate.children();
     if (children.length == 0 || !(children[0] instanceof NamedReference)) {
       return Optional.empty();
     }
-    if (!ROW_ADDR_COLUMN.equals(columnName((NamedReference) children[0]))) {
+    if (!columns.contains(columnName((NamedReference) children[0]))) {
       return Optional.empty();
     }
     Set<Integer> fragmentIds = new HashSet<>();
@@ -160,9 +176,9 @@ public final class RowAddressFilterAnalyzer {
     return Optional.of(fragmentIds);
   }
 
-  private static Optional<Set<Integer>> analyzeAnd(And predicate) {
-    Optional<Set<Integer>> left = analyzePredicate(predicate.left());
-    Optional<Set<Integer>> right = analyzePredicate(predicate.right());
+  private static Optional<Set<Integer>> analyzeAnd(And predicate, Set<String> columns) {
+    Optional<Set<Integer>> left = analyzePredicate(predicate.left(), columns);
+    Optional<Set<Integer>> right = analyzePredicate(predicate.right(), columns);
 
     if (left.isPresent() && right.isPresent()) {
       Set<Integer> intersection = new HashSet<>(left.get());
@@ -178,9 +194,9 @@ public final class RowAddressFilterAnalyzer {
     return Optional.empty();
   }
 
-  private static Optional<Set<Integer>> analyzeOr(Or predicate) {
-    Optional<Set<Integer>> left = analyzePredicate(predicate.left());
-    Optional<Set<Integer>> right = analyzePredicate(predicate.right());
+  private static Optional<Set<Integer>> analyzeOr(Or predicate, Set<String> columns) {
+    Optional<Set<Integer>> left = analyzePredicate(predicate.left(), columns);
+    Optional<Set<Integer>> right = analyzePredicate(predicate.right(), columns);
 
     // For OR, both sides must constrain _rowaddr to allow pruning — otherwise any fragment
     // could match via the unconstrained side.

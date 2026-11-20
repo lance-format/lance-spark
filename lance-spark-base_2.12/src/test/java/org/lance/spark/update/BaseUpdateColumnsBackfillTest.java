@@ -15,9 +15,9 @@ package org.lance.spark.update;
 
 import org.lance.BlobFile;
 import org.lance.Dataset;
-import org.lance.WriteParams;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceDataset;
+import org.lance.spark.LanceSpark;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
 import org.lance.spark.write.LanceBatchWrite;
@@ -120,6 +120,27 @@ public abstract class BaseUpdateColumnsBackfillTest {
         String.format(
             "insert into %s (id, value, name) values (1, 10, 'one'), (2, 20, 'two'), (3, 30, 'three');",
             fullTable));
+  }
+
+  @Test
+  public void testTransactionPropertiesBackfill() throws Exception {
+    prepareDataset();
+    spark.sql(
+        "CREATE TEMPORARY VIEW properties_source AS SELECT _rowaddr, _fragid, 200 AS value FROM "
+            + fullTable
+            + " WHERE id = 2");
+    LanceSpark.executeSql(
+        spark,
+        "ALTER TABLE " + fullTable + " UPDATE COLUMNS value FROM properties_source",
+        Collections.singletonMap("request", "update-columns"));
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    LanceDataset table =
+        (LanceDataset) catalog.loadTable(Identifier.of(new String[] {"default"}, tableName));
+    assertEquals(
+        Collections.singletonMap("request", "update-columns"),
+        TestUtils.readTransactionProperties(table.readOptions()));
+    assertEquals(240, spark.sql("SELECT SUM(value) FROM " + fullTable).first().getLong(0));
   }
 
   @Test
@@ -483,7 +504,11 @@ public abstract class BaseUpdateColumnsBackfillTest {
               Arrays.asList(
                   new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
                   new Field("value", FieldType.nullable(new ArrowType.Int(32, true)), null)));
-      org.lance.Dataset.create(allocator, datasetUri, schema, new WriteParams.Builder().build())
+      org.lance.Dataset.write()
+          .allocator(allocator)
+          .uri(datasetUri)
+          .schema(schema)
+          .execute()
           .close();
 
       LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);

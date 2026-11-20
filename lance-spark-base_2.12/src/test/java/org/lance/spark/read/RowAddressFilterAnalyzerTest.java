@@ -33,6 +33,15 @@ public class RowAddressFilterAnalyzerTest {
   }
 
   @Test
+  public void testRowIdPrunesOnlyWhenItIsARowAddress() {
+    Predicate[] filters = new Predicate[] {TestPredicates.in("_rowid", 4294967296L)};
+    assertFalse(RowAddressFilterAnalyzer.extractTargetFragmentIds(filters).isPresent());
+    assertFalse(RowAddressFilterAnalyzer.extractTargetFragmentIds(filters, false).isPresent());
+    assertEquals(
+        Optional.of(Set.of(1)), RowAddressFilterAnalyzer.extractTargetFragmentIds(filters, true));
+  }
+
+  @Test
   public void testEqualToFragmentOne() {
     // _rowaddr = 1L << 32 = 4294967296L → fragment 1
     Predicate[] filters = new Predicate[] {TestPredicates.eq("_rowaddr", 4294967296L)};

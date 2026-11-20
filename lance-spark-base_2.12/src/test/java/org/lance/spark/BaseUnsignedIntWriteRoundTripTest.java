@@ -348,6 +348,39 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
   }
 
   @Test
+  public void testZonemapOnUInt64KeepsMatchingRows() throws Exception {
+    // A zone holding 1 and 2^64-1 reports min=1, max=-1 as signed longs, so ordered pruning on
+    // those bounds would drop it.
+    String uri = tempDir.resolve("uint64_zonemap.lance").toString();
+    Schema schema =
+        new Schema(
+            Arrays.asList(
+                new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
+                unsignedField("u64", 64)));
+    Dataset.write()
+        .allocator(LanceRuntime.allocator())
+        .uri(uri)
+        .schema(schema)
+        .mode(WriteParams.WriteMode.CREATE)
+        .execute()
+        .close();
+    StructType sparkSchema = spark.read().format(LanceDataSource.name).load(uri).schema();
+    spark
+        .createDataFrame(
+            Arrays.asList(RowFactory.create(1, -1L), RowFactory.create(2, 1L)), sparkSchema)
+        .coalesce(1)
+        .write()
+        .format(LanceDataSource.name)
+        .mode(SaveMode.Append)
+        .save(uri);
+    String table = "unsigned_ns.default.uint64_zonemap";
+    spark.sql("ALTER TABLE " + table + " CREATE INDEX u64_zm USING zonemap (u64)");
+    assertEquals(
+        Collections.singletonList(RowFactory.create(2)),
+        spark.sql("SELECT id FROM " + table + " WHERE u64 = 1").collectAsList());
+  }
+
+  @Test
   public void testWidenedColumnCanBeRewrittenAfterReload() throws Exception {
     String sourceUri = tempDir.resolve("uint_widened_source.lance").toString();
     String targetUri = tempDir.resolve("uint_widened_target.lance").toString();

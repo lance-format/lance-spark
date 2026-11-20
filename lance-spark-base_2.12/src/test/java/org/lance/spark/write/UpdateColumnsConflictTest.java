@@ -14,10 +14,11 @@
 package org.lance.spark.write;
 
 import org.lance.Dataset;
-import org.lance.WriteParams;
 import org.lance.spark.LanceConstant;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
@@ -42,6 +43,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
@@ -73,8 +75,7 @@ public class UpdateColumnsConflictTest {
 
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
       // Create dataset with (id, value) rows
-      Dataset.create(allocator, datasetUri, ARROW_SCHEMA, new WriteParams.Builder().build())
-          .close();
+      Dataset.write().allocator(allocator).uri(datasetUri).schema(ARROW_SCHEMA).execute().close();
 
       LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
       StructType dataSchema = LanceArrowUtils.fromArrowSchema(ARROW_SCHEMA);
@@ -103,7 +104,16 @@ public class UpdateColumnsConflictTest {
 
       UpdateColumnsBackfillBatchWrite updateWrite =
           new UpdateColumnsBackfillBatchWrite(
-              updateSchema, writeOptions, updateColumns, null, null, null, null, false);
+              updateSchema,
+              writeOptions.toBuilder()
+                  .transactionProperties(Collections.singletonMap("request", "failed-backfill"))
+                  .build(),
+              updateColumns,
+              null,
+              null,
+              null,
+              null,
+              false);
 
       // Simulate executor work: write updated column values
       DataWriterFactory factory = updateWrite.createBatchWriterFactory(() -> 1);
@@ -117,13 +127,19 @@ public class UpdateColumnsConflictTest {
       }
 
       // Concurrent DELETE advances dataset to V3
-      try (Dataset ds = Dataset.open(datasetUri, allocator)) {
+      try (Dataset ds = Dataset.open().uri(datasetUri).allocator(allocator).build()) {
         ds.delete("id = 2");
       }
 
       // Backfill commit with pinned readVersion=V2 must fail — V3 exists
       assertThrows(
           Exception.class, () -> updateWrite.commit(new WriterCommitMessage[] {updateMsg}));
+      LanceSparkReadOptions readOptions = LanceSparkReadOptions.from(datasetUri);
+      try (Dataset committed = Utils.openDatasetBuilder(readOptions).build()) {
+        assertEquals(3, committed.version());
+        assertEquals(4, committed.countRows());
+      }
+      assertEquals(Collections.emptyMap(), TestUtils.readTransactionProperties(readOptions));
     }
   }
 }

@@ -13,8 +13,9 @@
  */
 package org.lance.spark.update;
 
-import org.lance.WriteParams;
 import org.lance.spark.LanceConstant;
+import org.lance.spark.LanceDataset;
+import org.lance.spark.LanceSpark;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
 import org.lance.spark.write.AddColumnsBackfillBatchWrite;
@@ -31,6 +32,8 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
+import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.write.DataWriter;
 import org.apache.spark.sql.connector.write.DataWriterFactory;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
@@ -116,6 +119,28 @@ public abstract class BaseAddColumnsBackfillTest {
                 .boxed()
                 .map(i -> String.format("(%d, 'text_%d')", i, i))
                 .collect(Collectors.joining(","))));
+  }
+
+  @Test
+  public void testTransactionPropertiesBackfill() throws Exception {
+    prepareDataset();
+    spark
+        .table(fullTable)
+        .select("_rowaddr", "_fragid", "id")
+        .withColumn("derived", functions.expr("id * 100"))
+        .createOrReplaceTempView("properties_source");
+    LanceSpark.executeSql(
+        spark,
+        "ALTER TABLE " + fullTable + " ADD COLUMNS derived FROM properties_source",
+        Collections.singletonMap("request", "add-columns"));
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    LanceDataset table =
+        (LanceDataset) catalog.loadTable(Identifier.of(new String[] {"default"}, tableName));
+    assertEquals(
+        Collections.singletonMap("request", "add-columns"),
+        TestUtils.readTransactionProperties(table.readOptions()));
+    assertEquals(4500, spark.sql("SELECT SUM(derived) FROM " + fullTable).first().getLong(0));
   }
 
   @Test
@@ -277,7 +302,11 @@ public abstract class BaseAddColumnsBackfillTest {
     try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
       Field field = new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null);
       Schema schema = new Schema(Collections.singletonList(field));
-      org.lance.Dataset.create(allocator, datasetUri, schema, new WriteParams.Builder().build())
+      org.lance.Dataset.write()
+          .allocator(allocator)
+          .uri(datasetUri)
+          .schema(schema)
+          .execute()
           .close();
 
       LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);

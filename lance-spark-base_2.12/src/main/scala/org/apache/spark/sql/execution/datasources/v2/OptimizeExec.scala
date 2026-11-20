@@ -18,9 +18,10 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
 import org.apache.spark.sql.catalyst.plans.logical.{LanceNamedArgument, OptimizeOutputType}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
+import org.lance.Dataset
 import org.lance.compaction.{Compaction, CompactionOptions, CompactionTask, RewriteResult}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceSparkReadOptions}
-import org.lance.spark.utils.Utils
+import org.lance.spark.utils.{FileFormatVersionResolver, Utils}
 
 import scala.collection.JavaConverters._
 
@@ -31,7 +32,7 @@ case class OptimizeExec(
 
   override def output: Seq[Attribute] = OptimizeOutputType.SCHEMA
 
-  private def buildOptions(): CompactionOptions = {
+  private def buildOptions(dataset: Dataset): CompactionOptions = {
     val builder = CompactionOptions.builder()
     val argsMap = args.map(t => (t.name, t)).toMap
 
@@ -47,6 +48,8 @@ case class OptimizeExec(
     argsMap.get("batch_size").map(t => builder.withBatchSize(longArg(t)))
     argsMap.get("defer_index_remap").map(t => builder.withDeferIndexRemap(booleanArg(t)))
     argsMap.get("max_source_fragments").map(t => builder.withMaxSourceFragments(longArg(t)))
+    FileFormatVersionResolver.resolveForCompaction(dataset).ifPresent(v =>
+      builder.withDataStorageVersion(v))
 
     builder.build()
   }
@@ -76,8 +79,6 @@ case class OptimizeExec(
   override protected def run(): Seq[InternalRow] = {
     val lanceDataset = LanceDataset.requireWritable(catalog.loadTable(ident), "Optimize")
 
-    // Build compaction options from arguments
-    val options = buildOptions()
     val readOptions = lanceDataset.readOptions()
 
     // Get namespace info and initial storage options from catalog/dataset
@@ -96,12 +97,13 @@ case class OptimizeExec(
     }
 
     // Plan compaction tasks
-    val tasks = {
+    val (options, tasks) = {
       val dataset = Utils.openDatasetBuilder(readOptions)
         .initialStorageOptions(initialStorageOpts.map(_.asJava).orNull)
         .build()
       try {
-        Compaction.planCompaction(dataset, options).getCompactionTasks
+        val resolvedOptions = buildOptions(dataset)
+        (resolvedOptions, Compaction.planCompaction(dataset, resolvedOptions).getCompactionTasks)
       } finally {
         dataset.close()
       }
