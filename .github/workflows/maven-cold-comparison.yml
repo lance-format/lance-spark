@@ -1,0 +1,143 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Temporary experiment for PR #974; not intended for merging.
+name: Maven cold-cache comparison
+
+on:
+  push:
+    branches: [codex/ci-cold-compare-20261120]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-C debuginfo=1"
+  RUST_BACKTRACE: "1"
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "1"
+
+jobs:
+  compare:
+    name: R${{ matrix.round }} / ${{ matrix.source.name }} / ${{ matrix.task.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.task.timeout }}
+    strategy:
+      fail-fast: false
+      max-parallel: 32
+      matrix:
+        round: [1, 2, 3]
+        task:
+          - {name: Lint, kind: lint, timeout: 10}
+          - {name: Install, kind: install, timeout: 30}
+          - {name: Test-3.4-2.12, kind: test, spark: "3.4", scala: "2.12", timeout: 30}
+          - {name: Test-3.4-2.13, kind: test, spark: "3.4", scala: "2.13", timeout: 30}
+          - {name: Test-3.5-2.12, kind: test, spark: "3.5", scala: "2.12", timeout: 30}
+          - {name: Test-3.5-2.13, kind: test, spark: "3.5", scala: "2.13", timeout: 30}
+          - {name: Test-4.0-2.13, kind: test, spark: "4.0", scala: "2.13", timeout: 30}
+          - {name: Test-4.1-2.13, kind: test, spark: "4.1", scala: "2.13", timeout: 30}
+          - {name: Test-4.2-2.13, kind: test, spark: "4.2", scala: "2.13", timeout: 30}
+          - {name: Integration-3.4-2.12, kind: integration, spark: "3.4", scala: "2.12", timeout: 45}
+          - {name: Integration-3.4-2.13, kind: integration, spark: "3.4", scala: "2.13", timeout: 45}
+          - {name: Integration-3.5-2.12, kind: integration, spark: "3.5", scala: "2.12", timeout: 45}
+          - {name: Integration-3.5-2.13, kind: integration, spark: "3.5", scala: "2.13", timeout: 45}
+          - {name: Integration-4.0-2.13, kind: integration, spark: "4.0", scala: "2.13", timeout: 45}
+          - {name: Integration-4.1-2.13, kind: integration, spark: "4.1", scala: "2.13", timeout: 45}
+          - {name: Integration-4.2-2.13, kind: integration, spark: "4.2", scala: "2.13", timeout: 45}
+        source:
+          - name: central
+            wrapper: ""
+            mirrors: ""
+          - name: google
+            wrapper: https://maven-central.storage-download.googleapis.com/maven2
+            mirrors: google-maven-central:https://maven-central.storage-download.googleapis.com/maven2:central
+    env:
+      MVNW_REPOURL: ${{ matrix.source.wrapper }}
+      MVNW_VERBOSE: "true"
+      SOURCE_NAME: ${{ matrix.source.name }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Java without Maven cache
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+          mvn-mirrors: ${{ matrix.source.mirrors }}
+      - name: Verify cold caches and source
+        env:
+          MAVEN_USER_HOME: ${{ runner.temp }}/cold-maven-wrapper
+          MAVEN_OPTS: -Dmaven.repo.local=${{ runner.temp }}/cold-maven-repository
+          COLD_MAVEN_REPOSITORY: ${{ runner.temp }}/cold-maven-repository
+        run: |
+          test ! -e "$MAVEN_USER_HOME"
+          test ! -e "$COLD_MAVEN_REPOSITORY"
+          echo "MAVEN_USER_HOME=$MAVEN_USER_HOME" >> "$GITHUB_ENV"
+          echo "MAVEN_OPTS=$MAVEN_OPTS" >> "$GITHUB_ENV"
+          echo "COLD_MAVEN_REPOSITORY=$COLD_MAVEN_REPOSITORY" >> "$GITHUB_ENV"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(Path.home() / ".m2/settings.xml").getroot()
+          ns = {"m": "http://maven.apache.org/SETTINGS/1.0.0"}
+          mirrors = [
+              (m.findtext("m:id", namespaces=ns),
+               m.findtext("m:url", namespaces=ns),
+               m.findtext("m:mirrorOf", namespaces=ns))
+              for m in root.findall("m:mirrors/m:mirror", ns)
+          ]
+          expected = [] if os.environ["SOURCE_NAME"] == "central" else [
+              ("google-maven-central",
+               "https://maven-central.storage-download.googleapis.com/maven2", "central")
+          ]
+          assert mirrors == expected, mirrors
+          print("Verified empty wrapper and dependency caches; mirrors:", mirrors)
+          PY
+      - name: Check code style
+        if: matrix.task.kind == 'lint'
+        run: make lint
+      - name: Install all modules
+        if: matrix.task.kind == 'install'
+        run: make install-all
+      - name: Install base
+        if: matrix.task.kind == 'test'
+        run: make install-base SCALA_VERSION=${{ matrix.task.scala }}
+      - name: Run tests
+        if: matrix.task.kind == 'test'
+        run: make test SPARK_VERSION=${{ matrix.task.spark }} SCALA_VERSION=${{ matrix.task.scala }}
+      - name: Run integration tests
+        if: matrix.task.kind == 'integration'
+        uses: ./.github/actions/pytest-integration
+        with:
+          spark-version: ${{ matrix.task.spark }}
+          scala-version: ${{ matrix.task.scala }}
+      - name: Report Maven artifact origins
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os
+          from collections import Counter
+          from pathlib import Path
+
+          origins = Counter()
+          repository = Path(os.environ["COLD_MAVEN_REPOSITORY"])
+          for metadata in repository.rglob("_remote.repositories"):
+              for line in metadata.read_text().splitlines():
+                  if not line.startswith("#") and ">" in line:
+                      origins[line.split(">", 1)[1].split("=", 1)[0] or "local"] += 1
+          print("Downloaded/installed artifact origins:", dict(origins))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(f"Maven source: {os.environ['SOURCE_NAME']}\n\n")
+              summary.write(f"Artifact origins: `{dict(origins)}`\n")
+          PY
