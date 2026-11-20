@@ -729,7 +729,9 @@ public final class ZonemapFragmentPruner {
    * floating-point width as {@code Double}. Widen narrow Java boxed primitives (Byte / Short /
    * Integer / Float) to match — otherwise an Integer literal against a Long zone bound would throw
    * {@code ClassCastException} from {@code Comparable.compareTo}. Also normalizes {@code
-   * UTF8String} → {@code String} for the same reason.
+   * UTF8String} → {@code String} for the same reason. Canonicalize signed floating zeros in both
+   * literals and bounds: SQL considers them equal, while {@code Double.compareTo} distinguishes
+   * them.
    */
   private static Object normalizeLiteral(Object value) {
     if (value instanceof UTF8String) {
@@ -738,8 +740,9 @@ public final class ZonemapFragmentPruner {
     if (value instanceof Byte || value instanceof Short || value instanceof Integer) {
       return ((Number) value).longValue();
     }
-    if (value instanceof Float) {
-      return ((Float) value).doubleValue();
+    if (value instanceof Float || value instanceof Double) {
+      double number = ((Number) value).doubleValue();
+      return number == 0.0D ? 0.0D : number;
     }
     return value;
   }

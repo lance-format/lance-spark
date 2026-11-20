@@ -17,11 +17,14 @@ import org.lance.ipc.FragmentSlice;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Optional;
 
+import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.connector.expressions.filter.Predicate;
 import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.PartitionReader;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -135,6 +138,55 @@ public abstract class BaseZonemapIndexTest {
         spark
             .sql(String.format("SELECT id FROM %s WHERE s IN ('\uFFFD', 'a')", table))
             .collectAsList());
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  public void testZonemapSlicesKeepBothSignedZeros(boolean singlePrecision) {
+    String tableName = "zm_zero_" + UUID.randomUUID().toString().replace("-", "");
+    String table = catalogName + ".default." + tableName;
+    String uri = rootPath.resolve(tableName + ".lance").toString();
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType)
+            .add("x", singlePrecision ? DataTypes.FloatType : DataTypes.DoubleType);
+    List<Row> rows = new ArrayList<>();
+    for (int id = 0; id < 12; id++) {
+      double value = id < 4 ? -0.0D : id < 8 ? 0.0D : 1.0D;
+      Object x = value;
+      if (singlePrecision) {
+        x = (float) value;
+      }
+      rows.add(RowFactory.create(id, x));
+    }
+    // Preserve the sign bits in separate zones of one fragment.
+    spark.createDataFrame(rows, schema).coalesce(1).write().format("lance").save(uri);
+    spark.sql(
+        String.format(
+            "ALTER TABLE %s CREATE INDEX x_zm USING zonemap (x) WITH (rows_per_zone=4)", table));
+
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            schema,
+            LanceSparkReadOptions.from(uri),
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+    builder.pushPredicates(new Predicate[] {TestPredicates.eq("x", 0.0D)});
+    InputPartition[] partitions = ((LanceScan) builder.build()).planInputPartitions();
+    assertEquals(1, partitions.length);
+    LanceSplit split = ((LanceInputPartition) partitions[0]).getLanceSplit();
+    assertEquals(
+        Collections.singletonList(new FragmentSlice(split.getFragments().get(0), 0, 8)),
+        split.getFragmentSlices());
+
+    assertEquals(
+        Arrays.asList(0, 1, 2, 3, 4, 5, 6, 7),
+        spark.sql("SELECT id FROM " + table + " WHERE x = 0.0 ORDER BY id").collectAsList().stream()
+            .map(row -> row.getInt(0))
+            .collect(Collectors.toList()));
+    assertEquals(
+        8L, spark.sql("SELECT count(*) FROM " + table + " WHERE x = 0.0").first().getLong(0));
   }
 
   @Test

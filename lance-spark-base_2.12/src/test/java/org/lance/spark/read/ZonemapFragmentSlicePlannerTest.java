@@ -42,6 +42,39 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class ZonemapFragmentSlicePlannerTest {
 
   @ParameterizedTest
+  @MethodSource("signedZeroPredicates")
+  public void testSignedZerosCompareEqually(
+      Predicate predicate, long expectedOffset, long expectedRows) {
+    Map<String, List<ZoneStats>> stats = new HashMap<>();
+    // JNI returns Double bounds for both FLOAT and DOUBLE columns.
+    stats.put(
+        "x",
+        Arrays.asList(
+            new ZoneStats(0, 0, 4, -1.0D, -1.0D, 0),
+            new ZoneStats(0, 4, 4, -0.0D, -0.0D, 0),
+            new ZoneStats(0, 8, 4, 0.0D, 0.0D, 0),
+            new ZoneStats(0, 12, 4, 1.0D, 1.0D, 0)));
+    ZonemapScanPlan plan =
+        plan(new Predicate[] {predicate}, stats, Collections.emptyMap(), Set.of(0));
+    assertEquals(
+        Collections.singletonList(new FragmentSlice(0, expectedOffset, expectedRows)),
+        plan.getFragmentSlices(0));
+  }
+
+  private static Stream<Arguments> signedZeroPredicates() {
+    return Stream.of(-0.0D, 0.0D, -0.0F, 0.0F)
+        .flatMap(
+            zero ->
+                Stream.of(
+                    Arguments.of(TestPredicates.eq("x", zero), 4L, 8L),
+                    Arguments.of(TestPredicates.in("x", zero), 4L, 8L),
+                    Arguments.of(TestPredicates.lt("x", zero), 0L, 4L),
+                    Arguments.of(TestPredicates.lte("x", zero), 0L, 12L),
+                    Arguments.of(TestPredicates.gt("x", zero), 12L, 4L),
+                    Arguments.of(TestPredicates.gte("x", zero), 4L, 12L)));
+  }
+
+  @ParameterizedTest
   @MethodSource("utf8StringPredicates")
   public void testStringRangesUseUtf8Ordering(Predicate predicate, long expectedRows) {
     Map<String, List<ZoneStats>> stats = new HashMap<>();
