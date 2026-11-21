@@ -119,8 +119,9 @@ public class LanceScan
 
   /**
    * Splits pre-computed on the driver during {@link LanceScanBuilder#build()}. Each entry is one
-   * fragment. Built from a single {@code Dataset} handle that was already opened for manifest /
-   * schema / zonemap loading, so no second {@code Dataset.open()} is needed at {@link
+   * fragment and may already carry a physical row selection, independent of its planning source.
+   * Built from a single {@code Dataset} handle that was already opened for manifest / schema /
+   * zonemap loading, so no second {@code Dataset.open()} is needed at {@link
    * #planInputPartitions()} time.
    */
   private final List<LanceSplit> precomputedSplits;
@@ -626,7 +627,8 @@ public class LanceScan
         || topNSortOrders.isPresent()
         || pushedAggregation.isPresent()
         || readOptions.getFullTextQuery() != null
-        || fragmentRowCounts.isEmpty()) {
+        || fragmentRowCounts.isEmpty()
+        || allSplits.stream().anyMatch(split -> !split.getFragmentSlices().isEmpty())) {
       return allSplits;
     }
 

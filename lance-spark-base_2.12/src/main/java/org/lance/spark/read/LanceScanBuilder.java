@@ -302,15 +302,49 @@ public class LanceScanBuilder
                   activeShardingColumn)
               : Collections.emptySet();
 
-      // Pre-compute fragment pruning so we can (a) estimate post-pruning statistics for
-      // JoinSelection (BroadcastHashJoin vs SortMergeJoin) and (b) pass the cached result
-      // to LanceScan to avoid re-computing during planInputPartitions().
+      // Pre-compute physical slice pruning so we can (a) estimate post-pruning statistics and (b)
+      // ship the exact driver plan to executors without re-reading zonemap metadata there.
+      ZonemapScanPlan zonemapScanPlan = null;
       Set<Integer> survivingFragmentIds = null;
       if (pushedPredicates.length > 0 && !zonemapStats.isEmpty()) {
-        survivingFragmentIds =
-            ZonemapFragmentPruner.pruneFragments(
-                    pushedPredicates, zonemapStats, zonemapLoad.uncoveredByColumn)
+        zonemapScanPlan =
+            ZonemapFragmentPruner.planFragmentSlices(
+                    pushedPredicates,
+                    zonemapStats,
+                    zonemapLoad.uncoveredByColumn,
+                    liveFragmentIds,
+                    scanPlan.getPhysicalFragmentRowCounts())
                 .orElse(null);
+        if (zonemapScanPlan != null) {
+          survivingFragmentIds = zonemapScanPlan.getSurvivingFragmentIds();
+          // Lance does not support physical slices on legacy storage or with full-text search.
+          // Keep safe fragment-level pruning for both ordinary reads and scan-based COUNT(*).
+          if (readOptions.getFullTextQuery() != null
+              || "0.1".equals(dataset.getLanceFileFormatVersion())) {
+            zonemapScanPlan = ZonemapScanPlan.fullFragments(survivingFragmentIds);
+          }
+        }
+      }
+
+      // Materialize row selections while the builder still owns the zonemap plan. Keep every
+      // original split in order: survivingFragmentIds drives pruning below and in LanceScan,
+      // while originalFragmentCount must still describe the dataset before pruning.
+      List<LanceSplit> precomputedSplits = scanPlan.getSplits();
+      if (zonemapScanPlan != null) {
+        List<LanceSplit> slicedSplits = new ArrayList<>(precomputedSplits.size());
+        for (LanceSplit split : precomputedSplits) {
+          if (split.getFragments().size() == 1) {
+            int fragmentId = split.getFragments().get(0);
+            if (survivingFragmentIds.contains(fragmentId)
+                && !zonemapScanPlan.scansFullFragment(fragmentId)) {
+              split =
+                  new LanceSplit(
+                      split.getFragments(), zonemapScanPlan.getFragmentSlices(fragmentId));
+            }
+          }
+          slicedSplits.add(split);
+        }
+        precomputedSplits = slicedSplits;
       }
 
       // Spark re-runs a partially pushed COUNT(*) as SUM over this scan's per-partition counts, so
@@ -318,7 +352,7 @@ public class LanceScanBuilder
       // Answering 0 is safe here: pruning never drops a fragment that could match.
       if (isPushedCountStar()
           && LanceScan.pruneForPlanning(
-                  scanPlan.getSplits(), pushedPredicates, survivingFragmentIds, rowIdIsRowAddress)
+                  precomputedSplits, pushedPredicates, survivingFragmentIds, rowIdIsRowAddress)
               .isEmpty()) {
         LOG.debug("All fragments pruned for a pushed COUNT(*); resolving the count to 0 locally");
         setLocalCount(0L);
@@ -389,7 +423,7 @@ public class LanceScanBuilder
               .sorted()
               .map(FieldReference::column)
               .toArray(NamedReference[]::new),
-          scanPlan.getSplits(),
+          precomputedSplits,
           scanPlan.getFragmentRowCounts(),
           activeShardingExpression,
           activeShardingColumn,
