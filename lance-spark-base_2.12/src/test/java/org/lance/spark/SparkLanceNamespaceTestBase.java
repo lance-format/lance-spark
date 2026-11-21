@@ -17,24 +17,31 @@ import org.lance.Version;
 import org.lance.spark.function.LanceMatchFunction;
 import org.lance.spark.function.LanceMultiMatchFunction;
 import org.lance.spark.function.LancePhraseFunction;
+import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.AnalysisException;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.connector.catalog.FunctionCatalog;
 import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.StagedTable;
+import org.apache.spark.sql.connector.catalog.StagingTableCatalog;
 import org.apache.spark.sql.connector.catalog.SupportsNamespaces;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.catalog.TableChange;
 import org.apache.spark.sql.connector.catalog.functions.UnboundFunction;
+import org.apache.spark.sql.connector.expressions.Transform;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -1118,6 +1125,123 @@ public abstract class SparkLanceNamespaceTestBase {
               spark.sql("ALTER TABLE " + full1 + " RENAME TO " + full2);
             });
     assertEquals("TABLE_ALREADY_EXISTS", ex.getErrorClass());
+  }
+
+  @ParameterizedTest(name = "pathBased={0}, operation={1}")
+  @CsvSource({
+    "false, CREATE",
+    "true, CREATE",
+    "false, CTAS",
+    "true, CTAS",
+    "false, CORTAS",
+    "true, CORTAS"
+  })
+  public void testCreatePersistsTableProperties(boolean pathBased, String operation)
+      throws Exception {
+    String tableName = generateTableName("create_properties");
+    String path = tempDir.resolve(tableName + ".lance").toString();
+    Identifier ident =
+        Identifier.of(
+            pathBased ? new String[0] : new String[] {"default"}, pathBased ? path : tableName);
+    String fullName = catalogName + (pathBased ? ".`" + path + "`" : ".default." + tableName);
+    boolean ordinaryCreate = operation.equals("CREATE");
+    String create = operation.equals("CORTAS") ? "CREATE OR REPLACE TABLE " : "CREATE TABLE ";
+    spark.sql(
+        create
+            + fullName
+            + (ordinaryCreate ? " (id INT)" : "")
+            + " USING lance OPTIONS ('app.option' = 'from-options',"
+            + " 'storage.secret_access_key' = 'test-secret',"
+            + " 'transaction_properties.request' = 'create-test', 'max_row_per_file' = '2',"
+            + " 'max_rows_per_group' = '2', 'max_bytes_per_file' = '1048576', 'batch_size' = '2')"
+            + " TBLPROPERTIES ('app.owner' = 'analytics',"
+            + " 'OPTION.Storage.session_token' = 'test-token')"
+            + (ordinaryCreate ? "" : " AS SELECT 1 AS id"));
+
+    spark.sql("REFRESH TABLE " + fullName);
+    LanceDataset loaded = (LanceDataset) catalog.loadTable(ident);
+    assertEquals("analytics", loaded.properties().get("app.owner"));
+    assertEquals("from-options", loaded.properties().get("app.option"));
+    try (org.lance.Dataset dataset = Utils.openDatasetBuilder(loaded.readOptions()).build()) {
+      assertEquals("analytics", dataset.getConfig().get("app.owner"));
+      assertEquals("from-options", dataset.getConfig().get("app.option"));
+      assertEquals("2", dataset.getConfig().get("max_row_per_file"));
+      assertEquals("2", dataset.getConfig().get("max_rows_per_group"));
+      assertEquals("1048576", dataset.getConfig().get("max_bytes_per_file"));
+      assertEquals("2", dataset.getConfig().get("batch_size"));
+      for (String key :
+          List.of(
+              "storage.secret_access_key",
+              "option.storage.secret_access_key",
+              "transaction_properties.request",
+              "option.transaction_properties.request",
+              "OPTION.Storage.session_token")) {
+        assertFalse(dataset.getConfig().containsKey(key), key);
+      }
+      assertFalse(dataset.getConfig().containsKey(TableCatalog.PROP_PROVIDER));
+      assertFalse(dataset.getConfig().containsKey(TableCatalog.PROP_LOCATION));
+      // The current Java write builder needs a separate config update for ordinary CREATE.
+      assertEquals(ordinaryCreate ? 2 : 1, dataset.version());
+      assertEquals(ordinaryCreate ? 0 : 1, dataset.countRows());
+    }
+  }
+
+  @ParameterizedTest(name = "pathBased={0}, createOrReplace={1}")
+  @CsvSource({"false, false", "true, false", "false, true", "true, true"})
+  public void testReplaceMergesTableProperties(boolean pathBased, boolean createOrReplace)
+      throws Exception {
+    String tableName = generateTableName("replace_properties");
+    String path = tempDir.resolve(tableName + ".lance").toString();
+    Identifier ident =
+        Identifier.of(
+            pathBased ? new String[0] : new String[] {"default"}, pathBased ? path : tableName);
+    String fullName = catalogName + (pathBased ? ".`" + path + "`" : ".default." + tableName);
+    spark.sql(
+        "CREATE TABLE "
+            + fullName
+            + " USING lance TBLPROPERTIES ('app.owner' = 'old', 'app.retained' = 'keep')"
+            + " AS SELECT 1 AS id");
+    LanceDataset original = (LanceDataset) catalog.loadTable(ident);
+    Map<String, String> updates = Collections.singletonMap("app.owner", "new");
+    StagingTableCatalog staging = (StagingTableCatalog) catalog;
+    StagedTable aborted =
+        createOrReplace
+            ? staging.stageCreateOrReplace(ident, original.schema(), new Transform[0], updates)
+            : staging.stageReplace(ident, original.schema(), new Transform[0], updates);
+    assertEquals("new", aborted.properties().get("app.owner"));
+    assertEquals("keep", aborted.properties().get("app.retained"));
+    aborted.abortStagedChanges();
+    try (org.lance.Dataset dataset = Utils.openDatasetBuilder(original.readOptions()).build()) {
+      assertEquals("old", dataset.getConfig().get("app.owner"));
+      assertEquals(1, dataset.version());
+      assertEquals(1, dataset.countRows());
+    }
+
+    spark.sql(
+        (createOrReplace ? "CREATE OR REPLACE TABLE " : "REPLACE TABLE ")
+            + fullName
+            + " USING lance OPTIONS ('storage.secret_access_key' = 'test-secret',"
+            + " 'transaction_properties' = '{\"request\":\"replace-test\"}')"
+            + " TBLPROPERTIES ('app.owner' = 'new', 'app.added' = 'yes')"
+            + " AS SELECT 2 AS id");
+    spark.sql("REFRESH TABLE " + fullName);
+    LanceDataset loaded = (LanceDataset) catalog.loadTable(ident);
+    assertEquals("keep", loaded.properties().get("app.retained"));
+    try (org.lance.Dataset dataset = Utils.openDatasetBuilder(loaded.readOptions()).build()) {
+      assertEquals("new", dataset.getConfig().get("app.owner"));
+      assertEquals("keep", dataset.getConfig().get("app.retained"));
+      assertEquals("yes", dataset.getConfig().get("app.added"));
+      for (String key :
+          List.of(
+              "storage.secret_access_key",
+              "option.storage.secret_access_key",
+              "transaction_properties",
+              "option.transaction_properties")) {
+        assertFalse(dataset.getConfig().containsKey(key), key);
+      }
+      assertEquals(2, dataset.version());
+    }
+    assertEquals(List.of(RowFactory.create(2)), spark.table(fullName).collectAsList());
   }
 
   @Test

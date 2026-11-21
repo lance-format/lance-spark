@@ -73,6 +73,7 @@ public class StagedCommit {
   // For new tables - info needed to create the dataset at commit time
   private final String datasetUri;
   private final Map<String, String> storageOptions;
+  private final Map<String, String> tableProperties;
 
   private final boolean isNewTable;
   private final LanceNamespace namespace;
@@ -104,6 +105,7 @@ public class StagedCommit {
     this.datasetUri = datasetUri;
     this.storageOptions = new HashMap<>(options.getStorageOptions());
     this.storageOptions.keySet().removeIf(TransactionProperties::isOption);
+    this.tableProperties = options.getTableProperties();
     this.isNewTable = datasetUri != null;
     this.enableStableRowIds = options.isEnableStableRowIds();
     this.fileFormatVersion = options.getFileFormatVersion();
@@ -179,7 +181,12 @@ public class StagedCommit {
   }
 
   private void commitNewTable() {
-    final Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
+    final Overwrite operation =
+        Overwrite.builder()
+            .fragments(fragments)
+            .schema(schema)
+            .configUpsertValues(tableProperties)
+            .build();
     final CommitBuilder builder =
         new CommitBuilder(datasetUri, LanceRuntime.allocator()).writeParams(storageOptions);
     if (enableStableRowIds) {
@@ -205,7 +212,12 @@ public class StagedCommit {
     final long version = ds.version();
     ds.close();
 
-    final Overwrite operation = Overwrite.builder().fragments(fragments).schema(schema).build();
+    final Overwrite operation =
+        Overwrite.builder()
+            .fragments(fragments)
+            .schema(schema)
+            .configUpsertValues(tableProperties)
+            .build();
     final CommitBuilder builder =
         new CommitBuilder(uri, LanceRuntime.allocator()).writeParams(storageOptions);
     builder.useStableRowIds(enableStableRowIds);
