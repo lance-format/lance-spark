@@ -392,28 +392,50 @@ public final class ZonemapFragmentPruner {
       }
       values.add(normalizeLiteral(((Literal<?>) children[i]).value()));
     }
+    // Sort once so each zone needs one binary search, even for large runtime IN filters.
+    boolean hasNull = values.removeIf(value -> value == null);
+    try {
+      values.sort(ZonemapFragmentPruner::compare);
+    } catch (ClassCastException e) {
+      LOG.debug(
+          "Cannot order IN values for zonemap pruning, skipping pruning on {}",
+          columnName((NamedReference) children[0]),
+          e);
+      return Optional.empty();
+    }
     return matchingRanges(
         columnName((NamedReference) children[0]),
         statsByColumn,
         uncoveredByColumn,
         allFragmentIds,
         physicalRowCounts,
-        zone -> {
-          for (Object value : values) {
-            if (value == null) {
-              if (zone.getNullCount() > 0) {
-                return true;
-              }
-            } else {
-              @SuppressWarnings("unchecked")
-              Comparable<Object> target = (Comparable<Object>) value;
-              if (zoneMatchesComparison(zone, target, ComparisonType.EQUALS)) {
-                return true;
-              }
-            }
-          }
-          return false;
-        });
+        zone -> (hasNull && zone.getNullCount() > 0) || zoneContainsAny(zone, values));
+  }
+
+  /** Whether a non-null sorted value may lie within the zone's bounds. */
+  private static boolean zoneContainsAny(ZoneStats zone, List<Object> sortedValues) {
+    if (sortedValues.isEmpty()) {
+      return false;
+    }
+    Object min = normalizeLiteral(zone.getMin());
+    Object max = normalizeLiteral(zone.getMax());
+    // Missing bounds may describe a type whose bounds Lance does not report (e.g. decimals).
+    if (min == null || max == null) {
+      return zone.getNullCount() < zone.getZoneLength();
+    }
+    // Find the first value not below min. As with comparisons, matchingRanges handles type
+    // mismatches by falling back for the whole fragment.
+    int low = 0;
+    int high = sortedValues.size();
+    while (low < high) {
+      int mid = (low + high) >>> 1;
+      if (compare(sortedValues.get(mid), min) < 0) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    return low < sortedValues.size() && compare(sortedValues.get(low), max) <= 0;
   }
 
   private static Optional<Map<Integer, RangeSet>> nullRanges(

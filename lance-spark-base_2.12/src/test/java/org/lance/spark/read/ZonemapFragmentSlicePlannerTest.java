@@ -48,7 +48,7 @@ public class ZonemapFragmentSlicePlannerTest {
             new ZoneStats(0, 4, 4, "\uF000", "\uF000", 0)));
     ZonemapScanPlan plan =
         plan(
-            new Predicate[] {TestPredicates.eq("s", "\uF000")},
+            new Predicate[] {TestPredicates.in("s", "\uF000", "a")},
             stats,
             Collections.emptyMap(),
             Set.of(0));
