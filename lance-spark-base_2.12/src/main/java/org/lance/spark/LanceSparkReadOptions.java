@@ -25,10 +25,12 @@ import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.Serializable;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 
 /**
  * Read-specific options for Lance Spark connector.
@@ -602,21 +604,40 @@ public class LanceSparkReadOptions implements Serializable {
     }
 
     /**
+     * Resolves catalog defaults, supported table defaults, and per-operation options, in that
+     * order.
+     *
+     * <p>Only tuning options are read from table properties. Spark's {@code option.} aliases,
+     * storage credentials, and operation selectors are not table defaults.
+     *
+     * @param defaults catalog options, including storage options
+     * @param tableProperties persisted table properties (or the staged table's properties)
+     * @param options explicit options for this operation
+     * @return this builder
+     */
+    public Builder fromOptions(
+        Map<String, String> defaults,
+        Map<String, String> tableProperties,
+        Map<String, String> options) {
+      parseOptions(new LanceOptionParser(defaults, tableProperties, options));
+      return this;
+    }
+
+    /**
      * Parses options from a map, extracting read-specific settings.
      *
      * @param options the options map
      * @return this builder
      */
     public Builder fromOptions(Map<String, String> options) {
-      this.storageOptions = new HashMap<>(options);
-      parseTypedFlags(options);
+      parseOptions(new LanceOptionParser(Collections.emptyMap(), Collections.emptyMap(), options));
       return this;
     }
 
     /**
      * Merges catalog config options as defaults (read options override).
      *
-     * <p>Also promotes recognized typed flags from the catalog config into their corresponding
+     * <p>Also parses recognized read options from the catalog config into their corresponding
      * Builder fields so that catalog-level settings (e.g. {@code spark.sql.catalog.<name>.<key>})
      * take effect on paths that do not later go through {@link #fromOptions(Map)} — notably SQL DML
      * (DELETE / UPDATE / MERGE INTO) and plain SELECT without per-read {@code .option(...)}.
@@ -626,7 +647,8 @@ public class LanceSparkReadOptions implements Serializable {
      */
     public Builder withCatalogDefaults(LanceSparkCatalogConfig catalogConfig) {
       // Merge storage options: catalog options are defaults, current options override
-      Map<String, String> merged = new HashMap<>(catalogConfig.getStorageOptions());
+      Map<String, String> merged = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+      merged.putAll(catalogConfig.getStorageOptions());
       merged.putAll(this.storageOptions);
       this.indexCacheBackend = catalogConfig.getIndexCacheBackend();
       this.metadataCacheBackend = catalogConfig.getMetadataCacheBackend();
@@ -634,68 +656,90 @@ public class LanceSparkReadOptions implements Serializable {
     }
 
     /**
-     * Applies typed-flag parsing for every known read option present in {@code opts}. Shared by
-     * {@link #fromOptions(Map)} and {@link #withCatalogDefaults(LanceSparkCatalogConfig)} so that
-     * both call sites stay in sync and catalog-level configs reach the typed fields.
+     * Both fromOptions overloads use this path so all declared sources share the same conversions
+     * and validation.
      */
-    private void parseTypedFlags(Map<String, String> opts) {
-      CaseInsensitiveStringMap references = new CaseInsensitiveStringMap(opts);
+    private void parseOptions(LanceOptionParser parser) {
+      CaseInsensitiveStringMap opts = new CaseInsensitiveStringMap(parser.resolvedOptions());
       Preconditions.checkArgument(
           !opts.containsKey(CONFIG_NEAREST),
           "The nearest read option is no longer supported; use VECTOR_SEARCH table function");
       Preconditions.checkArgument(
-          (references.containsKey(CONFIG_VERSION) ? 1 : 0)
-                  + (references.containsKey(CONFIG_BRANCH) ? 1 : 0)
-                  + (references.containsKey(CONFIG_TAG) ? 1 : 0)
+          (opts.containsKey(CONFIG_VERSION) ? 1 : 0)
+                  + (opts.containsKey(CONFIG_BRANCH) ? 1 : 0)
+                  + (opts.containsKey(CONFIG_TAG) ? 1 : 0)
               <= 1,
           "Specify only one of branch, tag, or version");
-      if (opts.containsKey(CONFIG_PUSH_DOWN_FILTERS)) {
-        this.pushDownFilters = Boolean.parseBoolean(opts.get(CONFIG_PUSH_DOWN_FILTERS));
+      if (opts.containsKey(CONFIG_VERSION)) {
+        this.ref =
+            parser
+                .option(CONFIG_VERSION)
+                .parse(this.ref, raw -> LanceRef.ofMain(Long.parseLong(raw)));
+      } else if (opts.containsKey(CONFIG_BRANCH)) {
+        this.ref = parser.option(CONFIG_BRANCH).parse(this.ref, LanceRef::ofBranch);
+      } else if (opts.containsKey(CONFIG_TAG)) {
+        this.ref = parser.option(CONFIG_TAG).parse(this.ref, LanceRef::ofTag);
       }
-      if (opts.containsKey(CONFIG_BLOCK_SIZE)) {
-        this.blockSize = Integer.parseInt(opts.get(CONFIG_BLOCK_SIZE));
-      }
-      if (references.containsKey(CONFIG_VERSION)) {
-        this.ref = LanceRef.ofMain(Long.parseLong(references.get(CONFIG_VERSION)));
-      } else if (references.containsKey(CONFIG_BRANCH)) {
-        this.ref = LanceRef.ofBranch(references.get(CONFIG_BRANCH));
-      } else if (references.containsKey(CONFIG_TAG)) {
-        this.ref = LanceRef.ofTag(references.get(CONFIG_TAG));
-      }
-      if (opts.containsKey(CONFIG_INDEX_CACHE_SIZE)) {
-        this.indexCacheSize = Integer.parseInt(opts.get(CONFIG_INDEX_CACHE_SIZE));
-      }
-      if (opts.containsKey(CONFIG_METADATA_CACHE_SIZE)) {
-        this.metadataCacheSize = Integer.parseInt(opts.get(CONFIG_METADATA_CACHE_SIZE));
-      }
-      if (opts.containsKey(CONFIG_BATCH_SIZE)) {
-        int parsedBatchSize = Integer.parseInt(opts.get(CONFIG_BATCH_SIZE));
-        Preconditions.checkArgument(parsedBatchSize > 0, "batch_size must be positive");
-        this.batchSize = parsedBatchSize;
-      }
-      if (opts.containsKey(CONFIG_TOP_N_PUSH_DOWN)) {
-        this.topNPushDown = Boolean.parseBoolean(opts.get(CONFIG_TOP_N_PUSH_DOWN));
-      }
-      if (opts.containsKey(CONFIG_FULL_TEXT_QUERY)) {
-        String json = opts.get(CONFIG_FULL_TEXT_QUERY);
-        this.fullTextQuery = FullTextQueryUtils.stringToFullTextQuery(json);
-      }
-      if (opts.containsKey(CONFIG_USE_SCALAR_INDEX)) {
-        this.useScalarIndex = Boolean.parseBoolean(opts.get(CONFIG_USE_SCALAR_INDEX));
-      }
-      if (opts.containsKey(CONFIG_RUNTIME_FILTER_MAX_KEYS)) {
-        runtimeFilterMaxKeys(Integer.parseInt(opts.get(CONFIG_RUNTIME_FILTER_MAX_KEYS)));
-      }
-      if (opts.containsKey(CONFIG_RUNTIME_FILTER_MAX_BYTES)) {
-        runtimeFilterMaxBytes(Integer.parseInt(opts.get(CONFIG_RUNTIME_FILTER_MAX_BYTES)));
-      }
-      if (opts.containsKey(CONFIG_EXECUTOR_CREDENTIAL_REFRESH)) {
-        this.executorCredentialRefresh =
-            Boolean.parseBoolean(opts.get(CONFIG_EXECUTOR_CREDENTIAL_REFRESH));
-      }
-      if (opts.containsKey(CONFIG_ARROW_BATCH_READS)) {
-        this.arrowBatchReads = Boolean.parseBoolean(opts.get(CONFIG_ARROW_BATCH_READS));
-      }
+      this.pushDownFilters =
+          parser
+              .option(CONFIG_PUSH_DOWN_FILTERS)
+              .tableProperty(CONFIG_PUSH_DOWN_FILTERS)
+              .booleanValue(this.pushDownFilters);
+      this.blockSize =
+          parser
+              .option(CONFIG_BLOCK_SIZE)
+              .tableProperty(CONFIG_BLOCK_SIZE)
+              .intValue(this.blockSize);
+      this.indexCacheSize =
+          parser
+              .option(CONFIG_INDEX_CACHE_SIZE)
+              .tableProperty(CONFIG_INDEX_CACHE_SIZE)
+              .intValue(this.indexCacheSize);
+      this.metadataCacheSize =
+          parser
+              .option(CONFIG_METADATA_CACHE_SIZE)
+              .tableProperty(CONFIG_METADATA_CACHE_SIZE)
+              .intValue(this.metadataCacheSize);
+      this.batchSize =
+          parser
+              .option(CONFIG_BATCH_SIZE)
+              .tableProperty(CONFIG_BATCH_SIZE)
+              .positiveIntValue(this.batchSize);
+      this.topNPushDown =
+          parser
+              .option(CONFIG_TOP_N_PUSH_DOWN)
+              .tableProperty(CONFIG_TOP_N_PUSH_DOWN)
+              .booleanValue(this.topNPushDown);
+      this.fullTextQuery =
+          parser
+              .option(CONFIG_FULL_TEXT_QUERY)
+              .parse(this.fullTextQuery, FullTextQueryUtils::stringToFullTextQuery);
+      this.useScalarIndex =
+          parser
+              .option(CONFIG_USE_SCALAR_INDEX)
+              .tableProperty(CONFIG_USE_SCALAR_INDEX)
+              .booleanValue(this.useScalarIndex);
+      this.runtimeFilterMaxKeys =
+          parser
+              .option(CONFIG_RUNTIME_FILTER_MAX_KEYS)
+              .tableProperty(CONFIG_RUNTIME_FILTER_MAX_KEYS)
+              .positiveIntValue(this.runtimeFilterMaxKeys);
+      this.runtimeFilterMaxBytes =
+          parser
+              .option(CONFIG_RUNTIME_FILTER_MAX_BYTES)
+              .tableProperty(CONFIG_RUNTIME_FILTER_MAX_BYTES)
+              .positiveIntValue(this.runtimeFilterMaxBytes);
+      this.executorCredentialRefresh =
+          parser
+              .option(CONFIG_EXECUTOR_CREDENTIAL_REFRESH)
+              .booleanValue(this.executorCredentialRefresh);
+      this.arrowBatchReads =
+          parser
+              .option(CONFIG_ARROW_BATCH_READS)
+              .tableProperty(CONFIG_ARROW_BATCH_READS)
+              .booleanValue(this.arrowBatchReads);
+      this.storageOptions = parser.resolvedOptions();
+      this.storageOptions.keySet().removeIf(TransactionProperties::isOption);
     }
 
     public LanceSparkReadOptions build() {

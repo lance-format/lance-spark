@@ -4214,5 +4214,49 @@ class TestDQLFullTextSearch:
         )
 
 
+class TestTableDefaults:
+    """Table defaults apply after reload and yield to operation options."""
+
+    @pytest.mark.parametrize("api", ["sql", "dataframe_v2"])
+    def test_write_defaults(self, spark, test_table, api):
+        source = spark.range(0, 6, 1, 1)
+        source.createOrReplaceTempView("source")
+        if api == "sql":
+            spark.sql(f"""
+                CREATE TABLE {test_table} USING lance
+                OPTIONS ('max_row_per_file' = '2', 'batch_size' = '2')
+                AS SELECT * FROM source
+            """)
+            initial_fragments = 3
+        else:
+            (source.writeTo(test_table).using("lance")
+             .tableProperty("max_row_per_file", "2")
+             .tableProperty("batch_size", "2")
+             .option("max_row_per_file", "3")
+             .option("app.operation", "create-only")
+             .create())
+            initial_fragments = 2
+        spark.catalog.refreshTable(test_table)
+        fragments = f"SELECT COUNT(DISTINCT _fragid) FROM {test_table}"
+        assert spark.sql(fragments).first()[0] == initial_fragments
+        source.writeTo(test_table).option("MAX_ROW_PER_FILE", "3").append()
+        assert spark.sql(fragments).first()[0] == initial_fragments + 2
+        properties = dict(spark.sql(f"SHOW TBLPROPERTIES {test_table}").collect())
+        assert properties["max_row_per_file"] == "2"
+        assert not {"app.operation", "option.app.operation"} & properties.keys()
+        spark.sql(f"INSERT INTO {test_table} SELECT * FROM source")
+        assert spark.sql(fragments).first()[0] == initial_fragments + 5
+        assert spark.table(test_table).count() == 18
+
+    def test_read_defaults(self, spark, test_table):
+        spark.sql(f"CREATE TABLE {test_table} USING lance AS SELECT 1 AS id")
+        spark.sql(f"ALTER TABLE {test_table} SET TBLPROPERTIES ('runtime_filter_max_keys' = '0')")
+        with pytest.raises(Exception, match="runtime_filter_max_keys.*positive"):
+            spark.table(test_table).collect()
+        assert spark.read.option("runtime_filter_max_keys", "4").table(test_table).count() == 1
+        spark.sql(f"ALTER TABLE {test_table} UNSET TBLPROPERTIES ('runtime_filter_max_keys')")
+        assert spark.table(test_table).count() == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
