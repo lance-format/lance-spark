@@ -77,6 +77,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -1712,7 +1713,14 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
     Map<String, String> userProperties = new HashMap<>();
     for (Map.Entry<String, String> entry : properties.entrySet()) {
-      if (!SPARK_RESERVED_TABLE_PROPERTIES.contains(entry.getKey())) {
+      String key = entry.getKey().toLowerCase(Locale.ROOT);
+      // Spark also includes SQL OPTIONS under option.* aliases in the catalog properties.
+      while (key.startsWith(TableCatalog.OPTION_PREFIX)) {
+        key = key.substring(TableCatalog.OPTION_PREFIX.length());
+      }
+      if (!SPARK_RESERVED_TABLE_PROPERTIES.contains(entry.getKey())
+          && !key.startsWith("storage.")
+          && !TransactionProperties.isOption(key)) {
         userProperties.put(entry.getKey(), entry.getValue());
       }
     }
