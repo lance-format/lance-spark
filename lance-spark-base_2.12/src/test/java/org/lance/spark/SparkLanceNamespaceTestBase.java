@@ -1150,8 +1150,12 @@ public abstract class SparkLanceNamespaceTestBase {
         create
             + fullName
             + (ordinaryCreate ? " (id INT)" : "")
-            + " USING lance OPTIONS ('app.option' = 'from-options')"
-            + " TBLPROPERTIES ('app.owner' = 'analytics')"
+            + " USING lance OPTIONS ('app.option' = 'from-options',"
+            + " 'storage.secret_access_key' = 'test-secret',"
+            + " 'transaction_properties.request' = 'create-test', 'max_row_per_file' = '2',"
+            + " 'max_rows_per_group' = '2', 'max_bytes_per_file' = '1048576', 'batch_size' = '2')"
+            + " TBLPROPERTIES ('app.owner' = 'analytics',"
+            + " 'OPTION.Storage.session_token' = 'test-token')"
             + (ordinaryCreate ? "" : " AS SELECT 1 AS id"));
 
     spark.sql("REFRESH TABLE " + fullName);
@@ -1161,6 +1165,19 @@ public abstract class SparkLanceNamespaceTestBase {
     try (org.lance.Dataset dataset = Utils.openDatasetBuilder(loaded.readOptions()).build()) {
       assertEquals("analytics", dataset.getConfig().get("app.owner"));
       assertEquals("from-options", dataset.getConfig().get("app.option"));
+      assertEquals("2", dataset.getConfig().get("max_row_per_file"));
+      assertEquals("2", dataset.getConfig().get("max_rows_per_group"));
+      assertEquals("1048576", dataset.getConfig().get("max_bytes_per_file"));
+      assertEquals("2", dataset.getConfig().get("batch_size"));
+      for (String key :
+          List.of(
+              "storage.secret_access_key",
+              "option.storage.secret_access_key",
+              "transaction_properties.request",
+              "option.transaction_properties.request",
+              "OPTION.Storage.session_token")) {
+        assertFalse(dataset.getConfig().containsKey(key), key);
+      }
       assertFalse(dataset.getConfig().containsKey(TableCatalog.PROP_PROVIDER));
       assertFalse(dataset.getConfig().containsKey(TableCatalog.PROP_LOCATION));
       // The current Java write builder needs a separate config update for ordinary CREATE.
@@ -1203,7 +1220,9 @@ public abstract class SparkLanceNamespaceTestBase {
     spark.sql(
         (createOrReplace ? "CREATE OR REPLACE TABLE " : "REPLACE TABLE ")
             + fullName
-            + " USING lance TBLPROPERTIES ('app.owner' = 'new', 'app.added' = 'yes')"
+            + " USING lance OPTIONS ('storage.secret_access_key' = 'test-secret',"
+            + " 'transaction_properties' = '{\"request\":\"replace-test\"}')"
+            + " TBLPROPERTIES ('app.owner' = 'new', 'app.added' = 'yes')"
             + " AS SELECT 2 AS id");
     spark.sql("REFRESH TABLE " + fullName);
     LanceDataset loaded = (LanceDataset) catalog.loadTable(ident);
@@ -1212,6 +1231,14 @@ public abstract class SparkLanceNamespaceTestBase {
       assertEquals("new", dataset.getConfig().get("app.owner"));
       assertEquals("keep", dataset.getConfig().get("app.retained"));
       assertEquals("yes", dataset.getConfig().get("app.added"));
+      for (String key :
+          List.of(
+              "storage.secret_access_key",
+              "option.storage.secret_access_key",
+              "transaction_properties",
+              "option.transaction_properties")) {
+        assertFalse(dataset.getConfig().containsKey(key), key);
+      }
       assertEquals(2, dataset.version());
     }
     assertEquals(List.of(RowFactory.create(2)), spark.table(fullName).collectAsList());
