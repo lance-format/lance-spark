@@ -31,6 +31,10 @@ The `OPTIMIZE` command supports several options to control compaction behavior:
 | `batch_size` | Long | Batch size for processing |
 | `defer_index_remap` | Boolean | Whether to defer index remapping |
 | `max_source_fragments` | Long | Maximum number of source fragments to compact in a single task |
+| `max_source_rows` | Long | Maximum number of live source rows to compact in a single run. Tasks are included until the next one would exceed the limit |
+| `max_source_bytes` | Long | Maximum number of source bytes (data and overlay files) to compact in a single run. Tasks are included until the next one would exceed the limit |
+| `excluded_fragment_ids` | String | Comma-separated fragment IDs to leave untouched, e.g. `'1,2,3'`. Excluded fragments act as boundaries: fragments on either side are never merged together |
+| `data_storage_version` | String | Data file format version of the rewritten files: `'2.0'`, `'2.1'`, `'2.2'`, `'2.3'`, `'stable'` or `'next'`. The table's default write version is unchanged. Defaults to `lance.compaction.data_storage_version` when configured, otherwise the table's version |
 
 ### Examples
 
@@ -51,6 +55,27 @@ Optimize with multiple options:
         materialize_deletions = TRUE,
         num_threads = 4
     );
+    ```
+
+Compact incrementally, rewriting at most about one million rows per run:
+
+=== "SQL"
+    ```sql
+    OPTIMIZE lance.db.users WITH (max_source_rows = 1000000);
+    ```
+
+Compact while leaving specific fragments untouched:
+
+=== "SQL"
+    ```sql
+    OPTIMIZE lance.db.users WITH (excluded_fragment_ids = '3,7');
+    ```
+
+Rewrite compacted fragments with a newer data file format:
+
+=== "SQL"
+    ```sql
+    OPTIMIZE lance.db.users WITH (data_storage_version = '2.1');
     ```
 
 ## Output

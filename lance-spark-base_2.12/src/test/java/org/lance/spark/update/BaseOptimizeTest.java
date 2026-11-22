@@ -13,6 +13,7 @@
  */
 package org.lance.spark.update;
 
+import org.lance.Fragment;
 import org.lance.Transaction;
 import org.lance.operation.CreateIndex;
 import org.lance.spark.LanceDataset;
@@ -36,6 +37,7 @@ import java.io.IOException;
 import java.lang.reflect.Method;
 import java.nio.file.Path;
 import java.util.Collections;
+import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -134,7 +136,11 @@ public abstract class BaseOptimizeTest {
                     + "num_threads=2,"
                     + "batch_size=2000,"
                     + "defer_index_remap=true,"
-                    + "max_source_fragments=128"
+                    + "max_source_fragments=128,"
+                    + "max_source_rows=1000000,"
+                    + "max_source_bytes=1073741824,"
+                    + "excluded_fragment_ids='4294967295',"
+                    + "data_storage_version='stable'"
                     + ")",
                 fullTable));
 
@@ -371,5 +377,148 @@ public abstract class BaseOptimizeTest {
         exception.getMessage().contains("'num_threads'")
             && exception.getMessage().contains("integer literal"),
         "error should name the option and ask for an integer, got: " + exception.getMessage());
+  }
+
+  @Test
+  public void testMaxSourceRowsBoundsCompaction() {
+    prepareDataset();
+
+    // target_rows_per_fragment=5 plans two 5-row tasks; a 5-row budget admits only the first.
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "optimize %s with (target_rows_per_fragment=5, max_source_rows=5)", fullTable));
+
+    Assertions.assertEquals("[5,1,5,1]", result.collectAsList().get(0).toString());
+  }
+
+  @Test
+  public void testMaxSourceBytesBoundsCompaction() throws Exception {
+    prepareDataset();
+
+    long firstTaskBytes;
+    try (org.lance.Dataset dataset = openDataset(tableName)) {
+      firstTaskBytes =
+          sortedFragmentIds(dataset).stream()
+              .limit(5)
+              .mapToLong(
+                  id ->
+                      dataset.getFragment(id).metadata().getFiles().stream()
+                          .mapToLong(f -> f.getFileSizeBytes())
+                          .sum())
+              .sum();
+    }
+
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "optimize %s with (target_rows_per_fragment=5, max_source_bytes=%d)",
+                fullTable, firstTaskBytes));
+
+    Assertions.assertEquals("[5,1,5,1]", result.collectAsList().get(0).toString());
+  }
+
+  @Test
+  public void testExcludedFragmentIds() throws Exception {
+    prepareDataset();
+
+    List<Integer> before;
+    try (org.lance.Dataset dataset = openDataset(tableName)) {
+      before = sortedFragmentIds(dataset);
+    }
+    int first = before.get(0);
+    int middle = before.get(5);
+
+    // The excluded fragments stay untouched and split the rest into two separate tasks.
+    Dataset<Row> result =
+        spark.sql(
+            String.format(
+                "optimize %s with (excluded_fragment_ids=' %d, %d ')", fullTable, first, middle));
+
+    Assertions.assertEquals("[8,2,8,2]", result.collectAsList().get(0).toString());
+    try (org.lance.Dataset dataset = openDataset(tableName)) {
+      List<Integer> after = sortedFragmentIds(dataset);
+      Assertions.assertTrue(after.contains(first), "excluded fragment was compacted: " + after);
+      Assertions.assertTrue(after.contains(middle), "excluded fragment was compacted: " + after);
+      Assertions.assertEquals(4, after.size());
+    }
+    Assertions.assertEquals(10L, spark.table(fullTable).count());
+  }
+
+  @Test
+  public void testExcludedFragmentIdsAcceptsSingleIntegerLiteral() throws Exception {
+    prepareDataset();
+
+    int first;
+    try (org.lance.Dataset dataset = openDataset(tableName)) {
+      first = sortedFragmentIds(dataset).get(0);
+    }
+
+    Dataset<Row> result =
+        spark.sql(String.format("optimize %s with (excluded_fragment_ids=%d)", fullTable, first));
+
+    Assertions.assertEquals("[9,1,9,1]", result.collectAsList().get(0).toString());
+  }
+
+  @Test
+  public void testDataStorageVersionRewritesFilesWithoutChangingTableVersion() throws Exception {
+    spark.sql(
+        String.format(
+            "create table %s (id int, text string) using lance "
+                + "tblproperties ('file_format_version' = '2.0')",
+            fullTable));
+    spark.sql(String.format("insert into %s values (1, 'a'), (2, 'b'), (3, 'c')", fullTable));
+
+    Dataset<Row> result =
+        spark.sql(String.format("optimize %s with (data_storage_version='2.1')", fullTable));
+
+    Assertions.assertEquals(1L, result.collectAsList().get(0).<Long>getAs("fragments_added"));
+    try (org.lance.Dataset dataset = openDataset(tableName)) {
+      Assertions.assertEquals("2.0", dataset.getLanceFileFormatVersion());
+      for (Fragment fragment : dataset.getFragments()) {
+        for (org.lance.fragment.DataFile file : fragment.metadata().getFiles()) {
+          Assertions.assertEquals(
+              "2.1", file.getFileMajorVersion() + "." + file.getFileMinorVersion());
+        }
+      }
+    }
+    Assertions.assertEquals(3L, spark.table(fullTable).count());
+  }
+
+  @Test
+  public void testInvalidNewOptionsNameTheOption() {
+    prepareDataset();
+
+    String[][] cases = {
+      {"max_source_rows=0", "'max_source_rows' option must be greater than 0"},
+      {"max_source_bytes=-1", "'max_source_bytes' option must be greater than 0"},
+      {"max_source_rows='10'", "'max_source_rows' option must be an integer literal"},
+      {"excluded_fragment_ids='1,,2'", "'excluded_fragment_ids' option must be a comma-separated"},
+      {"excluded_fragment_ids='1,a'", "'excluded_fragment_ids' option must be a comma-separated"},
+      {"excluded_fragment_ids=-1", "'excluded_fragment_ids' option must be a comma-separated"},
+      {
+        "excluded_fragment_ids='4294967296'",
+        "'excluded_fragment_ids' option must be a comma-separated"
+      },
+      {"data_storage_version='9.9'", "'data_storage_version' option must be one of"},
+      {"data_storage_version=2.1", "'data_storage_version' option must be a string literal"},
+    };
+    for (String[] c : cases) {
+      Exception exception =
+          Assertions.assertThrows(
+              Exception.class,
+              () -> spark.sql(String.format("optimize %s with (%s)", fullTable, c[0])),
+              c[0] + " should be rejected");
+      Assertions.assertTrue(
+          exception.getMessage().contains(c[1]),
+          c[0] + ": expected '" + c[1] + "', got: " + exception.getMessage());
+    }
+  }
+
+  private static List<Integer> sortedFragmentIds(org.lance.Dataset dataset) {
+    return dataset.getFragments().stream()
+        .map(Fragment::getId)
+        .sorted()
+        .collect(Collectors.toList());
   }
 }
