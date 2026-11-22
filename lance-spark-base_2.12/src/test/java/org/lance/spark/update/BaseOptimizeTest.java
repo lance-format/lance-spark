@@ -137,6 +137,8 @@ public abstract class BaseOptimizeTest {
                     + "batch_size=2000,"
                     + "defer_index_remap=true,"
                     + "max_source_fragments=128,"
+                    + "compaction_mode='try_binary_copy',"
+                    + "binary_copy_read_batch_bytes=1048576,"
                     + "max_source_rows=1000000,"
                     + "max_source_bytes=1073741824,"
                     + "excluded_fragment_ids='4294967295',"
@@ -380,6 +382,21 @@ public abstract class BaseOptimizeTest {
   }
 
   @Test
+  public void testCompactionModes() {
+    for (String mode : new String[] {"reencode", "try_binary_copy", "FORCE_BINARY_COPY"}) {
+      spark.sql(String.format("drop table if exists %s", fullTable));
+      prepareDataset();
+
+      Dataset<Row> result =
+          spark.sql(String.format("optimize %s with (compaction_mode='%s')", fullTable, mode));
+
+      Assertions.assertEquals(
+          "[10,1,10,1]", result.collectAsList().get(0).toString(), "compaction_mode=" + mode);
+      Assertions.assertEquals(10L, spark.table(fullTable).count(), "compaction_mode=" + mode);
+    }
+  }
+
+  @Test
   public void testMaxSourceRowsBoundsCompaction() {
     prepareDataset();
 
@@ -490,6 +507,9 @@ public abstract class BaseOptimizeTest {
     prepareDataset();
 
     String[][] cases = {
+      {"compaction_mode='bogus'", "'compaction_mode' option must be one of"},
+      {"compaction_mode=1", "'compaction_mode' option must be a string literal"},
+      {"binary_copy_read_batch_bytes=0", "'binary_copy_read_batch_bytes' option must be greater"},
       {"max_source_rows=0", "'max_source_rows' option must be greater than 0"},
       {"max_source_bytes=-1", "'max_source_bytes' option must be greater than 0"},
       {"max_source_rows='10'", "'max_source_rows' option must be an integer literal"},

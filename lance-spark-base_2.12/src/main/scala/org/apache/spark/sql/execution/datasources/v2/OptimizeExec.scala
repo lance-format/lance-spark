@@ -19,7 +19,7 @@ import org.apache.spark.sql.catalyst.plans.logical.{LanceNamedArgument, Optimize
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
 import org.lance.{Dataset, DataStorageVersion}
-import org.lance.compaction.{Compaction, CompactionOptions, CompactionTask, RewriteResult}
+import org.lance.compaction.{Compaction, CompactionMode, CompactionOptions, CompactionTask, RewriteResult}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceSparkReadOptions}
 import org.lance.spark.utils.{FileFormatVersionResolver, Utils}
 
@@ -53,6 +53,9 @@ case class OptimizeExec(
     argsMap.get("batch_size").map(t => builder.withBatchSize(longArg(t)))
     argsMap.get("defer_index_remap").map(t => builder.withDeferIndexRemap(booleanArg(t)))
     argsMap.get("max_source_fragments").map(t => builder.withMaxSourceFragments(longArg(t)))
+    argsMap.get("compaction_mode").map(t => builder.withCompactionMode(compactionModeArg(t)))
+    argsMap.get("binary_copy_read_batch_bytes").map(t =>
+      builder.withBinaryCopyReadBatchBytes(positiveLongArg(t)))
     argsMap.get("max_source_rows").map(t => builder.withMaxSourceRows(positiveLongArg(t)))
     argsMap.get("max_source_bytes").map(t => builder.withMaxSourceBytes(positiveLongArg(t)))
     argsMap.get("excluded_fragment_ids").map(t =>
@@ -97,6 +100,15 @@ case class OptimizeExec(
     case other =>
       throw new IllegalArgumentException(
         s"'${arg.name}' option must be a string literal, got: $other")
+  }
+
+  private def compactionModeArg(arg: LanceNamedArgument): CompactionMode = {
+    val value = stringArg(arg).trim.toLowerCase(Locale.ROOT)
+    CompactionMode.values().find(_.getValue == value).getOrElse(
+      throw new IllegalArgumentException(
+        s"'${arg.name}' option must be one of " +
+          CompactionMode.values().map(m => s"'${m.getValue}'").mkString(", ") +
+          s", got: '${stringArg(arg)}'"))
   }
 
   private def dataStorageVersionArg(arg: LanceNamedArgument): DataStorageVersion = {
