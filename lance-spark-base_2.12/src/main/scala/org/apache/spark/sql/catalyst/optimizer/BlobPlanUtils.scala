@@ -13,6 +13,7 @@
  */
 package org.apache.spark.sql.catalyst.optimizer
 
+import org.apache.spark.sql.catalyst.CatalystCompat.TreeNodeArgs
 import org.apache.spark.sql.catalyst.analysis.NamedRelation
 import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, OverwriteByExpression}
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
@@ -27,15 +28,17 @@ private[optimizer] object BlobPlanUtils {
       command: LogicalPlan) {
 
     def withQuery(newQuery: LogicalPlan): LogicalPlan = command match {
-      case a: AppendData => a.copy(query = newQuery)
-      case o: OverwriteByExpression => o.copy(query = newQuery)
+      case a: AppendData => a.withNewQuery(newQuery)
+      case o: OverwriteByExpression => o.withNewQuery(newQuery)
     }
 
     def withTableAndOptions(
         newTable: NamedRelation,
         newWriteOptions: Map[String, String]): LogicalPlan = command match {
-      case a: AppendData => a.copy(table = newTable, writeOptions = newWriteOptions)
-      case o: OverwriteByExpression => o.copy(table = newTable, writeOptions = newWriteOptions)
+      case a: AppendData =>
+        a.withNewTable(newTable).withArg(_.writeOptions)(newWriteOptions)
+      case o: OverwriteByExpression =>
+        o.withNewTable(newTable).withArg(_.writeOptions)(newWriteOptions)
     }
   }
 

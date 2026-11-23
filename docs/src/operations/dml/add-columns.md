@@ -31,6 +31,31 @@ No table rewrite, no data movement—just a new column that is instantly queryab
     Because we use `_rowaddr` and `_fragid` to address the target dataset's rows for the new column's data,
     the temporary view should contain `_rowaddr` and `_fragid`.
 
+## Adding nullable Float32 vectors
+
+Keep missing embeddings as null vectors. Set the dense vector's dimension before adding it; an
+ordinary Float32 array remains a variable-length list:
+
+```sql
+ALTER TABLE users SET TBLPROPERTIES ('embedding.arrow.fixed-size-list.size' = '1024');
+
+CREATE TEMPORARY VIEW vector_source AS
+SELECT _rowaddr, _fragid,
+       CAST(NULL AS ARRAY<FLOAT>) AS embedding,
+       CAST(NULL AS ARRAY<FLOAT>) AS sparse_weights
+FROM users;
+
+ALTER TABLE users ADD COLUMNS embedding, sparse_weights FROM vector_source;
+```
+
+Existing rows retain their other columns and read both added columns as null. The dense column is
+stored as `FixedSizeList<Float32>[1024]`; sparse weights are stored as `List<Float32>`. Do not use
+empty arrays or zero vectors to represent missing embeddings. Subsequent writes must provide the
+declared dense-vector length.
+
+Lance's primitive fixed-size-list schema exposes nullable elements on read, even when the source
+array declares non-nullable elements. The numeric width and vector dimension remain unchanged.
+
 ## Adding a Blob v2 Column
 
 To add a blob v2 column, create the target table with Lance file format version `2.2` or higher,

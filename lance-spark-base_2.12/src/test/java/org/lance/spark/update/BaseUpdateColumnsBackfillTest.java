@@ -20,6 +20,7 @@ import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceSpark;
 import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.utils.Utils;
 import org.lance.spark.write.LanceBatchWrite;
 import org.lance.spark.write.UpdateColumnsBackfillBatchWrite;
 
@@ -333,9 +334,7 @@ public abstract class BaseUpdateColumnsBackfillTest {
         (LanceDataset)
             ((TableCatalog) spark.sessionState().catalogManager().catalog(catalogName))
                 .loadTable(Identifier.of(new String[] {"default"}, tableName));
-    try (BufferAllocator allocator = new RootAllocator();
-        Dataset dataset =
-            Dataset.open().allocator(allocator).uri(table.readOptions().getDatasetUri()).build()) {
+    try (Dataset dataset = Utils.openDatasetBuilder(table.readOptions()).build()) {
       List<BlobFile> blobs = dataset.takeBlobs(rowAddresses, "payload");
       assertEquals(2, blobs.size());
       try (BlobFile firstBlob = blobs.get(0);
@@ -366,6 +365,24 @@ public abstract class BaseUpdateColumnsBackfillTest {
                     "alter table %s update columns non_existent_col from update_source",
                     fullTable)),
         "Can't update non-existent columns: non_existent_col");
+  }
+
+  @Test
+  public void testUpdateRejectsDifferentDataTypeWithoutMutation() {
+    prepareDataset();
+    List<Row> before = spark.sql("SELECT * FROM " + fullTable + " ORDER BY id").collectAsList();
+    spark.sql(
+        "CREATE TEMPORARY VIEW wrong_type_source AS SELECT _rowaddr, _fragid, CAST(value AS DOUBLE) AS value FROM "
+            + fullTable);
+    IllegalArgumentException error =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                spark.sql(
+                    "ALTER TABLE " + fullTable + " UPDATE COLUMNS value FROM wrong_type_source"));
+    assertTrue(error.getMessage().contains("value"));
+    assertTrue(error.getMessage().contains("expected"));
+    assertEquals(before, spark.sql("SELECT * FROM " + fullTable + " ORDER BY id").collectAsList());
   }
 
   @Test

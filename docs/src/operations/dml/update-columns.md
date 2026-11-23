@@ -45,6 +45,11 @@ ALTER TABLE users UPDATE COLUMNS value, name FROM update_source;
     The source must contain `_rowaddr` and `_fragid` columns to address the target dataset's rows.
     The columns specified in the `UPDATE COLUMNS` clause must already exist in the target table.
 
+Updates preserve the target column's data type, nullability, and encoding metadata. Source data
+types must match the target, apart from nullability; cast the source explicitly when conversion is
+needed. For blob v2 columns, supply `BINARY` payloads rather than the descriptor structs returned by
+reads.
+
 ## Comparison with Other Operations
 
 | Feature | UPDATE SET | UPDATE COLUMNS FROM | MERGE INTO |

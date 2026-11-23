@@ -65,6 +65,8 @@ import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.catalog.TableChange;
 import org.apache.spark.sql.connector.catalog.functions.UnboundFunction;
 import org.apache.spark.sql.connector.expressions.Transform;
+import org.apache.spark.sql.types.MetadataBuilder;
+import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.apache.spark.sql.util.LanceArrowUtils;
@@ -1007,6 +1009,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
   public Table alterTable(Identifier ident, TableChange... changes) throws NoSuchTableException {
     Map<String, String> propsToSet = new HashMap<>();
     Set<String> keysToRemove = new HashSet<>();
+    List<StructField> columnsToAdd = new ArrayList<>();
 
     for (TableChange change : changes) {
       if (change instanceof TableChange.SetProperty) {
@@ -1015,12 +1018,34 @@ public abstract class BaseLanceNamespaceSparkCatalog
       } else if (change instanceof TableChange.RemoveProperty) {
         TableChange.RemoveProperty removeProp = (TableChange.RemoveProperty) change;
         keysToRemove.add(removeProp.property());
+      } else if (change instanceof TableChange.AddColumn) {
+        TableChange.AddColumn addColumn = (TableChange.AddColumn) change;
+        if (addColumn.fieldNames().length != 1
+            || !addColumn.isNullable()
+            || addColumn.position() != null
+            || addColumn.defaultValue() != null) {
+          throw new UnsupportedOperationException(
+              "ADD COLUMNS supports only nullable top-level columns "
+                  + "without a position or default.");
+        }
+        MetadataBuilder metadata = new MetadataBuilder();
+        if (addColumn.comment() != null) {
+          metadata.putString("comment", addColumn.comment());
+        }
+        columnsToAdd.add(
+            new StructField(
+                addColumn.fieldNames()[0], addColumn.dataType(), true, metadata.build()));
       } else {
         throw new UnsupportedOperationException(
             "Unsupported table change type: "
                 + change.getClass().getSimpleName()
-                + ". Only SET/UNSET TBLPROPERTIES is supported.");
+                + ". Only ADD COLUMNS and SET/UNSET TBLPROPERTIES are supported.");
       }
+    }
+
+    if (!columnsToAdd.isEmpty() && (!propsToSet.isEmpty() || !keysToRemove.isEmpty())) {
+      throw new UnsupportedOperationException(
+          "Adding columns and changing table properties in one operation is not supported.");
     }
 
     if (propsToSet.containsKey(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS)
@@ -1030,7 +1055,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
               + " can only be set at table creation.");
     }
 
-    if (propsToSet.isEmpty() && keysToRemove.isEmpty()) {
+    if (columnsToAdd.isEmpty() && propsToSet.isEmpty() && keysToRemove.isEmpty()) {
       // No changes to apply, just return the current table
       return loadTable(ident);
     }
@@ -1038,11 +1063,32 @@ public abstract class BaseLanceNamespaceSparkCatalog
     ResolvedTable resolved = resolveIdentifier(ident);
 
     try (Dataset dataset = Utils.openDatasetBuilder(resolved.readOptions).build()) {
-      boolean managedVersioning =
-          resolved.describeResponse != null
-              && Boolean.TRUE.equals(resolved.describeResponse.getManagedVersioning());
-      alterTableProperties(
-          dataset, propsToSet, keysToRemove, managedVersioning, resolved.tableIdList);
+      if (!columnsToAdd.isEmpty()) {
+        StructType newColumns =
+            SchemaConverter.processSchemaWithProperties(
+                new StructType(columnsToAdd.toArray(new StructField[0])),
+                dataset.getConfig(),
+                dataset.getLanceFileFormatVersion());
+        Schema arrowSchema = LanceArrowUtils.toArrowSchema(newColumns, "UTC", true);
+        // Arrow conversion can change nested nullability; reject that before committing.
+        StructType roundTripSchema = LanceArrowUtils.fromArrowSchema(arrowSchema);
+        for (int i = 0; i < newColumns.fields().length; i++) {
+          if (!newColumns.fields()[i].dataType().equals(roundTripSchema.fields()[i].dataType())) {
+            throw new UnsupportedOperationException(
+                "Cannot preserve the type of added column '"
+                    + newColumns.fields()[i].name()
+                    + "'.");
+          }
+        }
+        // Native schema-only addition makes existing rows read as null without a backfill.
+        dataset.addColumns(arrowSchema);
+      } else {
+        boolean managedVersioning =
+            resolved.describeResponse != null
+                && Boolean.TRUE.equals(resolved.describeResponse.getManagedVersioning());
+        alterTableProperties(
+            dataset, propsToSet, keysToRemove, managedVersioning, resolved.tableIdList);
+      }
     }
 
     return loadTable(ident);
