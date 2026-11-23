@@ -28,17 +28,17 @@ private[optimizer] object BlobPlanUtils {
       command: LogicalPlan) {
 
     def withQuery(newQuery: LogicalPlan): LogicalPlan = command match {
-      case a: AppendData => a.withArg(_.query)(newQuery)
-      case o: OverwriteByExpression => o.withArg(_.query)(newQuery)
+      case a: AppendData => a.withNewQuery(newQuery)
+      case o: OverwriteByExpression => o.withNewQuery(newQuery)
     }
 
     def withTableAndOptions(
         newTable: NamedRelation,
         newWriteOptions: Map[String, String]): LogicalPlan = command match {
       case a: AppendData =>
-        a.withArg(_.table)(newTable).withArg(_.writeOptions)(newWriteOptions)
+        a.withNewTable(newTable).withArg(_.writeOptions)(newWriteOptions)
       case o: OverwriteByExpression =>
-        o.withArg(_.table)(newTable).withArg(_.writeOptions)(newWriteOptions)
+        o.withNewTable(newTable).withArg(_.writeOptions)(newWriteOptions)
     }
   }
 

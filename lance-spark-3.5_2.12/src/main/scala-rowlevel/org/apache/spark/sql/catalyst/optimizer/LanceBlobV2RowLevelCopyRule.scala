@@ -139,7 +139,7 @@ case class LanceBlobV2RowLevelCopyRule() extends Rule[LogicalPlan] {
 
   private def rewriteWriteDelta(w: WriteDelta): LogicalPlan = {
     val target = maskedTarget(w.table).get
-    val unmasked = w.withArg(_.table)(unmaskTarget(w.table))
+    val unmasked = w.withNewTable(unmaskTarget(w.table))
     val targetBlobColumns =
       target.schema().fields.collect { case f if BlobUtils.isBlobV2SparkField(f) => f.name }.toSet
     if (targetBlobColumns.isEmpty || alreadyRewritten(w.query)) {
@@ -218,10 +218,9 @@ case class LanceBlobV2RowLevelCopyRule() extends Rule[LogicalPlan] {
     if (rewrittenColumns.isEmpty) {
       return unmasked
     }
-    unmasked
-      .withArg(_.table)(attachBlobSourceContexts(unmasked.table, bindings))
-      .withArg(_.query)(injectRowAddresses(newQuery, bindings))
-      .withArg(_.projections)(retypeRowProjection(w.projections, rewrittenColumns))
+    w.withArg(_.projections)(retypeRowProjection(w.projections, rewrittenColumns))
+      .withNewTable(attachBlobSourceContexts(unmasked.table, bindings))
+      .withNewQuery(injectRowAddresses(newQuery, bindings))
   }
 
   // WriteDelta write options are empty; attach pinned source contexts on the operation instead.
@@ -250,7 +249,7 @@ case class LanceBlobV2RowLevelCopyRule() extends Rule[LogicalPlan] {
 
   private def rewriteLoweredAppend(a: AppendData): LogicalPlan = {
     val target = maskedTarget(a.table).get
-    val unmasked = a.withArg(_.table)(unmaskTarget(a.table))
+    val unmasked = a.withNewTable(unmaskTarget(a.table))
     val targetBlobColumns =
       target.schema().fields.collect { case f if BlobUtils.isBlobV2SparkField(f) => f.name }.toSet
     if (targetBlobColumns.isEmpty || alreadyRewritten(a.query)) {
@@ -268,8 +267,8 @@ case class LanceBlobV2RowLevelCopyRule() extends Rule[LogicalPlan] {
           unmasked
         } else {
           val newChild = injectRowAddresses(p.child, bindings)
-          unmasked.withArg(_.query)(
-            p.withArg(_.projectList)(rewritten).withArg(_.child)(newChild))
+          unmasked.withNewQuery(
+            p.withArg(_.projectList)(rewritten).withNewChildren(Seq(newChild)))
         }
       case q =>
         // Optimizer may drop a no-op project; rewrap outputs as copy tokens.
@@ -277,7 +276,7 @@ case class LanceBlobV2RowLevelCopyRule() extends Rule[LogicalPlan] {
         if (names.isEmpty) {
           unmasked
         } else {
-          unmasked.withArg(_.query)(Project(rewritten, injectRowAddresses(q, bindings)))
+          unmasked.withNewQuery(Project(rewritten, injectRowAddresses(q, bindings)))
         }
     }
   }

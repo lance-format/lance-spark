@@ -18,7 +18,7 @@ import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan}
 
 import java.lang.reflect.{InvocationTargetException, Method}
 
-private[v2] object AppendDataCompat {
+private[sql] object AppendDataCompat {
   def byPosition(
       relation: NamedRelation,
       query: LogicalPlan,

@@ -17,6 +17,7 @@ import org.apache.spark.sql.catalyst.CatalystCompat.TreeNodeArgs
 import org.apache.spark.sql.catalyst.analysis.UnresolvedRelation
 import org.apache.spark.sql.catalyst.expressions.{Alias, Ascending, Attribute, AttributeReference, SortOrder}
 import org.apache.spark.sql.catalyst.plans.logical.{LeafNode, LocalRelation, LogicalPlan, Project, UnaryNode}
+import org.apache.spark.sql.execution.datasources.v2.AppendDataCompat
 import org.apache.spark.sql.types.{IntegerType, MetadataBuilder}
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.Test
@@ -89,7 +90,7 @@ class CatalystCompatTest {
   def withArgSelectsTheCompatibleConstructorArgumentWhenFieldsShareAnInstance(): Unit = {
     val sharedRelation = UnresolvedRelation(Seq("target"))
     val original =
-      CatalystCompat.appendDataByPosition(sharedRelation, sharedRelation, Map.empty[String, String])
+      AppendDataCompat.byPosition(sharedRelation, sharedRelation, Map.empty[String, String])
     val replacementQuery = Project(query.output, query)
 
     val updated = original.withArg(_.query)(replacementQuery)
@@ -139,19 +140,6 @@ class CatalystCompatTest {
     assertEquals(order, sort.order)
     assertTrue(sort.global)
     assertSame(query, sort.child)
-  }
-
-  @Test
-  def appendDataByPositionBuildsAByPositionAppend(): Unit = {
-    val table = UnresolvedRelation(Seq("target"))
-    val options = Map("k" -> "v")
-
-    val append = CatalystCompat.appendDataByPosition(table, query, options)
-
-    assertSame(table, append.table)
-    assertSame(query, append.query)
-    assertEquals(options, append.writeOptions)
-    assertFalse(append.isByName)
   }
 
   @Test

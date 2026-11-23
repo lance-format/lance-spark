@@ -13,9 +13,8 @@
  */
 package org.apache.spark.sql.catalyst
 
-import org.apache.spark.sql.catalyst.analysis.NamedRelation
 import org.apache.spark.sql.catalyst.expressions.SortOrder
-import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, Sort}
+import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, Sort}
 import org.apache.spark.sql.catalyst.trees.TreeNode
 
 import java.lang.invoke.MethodType
@@ -28,21 +27,17 @@ import java.lang.reflect.{Constructor, InvocationTargetException, Method}
  * constructor or companion factory call binds to the exact JVM signature of the Spark build it was
  * compiled against and can fail with `NoSuchMethodError` when the runtime class has a different
  * shape. Lance code must therefore
- * modify Spark tree nodes through [[CatalystCompat.TreeNodeArgs.withArg]] and construct the nodes
- * listed here through their factories.
+ * prefer Spark's rewrite methods and use [[CatalystCompat.TreeNodeArgs.withArg]] for fields without
+ * an equivalent API. Nodes with unstable constructors need runtime-aware factories.
  */
 object CatalystCompat {
 
   implicit class TreeNodeArgs[T <: TreeNode[_]](node: T) {
 
     /**
-     * Returns a copy of this node with the product argument read by `field` replaced by
-     * `value`, like a compiled `copy(field = value)`.
-     *
-     * The copy goes through [[TreeNode.makeCopy]], the reflective path Spark itself uses for every
-     * tree transformation, so it works for whatever constructor the runtime's class has. The
-     * argument is located by reference identity with the accessor's value, never by position,
-     * which keeps it correct when fields are inserted or appended.
+     * Replaces the product argument read by `field` through Spark's reflective `makeCopy` path.
+     * Reference identity and accessor checks disambiguate fields sharing values such as Nil or None.
+     * Prefer Spark's rewrite methods when they provide the same operation.
      */
     def withArg[A <: AnyRef](field: T => A)(value: A): T = {
       val current = field(node)
@@ -95,12 +90,6 @@ object CatalystCompat {
 
   def sort(order: Seq[SortOrder], global: Boolean, child: LogicalPlan): Sort =
     invokeCompanionFactory(classOf[Sort], "apply", order, Boolean.box(global), child)
-
-  def appendDataByPosition(
-      table: NamedRelation,
-      query: LogicalPlan,
-      writeOptions: Map[String, String]): AppendData =
-    invokeCompanionFactory(classOf[AppendData], "byPosition", table, query, writeOptions)
 
   /**
    * Invokes the companion method `factoryName` of `nodeClass` with `args` as its leading

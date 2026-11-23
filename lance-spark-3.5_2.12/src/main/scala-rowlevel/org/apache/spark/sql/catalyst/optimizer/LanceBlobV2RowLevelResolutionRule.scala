@@ -35,9 +35,9 @@ import java.util
 case class LanceBlobV2RowLevelResolutionRule() extends Rule[LogicalPlan] {
 
   override def apply(plan: LogicalPlan): LogicalPlan = plan.resolveOperatorsDown {
-    case m: MergeIntoTable => m.withArg(_.targetTable)(mask(m.targetTable))
-    case u: UpdateTable => u.withArg(_.table)(mask(u.table))
-    case d: DeleteFromTable => d.withArg(_.table)(mask(d.table))
+    case m: MergeIntoTable => m.withNewChildren(Seq(mask(m.targetTable), m.sourceTable))
+    case u: UpdateTable => u.withNewChildren(Seq(mask(u.table)))
+    case d: DeleteFromTable => d.withNewChildren(Seq(mask(d.table)))
   }
 
   private def mask(target: LogicalPlan): LogicalPlan = target.resolveOperators {
