@@ -50,12 +50,10 @@ import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -270,6 +268,84 @@ public abstract class BaseUpdateColumnsBackfillTest {
   }
 
   @Test
+  public void testUpdateFixedSizeListColumnFromSqlTempView() {
+    spark.sql(
+        String.format(
+            "create table %s (id int, vec array<float>) using lance "
+                + "tblproperties ('vec.arrow.fixed-size-list.size' = '4')",
+            fullTable));
+    spark.sql(
+        String.format(
+            "insert into %s values "
+                + "(1, array(1.0F, 2.0F, 3.0F, 4.0F)), "
+                + "(2, array(5.0F, 6.0F, 7.0F, 8.0F))",
+            fullTable));
+
+    // Spark SQL's array(...) produces ArrayType(FloatType, containsNull = false), whereas the
+    // table's FixedSizeList column has containsNull = true.
+    spark.sql(
+        String.format(
+            "create temporary view update_source as "
+                + "select _rowaddr, _fragid, array(10.0F, 20.0F, 30.0F, 40.0F) as vec "
+                + "from %s where id = 2",
+            fullTable));
+
+    spark.sql(String.format("alter table %s update columns vec from update_source", fullTable));
+
+    List<Row> results =
+        spark.sql(String.format("select id, vec from %s order by id", fullTable)).collectAsList();
+    assertEquals(Arrays.asList(1.0f, 2.0f, 3.0f, 4.0f), results.get(0).getList(1));
+    assertEquals(Arrays.asList(10.0f, 20.0f, 30.0f, 40.0f), results.get(1).getList(1));
+    assertEquals(
+        4L,
+        spark
+            .table(fullTable)
+            .schema()
+            .apply("vec")
+            .metadata()
+            .getLong("arrow.fixed-size-list.size"));
+  }
+
+  @Test
+  public void testUpdateBlobV2ColumnFromSqlTempView() throws Exception {
+    spark.sql(
+        String.format(
+            "create table %s (id int, payload binary) using lance tblproperties "
+                + "('payload.lance.encoding'='blob', 'file_format_version'='2.2')",
+            fullTable));
+    spark.sql(String.format("insert into %s values (1, X'0102'), (2, X'0304')", fullTable));
+    spark.sql(
+        String.format(
+            "create temporary view update_source as "
+                + "select _rowaddr, _fragid, X'0506' as payload from %s where id = 2",
+            fullTable));
+
+    spark.sql(String.format("alter table %s update columns payload from update_source", fullTable));
+
+    List<Row> rows =
+        spark
+            .sql(String.format("select id, _rowaddr from %s order by id", fullTable))
+            .collectAsList();
+    assertEquals(2, rows.size());
+    assertEquals(1, rows.get(0).getInt(0));
+    assertEquals(2, rows.get(1).getInt(0));
+    List<Long> rowAddresses = Arrays.asList(rows.get(0).getLong(1), rows.get(1).getLong(1));
+    LanceDataset table =
+        (LanceDataset)
+            ((TableCatalog) spark.sessionState().catalogManager().catalog(catalogName))
+                .loadTable(Identifier.of(new String[] {"default"}, tableName));
+    try (Dataset dataset = Utils.openDatasetBuilder(table.readOptions()).build()) {
+      List<BlobFile> blobs = dataset.takeBlobs(rowAddresses, "payload");
+      assertEquals(2, blobs.size());
+      try (BlobFile firstBlob = blobs.get(0);
+          BlobFile secondBlob = blobs.get(1)) {
+        assertArrayEquals(new byte[] {1, 2}, firstBlob.read());
+        assertArrayEquals(new byte[] {5, 6}, secondBlob.read());
+      }
+    }
+  }
+
+  @Test
   public void testUpdateNonExistentColumn() {
     prepareDataset();
 
@@ -307,41 +383,6 @@ public abstract class BaseUpdateColumnsBackfillTest {
     assertTrue(error.getMessage().contains("value"));
     assertTrue(error.getMessage().contains("expected"));
     assertEquals(before, spark.sql("SELECT * FROM " + fullTable + " ORDER BY id").collectAsList());
-  }
-
-  @Test
-  public void testUpdateBlobPayloadPreservesUnmatchedRows() throws Exception {
-    spark.sql(
-        "CREATE TABLE "
-            + fullTable
-            + " (id INT, payload BINARY) USING lance TBLPROPERTIES ('payload.lance.encoding' = 'blob', 'file_format_version' = '2.2')");
-    spark.sql(
-        "INSERT INTO "
-            + fullTable
-            + " VALUES (1, CAST('one' AS BINARY)), (2, CAST('two' AS BINARY))");
-    spark.sql(
-        "CREATE TEMPORARY VIEW blob_update_source AS SELECT _rowaddr, _fragid, CAST('updated' AS BINARY) AS payload FROM "
-            + fullTable
-            + " WHERE id = 2");
-    spark.sql("ALTER TABLE " + fullTable + " UPDATE COLUMNS payload FROM blob_update_source");
-
-    List<Long> rowAddresses =
-        spark.sql("SELECT _rowaddr FROM " + fullTable + " ORDER BY id").collectAsList().stream()
-            .map(row -> row.getLong(0))
-            .collect(Collectors.toList());
-    TableCatalog catalog =
-        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
-    LanceDataset table =
-        (LanceDataset) catalog.loadTable(Identifier.of(new String[] {"default"}, tableName));
-    try (Dataset dataset = Utils.openDatasetBuilder(table.readOptions()).build()) {
-      List<BlobFile> blobs = dataset.takeBlobs(rowAddresses, "payload");
-      assertEquals(2, blobs.size());
-      try (BlobFile first = blobs.get(0);
-          BlobFile second = blobs.get(1)) {
-        assertArrayEquals("one".getBytes(StandardCharsets.UTF_8), first.read());
-        assertArrayEquals("updated".getBytes(StandardCharsets.UTF_8), second.read());
-      }
-    }
   }
 
   @Test

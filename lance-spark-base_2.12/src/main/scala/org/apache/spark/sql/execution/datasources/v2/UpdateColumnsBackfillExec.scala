@@ -106,13 +106,14 @@ object UpdateColumnsBackfillExec {
             .withMetadata(sourceField.metadata)
             .withMetadata(targetField.metadata)
             .build()
-          val writeType =
+          // Blob v2 exposes a descriptor on read but accepts binary values on write.
+          val targetDataType =
             if (BlobUtils.isBlobV2SparkField(targetField)) BinaryType else targetField.dataType
           require(
-            DataType.equalsIgnoreNullability(sourceField.dataType, writeType),
-            s"UPDATE COLUMNS source '${sourceField.name}' has type ${sourceField.dataType}, expected $writeType")
+            DataType.equalsIgnoreNullability(sourceField.dataType, targetDataType),
+            s"UPDATE COLUMNS source '${sourceField.name}' has type ${sourceField.dataType}, expected $targetDataType")
           sourceField.copy(
-            dataType = writeType,
+            dataType = targetDataType,
             nullable = targetField.nullable,
             metadata = metadata)
         case _ =>
