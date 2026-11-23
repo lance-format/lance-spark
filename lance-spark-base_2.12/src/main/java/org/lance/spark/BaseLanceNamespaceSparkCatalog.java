@@ -1070,6 +1070,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
                 dataset.getConfig(),
                 dataset.getLanceFileFormatVersion());
         Schema arrowSchema = LanceArrowUtils.toArrowSchema(newColumns, "UTC", true);
+        // Arrow conversion can change nested nullability; reject that before committing.
         StructType roundTripSchema = LanceArrowUtils.fromArrowSchema(arrowSchema);
         for (int i = 0; i < newColumns.fields().length; i++) {
           if (!newColumns.fields()[i].dataType().equals(roundTripSchema.fields()[i].dataType())) {
@@ -1079,6 +1080,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
                     + "'.");
           }
         }
+        // Native schema-only addition makes existing rows read as null without a backfill.
         dataset.addColumns(arrowSchema);
       } else {
         boolean managedVersioning =
