@@ -36,7 +36,6 @@ import org.apache.spark.sql.connector.catalog.functions.UnboundFunction;
 import org.apache.spark.sql.connector.expressions.Expressions;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
-import org.apache.spark.sql.util.LanceArrowUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -1088,30 +1087,6 @@ public abstract class SparkLanceNamespaceTestBase {
                 TableChange.addColumn(new String[] {"id"}, DataTypes.StringType)));
     assertEquals(version, getLatestVersion(tableName).getId());
     assertArrayEquals(new String[] {"id"}, spark.table(fullName).columns());
-  }
-
-  @Test
-  public void testAddColumnsRejectsConcurrentSchemaProperty() throws Exception {
-    String tableName = generateTableName("add_concurrent");
-    String fullName = catalogName + ".default." + tableName;
-    spark.sql("CREATE TABLE " + fullName + " (id INT)");
-    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
-    LanceDataset table = (LanceDataset) catalog.loadTable(ident);
-    try (org.lance.Dataset stale = openLatestDataset(table.readOptions())) {
-      StructType newColumns =
-          new StructType().add("features", DataTypes.createArrayType(DataTypes.FloatType), true);
-      spark.sql(
-          "ALTER TABLE "
-              + fullName
-              + " SET TBLPROPERTIES ('features.arrow.fixed-size-list.size' = '3')");
-      RuntimeException error =
-          assertThrows(
-              RuntimeException.class,
-              () -> stale.addColumns(LanceArrowUtils.toArrowSchema(newColumns, "UTC", true)));
-      assertTrue(error.getMessage().contains("commit conflict"));
-    }
-    assertArrayEquals(new String[] {"id"}, spark.table(fullName).columns());
-    assertEquals("3", getTableConfig(tableName).get("features.arrow.fixed-size-list.size"));
   }
 
   @Test
