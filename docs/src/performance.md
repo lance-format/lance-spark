@@ -157,6 +157,20 @@ For large scans, increasing this to match your CPU core count enables more concu
 export LANCE_IO_THREADS=128
 ```
 
+### Compute Threads
+
+Set via environment variable `LANCE_IO_CORE_RESERVATION` (default: 2) or `LANCE_CPU_THREADS`.
+
+Lance runs CPU-heavy work, such as vector index search, on a pool of `cores - LANCE_IO_CORE_RESERVATION` threads per JVM, with a minimum of one. The default readahead and parallelism of its scans follow the same number. With the default of 2, an executor with 3 cores gets one compute thread, and one with 4 cores gets two.
+
+On executors with fewer than 8 cores, lower the reservation, or set `LANCE_CPU_THREADS` to the executor's core count. Lance reads these variables when it starts in each executor process, so pass them as executor environment variables:
+
+```bash
+--conf spark.executorEnv.LANCE_IO_CORE_RESERVATION=0
+```
+
+In a benchmark of batched vector search inside Spark tasks (10M 1024-dimensional vectors, IVF_RQ index), a reservation of 0 on 3-core executors was 2.2-2.6× faster, and a reservation of 1 on 4-core executors was 1.35× faster. A full scan of the vector column was unchanged.
+
 ### Custom Read Metrics
 
 Lance Spark reports per-task custom metrics on the Spark UI Scan node, viewable in the SQL tab's
