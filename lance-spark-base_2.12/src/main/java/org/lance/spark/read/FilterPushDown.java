@@ -133,8 +133,19 @@ public class FilterPushDown {
         // and let Spark evaluate the predicate post-scan.
         return false;
       }
+      if (isNonFiniteFloatingPointLiteral((Literal<?>) children[i])) {
+        // Lance's SQL parser reads NaN and Infinity as column names, so a pushed predicate on one
+        // fails the scan. Let Spark evaluate it post-scan, with its own NaN semantics.
+        return false;
+      }
     }
     return true;
+  }
+
+  private static boolean isNonFiniteFloatingPointLiteral(Literal<?> literal) {
+    Object value = literal.value();
+    return (value instanceof Double && !Double.isFinite((Double) value))
+        || (value instanceof Float && !Float.isFinite((Float) value));
   }
 
   /**
