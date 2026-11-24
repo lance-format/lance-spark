@@ -31,7 +31,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 
 /**
  * Verifies that SQL UPDATE on a Lance table with stable row IDs preserves _rowid values. Uses the
- * native DeltaWriter.update() path with task-level RowIdMeta attachment.
+ * native DeltaWriter.update() path with task-level RowIdMeta attachment. Also checks that indexed
+ * filters stay correct after UPDATE and MERGE rewrite rows on such a table.
  */
 public class UpdateRowIdStabilityTest {
   private SparkSession spark;
@@ -50,6 +51,8 @@ public class UpdateRowIdStabilityTest {
                 "spark.sql.catalog." + catalogName, "org.lance.spark.LanceNamespaceSparkCatalog")
             .config("spark.sql.catalog." + catalogName + ".impl", "dir")
             .config("spark.sql.catalog." + catalogName + ".root", tempDir.toString())
+            .config(
+                "spark.sql.extensions", "org.lance.spark.extensions.LanceSparkSessionExtensions")
             .getOrCreate();
 
     spark.sql("CREATE NAMESPACE IF NOT EXISTS " + catalogName + ".default");
@@ -272,6 +275,81 @@ public class UpdateRowIdStabilityTest {
     }
 
     verifyDataValues(Map.of(1, 10, 2, 22, 3, 30, 4, 40, 5, 52, 6, 60));
+  }
+
+  /**
+   * The index tests use a bitmap index because it maps values to row ids on every Lance version;
+   * BTrees built on Lance 14 map values to row addresses.
+   */
+  @Test
+  public void testIndexedFiltersSeeRowsRewrittenByUpdate() {
+    createIndexedTable();
+
+    spark.sql("UPDATE " + fullTableName + " SET value = 999 WHERE id = 2");
+
+    assertEquals(List.of(2), idsWhere("value = 999"));
+    assertEquals(List.of(), idsWhere("value = 200"));
+    verifyDataValues(Map.of(1, 100, 2, 999, 3, 300));
+  }
+
+  @Test
+  public void testIndexedFiltersSeeRowsWrittenByMerge() {
+    createIndexedTable();
+
+    spark.sql(
+        "MERGE INTO "
+            + fullTableName
+            + " t USING (SELECT 3 AS id, 'Carol' AS name, 301 AS value"
+            + " UNION ALL SELECT 4, 'Dave', 400) s ON t.id = s.id"
+            + " WHEN MATCHED THEN UPDATE SET * WHEN NOT MATCHED THEN INSERT *");
+
+    assertEquals(List.of(3), idsWhere("value = 301"));
+    assertEquals(List.of(4), idsWhere("value = 400"));
+    assertEquals(List.of(), idsWhere("value = 300"));
+  }
+
+  @Test
+  public void testIndexedFiltersSeeNestedFieldsRewrittenByUpdate() {
+    spark.sql(
+        "CREATE TABLE "
+            + fullTableName
+            + " (id INT NOT NULL, payload STRUCT<value: INT, tag: STRING>)"
+            + " TBLPROPERTIES ('enable_stable_row_ids' = 'true')");
+    spark.sql(
+        "INSERT INTO "
+            + fullTableName
+            + " VALUES (1, named_struct('value', 100, 'tag', 'a')),"
+            + " (2, named_struct('value', 200, 'tag', 'b')),"
+            + " (3, named_struct('value', 300, 'tag', 'c'))");
+    spark.sql(
+        "ALTER TABLE " + fullTableName + " CREATE INDEX payload_idx USING bitmap (payload.value)");
+
+    spark.sql("UPDATE " + fullTableName + " SET payload.value = 999 WHERE id = 2");
+
+    assertEquals(List.of(2), idsWhere("payload.value = 999"));
+    assertEquals(List.of(), idsWhere("payload.value = 200"));
+  }
+
+  private void createIndexedTable() {
+    spark.sql(
+        "CREATE TABLE "
+            + fullTableName
+            + " (id INT NOT NULL, name STRING, value INT)"
+            + " TBLPROPERTIES ('enable_stable_row_ids' = 'true')");
+    spark.sql(
+        "INSERT INTO "
+            + fullTableName
+            + " VALUES (1, 'Alice', 100), (2, 'Bob', 200), (3, 'Charlie', 300)");
+    spark.sql("ALTER TABLE " + fullTableName + " CREATE INDEX value_idx USING bitmap (value)");
+  }
+
+  private List<Integer> idsWhere(String condition) {
+    return spark
+        .sql("SELECT id FROM " + fullTableName + " WHERE " + condition + " ORDER BY id")
+        .collectAsList()
+        .stream()
+        .map(r -> r.getInt(0))
+        .collect(Collectors.toList());
   }
 
   private Map<Integer, Long> readRowIds() {
