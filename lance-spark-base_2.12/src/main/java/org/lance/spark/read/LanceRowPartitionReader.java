@@ -22,12 +22,17 @@ import java.io.IOException;
 import java.util.Iterator;
 
 public class LanceRowPartitionReader implements PartitionReader<InternalRow> {
-  private final LanceColumnarPartitionReader reader;
+  private final PartitionReader<ColumnarBatch> reader;
   private ColumnarBatch currentBatch;
   private Iterator<InternalRow> currentRows;
   private InternalRow currentRecord;
 
   public LanceRowPartitionReader(LanceColumnarPartitionReader reader) {
+    // Keep this constructor descriptor for callers compiled against the original reader API.
+    this((PartitionReader<ColumnarBatch>) reader);
+  }
+
+  public LanceRowPartitionReader(PartitionReader<ColumnarBatch> reader) {
     this.reader = reader;
   }
 

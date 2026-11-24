@@ -172,6 +172,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
 
   /** Create-time schema and file format version resolution for every catalog create path. */
   private CreateTableSpec resolveCreateSpec(StructType schema, Map<String, String> properties) {
+    rejectSamplingTableProperties(properties);
     return CreateTableSpec.resolve(schema, properties, catalogConfig.getFileFormatVersion());
   }
 
@@ -179,6 +180,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
   private CreateTableSpec resolveReplaceSpec(
       StructType schema, Map<String, String> properties, Dataset existingDataset) {
     try {
+      rejectSamplingTableProperties(properties);
       return CreateTableSpec.resolveForReplace(
           schema,
           properties,
@@ -1100,6 +1102,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Set<String> keysToRemove,
       boolean managedVersioning,
       List<String> tableIdList) {
+    rejectSamplingTableProperties(propsToSet);
     rejectSchemaPropertiesForExistingColumns(dataset.getSchema(), propsToSet);
     Map<String, String> merged = new HashMap<>(dataset.getConfig());
     merged.putAll(propsToSet);
@@ -1751,10 +1754,19 @@ public abstract class BaseLanceNamespaceSparkCatalog
         .collect(Collectors.toList());
   }
 
+  private static void rejectSamplingTableProperties(Map<String, String> properties) {
+    if (properties != null
+        && properties.keySet().stream().anyMatch(LanceSparkReadOptions::isSamplingOption)) {
+      throw new IllegalArgumentException(
+          "Sampling options must be specified per read, not as table properties");
+    }
+  }
+
   private static Map<String, String> copyUserTableProperties(Map<String, String> properties) {
     if (properties == null || properties.isEmpty()) {
       return Collections.emptyMap();
     }
+    rejectSamplingTableProperties(properties);
 
     Map<String, String> userProperties = new HashMap<>();
     for (Map.Entry<String, String> entry : properties.entrySet()) {

@@ -86,6 +86,38 @@ Column names containing backticks also remain in Spark.
     JOIN projects p ON u.id = p.user_id;
     ```
 
+## Exact Random Sampling
+
+Read an exact sample directly from a retained snapshot using batched Lance random
+access. Both path and catalog reads support the sampling options:
+
+```python
+sampled = (
+    spark.read
+    .option("version", "123")  # Replace with a retained version.
+    .option("sample_size", "1000")
+    .option("sample_seed", "42")
+    .table("lance.default.users")
+    .select("id", "age")
+)
+
+assert sampled.count() == 1000
+
+# Predicates apply to the sampled rows; this count may be less than 1000.
+adults = sampled.where("age >= 18")
+adults.show()
+```
+
+The snapshot must have at least the requested number of live rows. Sampling is
+without replacement and reproducible as a set, with no global ordering guarantee.
+Changing the projection or `sample_batch_size` preserves the chosen positions.
+The snapshot and its files must remain retained for replay.
+
+Sampling supports up to one million selected positions. Blob projections and
+`arrow_batch_reads=true` are currently unsupported. Select only ordinary columns
+when sampling a table containing blobs. For all options and reproducibility
+boundaries, see [Exact Random Sampling](../../config.md#exact-random-sampling).
+
 ## Querying Blob Columns
 
 When querying tables with blob columns, the blob data itself is not materialized by default. 

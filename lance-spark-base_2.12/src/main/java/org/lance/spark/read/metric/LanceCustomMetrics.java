@@ -42,10 +42,14 @@ public final class LanceCustomMetrics {
   public static final String NUM_INDICES_LOADED = "numIndicesLoaded";
   public static final String NUM_PARTS_LOADED = "numPartsLoaded";
   public static final String NUM_INDEX_COMPARISONS = "numIndexComparisons";
+  public static final String NUM_TAKE_CALLS = "numTakeCalls";
+  public static final String NUM_ROWS_REQUESTED = "numRowsRequested";
+  public static final String NUM_ROWS_RETURNED = "numRowsReturned";
 
   public static final String DATASET_OPEN_TIME_NS = "datasetOpenTimeNs";
   public static final String SCANNER_CREATE_TIME_NS = "scannerCreateTimeNs";
   public static final String BATCH_LOAD_TIME_NS = "batchLoadTimeNs";
+  public static final String TAKE_TIME_NS = "takeTimeNs";
 
   private LanceCustomMetrics() {}
 
@@ -195,6 +199,54 @@ public final class LanceCustomMetrics {
     }
   }
 
+  public static class NumTakeCallsMetric extends CustomSumMetric {
+    @Override
+    public String name() {
+      return NUM_TAKE_CALLS;
+    }
+
+    @Override
+    public String description() {
+      return "number of native Lance take calls";
+    }
+  }
+
+  public static class NumRowsRequestedMetric extends CustomSumMetric {
+    @Override
+    public String name() {
+      return NUM_ROWS_REQUESTED;
+    }
+
+    @Override
+    public String description() {
+      return "number of logical positions requested";
+    }
+  }
+
+  public static class NumRowsReturnedMetric extends CustomSumMetric {
+    @Override
+    public String name() {
+      return NUM_ROWS_RETURNED;
+    }
+
+    @Override
+    public String description() {
+      return "number of sampled rows returned";
+    }
+  }
+
+  public static class TakeTimeNsMetric extends CustomNsTimeMetric {
+    @Override
+    public String name() {
+      return TAKE_TIME_NS;
+    }
+
+    @Override
+    public String description() {
+      return "time spent in native Lance take calls";
+    }
+  }
+
   private static final CustomMetric[] ALL_METRICS = {
     new NumFragmentsScannedMetric(),
     new NumBatchesLoadedMetric(),
@@ -210,8 +262,20 @@ public final class LanceCustomMetrics {
     new BatchLoadTimeNsMetric(),
   };
 
+  private static final CustomMetric[] SAMPLING_METRICS = {
+    new NumTakeCallsMetric(),
+    new NumRowsRequestedMetric(),
+    new NumRowsReturnedMetric(),
+    new TakeTimeNsMetric(),
+  };
+
   /** Returns all supported custom metrics, used by LanceScan.supportedCustomMetrics(). */
   public static CustomMetric[] allMetrics() {
     return ALL_METRICS.clone();
+  }
+
+  /** Returns the metrics supported by the native take sampling reader. */
+  public static CustomMetric[] samplingMetrics() {
+    return SAMPLING_METRICS.clone();
   }
 }

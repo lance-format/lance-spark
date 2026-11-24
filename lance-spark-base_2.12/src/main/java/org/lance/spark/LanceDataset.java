@@ -16,6 +16,7 @@ package org.lance.spark;
 import org.lance.Dataset;
 import org.lance.memwal.ShardingSpec;
 import org.lance.spark.internal.TransactionPropertiesWriteTable;
+import org.lance.spark.read.LanceSampleScanBuilder;
 import org.lance.spark.read.LanceScanBuilder;
 import org.lance.spark.utils.BlobSourceContext;
 import org.lance.spark.utils.BlobUtils;
@@ -319,6 +320,12 @@ public class LanceDataset
     LanceSparkReadOptions scanOptions = mergeScanOptions(scanMap);
     StructType scanSchema = sparkSchema;
     LanceRef scanRef = scanOptions.getRef();
+    if (scanOptions.isSampling()) {
+      Preconditions.checkArgument(
+          scanRef != null && scanRef.getVersionNumber().isPresent(),
+          "Exact sampling requires an explicit version; "
+              + "unversioned latest, branch heads, and tags are unsupported");
+    }
     if (scanRef != null && (scanRef.isBranchOrTag() || scanRef.getVersionNumber().isPresent())) {
       try (Dataset dataset =
           Utils.openDatasetBuilder(scanOptions)
@@ -327,6 +334,15 @@ public class LanceDataset
               .build()) {
         scanOptions = scanOptions.withRef(Utils.pinOpenedRef(dataset, scanRef));
         scanSchema = LanceArrowUtils.fromArrowSchema(dataset.getSchema());
+        if (scanOptions.isSampling()) {
+          return new LanceSampleScanBuilder(
+              scanSchema,
+              scanOptions,
+              dataset.countRows(),
+              initialStorageOptions,
+              namespaceImpl,
+              namespaceProperties);
+        }
       }
     }
     return new LanceScanBuilder(
@@ -367,6 +383,9 @@ public class LanceDataset
             .indexCacheBackend(readOptions.getIndexCacheBackend())
             .metadataCacheBackend(readOptions.getMetadataCacheBackend())
             .ref(tableRef)
+            .sampleSize(readOptions.getSampleSize())
+            .sampleSeed(readOptions.getSampleSeed())
+            .sampleBatchSize(readOptions.isSampling() ? readOptions.getSampleBatchSize() : null)
             .fromOptions(merged)
             .build();
     if (tableRef != null && scanSetsRef) {
