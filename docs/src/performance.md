@@ -146,6 +146,29 @@ df.write \
 
 ## Read Performance
 
+### Batch Byte Budgeting, Readahead, and Late Materialization
+
+When scanning tables that mix narrow scalar columns with wide binary/protobuf/string columns, tuning row-based `batch_size` alone forces a tradeoff between OLAP throughput and off-heap memory usage. Use Lance's native byte-budgeted batching, readahead, I/O buffer, and late materialization read options instead:
+
+- `batch_size_bytes` (e.g. `16777216` for 16 MB): Soft byte target per output Arrow batch. Keeps higher `batch_size` throughput when projecting narrow scalar columns while splitting wide binary batches into fewer rows.
+- `batch_readahead` / `fragment_readahead` (e.g. `2`–`4`): Bounds native Rust async prefetch queue depth per task so wide projections do not multiply batch memory by the default queue depth (`16`).
+- `io_buffer_size`: Caps the per-scanner native I/O buffer in bytes when many Spark tasks share an executor.
+- `late_materialization`: Controls post-filter column materialization (`heuristic`, `all_late`, `all_early`, or `all_early_except:col1,col2`).
+
+!!!note
+    `batch_size_bytes` is a batch-splitting target rather than a hard cap on retained off-heap memory: native Arrow slices can retain references to larger decoded parent buffers sized by `batch_size`. For wide projections on tight executor memory budgets, combine `batch_size_bytes` and `batch_readahead` with a conservative row-based `batch_size` (e.g. `512`–`2048`).
+
+```python
+df = spark.read \
+    .format("lance") \
+    .option("batch_size", "1024") \
+    .option("batch_size_bytes", "16777216") \
+    .option("batch_readahead", "4") \
+    .option("io_buffer_size", "134217728") \
+    .option("late_materialization", "all_early_except:payload") \
+    .load("/path/to/dataset.lance")
+```
+
 ### I/O Threads
 
 Set via environment variable `LANCE_IO_THREADS` (default: 64).

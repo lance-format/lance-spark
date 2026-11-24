@@ -26,6 +26,13 @@ import org.lance.spark.LanceSparkCatalogConfig;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.LanceSparkWriteOptions;
 
+import org.apache.arrow.memory.ArrowBuf;
+import org.apache.arrow.memory.ReferenceManager;
+import org.apache.arrow.vector.BaseLargeVariableWidthVector;
+import org.apache.arrow.vector.BaseVariableWidthVector;
+import org.apache.arrow.vector.FieldVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.ipc.message.ArrowFieldNode;
 import org.apache.spark.sql.catalyst.expressions.MetadataAttribute;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
@@ -297,6 +304,104 @@ public class Utils {
     }
 
     return builder.build();
+  }
+
+  /**
+   * Normalizes variable-width vectors imported over the Arrow C Data Interface when the producer
+   * exported a zero-copy slice ({@code offsets[0] > 0}).
+   *
+   * <p>Apache Arrow Java's {@code BufferImportTypeVisitor} sizes the imported data buffer to {@code
+   * endOffset - startOffset} while keeping the unshifted base pointer {@code buffers[2]}, causing
+   * bounds checks at {@code offsets[i] >= endOffset - startOffset} to fail. Deriving a view up to
+   * {@code endOffset} on the same {@link ReferenceManager} restores the valid addressable range
+   * without copying data.
+   */
+  public static void normalizeSlicedVariableWidthVectors(VectorSchemaRoot root) {
+    if (root == null) {
+      return;
+    }
+    for (FieldVector vector : root.getFieldVectors()) {
+      normalizeSlicedVariableWidthVector(vector);
+    }
+  }
+
+  private static void normalizeSlicedVariableWidthVector(FieldVector vector) {
+    for (FieldVector child : vector.getChildrenFromFields()) {
+      normalizeSlicedVariableWidthVector(child);
+    }
+    if (vector instanceof BaseVariableWidthVector) {
+      BaseVariableWidthVector varVec = (BaseVariableWidthVector) vector;
+      int valueCount = varVec.getValueCount();
+      if (valueCount > 0) {
+        ArrowBuf offsetBuf = varVec.getOffsetBuffer();
+        int startOffset = offsetBuf.getInt(0);
+        int endOffset = offsetBuf.getInt((long) valueCount * BaseVariableWidthVector.OFFSET_WIDTH);
+        ArrowBuf dataBuf = varVec.getDataBuffer();
+        if (startOffset > 0 && endOffset > dataBuf.capacity()) {
+          expandImportedDataBufferCapacity(
+              varVec,
+              valueCount,
+              varVec.getNullCount(),
+              varVec.getValidityBuffer(),
+              offsetBuf,
+              dataBuf,
+              endOffset);
+        }
+      }
+    } else if (vector instanceof BaseLargeVariableWidthVector) {
+      BaseLargeVariableWidthVector largeVec = (BaseLargeVariableWidthVector) vector;
+      int valueCount = largeVec.getValueCount();
+      if (valueCount > 0) {
+        ArrowBuf offsetBuf = largeVec.getOffsetBuffer();
+        long startOffset = offsetBuf.getLong(0);
+        long endOffset =
+            offsetBuf.getLong((long) valueCount * BaseLargeVariableWidthVector.OFFSET_WIDTH);
+        ArrowBuf dataBuf = largeVec.getDataBuffer();
+        if (startOffset > 0 && endOffset > dataBuf.capacity()) {
+          expandImportedDataBufferCapacity(
+              largeVec,
+              valueCount,
+              largeVec.getNullCount(),
+              largeVec.getValidityBuffer(),
+              offsetBuf,
+              dataBuf,
+              endOffset);
+        }
+      }
+    }
+  }
+
+  private static void expandImportedDataBufferCapacity(
+      FieldVector vector,
+      int valueCount,
+      int nullCount,
+      ArrowBuf validityBuf,
+      ArrowBuf offsetBuf,
+      ArrowBuf dataBuf,
+      long requiredCapacity) {
+    ReferenceManager validityRef = validityBuf.getReferenceManager();
+    ReferenceManager offsetRef = offsetBuf.getReferenceManager();
+    ReferenceManager dataRef = dataBuf.getReferenceManager();
+    validityRef.retain();
+    try {
+      offsetRef.retain();
+      try {
+        dataRef.retain();
+        try {
+          ArrowBuf expandedDataBuf = dataRef.deriveBuffer(dataBuf, 0L, requiredCapacity);
+          expandedDataBuf.writerIndex(requiredCapacity);
+          vector.loadFieldBuffers(
+              new ArrowFieldNode(valueCount, nullCount),
+              Arrays.asList(validityBuf, offsetBuf, expandedDataBuf));
+        } finally {
+          dataRef.release();
+        }
+      } finally {
+        offsetRef.release();
+      }
+    } finally {
+      validityRef.release();
+    }
   }
 
   // Determine if the timestamp is in microseconds or nanoseconds and convert to Instant
