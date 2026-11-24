@@ -31,6 +31,7 @@ import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.spark.sql.execution.vectorized.ConstantColumnVector;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
@@ -76,8 +77,10 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
 
   public static LanceFragmentColumnarBatchScanner create(
       int fragmentId, LanceInputPartition inputPartition) {
-    LanceFragmentScanner fragmentScanner = LanceFragmentScanner.create(fragmentId, inputPartition);
-    if (!inputPartition.getReadOptions().isArrowBatchReadsEnabled()) {
+    boolean arrowBatchReads = inputPartition.getReadOptions().isArrowBatchReadsEnabled();
+    LanceFragmentScanner fragmentScanner =
+        LanceFragmentScanner.create(fragmentId, inputPartition, !arrowBatchReads);
+    if (!arrowBatchReads) {
       return new LanceFragmentColumnarBatchScanner(
           fragmentScanner, fragmentScanner.getArrowReader());
     }
@@ -231,6 +234,8 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
                   + "injected the query into the relation options.");
         }
         fieldVectors.add(new LanceArrowColumnVector(vector, false, field));
+      } else if (fragmentScanner.isMissingColumn(fieldName)) {
+        fieldVectors.add(createNullConstantVector(root.getRowCount(), field.dataType()));
       } else {
         FieldVector vector = actualFields.get(fieldName);
         if (vector == null) {
@@ -252,6 +257,18 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
       }
     }
     return fieldVectors;
+  }
+
+  static ConstantColumnVector createNullConstantVector(int numRows, DataType dataType) {
+    ConstantColumnVector vector = new ConstantColumnVector(numRows, dataType);
+    vector.setNull();
+    if (dataType instanceof StructType) {
+      StructField[] childFields = ((StructType) dataType).fields();
+      for (int i = 0; i < childFields.length; i++) {
+        vector.setChild(i, createNullConstantVector(numRows, childFields[i].dataType()));
+      }
+    }
+    return vector;
   }
 
   /**

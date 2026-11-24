@@ -13,6 +13,8 @@
  */
 package org.lance.spark.internal;
 
+import org.lance.Dataset;
+import org.lance.ipc.ScanOptions;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.DescribeTableRequest;
 import org.lance.namespace.model.DescribeTableResponse;
@@ -23,26 +25,42 @@ import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.read.LanceSplit;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Optional;
+import org.lance.spark.write.SingleBatchArrowReader;
 
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.BigIntVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.spark.sql.catalyst.expressions.MetadataAttribute;
+import org.apache.spark.sql.execution.vectorized.ConstantColumnVector;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
+import org.apache.spark.sql.vectorized.ColumnVector;
+import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class LanceFragmentScannerTest {
 
@@ -321,7 +339,155 @@ public class LanceFragmentScannerTest {
                                   BlobUtils.ARROW_EXTENSION_BLOB_V2)
                               .build())
                     }));
-    assertEquals(java.util.Collections.singleton("payload"), names);
+    assertEquals(Collections.singleton("payload"), names);
+  }
+
+  @Test
+  public void testBuildScanOptionsWithAllMissingColumnsRequestsRowId() {
+    StructType schema =
+        new StructType().add("x", DataTypes.LongType).add("extra_bin", DataTypes.BinaryType);
+
+    LanceInputPartition partition =
+        new LanceInputPartition(
+            schema,
+            0,
+            new LanceSplit(Collections.singletonList(0)),
+            TestUtils.TestTable1Config.readOptions,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            "test-all-missing",
+            null,
+            null,
+            null,
+            null);
+
+    Set<String> allMissing = new HashSet<>(Arrays.asList("x", "extra_bin"));
+    ScanOptions optsAllMissing =
+        LanceFragmentScanner.buildScanOptions(partition, Collections.emptySet(), allMissing);
+    assertTrue(optsAllMissing.getColumns().orElse(Collections.singletonList("x")).isEmpty());
+    assertTrue(optsAllMissing.isWithRowId());
+  }
+
+  @Test
+  public void testMissingSchemaEvolvedColumnsReturnConstantColumnVector(@TempDir Path tempDir)
+      throws IOException {
+    String evolvedUri = tempDir.resolve("evolved_dataset.lance").toString();
+    StructType baseSchema = new StructType().add("x", DataTypes.LongType, true);
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
+        VectorSchemaRoot root =
+            VectorSchemaRoot.create(
+                LanceArrowUtils.toArrowSchema(baseSchema, "UTC", true), allocator);
+        SingleBatchArrowReader reader = new SingleBatchArrowReader(allocator, root)) {
+      BigIntVector xVec = (BigIntVector) root.getVector("x");
+      xVec.setSafe(0, 0L);
+      xVec.setSafe(1, 1L);
+      root.setRowCount(2);
+      Dataset.write()
+          .allocator(allocator)
+          .uri(evolvedUri)
+          .dataStorageVersion("2.1")
+          .reader(reader)
+          .execute()
+          .close();
+    }
+
+    StructType nestedStruct =
+        new StructType().add("a", DataTypes.IntegerType, true).add("b", DataTypes.StringType, true);
+    StructType addedColumns =
+        new StructType()
+            .add("extra_int", DataTypes.IntegerType, true)
+            .add("extra_bin", DataTypes.BinaryType, true)
+            .add("extra_struct", nestedStruct, true);
+    TestUtils.addColumnsToDataset(evolvedUri, addedColumns);
+
+    StructType projectedSchema =
+        new StructType()
+            .add("x", DataTypes.LongType, true)
+            .add("extra_int", DataTypes.IntegerType, true)
+            .add("extra_bin", DataTypes.BinaryType, true)
+            .add("extra_struct", nestedStruct, true);
+    LanceInputPartition partition =
+        new LanceInputPartition(
+            projectedSchema,
+            0,
+            new LanceSplit(Collections.singletonList(0)),
+            LanceSparkReadOptions.from(evolvedUri),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            "test-missing-cols",
+            null,
+            null,
+            null,
+            null);
+
+    try (LanceFragmentScanner scanner = LanceFragmentScanner.create(0, partition, true)) {
+      assertFalse(scanner.isMissingColumn("x"));
+      assertTrue(scanner.isMissingColumn("extra_int"));
+      assertTrue(scanner.isMissingColumn("extra_bin"));
+      assertTrue(scanner.isMissingColumn("extra_struct"));
+    }
+
+    try (LanceFragmentColumnarBatchScanner batchScanner =
+        LanceFragmentColumnarBatchScanner.create(0, partition)) {
+      assertTrue(batchScanner.loadNextBatch());
+      try (ColumnarBatch batch = batchScanner.getCurrentBatch()) {
+        assertEquals(2, batch.numRows());
+        assertFalse(batch.column(0) instanceof ConstantColumnVector);
+        assertEquals(0L, batch.column(0).getLong(0));
+        assertEquals(1L, batch.column(0).getLong(1));
+
+        for (int colIdx = 1; colIdx <= 3; colIdx++) {
+          ColumnVector vector = batch.column(colIdx);
+          assertInstanceOf(ConstantColumnVector.class, vector);
+          for (int rowIdx = 0; rowIdx < batch.numRows(); rowIdx++) {
+            assertTrue(vector.isNullAt(rowIdx));
+          }
+        }
+        ColumnVector structVec = batch.column(3);
+        assertInstanceOf(ConstantColumnVector.class, structVec.getChild(0));
+        assertInstanceOf(ConstantColumnVector.class, structVec.getChild(1));
+        assertTrue(structVec.getChild(0).isNullAt(0));
+        assertTrue(structVec.getChild(1).isNullAt(1));
+      }
+      assertFalse(batchScanner.loadNextBatch());
+    }
+
+    // Projecting ONLY missing columns still preserves exact batch row count.
+    LanceInputPartition onlyMissingPartition =
+        new LanceInputPartition(
+            addedColumns,
+            0,
+            new LanceSplit(Collections.singletonList(0)),
+            LanceSparkReadOptions.from(evolvedUri),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            "test-only-missing-cols",
+            null,
+            null,
+            null,
+            null);
+    try (LanceFragmentColumnarBatchScanner batchScanner =
+        LanceFragmentColumnarBatchScanner.create(0, onlyMissingPartition)) {
+      assertTrue(batchScanner.loadNextBatch());
+      try (ColumnarBatch batch = batchScanner.getCurrentBatch()) {
+        assertEquals(2, batch.numRows());
+        for (int colIdx = 0; colIdx < 3; colIdx++) {
+          assertInstanceOf(ConstantColumnVector.class, batch.column(colIdx));
+          assertTrue(batch.column(colIdx).isNullAt(0));
+          assertTrue(batch.column(colIdx).isNullAt(1));
+        }
+      }
+      assertFalse(batchScanner.loadNextBatch());
+    }
   }
 
   /**

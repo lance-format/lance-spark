@@ -157,6 +157,14 @@ For large scans, increasing this to match your CPU core count enables more concu
 export LANCE_IO_THREADS=128
 ```
 
+### Schema Evolution and Missing Columns
+
+When nullable columns are added via metadata-only schema evolution, older Lance fragments do not
+physically contain data files for the added columns. During Spark columnar scans, Lance Spark omits
+physically absent columns from the native fragment scan projection and materializes zero-allocation
+Spark `ConstantColumnVector`s filled with `NULL`, avoiding unnecessary native null-buffer
+allocations across pre-evolution fragments.
+
 ### Custom Read Metrics
 
 Lance Spark reports per-task custom metrics on the Spark UI Scan node, viewable in the SQL tab's

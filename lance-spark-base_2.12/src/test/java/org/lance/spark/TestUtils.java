@@ -25,6 +25,7 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -142,6 +143,16 @@ public class TestUtils {
 
   public static void clearOpenTelemetry() {
     LanceRuntime.clearOpenTelemetry();
+  }
+
+  /**
+   * Evolves a Lance dataset schema with metadata-only nullable columns (without rewriting data).
+   */
+  public static void addColumnsToDataset(String datasetUri, StructType columnsToAdd) {
+    try (Dataset dataset =
+        Utils.openDatasetBuilder(LanceSparkReadOptions.from(datasetUri)).build()) {
+      dataset.addColumns(LanceArrowUtils.toArrowSchema(columnsToAdd, "UTC", true));
+    }
   }
 
   /**
