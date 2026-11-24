@@ -381,6 +381,17 @@ You can control runtime filtering with a few read options:
 
 With Spark's default `dynamicPartitionPruning.reuseBroadcastOnly=true`, runtime filters only reach Lance when the other side of the join is broadcast and has a selective filter. Spark drops the filter on shuffle joins or when Lance is the broadcast side.
 
+The other side of the join can itself be a Lance table. Spark looks for its selective filter after Lance has pushed that filter into the scan, so with the session extensions (`LanceSparkSessionExtensions`), Lance also leaves the filter for Spark to evaluate when the other side's join key can take a runtime filter:
+
+```sql
+SELECT f.amount
+FROM lance.default.sales f
+JOIN lance.default.dates d ON f.date_key = d.date_key
+WHERE d.month = 10;
+```
+
+Spark then evaluates the filter on the rows the scan of `dates` returns, as well as Lance.
+
 You can also use a `_rowid` runtime filter when another table (like an Iceberg table) stores Lance row IDs and joins back to Lance:
 
 ```sql
