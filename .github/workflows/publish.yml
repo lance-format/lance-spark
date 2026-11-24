@@ -33,8 +33,8 @@ jobs:
   release:
     name: Release Spark
     runs-on: ubuntu-24.04
-    # The plugin waits up to 30 minutes for each of the seven publishes.
-    timeout-minutes: 360
+    # The shared-module publish can wait up to 30 minutes. Bundle pairs stop at validation.
+    timeout-minutes: 180
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -74,14 +74,29 @@ jobs:
           chmod 700 "$gpg_home"
           printf '%s\n' "use-agent" "pinentry-mode loopback" >> "$gpg_home/gpg.conf"
           export GPG_TTY=$(tty)
-          # Upload one bundle at a time to stay under Maven Central's 1GB zip limit.
-          for bundle in lance-spark-bundle-*; do
+          # Bundle POMs parent to lance-spark-root. Central has to have that POM
+          # published before a bundle upload can validate. ignorePublishedComponents
+          # skips a coordinate after the portal marks it published.
+          bundles=(lance-spark-bundle-*)
+          exclude_args=$(printf ',!:%s' "${bundles[@]}")
+          ./mvnw --batch-mode -DskipTests -DpushChanges=false \
+            -Dgpg.passphrase="${GPG_PASSPHRASE}" \
+            deploy -P deploy-to-ossrh \
+            -DignorePublishedComponents=true \
+            -DwaitUntil=published \
+            -pl "${exclude_args#,}"
+          # Two shaded jars stay under the 1GB upload limit. Bundle coordinates do not overlap.
+          for ((i = 0; i < ${#bundles[@]}; i += 2)); do
+            pair=":${bundles[i]}"
+            if ((i + 1 < ${#bundles[@]})); then
+              pair+=",:${bundles[i+1]}"
+            fi
             ./mvnw --batch-mode -DskipTests -DpushChanges=false \
               -Dgpg.passphrase="${GPG_PASSPHRASE}" \
               deploy -P deploy-to-ossrh \
               -DignorePublishedComponents=true \
-              -DwaitUntil=published \
-              -pl ":${bundle}" -am
+              -DwaitUntil=validated \
+              -pl "${pair}"
           done
         env:
           SONATYPE_USER: ${{ secrets.SONATYPE_USER }}
