@@ -14,6 +14,8 @@
 package org.lance.spark.utils;
 
 import com.google.common.collect.ImmutableMap;
+import org.apache.arrow.vector.types.DateUnit;
+import org.apache.arrow.vector.types.TimeUnit;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
@@ -25,11 +27,14 @@ import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -754,6 +759,59 @@ public class SchemaConverterTest {
             LanceArrowUtils.markUnsignedForWrite(widened, destination), "UTC", true);
     assertEquals(new ArrowType.Int(32, true), widenedWrite.findField("u8").getType());
     assertEquals(new ArrowType.Int(64, true), widenedWrite.findField("u16").getType());
+  }
+
+  static Stream<ArrowType> nonNumericFixedSizeListTypes() {
+    return Stream.of(
+        ArrowType.Bool.INSTANCE,
+        ArrowType.Utf8.INSTANCE,
+        ArrowType.LargeUtf8.INSTANCE,
+        ArrowType.Binary.INSTANCE,
+        new ArrowType.Date(DateUnit.DAY),
+        new ArrowType.Timestamp(TimeUnit.MICROSECOND, null));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("nonNumericFixedSizeListTypes")
+  public void testFixedSizeListSchemaRestoration(ArrowType elementType) {
+    Field fixed =
+        new Field(
+            "values",
+            FieldType.nullable(new ArrowType.FixedSizeList(3)),
+            Collections.singletonList(new Field("item", FieldType.nullable(elementType), null)));
+    Schema original =
+        new Schema(
+            Arrays.asList(
+                fixed,
+                new Field(
+                    "nested",
+                    FieldType.nullable(ArrowType.Struct.INSTANCE),
+                    Collections.singletonList(fixed))));
+    StructType sparkSchema = LanceArrowUtils.fromArrowSchema(original);
+    Schema restored = LanceArrowUtils.toArrowSchema(sparkSchema, "UTC", false);
+    for (Field field :
+        Arrays.asList(
+            restored.findField("values"), restored.findField("nested").getChildren().get(0))) {
+      assertEquals("values", field.getName());
+      assertEquals(new ArrowType.FixedSizeList(3), field.getType());
+      assertTrue(field.isNullable());
+      assertEquals(1, field.getChildren().size());
+      Field child = field.getChildren().get(0);
+      assertEquals("item", child.getName());
+      assertEquals(elementType, child.getType());
+      assertTrue(child.isNullable());
+    }
+
+    assertEquals(
+        ArrowType.List.INSTANCE,
+        LanceArrowUtils.toArrowField(
+                "values",
+                sparkSchema.apply("values").dataType(),
+                true,
+                "UTC",
+                Metadata.empty(),
+                false)
+            .getType());
   }
 
   private static Field intField(String name, int bitWidth, boolean signed) {

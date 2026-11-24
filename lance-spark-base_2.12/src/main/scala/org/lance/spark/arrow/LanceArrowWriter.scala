@@ -28,17 +28,16 @@ import scala.collection.JavaConverters._
 
 /**
  * Custom ArrowWriter implementation that supports converting Spark DataFrame
- * Array<Float/Double> columns to Arrow FixedSizeList for vector embeddings.
+ * arrays of fixed-width scalar values to Arrow FixedSizeList.
  *
  * This class is copied and modified from Apache Spark's ArrowWriter
  * (https://github.com/apache/spark/blob/master/sql/catalyst/src/main/scala/org/apache/spark/sql/execution/arrow/ArrowWriter.scala)
- * to enable writing vector columns (embeddings) as FixedSizeList, which is required for
- * Lance's vector indexing and similarity search capabilities.
+ * to enable writing fixed-size list columns, including vector embeddings.
  *
  * Key modifications from Spark's ArrowWriter:
  * - Detects when an Arrow field is FixedSizeListVector (created by LanceArrowUtils)
  * - Uses custom FixedSizeListWriter to write data directly to FixedSizeListVector
- * - Validates vector dimensions during write
+ * - Validates fixed-size list lengths during write
  */
 object LanceArrowWriter {
   def create(
@@ -79,7 +78,8 @@ object LanceArrowWriter {
       metadata: org.apache.spark.sql.types.Metadata = null,
       resolver: BlobReferenceResolver = null): LanceArrowFieldWriter = {
     (sparkType, vector) match {
-      case (ArrayType(elementType: NumericType, _), vector: FixedSizeListVector) =>
+      case (ArrayType(elementType, _), vector: FixedSizeListVector)
+          if vector.getDataVector.isInstanceOf[BaseFixedWidthVector] =>
         val elementWriter = createFieldWriter(
           vector.getDataVector(),
           elementType,
