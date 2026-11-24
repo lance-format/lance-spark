@@ -13,7 +13,10 @@
  */
 package org.lance.spark.vectorized;
 
+import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.complex.StructVector;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.vectorized.ColumnVector;
 
 /**
@@ -34,6 +37,31 @@ public class LanceStructAccessor {
     this.childColumns = new LanceArrowColumnVector[numChildren];
     for (int i = 0; i < numChildren; i++) {
       childColumns[i] = new LanceArrowColumnVector(vector.getChildByOrdinal(i));
+    }
+  }
+
+  /**
+   * Schema-aware constructor that maps Arrow children by name to {@code sparkStructType}'s field
+   * order. Use this when the caller's Spark schema may be a pruned or reordered subset of the Arrow
+   * vector's on-disk children — Spark's generated projection accesses children by the pruned-schema
+   * ordinal, so binding by physical Arrow ordinal causes a type mismatch (see GitHub issue #499).
+   */
+  public LanceStructAccessor(StructVector vector, StructType sparkStructType) {
+    this.accessor = vector;
+
+    StructField[] sparkFields = sparkStructType.fields();
+    this.childColumns = new LanceArrowColumnVector[sparkFields.length];
+    for (int i = 0; i < sparkFields.length; i++) {
+      StructField sparkField = sparkFields[i];
+      FieldVector arrowChild = vector.getChild(sparkField.name(), FieldVector.class);
+      if (arrowChild == null) {
+        throw new IllegalArgumentException(
+            "Arrow struct vector "
+                + vector.getField().getName()
+                + " is missing required field: "
+                + sparkField.name());
+      }
+      childColumns[i] = new LanceArrowColumnVector(arrowChild, sparkField.dataType());
     }
   }
 
