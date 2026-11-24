@@ -716,12 +716,27 @@ df = spark.read \
 
 If any selected column is unsupported, the whole scan uses the regular reader. This includes
 blob columns and columns holding a blob in a struct or list, JSON columns, `_score`, and Arrow
-types Spark cannot read directly, such as unsigned integers or nanosecond timestamps.
+types Spark cannot read that have no conversion below, such as time columns.
 `LanceScan.arrowBatchSchema()` reports whether a scan supports Arrow batches;
 `LanceScan.withArrowBatches()` turns them on for a planned scan and throws if it does not.
 
-`FixedSizeList` (vector) columns become Arrow `List`s, and `_rowid`, `_rowaddr`, and the row
-version columns are exposed as signed 64-bit integers.
+Columns whose Arrow types Spark cannot read directly become types it reads, holding the values the
+regular reader returns, at any depth:
+
+| Lance Arrow type | Arrow batch type |
+|---|---|
+| `FixedSizeList` (vector), `LargeList` | `List` |
+| `FixedSizeBinary` | `Binary` |
+| `UInt8`, `UInt16`, `UInt32` | `Int16`, `Int32`, `Int64` |
+| `UInt64` | `Int64` (values of 2^63 and above become negative) |
+| `Float16` | `Float32` |
+| `Date(MILLISECOND)` | `Date(DAY)`, rounded down |
+| `Timestamp` in seconds, milliseconds or nanoseconds | `Timestamp(MICROSECOND)`, nanoseconds rounded down |
+
+Lists, fixed-size binaries and `UInt64` columns share Lance's buffers, with new offsets where
+needed. The other conversions copy their values, so a vector of `UInt8` or `Float16` elements
+reads slower as Arrow batches than with the regular reader, which converts each value as it is
+read. `_rowid`, `_rowaddr`, and the row version columns are exposed as signed 64-bit integers.
 
 Native vectors may be reused on `next()`, while converted vectors are released. Consumers must
 copy or transfer data they need to keep before advancing.
