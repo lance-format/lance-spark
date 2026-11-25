@@ -13,93 +13,42 @@
  */
 package org.lance.spark.read;
 
-import org.lance.Dataset;
-import org.lance.Fragment;
-import org.lance.spark.LanceRef;
-import org.lance.spark.LanceSparkReadOptions;
-import org.lance.spark.utils.Utils;
-
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
+/** One reader task containing either full fragments or bounded physical slices. */
 public class LanceSplit implements Serializable {
-  private static final long serialVersionUID = 2983749283749283749L;
+  private static final long serialVersionUID = 2983749283749283750L;
 
-  private final List<Integer> fragments;
+  private final List<FragmentSplit> fragmentSplits;
 
-  public LanceSplit(List<Integer> fragments) {
-    this.fragments = fragments;
+  public LanceSplit(List<FragmentSplit> fragmentSplits) {
+    this.fragmentSplits = Collections.unmodifiableList(new ArrayList<>(fragmentSplits));
+    this.fragmentSplits.forEach(Objects::requireNonNull);
+    // The current Java scan adapter does not support mixing full fragments and slices in a task.
+    if (hasFragmentSlices()
+        && this.fragmentSplits.stream().anyMatch(FragmentSplit::isFullFragment)) {
+      throw new IllegalArgumentException("A task cannot mix full fragments and physical slices");
+    }
   }
 
+  public List<FragmentSplit> getFragmentSplits() {
+    return fragmentSplits;
+  }
+
+  /** Each fragment is scanned once, with all its ranges, in first-occurrence order. */
   public List<Integer> getFragments() {
-    return fragments;
+    return fragmentSplits.stream()
+        .map(FragmentSplit::getFragmentId)
+        .distinct()
+        .collect(Collectors.toList());
   }
 
-  /** Result of scan planning containing splits, resolved version, and per-fragment row counts. */
-  public static class ScanPlanResult {
-    private final List<LanceSplit> splits;
-    private final LanceRef ref;
-
-    /** Per-fragment logical row counts (after deletions). Key is fragment ID. */
-    private final Map<Integer, Long> fragmentRowCounts;
-
-    public ScanPlanResult(
-        List<LanceSplit> splits, LanceRef ref, Map<Integer, Long> fragmentRowCounts) {
-      this.splits = splits;
-      this.ref = ref;
-      this.fragmentRowCounts = fragmentRowCounts;
-    }
-
-    public List<LanceSplit> getSplits() {
-      return splits;
-    }
-
-    public LanceRef getRef() {
-      return ref;
-    }
-
-    public Map<Integer, Long> getFragmentRowCounts() {
-      return fragmentRowCounts;
-    }
-  }
-
-  /**
-   * Generates splits and resolves the dataset version.
-   *
-   * <p>This method opens the dataset at the specified version (or latest if not specified), gets
-   * the fragment IDs and per-fragment row counts, and returns both the splits and the resolved
-   * version. The resolved version should be passed to workers to ensure snapshot isolation.
-   */
-  public static ScanPlanResult planScan(LanceSparkReadOptions readOptions) {
-    try (Dataset dataset = Utils.openDatasetBuilder(readOptions).build()) {
-      return planScan(dataset, readOptions);
-    }
-  }
-
-  /**
-   * Generates splits and resolves the dataset version using an already-opened dataset.
-   *
-   * <p>Prefer this overload over {@link #planScan(LanceSparkReadOptions)} when the caller already
-   * holds an open {@link Dataset} (e.g. in scan planning), to avoid re-opening the dataset and
-   * paying the manifest IO cost twice.
-   *
-   * <p>The caller retains ownership of the dataset; this method does not close it.
-   */
-  public static ScanPlanResult planScan(Dataset dataset, LanceSparkReadOptions readOptions) {
-    List<Fragment> fragments = dataset.getFragments();
-    List<LanceSplit> splits = new ArrayList<>(fragments.size());
-    Map<Integer, Long> fragmentRowCounts = new HashMap<>(fragments.size());
-    for (Fragment fragment : fragments) {
-      int id = fragment.getId();
-      splits.add(new LanceSplit(Collections.singletonList(id)));
-      fragmentRowCounts.put(id, fragment.metadata().getNumRows());
-    }
-
-    LanceRef ref = Utils.pinOpenedRef(dataset, readOptions.getRef());
-    return new ScanPlanResult(splits, ref, fragmentRowCounts);
+  public boolean hasFragmentSlices() {
+    return fragmentSplits.stream().anyMatch(split -> !split.isFullFragment());
   }
 }

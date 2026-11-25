@@ -18,8 +18,8 @@ import org.lance.Fragment;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
 import org.lance.ipc.ScanStats;
-import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.read.FragmentSplit;
 import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Utils;
@@ -30,12 +30,10 @@ import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 public class LanceFragmentScanner implements AutoCloseable {
   private final Dataset dataset;
@@ -65,7 +63,9 @@ public class LanceFragmentScanner implements AutoCloseable {
     this.blobColumnNames = blobColumnNames;
   }
 
-  public static LanceFragmentScanner create(int fragmentId, LanceInputPartition inputPartition) {
+  /** Opens the given fragment with its nonempty list of planned splits. */
+  public static LanceFragmentScanner create(
+      int fragmentId, List<FragmentSplit> fragmentSplits, LanceInputPartition inputPartition) {
     Dataset dataset = null;
     LanceScanner lanceScanner = null;
     try {
@@ -83,56 +83,11 @@ public class LanceFragmentScanner implements AutoCloseable {
                 "Fragment %d not found in dataset at %s (version=%s)",
                 fragmentId, readOptions.getDatasetUri(), readOptions.getRef()));
       }
-      ScanOptions.Builder scanOptions = new ScanOptions.Builder();
-
-      StructType scanSchema = inputPartition.getSchema();
-      Set<String> blobColumnNames = getBlobColumnNames(scanSchema);
-      boolean hasBlobColumns = !blobColumnNames.isEmpty();
-
-      List<String> projectedColumns = getColumnNames(scanSchema);
-      if (readOptions.getFullTextQuery() != null
-          && Arrays.stream(scanSchema.fields()).anyMatch(Utils::isScoreMetadataColumn)) {
-        projectedColumns.add(LanceConstant.SCORE);
-      }
-      if (projectedColumns.isEmpty() && scanSchema.isEmpty()) {
-        scanOptions.withRowId(true);
-      }
-      if (hasField(scanSchema, LanceConstant.ROW_ID)) {
-        scanOptions.withRowId(true);
-      }
-
-      // Request _rowaddr when blob columns are present so we can build blob references.
-      boolean userRequestedRowAddr = hasField(scanSchema, LanceConstant.ROW_ADDRESS);
-      if (hasBlobColumns || userRequestedRowAddr) {
-        scanOptions.withRowAddress(true);
-      }
-
-      scanOptions.columns(projectedColumns);
-      if (inputPartition.getWhereCondition().isPresent()) {
-        scanOptions.filter(inputPartition.getWhereCondition().get());
-      }
-      scanOptions.batchSize(readOptions.getBatchSize());
-      if (readOptions.getFullTextQuery() != null) {
-        scanOptions.fullTextQuery(readOptions.getFullTextQuery());
-        scanOptions.prefilter(true);
-        scanOptions.disableScoringAutoprojection(true);
-      }
-      scanOptions.useScalarIndex(readOptions.isUseScalarIndex());
-      if (inputPartition.getLimit().isPresent()) {
-        scanOptions.limit(inputPartition.getLimit().get());
-      }
-      if (inputPartition.getOffset().isPresent()) {
-        scanOptions.offset(inputPartition.getOffset().get());
-      }
-      if (inputPartition.getTopNSortOrders().isPresent()) {
-        scanOptions.setColumnOrderings(inputPartition.getTopNSortOrders().get());
-      }
-
-      // Collect scan stats
-      scanOptions.collectStats(true);
+      ScanOptions scanOptions = inputPartition.fragmentScanOptions(fragmentSplits);
+      Set<String> blobColumnNames = getBlobColumnNames(inputPartition.getSchema());
 
       long scanCreateStart = System.nanoTime();
-      lanceScanner = fragment.newScan(scanOptions.build());
+      lanceScanner = fragment.newScan(scanOptions);
       long scanCreateTimeNs = System.nanoTime() - scanCreateStart;
       return new LanceFragmentScanner(
           dataset,
@@ -258,53 +213,6 @@ public class LanceFragmentScanner implements AutoCloseable {
       }
     }
     return blobColumns;
-  }
-
-  private static List<String> getColumnNames(StructType schema) {
-    java.util.Set<String> schemaFields = new java.util.HashSet<>();
-    for (StructField field : schema.fields()) {
-      schemaFields.add(field.name());
-    }
-
-    List<String> columns =
-        Arrays.stream(schema.fields())
-            .filter(field -> !Utils.isScoreMetadataColumn(field))
-            .map(StructField::name)
-            .filter(
-                name ->
-                    !name.equals(LanceConstant.FRAGMENT_ID)
-                        && !name.equals(LanceConstant.ROW_ID)
-                        && !name.equals(LanceConstant.ROW_ADDRESS)
-                        && !name.equals(LanceConstant.ROW_CREATED_AT_VERSION)
-                        && !name.equals(LanceConstant.ROW_LAST_UPDATED_AT_VERSION)
-                        && !name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)
-                        && !name.endsWith(LanceConstant.BLOB_SIZE_SUFFIX))
-            .collect(Collectors.toList());
-    // Blob v1 virtual columns are derived from their base blob column, so scan the base column even
-    // when the query only projects the virtual columns.
-    for (StructField field : schema.fields()) {
-      String baseName = BlobUtils.blobV1VirtualColumnBaseName(field.name());
-      if (baseName != null && !columns.contains(baseName)) {
-        columns.add(baseName);
-      }
-    }
-    if (schemaFields.contains(LanceConstant.ROW_LAST_UPDATED_AT_VERSION)) {
-      columns.add(LanceConstant.ROW_LAST_UPDATED_AT_VERSION);
-    }
-    if (schemaFields.contains(LanceConstant.ROW_CREATED_AT_VERSION)) {
-      columns.add(LanceConstant.ROW_CREATED_AT_VERSION);
-    }
-
-    return columns;
-  }
-
-  private static boolean hasField(StructType schema, String name) {
-    for (StructField field : schema.fields()) {
-      if (field.name().equals(name)) {
-        return true;
-      }
-    }
-    return false;
   }
 
   public Optional<ScanStats> getScanStats() {

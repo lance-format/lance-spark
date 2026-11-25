@@ -30,6 +30,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -40,7 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 public class LanceColumnarPartitionReaderTest {
   @Test
   public void test() throws Exception {
-    LanceSplit split = new LanceSplit(Arrays.asList(0, 1));
+    LanceSplit split = new LanceSplit(Arrays.asList(FragmentSplit.full(0), FragmentSplit.full(1)));
     LanceInputPartition partition =
         new LanceInputPartition(
             TestUtils.TestTable1Config.schema,
@@ -83,7 +84,7 @@ public class LanceColumnarPartitionReaderTest {
 
   @Test
   public void testOffsetAndLimit() throws Exception {
-    LanceSplit split = new LanceSplit(Collections.singletonList(0));
+    LanceSplit split = new LanceSplit(Collections.singletonList(FragmentSplit.full(0)));
     LanceInputPartition partition =
         new LanceInputPartition(
             TestUtils.TestTable1Config.schema,
@@ -124,7 +125,7 @@ public class LanceColumnarPartitionReaderTest {
 
   @Test
   public void testTopN() throws Exception {
-    LanceSplit split = new LanceSplit(Collections.singletonList(1));
+    LanceSplit split = new LanceSplit(Collections.singletonList(FragmentSplit.full(1)));
     ColumnOrdering.Builder builder = new ColumnOrdering.Builder();
     builder.setNullFirst(true);
     builder.setAscending(false);
@@ -172,7 +173,8 @@ public class LanceColumnarPartitionReaderTest {
     // Fragment 0 exists; fragment 999999 does not. Iterating 0 → 999999 must fail on the second
     // fragment; close() must then be idempotent — not re-close the already-closed fragment 0
     // scanner and raise `ArrowArrayStream is already closed`.
-    LanceSplit split = new LanceSplit(Arrays.asList(0, 999999));
+    LanceSplit split =
+        new LanceSplit(Arrays.asList(FragmentSplit.full(0), FragmentSplit.full(999999)));
     LanceInputPartition partition =
         new LanceInputPartition(
             TestUtils.TestTable1Config.schema,
@@ -213,7 +215,7 @@ public class LanceColumnarPartitionReaderTest {
   @Test
   public void testCloseIsIdempotent() throws Exception {
     // Second close() must be a no-op — verifies the null-first idempotence guard.
-    LanceSplit split = new LanceSplit(Collections.singletonList(0));
+    LanceSplit split = new LanceSplit(Collections.singletonList(FragmentSplit.full(0)));
     LanceInputPartition partition =
         new LanceInputPartition(
             TestUtils.TestTable1Config.schema,
@@ -339,7 +341,7 @@ public class LanceColumnarPartitionReaderTest {
     return new LanceInputPartition(
         TestUtils.TestTable1Config.schema,
         0,
-        new LanceSplit(fragments),
+        new LanceSplit(fragments.stream().map(FragmentSplit::full).collect(Collectors.toList())),
         readOptions,
         Optional.empty(),
         Optional.empty(),

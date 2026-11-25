@@ -112,15 +112,10 @@ public class LanceScan
   private transient Object runtimeFilterLock = new Object();
 
   /**
-   * Pre-computed surviving fragment IDs from zonemap pruning in LanceScanBuilder. When non-null,
-   * {@link #pruneByZonemapStats} skips re-computing and uses these directly.
-   */
-  private final Set<Integer> cachedSurvivingFragmentIds;
-
-  /**
    * Splits pre-computed on the driver during {@link LanceScanBuilder#build()}. Each entry is one
-   * fragment. Built from a single {@code Dataset} handle that was already opened for manifest /
-   * schema / zonemap loading, so no second {@code Dataset.open()} is needed at {@link
+   * fragment and may already carry a physical row selection, independent of its planning source.
+   * Built from a single {@code Dataset} handle that was already opened for manifest / schema /
+   * zonemap loading, so no second {@code Dataset.open()} is needed at {@link
    * #planInputPartitions()} time.
    */
   private final List<LanceSplit> precomputedSplits;
@@ -324,7 +319,6 @@ public class LanceScan
             ? Arrays.copyOf(pushedPredicates, pushedPredicates.length)
             : new Predicate[0];
     this.statistics = statistics;
-    this.cachedSurvivingFragmentIds = survivingFragmentIds;
     this.zonemapStats = zonemapStats != null ? zonemapStats : Collections.emptyMap();
     this.uncoveredFragmentsByColumn =
         uncoveredFragmentsByColumn != null ? uncoveredFragmentsByColumn : Collections.emptyMap();
@@ -332,7 +326,7 @@ public class LanceScan
         runtimeFilterAttributes != null
             ? Arrays.copyOf(runtimeFilterAttributes, runtimeFilterAttributes.length)
             : new NamedReference[0];
-    this.precomputedSplits = precomputedSplits;
+    this.precomputedSplits = retainFragments(precomputedSplits, survivingFragmentIds);
     this.precomputedFragmentRowCounts =
         precomputedFragmentRowCounts != null
             ? precomputedFragmentRowCounts
@@ -404,7 +398,7 @@ public class LanceScan
             pushedAggregation,
             pushedPredicates,
             statistics,
-            cachedSurvivingFragmentIds,
+            null,
             zonemapStats,
             uncoveredFragmentsByColumn,
             runtimeFilterAttributes,
@@ -449,8 +443,7 @@ public class LanceScan
     // LanceScanBuilder.build() from the same Dataset handle that loaded manifest /
     // schema / zonemap stats. This avoids a second Dataset.open() at plan time.
     List<LanceSplit> prunedSplits =
-        pruneForPlanning(
-            precomputedSplits, effectivePredicates, cachedSurvivingFragmentIds, rowIdIsRowAddress);
+        pruneByRowAddrFilters(precomputedSplits, effectivePredicates, rowIdIsRowAddress);
 
     // Sharding keys are exact per-fragment values. Equality and IN predicates on the sharding
     // source column can therefore remove fragments without consulting native index state.
@@ -529,36 +522,18 @@ public class LanceScan
   }
 
   /**
-   * Shared with {@link LanceScanBuilder#build()} so planning can tell, before the scan exists,
-   * whether pruning leaves anything to read. An empty result means no fragment can match.
-   *
-   * @param survivingFragmentIds fragment IDs kept by zonemap pruning, or null when the builder did
-   *     not prune
-   */
-  static List<LanceSplit> pruneForPlanning(
-      List<LanceSplit> allSplits,
-      Predicate[] pushedPredicates,
-      Set<Integer> survivingFragmentIds,
-      boolean rowIdIsRowAddress) {
-    return pruneByZonemapStats(
-        pruneByRowAddrFilters(allSplits, pushedPredicates, rowIdIsRowAddress),
-        survivingFragmentIds);
-  }
-
-  /**
    * Prunes splits based on {@code _rowaddr} filters — skipping fragment opens, scan setup, and task
    * scheduling for fragments that provably cannot match the query predicate.
    *
    * <p>CONTRACT: {@link LanceSplit#getFragments()} returns Lance fragment IDs as Integer values
    * that match {@code (int)(rowAddr >>> 32)} — the same encoding used by {@link
-   * org.lance.spark.join.FragmentAwareJoinUtils}. This is verified by {@link
-   * LanceSplit#planScan(LanceSparkReadOptions)} which maps {@code Fragment.getId()} directly.
+   * org.lance.spark.join.FragmentAwareJoinUtils}.
    *
    * <p>Note: an empty allowedIds set is valid — it means the filter is unsatisfiable (e.g. {@code
    * _rowaddr = 0 AND _rowaddr = 4294967296L}) and no fragments can match, resulting in zero rows
    * returned.
    */
-  private static List<LanceSplit> pruneByRowAddrFilters(
+  static List<LanceSplit> pruneByRowAddrFilters(
       List<LanceSplit> allSplits, Predicate[] effectivePredicates, boolean rowIdIsRowAddress) {
     java.util.Optional<Set<Integer>> targetFragmentIds =
         RowAddressFilterAnalyzer.extractTargetFragmentIds(effectivePredicates, rowIdIsRowAddress);
@@ -613,11 +588,12 @@ public class LanceScan
    *   <li>Aggregation is pushed (e.g., COUNT(*) LIMIT — row counts don't apply)
    *   <li>FTS query is active (needs all fragments to return complete matching results)
    *   <li>Fragment row counts are unavailable
+   *   <li>A split reads only slices. Counting the whole fragment could reach the limit too early
+   *       and skip a required split.
    * </ul>
    *
-   * <p>Correctness is guaranteed because Spark keeps a global {@code CollectLimit} on top (since
-   * {@code isPartiallyPushed()} returns {@code true}). If we under-estimate due to concurrent
-   * deletions, the query simply returns fewer rows than the limit — which is valid LIMIT semantics.
+   * <p>The counts and splits come from the same pinned snapshot. Spark applies the global {@code
+   * CollectLimit} to the retained partitions.
    */
   private List<LanceSplit> pruneByLimit(
       List<LanceSplit> allSplits, java.util.Map<Integer, Long> fragmentRowCounts) {
@@ -626,7 +602,8 @@ public class LanceScan
         || topNSortOrders.isPresent()
         || pushedAggregation.isPresent()
         || readOptions.getFullTextQuery() != null
-        || fragmentRowCounts.isEmpty()) {
+        || fragmentRowCounts.isEmpty()
+        || allSplits.stream().anyMatch(LanceSplit::hasFragmentSlices)) {
       return allSplits;
     }
 
@@ -660,52 +637,29 @@ public class LanceScan
     return pruned;
   }
 
-  /**
-   * Prunes splits based on zonemap index statistics — using per-column min/max/null_count to
-   * eliminate fragments that provably cannot match the pushed filters.
-   *
-   * <p>This is analogous to partition pruning in Hive/Iceberg: fragments whose zones all fail the
-   * predicate are skipped entirely, avoiding fragment opens, scan setup, and task scheduling.
-   */
-  private static List<LanceSplit> pruneByZonemapStats(
-      List<LanceSplit> allSplits, Set<Integer> survivingFragmentIds) {
-    // Null means the builder did not prune. Do not recompute here.
-    if (survivingFragmentIds == null) {
-      return allSplits;
+  private static List<LanceSplit> retainFragments(
+      List<LanceSplit> splits, Set<Integer> allowedIds) {
+    if (allowedIds == null) {
+      return splits;
     }
-    Set<Integer> allowedIds = survivingFragmentIds;
-
-    List<LanceSplit> pruned =
-        allSplits.stream()
-            .filter(split -> split.getFragments().stream().anyMatch(allowedIds::contains))
-            .collect(Collectors.toList());
-
-    if (pruned.size() < allSplits.size()) {
-      LOG.debug(
-          "Zonemap pruning: {} of {} splits retained," + " allowed fragment IDs: {}",
-          pruned.size(),
-          allSplits.size(),
-          allowedIds);
-    }
-
-    return pruned;
+    return splits.stream()
+        .filter(split -> split.getFragments().stream().anyMatch(allowedIds::contains))
+        .collect(Collectors.toList());
   }
 
   private List<LanceSplit> pruneByRuntimeZonemapStats(
       List<LanceSplit> allSplits, Predicate[] runtimePredicatesSnapshot) {
-    if (runtimePredicatesSnapshot.length == 0 || zonemapStats.isEmpty()) {
+    if (runtimePredicatesSnapshot.length == 0 || zonemapStats.isEmpty() || allSplits.isEmpty()) {
       return allSplits;
     }
-    java.util.Optional<Set<Integer>> surviving =
-        ZonemapFragmentPruner.pruneFragments(
-            runtimePredicatesSnapshot, zonemapStats, uncoveredFragmentsByColumn);
-    if (!surviving.isPresent()) {
-      return allSplits;
-    }
-    Set<Integer> allowedIds = surviving.get();
-    return allSplits.stream()
-        .filter(split -> split.getFragments().stream().anyMatch(allowedIds::contains))
-        .collect(Collectors.toList());
+    Set<Integer> candidateIds =
+        allSplits.stream()
+            .flatMap(split -> split.getFragments().stream())
+            .collect(Collectors.toSet());
+    return ZonemapFragmentPruner.pruneFragments(
+            runtimePredicatesSnapshot, zonemapStats, uncoveredFragmentsByColumn, candidateIds)
+        .map(ids -> retainFragments(allSplits, ids))
+        .orElse(allSplits);
   }
 
   static boolean supportsRuntimeFiltering(LanceSparkReadOptions readOptions) {
@@ -1077,15 +1031,14 @@ public class LanceScan
     result = result.$plus(scala.Tuple2.apply("offset", offset.toString()));
     result = result.$plus(scala.Tuple2.apply("topNSortOrders", topNSortOrders.toString()));
     result = result.$plus(scala.Tuple2.apply("pushedAggregation", pushedAggregation.toString()));
+    int fragmentCount = precomputedFragmentRowCounts.size();
     result =
-        result.$plus(
-            scala.Tuple2.apply(
-                "originalFragmentCount", Integer.toString(precomputedSplits.size())));
+        result.$plus(scala.Tuple2.apply("originalFragmentCount", Integer.toString(fragmentCount)));
     result =
         result.$plus(
             scala.Tuple2.apply(
                 "numPartitions",
-                Integer.toString(numPartitions >= 0 ? numPartitions : precomputedSplits.size())));
+                Integer.toString(numPartitions >= 0 ? numPartitions : fragmentCount)));
     synchronized (runtimeFilterLock) {
       Set<String> runtimeFilterColumns = new LinkedHashSet<>();
       for (Predicate predicate : runtimePredicates) {

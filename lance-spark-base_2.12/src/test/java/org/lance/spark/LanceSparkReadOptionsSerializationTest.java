@@ -472,11 +472,12 @@ public class LanceSparkReadOptionsSerializationTest {
   }
 
   @Test
-  public void testUseScalarIndexSerialization() throws IOException, ClassNotFoundException {
+  public void testIndexOptionsSerialization() throws IOException, ClassNotFoundException {
     LanceSparkReadOptions options =
         LanceSparkReadOptions.builder()
             .datasetUri("s3://bucket/path")
             .useScalarIndex(false)
+            .useZonemapSlices(true)
             .build();
 
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -489,5 +490,6 @@ public class LanceSparkReadOptionsSerializationTest {
     LanceSparkReadOptions deserializedOptions = (LanceSparkReadOptions) ois.readObject();
 
     Assertions.assertFalse(deserializedOptions.isUseScalarIndex());
+    Assertions.assertTrue(deserializedOptions.isUseZonemapSlices());
   }
 }

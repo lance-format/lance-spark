@@ -18,7 +18,7 @@ import org.lance.spark.LanceDataset;
 import org.lance.spark.LanceRef;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.read.LanceInputPartition;
-import org.lance.spark.read.LanceSplit;
+import org.lance.spark.read.LanceScanBuilder;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
@@ -469,6 +469,14 @@ public abstract class BaseBranchDDLTest {
     Assertions.assertEquals(versions.firstInsertVersion, ref.getVersionNumber().get());
   }
 
+  private LanceRef plannedPartitionRef(LanceSparkReadOptions options) {
+    LanceScanBuilder builder =
+        new LanceScanBuilder(spark.table(fullTable).schema(), options, Map.of(), null, Map.of());
+    LanceInputPartition partition =
+        (LanceInputPartition) builder.build().toBatch().planInputPartitions()[0];
+    return partition.getReadOptions().getRef();
+  }
+
   @Test
   public void testTagScanPinsVersionNotName() {
     DatasetVersions versions = prepareDatasetWithHistory();
@@ -478,7 +486,7 @@ public abstract class BaseBranchDDLTest {
             .ref(LanceRef.ofTag(versions.firstInsertTag))
             .build();
 
-    LanceRef plannedRef = LanceSplit.planScan(readOptions).getRef();
+    LanceRef plannedRef = plannedPartitionRef(readOptions);
 
     Assertions.assertTrue(plannedRef.getTagName().isEmpty());
     Assertions.assertEquals(versions.firstInsertVersion, plannedRef.getVersionNumber().get());
@@ -553,7 +561,7 @@ public abstract class BaseBranchDDLTest {
             .ref(LanceRef.ofBranch("audit"))
             .build();
 
-    LanceRef plannedRef = LanceSplit.planScan(readOptions).getRef();
+    LanceRef plannedRef = plannedPartitionRef(readOptions);
 
     Assertions.assertEquals("audit", plannedRef.getBranchName().get());
     Assertions.assertTrue(plannedRef.getVersionNumber().isPresent());

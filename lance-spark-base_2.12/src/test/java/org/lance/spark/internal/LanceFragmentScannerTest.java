@@ -19,6 +19,7 @@ import org.lance.namespace.model.DescribeTableResponse;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.read.FragmentSplit;
 import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.read.LanceSplit;
 import org.lance.spark.utils.BlobUtils;
@@ -32,13 +33,13 @@ import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -46,18 +47,29 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 
 public class LanceFragmentScannerTest {
 
-  private List<String> callGetColumnNames(StructType schema)
-      throws NoSuchMethodException, InvocationTargetException, IllegalAccessException {
-    Method method =
-        LanceFragmentScanner.class.getDeclaredMethod("getColumnNames", StructType.class);
-    method.setAccessible(true);
-    @SuppressWarnings("unchecked")
-    List<String> result = (List<String>) method.invoke(null, schema);
-    return result;
+  private List<String> projectedColumns(StructType schema) {
+    List<FragmentSplit> splits = Collections.singletonList(FragmentSplit.full(0));
+    LanceInputPartition partition =
+        new LanceInputPartition(
+            schema,
+            0,
+            new LanceSplit(splits),
+            TestUtils.TestTable1Config.readOptions,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            "test",
+            null,
+            null,
+            null,
+            null);
+    return partition.fragmentScanOptions(splits).getColumns().get();
   }
 
   @Test
-  public void testGetColumnNamesWithOnlyDataColumns() throws Exception {
+  public void testGetColumnNamesWithOnlyDataColumns() {
     StructType schema =
         new StructType(
             new StructField[] {
@@ -66,13 +78,13 @@ public class LanceFragmentScannerTest {
               DataTypes.createStructField("age", DataTypes.IntegerType, true)
             });
 
-    List<String> result = callGetColumnNames(schema);
+    List<String> result = projectedColumns(schema);
     List<String> expected = Arrays.asList("id", "name", "age");
     assertEquals(expected, result);
   }
 
   @Test
-  public void testGetColumnNamesWithRowId() throws Exception {
+  public void testGetColumnNamesWithRowId() {
     StructType schema =
         new StructType(
             new StructField[] {
@@ -81,13 +93,13 @@ public class LanceFragmentScannerTest {
               DataTypes.createStructField(LanceConstant.ROW_ID, DataTypes.LongType, true)
             });
 
-    List<String> result = callGetColumnNames(schema);
+    List<String> result = projectedColumns(schema);
     List<String> expected = Arrays.asList("id", "name");
     assertEquals(expected, result);
   }
 
   @Test
-  public void testGetColumnNamesWithRowAddress() throws Exception {
+  public void testGetColumnNamesWithRowAddress() {
     StructType schema =
         new StructType(
             new StructField[] {
@@ -96,13 +108,13 @@ public class LanceFragmentScannerTest {
               DataTypes.createStructField("name", DataTypes.StringType, true)
             });
 
-    List<String> result = callGetColumnNames(schema);
+    List<String> result = projectedColumns(schema);
     List<String> expected = Arrays.asList("id", "name");
     assertEquals(expected, result);
   }
 
   @Test
-  public void testGetColumnNamesWithVersionColumns() throws Exception {
+  public void testGetColumnNamesWithVersionColumns() {
     StructType schema =
         new StructType(
             new StructField[] {
@@ -114,7 +126,7 @@ public class LanceFragmentScannerTest {
                   LanceConstant.ROW_LAST_UPDATED_AT_VERSION, DataTypes.LongType, true)
             });
 
-    List<String> result = callGetColumnNames(schema);
+    List<String> result = projectedColumns(schema);
     List<String> expected =
         Arrays.asList(
             "id",
@@ -125,7 +137,7 @@ public class LanceFragmentScannerTest {
   }
 
   @Test
-  public void testGetColumnNamesWithAllMetadataColumns() throws Exception {
+  public void testGetColumnNamesWithAllMetadataColumns() {
     // Test with all metadata columns in the order defined in LanceDataset.METADATA_COLUMNS
     StructType schema =
         new StructType(
@@ -141,7 +153,7 @@ public class LanceFragmentScannerTest {
               DataTypes.createStructField(LanceConstant.FRAGMENT_ID, DataTypes.IntegerType, true)
             });
 
-    List<String> result = callGetColumnNames(schema);
+    List<String> result = projectedColumns(schema);
     // Data columns first, then version columns. Row ID, row address, and fragment ID are requested
     // outside the projection list.
     List<String> expected =
@@ -154,7 +166,7 @@ public class LanceFragmentScannerTest {
   }
 
   @Test
-  public void testGetColumnNamesExcludesScore() throws Exception {
+  public void testGetColumnNamesExcludesScore() {
     StructType schema =
         new StructType(
             new StructField[] {
@@ -167,18 +179,18 @@ public class LanceFragmentScannerTest {
                       .metadata())
             });
 
-    assertEquals(Arrays.asList("id"), callGetColumnNames(schema));
+    assertEquals(Arrays.asList("id"), projectedColumns(schema));
   }
 
   @Test
-  public void testGetColumnNamesIncludesStoredScore() throws Exception {
+  public void testGetColumnNamesIncludesStoredScore() {
     StructType schema =
         new StructType().add("id", DataTypes.LongType).add("_score", DataTypes.FloatType);
-    assertEquals(Arrays.asList("id", "_score"), callGetColumnNames(schema));
+    assertEquals(Arrays.asList("id", "_score"), projectedColumns(schema));
   }
 
   @Test
-  public void testGetColumnNamesExcludesBlobColumns() throws Exception {
+  public void testGetColumnNamesExcludesBlobColumns() {
     StructType schema =
         new StructType(
             new StructField[] {
@@ -190,14 +202,14 @@ public class LanceFragmentScannerTest {
                   "data" + LanceConstant.BLOB_SIZE_SUFFIX, DataTypes.LongType, true)
             });
 
-    List<String> result = callGetColumnNames(schema);
+    List<String> result = projectedColumns(schema);
     // Blob metadata columns should be excluded
     List<String> expected = Arrays.asList("id", "data");
     assertEquals(expected, result);
   }
 
   @Test
-  public void testGetColumnNamesAddsBaseColumnForBlobV1VirtualColumns() throws Exception {
+  public void testGetColumnNamesAddsBaseColumnForBlobV1VirtualColumns() {
     StructType schema =
         new StructType(
             new StructField[] {
@@ -211,11 +223,11 @@ public class LanceFragmentScannerTest {
             });
 
     // The base blob columns are scanned once each, even when only virtual columns are projected
-    assertEquals(Arrays.asList("id", "data", "other"), callGetColumnNames(schema));
+    assertEquals(Arrays.asList("id", "data", "other"), projectedColumns(schema));
   }
 
   @Test
-  public void testGetColumnNamesOrderingWithMixedColumns() throws Exception {
+  public void testGetColumnNamesOrderingWithMixedColumns() {
     // Test that regular columns come first, then metadata columns in the correct order
     StructType schema =
         new StructType(
@@ -229,7 +241,7 @@ public class LanceFragmentScannerTest {
               DataTypes.createStructField("m_middle_column", DataTypes.IntegerType, true)
             });
 
-    List<String> result = callGetColumnNames(schema);
+    List<String> result = projectedColumns(schema);
     // Regular data columns in schema order, then projected version metadata columns.
     List<String> expected =
         Arrays.asList(
@@ -241,7 +253,7 @@ public class LanceFragmentScannerTest {
   }
 
   @Test
-  public void testGetColumnNamesWithFragmentId() throws Exception {
+  public void testGetColumnNamesWithFragmentId() {
     // FRAGMENT_ID should be excluded from the projection
     StructType schema =
         new StructType(
@@ -250,7 +262,7 @@ public class LanceFragmentScannerTest {
               DataTypes.createStructField(LanceConstant.FRAGMENT_ID, DataTypes.IntegerType, true)
             });
 
-    List<String> result = callGetColumnNames(schema);
+    List<String> result = projectedColumns(schema);
     List<String> expected = Arrays.asList("id");
     assertEquals(expected, result);
   }
@@ -285,7 +297,7 @@ public class LanceFragmentScannerTest {
     return new LanceInputPartition(
         TestUtils.TestTable1Config.schema,
         0,
-        new LanceSplit(fragments),
+        new LanceSplit(fragments.stream().map(FragmentSplit::full).collect(Collectors.toList())),
         readOptions,
         Optional.empty(),
         Optional.empty(),

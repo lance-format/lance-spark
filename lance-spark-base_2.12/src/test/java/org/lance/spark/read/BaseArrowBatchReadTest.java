@@ -417,11 +417,11 @@ public abstract class BaseArrowBatchReadTest {
    */
   @Test
   public void scansWithoutAnArrowBatchPlanReadAsUsual() throws Exception {
-    String uri = writeSparkDataset("without-plan");
+    String uri = tempDir.resolve("without-plan.lance").toString();
+    writeArrowDataset(uri, true);
     LanceScan planned = lanceScan(read(uri, true));
     LanceSparkReadOptions options = planned.readOptions();
     assertTrue(options.isArrowBatchReadsEnabled());
-    LanceSplit.ScanPlanResult splits = LanceSplit.planScan(options);
     for (ArrowBatchAdapter.Plan plan :
         Arrays.asList(null, ArrowBatchAdapter.Plan.unsupported("unsupported for the test"))) {
       LanceScan scan =
@@ -436,8 +436,8 @@ public abstract class BaseArrowBatchReadTest {
               new Predicate[0],
               null,
               null,
-              splits.getSplits(),
-              splits.getFragmentRowCounts(),
+              List.of(new LanceSplit(List.of(FragmentSplit.full(0)))),
+              Map.of(0, 3L),
               null,
               null,
               Collections.emptyMap(),
@@ -455,7 +455,7 @@ public abstract class BaseArrowBatchReadTest {
             }
             rows[0] += batch.numRows();
           });
-      assertEquals(20, rows[0]);
+      assertEquals(3, rows[0]);
     }
   }
 

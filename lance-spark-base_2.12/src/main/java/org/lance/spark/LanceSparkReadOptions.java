@@ -60,6 +60,10 @@ public class LanceSparkReadOptions implements Serializable {
   public static final String CONFIG_METADATA_CACHE_SIZE = "metadata_cache_size";
   public static final String CONFIG_BATCH_SIZE = "batch_size";
   public static final String CONFIG_USE_SCALAR_INDEX = "use_scalar_index";
+
+  /** Keep disabled for zonemaps built by Lance 0.39 or earlier. Slices require physical offsets. */
+  public static final String CONFIG_USE_ZONEMAP_SLICES = "use_zonemap_slices";
+
   public static final String CONFIG_RUNTIME_FILTER_MAX_KEYS = "runtime_filter_max_keys";
   public static final String CONFIG_RUNTIME_FILTER_MAX_BYTES = "runtime_filter_max_bytes";
   public static final String CONFIG_TOP_N_PUSH_DOWN = "topN_push_down";
@@ -109,6 +113,7 @@ public class LanceSparkReadOptions implements Serializable {
   // Changed from 512 to 8192 for better OLAP scan performance (33x improvement)
   private static final int DEFAULT_BATCH_SIZE = 8192;
   private static final boolean DEFAULT_USE_SCALAR_INDEX = true;
+  private static final boolean DEFAULT_USE_ZONEMAP_SLICES = false;
   private static final int DEFAULT_RUNTIME_FILTER_MAX_KEYS = 100_000;
   private static final int DEFAULT_RUNTIME_FILTER_MAX_BYTES = 4_194_304;
   private static final boolean DEFAULT_TOP_N_PUSH_DOWN = true;
@@ -125,6 +130,7 @@ public class LanceSparkReadOptions implements Serializable {
   private final int batchSize;
   private transient FullTextQuery fullTextQuery;
   private final boolean useScalarIndex;
+  private final boolean useZonemapSlices;
   private final int runtimeFilterMaxKeys;
   private final int runtimeFilterMaxBytes;
   private final boolean topNPushDown;
@@ -163,6 +169,7 @@ public class LanceSparkReadOptions implements Serializable {
     this.batchSize = builder.batchSize;
     this.fullTextQuery = builder.fullTextQuery;
     this.useScalarIndex = builder.useScalarIndex;
+    this.useZonemapSlices = builder.useZonemapSlices;
     this.runtimeFilterMaxKeys = builder.runtimeFilterMaxKeys;
     this.runtimeFilterMaxBytes = builder.runtimeFilterMaxBytes;
     this.topNPushDown = builder.topNPushDown;
@@ -279,6 +286,10 @@ public class LanceSparkReadOptions implements Serializable {
     return useScalarIndex;
   }
 
+  public boolean isUseZonemapSlices() {
+    return useZonemapSlices;
+  }
+
   public int getRuntimeFilterMaxKeys() {
     return runtimeFilterMaxKeys;
   }
@@ -371,6 +382,7 @@ public class LanceSparkReadOptions implements Serializable {
         .batchSize(this.batchSize)
         .fullTextQuery(this.fullTextQuery)
         .useScalarIndex(this.useScalarIndex)
+        .useZonemapSlices(this.useZonemapSlices)
         .runtimeFilterMaxKeys(this.runtimeFilterMaxKeys)
         .runtimeFilterMaxBytes(this.runtimeFilterMaxBytes)
         .topNPushDown(this.topNPushDown)
@@ -430,6 +442,7 @@ public class LanceSparkReadOptions implements Serializable {
     return pushDownFilters == that.pushDownFilters
         && batchSize == that.batchSize
         && useScalarIndex == that.useScalarIndex
+        && useZonemapSlices == that.useZonemapSlices
         && runtimeFilterMaxKeys == that.runtimeFilterMaxKeys
         && runtimeFilterMaxBytes == that.runtimeFilterMaxBytes
         && topNPushDown == that.topNPushDown
@@ -460,6 +473,7 @@ public class LanceSparkReadOptions implements Serializable {
         batchSize,
         FullTextQueryUtils.fullTextQueryToString(fullTextQuery),
         useScalarIndex,
+        useZonemapSlices,
         runtimeFilterMaxKeys,
         runtimeFilterMaxBytes,
         topNPushDown,
@@ -483,6 +497,7 @@ public class LanceSparkReadOptions implements Serializable {
     private Integer metadataCacheSize;
     private int batchSize = DEFAULT_BATCH_SIZE;
     private boolean useScalarIndex = DEFAULT_USE_SCALAR_INDEX;
+    private boolean useZonemapSlices = DEFAULT_USE_ZONEMAP_SLICES;
     private int runtimeFilterMaxKeys = DEFAULT_RUNTIME_FILTER_MAX_KEYS;
     private int runtimeFilterMaxBytes = DEFAULT_RUNTIME_FILTER_MAX_BYTES;
     private boolean topNPushDown = DEFAULT_TOP_N_PUSH_DOWN;
@@ -539,6 +554,11 @@ public class LanceSparkReadOptions implements Serializable {
 
     public Builder useScalarIndex(boolean useScalarIndex) {
       this.useScalarIndex = useScalarIndex;
+      return this;
+    }
+
+    public Builder useZonemapSlices(boolean useZonemapSlices) {
+      this.useZonemapSlices = useZonemapSlices;
       return this;
     }
 
@@ -682,6 +702,9 @@ public class LanceSparkReadOptions implements Serializable {
       }
       if (opts.containsKey(CONFIG_USE_SCALAR_INDEX)) {
         this.useScalarIndex = Boolean.parseBoolean(opts.get(CONFIG_USE_SCALAR_INDEX));
+      }
+      if (opts.containsKey(CONFIG_USE_ZONEMAP_SLICES)) {
+        this.useZonemapSlices = Boolean.parseBoolean(opts.get(CONFIG_USE_ZONEMAP_SLICES));
       }
       if (opts.containsKey(CONFIG_RUNTIME_FILTER_MAX_KEYS)) {
         runtimeFilterMaxKeys(Integer.parseInt(opts.get(CONFIG_RUNTIME_FILTER_MAX_KEYS)));
