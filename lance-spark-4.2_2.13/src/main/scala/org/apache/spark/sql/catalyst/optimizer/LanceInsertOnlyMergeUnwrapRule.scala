@@ -15,7 +15,7 @@ package org.apache.spark.sql.catalyst.optimizer
 
 import org.apache.spark.sql.catalyst.plans.logical.{AppendData, InsertOnlyMerge, LogicalPlan}
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
+import org.apache.spark.sql.execution.datasources.v2.{AppendDataCompat, DataSourceV2Relation}
 
 /**
  * Spark 4.2 lowers an insert-only MERGE (only {@code WHEN NOT MATCHED THEN INSERT}) to an
@@ -36,6 +36,6 @@ case class LanceInsertOnlyMergeUnwrapRule() extends Rule[LogicalPlan] {
   override def apply(plan: LogicalPlan): LogicalPlan = plan.transformDown {
     case InsertOnlyMerge(r: DataSourceV2Relation, query, None, _)
         if r.table.isInstanceOf[RowLevelMaskedLanceTable] =>
-      AppendData.byPosition(r, query)
+      AppendDataCompat.byPosition(r, query, Map.empty)
   }
 }

@@ -49,7 +49,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Runtime filtering contract tests, instantiated only by the supported Spark 4.1+ modules. */
+/** Runtime filtering contract tests. */
 public abstract class BaseLanceRuntimeFilteringTest {
   private static final StructType SCHEMA =
       new StructType()

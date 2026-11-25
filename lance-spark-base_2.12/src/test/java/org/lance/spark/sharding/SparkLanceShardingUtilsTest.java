@@ -23,8 +23,12 @@ import org.apache.spark.sql.connector.expressions.NamedReference;
 import org.apache.spark.sql.connector.expressions.Transform;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -227,5 +231,62 @@ public class SparkLanceShardingUtilsTest {
         SparkLanceShardingUtils.detectFragmentKeys(field, null, zones, Set.of(0));
 
     assertFalse(keys.isPresent());
+  }
+
+  @Test
+  public void testDetectFragmentKeysWithInterleavedZonesAcrossManyFragments() {
+    ShardingField field =
+        SparkLanceShardingUtils.fromSparkTransforms(
+                new Transform[] {Expressions.identity("region")})
+            .fields()
+            .get(0);
+    int fragments = 1_000;
+    List<ZoneStats> zones = new ArrayList<>();
+    Set<Integer> live = new HashSet<>();
+    Map<Integer, Object> expected = new HashMap<>();
+    // Zones arrive ordered by zone, not by fragment, so each fragment's zones are interleaved.
+    for (int zone = 0; zone < 2; zone++) {
+      for (int fragment = 0; fragment < fragments; fragment++) {
+        String value = "r" + (fragment % 97);
+        zones.add(new ZoneStats(fragment, zone * 10, 10, value, value, 0));
+        live.add(fragment);
+        expected.put(fragment, value);
+      }
+    }
+
+    Optional<Map<Integer, Object>> keys =
+        SparkLanceShardingUtils.detectFragmentKeys(field, null, zones, live);
+
+    assertTrue(keys.isPresent());
+    assertEquals(expected, keys.get());
+  }
+
+  @Test
+  public void testDetectFragmentKeysIsLinearInZones() {
+    ShardingField field =
+        SparkLanceShardingUtils.fromSparkTransforms(
+                new Transform[] {Expressions.identity("region")})
+            .fields()
+            .get(0);
+    // A table this size has 200,000 fragments with two zonemap zones each. Scanning every zone for
+    // every fragment would take 8 x 10^10 comparisons; grouping zones by fragment takes 400,000.
+    int fragments = 200_000;
+    List<ZoneStats> zones = new ArrayList<>(2 * fragments);
+    Set<Integer> live = new HashSet<>();
+    for (int fragment = 0; fragment < fragments; fragment++) {
+      String value = String.format("%04X", fragment % 65_536);
+      zones.add(new ZoneStats(fragment, 0, 8_192, value, value, 0));
+      zones.add(new ZoneStats(fragment, 8_192, 8_192, value, value, 0));
+      live.add(fragment);
+    }
+
+    Optional<Map<Integer, Object>> keys =
+        assertTimeoutPreemptively(
+            Duration.ofSeconds(30),
+            () -> SparkLanceShardingUtils.detectFragmentKeys(field, null, zones, live));
+
+    assertTrue(keys.isPresent());
+    assertEquals(fragments, keys.get().size());
+    assertEquals("0001", keys.get().get(65_537));
   }
 }

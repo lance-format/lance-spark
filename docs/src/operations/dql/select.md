@@ -369,7 +369,7 @@ These options control how data is read from Lance datasets. They can be set usin
 
 ### Runtime Join Filtering
 
-On Spark 4.1 and newer, Spark can push join dynamic partition pruning filters into Lance scans. Lance accepts `IN` filters on projected `_rowaddr` and `_rowid` columns, active sharding columns, and top-level scalar columns backed by a compatible scalar or zonemap index. Columns that Spark reads with lossy conversions are skipped (`Timestamp(NANOSECOND)`, `Date(MILLISECOND)`, and `UInt64`).
+Spark can push join dynamic partition pruning filters into Lance scans. Lance accepts `IN` filters on projected `_rowaddr` and `_rowid` columns, active sharding columns, and top-level scalar columns backed by a compatible scalar or zonemap index. Columns that Spark reads with lossy conversions are skipped (`Timestamp(NANOSECOND)`, `Date(MILLISECOND)`, `Time32`, `Time64`, and `UInt64`).
 
 Runtime filters prune fragments from the pinned snapshot and also get passed to the native Lance scanner, while Spark still runs the full join. Multiple runtime filters combine with `AND`. Null keys are ignored, an empty or all-null key set returns an empty scan, and fragments not covered by a partially built zonemap index are kept safely. A filter with a negative `_rowid` or `_rowaddr` key is left to Spark.
 

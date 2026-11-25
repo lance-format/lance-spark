@@ -38,6 +38,7 @@ Use `-pl <module> -am` to target a specific Spark/Scala version and build its de
 - Follow existing code style — enforced by Spotless (`checkstyle.xml`) and scalafmt (`.scalafmt.conf`).
 - Use top-level imports — do not use fully qualified class names.
 - Keep the connector logic thin — delegate to `lance-core` where possible.
+- **Never call `copy` on a Spark Catalyst node.** Its JVM signature can differ between Spark releases and distributions, causing a `NoSuchMethodError`. Prefer Spark’s `withNewQuery`, `withNewTable`, and `withNewChildren` methods where available. Use `node.withArg(_.field)(value)` from `CatalystCompat` for other fields, and runtime-aware factories for constructors whose signatures have diverged.
 - **Never open a Lance dataset directly.** Use `Utils.openDatasetBuilder()` to construct an `OpenDatasetBuilder` from `LanceSparkReadOptions` or `LanceSparkWriteOptions`. The builder handles storage option merging and runtime session management.
 
 ## Documentation

@@ -15,10 +15,11 @@ package org.apache.spark.sql.execution.datasources.v2
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Attribute
-import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, Project}
+import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, Project}
 import org.apache.spark.sql.connector.catalog._
-import org.apache.spark.sql.types.{MetadataBuilder, StructType}
+import org.apache.spark.sql.types.{BinaryType, DataType, MetadataBuilder, StructType}
 import org.lance.spark.{LanceConstant, LanceDataset}
+import org.lance.spark.utils.BlobUtils
 
 /**
  * Execution plan for UPDATE COLUMNS FROM command.
@@ -79,7 +80,7 @@ case class UpdateColumnsBackfillExec(
       Some(ident))
 
     val append =
-      AppendData.byPosition(
+      AppendDataCompat.byPosition(
         relation,
         actualQuery,
         writeOptions + (LanceConstant.UPDATE_COLUMNS_KEY -> columnNames.mkString(",")))
@@ -105,7 +106,16 @@ object UpdateColumnsBackfillExec {
             .withMetadata(sourceField.metadata)
             .withMetadata(targetField.metadata)
             .build()
-          sourceField.copy(metadata = metadata)
+          // Blob v2 exposes a descriptor on read but accepts binary values on write.
+          val targetDataType =
+            if (BlobUtils.isBlobV2SparkField(targetField)) BinaryType else targetField.dataType
+          require(
+            DataType.equalsIgnoreNullability(sourceField.dataType, targetDataType),
+            s"UPDATE COLUMNS source '${sourceField.name}' has type ${sourceField.dataType}, expected $targetDataType")
+          sourceField.copy(
+            dataType = targetDataType,
+            nullable = targetField.nullable,
+            metadata = metadata)
         case _ =>
           sourceField
       }

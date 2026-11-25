@@ -13,6 +13,7 @@
  */
 package org.apache.spark.sql.catalyst.optimizer
 
+import org.apache.spark.sql.catalyst.CatalystCompat.TreeNodeArgs
 import org.apache.spark.sql.catalyst.analysis.{NamedRelation, ResolvedIdentifier}
 import org.apache.spark.sql.catalyst.expressions.{Alias, AttributeReference, Expression, ExprId, LanceBlobV2CopyRef, NamedExpression, SortOrder}
 import org.apache.spark.sql.catalyst.optimizer.BlobPlanUtils.{LanceRelation, V2BlobWrite}
@@ -37,13 +38,15 @@ case class LanceBlobV2CopyThroughRule() extends Rule[LogicalPlan] {
     case c: CreateTableAsSelect if c.query.resolved && isLanceCatalog(c.name) =>
       rewriteGuarded(c.query, None) match {
         case Some(q) =>
-          c.copy(query = q, writeOptions = withBlobSourceContexts(c.query, c.writeOptions))
+          c.withArg(_.writeOptions)(withBlobSourceContexts(c.query, c.writeOptions))
+            .withNewChildren(c.children.map(child => if (child eq c.query) q else child))
         case None => c
       }
     case r: ReplaceTableAsSelect if r.query.resolved && isLanceCatalog(r.name) =>
       rewriteGuarded(r.query, None) match {
         case Some(q) =>
-          r.copy(query = q, writeOptions = withBlobSourceContexts(r.query, r.writeOptions))
+          r.withArg(_.writeOptions)(withBlobSourceContexts(r.query, r.writeOptions))
+            .withNewChildren(r.children.map(child => if (child eq r.query) q else child))
         case None => r
       }
     case command @ V2BlobWrite(write) if write.query.resolved =>
@@ -101,15 +104,15 @@ case class LanceBlobV2CopyThroughRule() extends Rule[LogicalPlan] {
     case s: Sort =>
       rewriteQuery(s.child, targetBlobColumns)
         .filterNot(rewritten => ordersByRewrittenColumn(s.order, rewritten))
-        .map(rewritten => s.copy(child = rewritten))
+        .map(rewritten => s.withNewChildren(Seq(rewritten)))
     case l: GlobalLimit =>
-      rewriteQuery(l.child, targetBlobColumns).map(rewritten => l.copy(child = rewritten))
+      rewriteQuery(l.child, targetBlobColumns).map(rewritten => l.withNewChildren(Seq(rewritten)))
     case l: LocalLimit =>
-      rewriteQuery(l.child, targetBlobColumns).map(rewritten => l.copy(child = rewritten))
+      rewriteQuery(l.child, targetBlobColumns).map(rewritten => l.withNewChildren(Seq(rewritten)))
     case o: Offset =>
-      rewriteQuery(o.child, targetBlobColumns).map(rewritten => o.copy(child = rewritten))
+      rewriteQuery(o.child, targetBlobColumns).map(rewritten => o.withNewChildren(Seq(rewritten)))
     case a: SubqueryAlias =>
-      rewriteQuery(a.child, targetBlobColumns).map(rewritten => a.copy(child = rewritten))
+      rewriteQuery(a.child, targetBlobColumns).map(rewritten => a.withNewChildren(Seq(rewritten)))
     // A bare table read (e.g. spark.table(...).writeTo(...).append()) has no projection to
     // rewrite. Synthesize the identity projection so the DataFrame API matches the SQL path.
     case LanceRelation(relation, _) =>

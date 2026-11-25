@@ -18,6 +18,7 @@ import org.lance.spark.function.LanceMatchFunction;
 import org.lance.spark.function.LanceMultiMatchFunction;
 import org.lance.spark.function.LancePhraseFunction;
 import org.lance.spark.utils.Utils;
+import org.lance.spark.utils.VectorUtils;
 
 import org.apache.spark.sql.AnalysisException;
 import org.apache.spark.sql.Dataset;
@@ -27,6 +28,7 @@ import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
+import org.apache.spark.sql.connector.catalog.ColumnDefaultValue;
 import org.apache.spark.sql.connector.catalog.FunctionCatalog;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.StagedTable;
@@ -35,7 +37,10 @@ import org.apache.spark.sql.connector.catalog.SupportsNamespaces;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.catalog.TableChange;
 import org.apache.spark.sql.connector.catalog.functions.UnboundFunction;
+import org.apache.spark.sql.connector.expressions.Expressions;
 import org.apache.spark.sql.connector.expressions.Transform;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -964,12 +969,131 @@ public abstract class SparkLanceNamespaceTestBase {
         assertThrows(
             UnsupportedOperationException.class,
             () -> {
-              catalog.alterTable(
-                  ident,
-                  TableChange.addColumn(
-                      new String[] {"new_col"}, org.apache.spark.sql.types.DataTypes.StringType));
+              catalog.alterTable(ident, TableChange.renameColumn(new String[] {"name"}, "renamed"));
             });
-    assertTrue(ex.getMessage().contains("Only SET/UNSET TBLPROPERTIES is supported"));
+    assertTrue(ex.getMessage().contains("Only ADD COLUMNS and SET/UNSET TBLPROPERTIES"));
+  }
+
+  @Test
+  public void testAddColumnsPreservesRowsAndAllowsWrites() {
+    String fullName = catalogName + ".default." + generateTableName("add_columns");
+    spark.sql("CREATE TABLE " + fullName + " (id INT, name STRING)");
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, 'one'), (2, 'two')");
+    spark.sql(
+        "ALTER TABLE "
+            + fullName
+            + " ADD COLUMNS (score FLOAT COMMENT 'score', details STRUCT<label: STRING>)");
+
+    Dataset<Row> updated = spark.sql("SELECT * FROM " + fullName + " ORDER BY id");
+    assertArrayEquals(new String[] {"id", "name", "score", "details"}, updated.columns());
+    List<Row> rows = updated.collectAsList();
+    assertEquals(2, rows.size());
+    assertEquals(1, rows.get(0).getInt(0));
+    assertEquals("one", rows.get(0).getString(1));
+    assertTrue(rows.get(0).isNullAt(2));
+    assertTrue(rows.get(0).isNullAt(3));
+    assertTrue(rows.get(1).isNullAt(2));
+    assertTrue(rows.get(1).isNullAt(3));
+    assertEquals("score", updated.schema().apply("score").getComment().get());
+
+    spark.sql(
+        "INSERT INTO "
+            + fullName
+            + " VALUES (3, 'three', CAST(1.5 AS FLOAT), named_struct('label', 'new'))");
+    Row inserted =
+        spark.sql("SELECT score, details.label FROM " + fullName + " WHERE id = 3").head();
+    assertEquals(1.5f, inserted.getFloat(0));
+    assertEquals("new", inserted.getString(1));
+    assertArrayEquals(
+        new String[] {"id", "name"},
+        spark.sql("SELECT * FROM " + fullName + " VERSION AS OF 2").columns());
+  }
+
+  @Test
+  public void testAddColumnsRejectsUnsupportedChangesWithoutMutation() throws Exception {
+    String tableName = generateTableName("add_columns_invalid");
+    String fullName = catalogName + ".default." + tableName;
+    spark.sql("CREATE TABLE " + fullName + " (id INT, data STRUCT<value: STRING>)");
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    long version = getLatestVersion(tableName).getId();
+    TableChange valid = TableChange.addColumn(new String[] {"new_col"}, DataTypes.StringType);
+    TableChange[] invalid = {
+      TableChange.addColumn(new String[] {"data", "nested"}, DataTypes.StringType),
+      TableChange.addColumn(new String[] {"required"}, DataTypes.StringType, false),
+      TableChange.addColumn(
+          new String[] {"positioned"},
+          DataTypes.StringType,
+          true,
+          null,
+          TableChange.ColumnPosition.first(),
+          null),
+      TableChange.addColumn(
+          new String[] {"with_default"},
+          DataTypes.StringType,
+          true,
+          null,
+          null,
+          new ColumnDefaultValue("'value'", Expressions.literal("value"))),
+      TableChange.addColumn(
+          new String[] {"nonnullable_child"},
+          new StructType().add("required", DataTypes.StringType, false))
+    };
+    for (TableChange change : invalid) {
+      assertThrows(
+          UnsupportedOperationException.class, () -> catalog.alterTable(ident, valid, change));
+    }
+    assertThrows(
+        UnsupportedOperationException.class,
+        () -> catalog.alterTable(ident, valid, TableChange.setProperty("key", "value")));
+    assertEquals(version, getLatestVersion(tableName).getId());
+    assertArrayEquals(new String[] {"id", "data"}, spark.table(fullName).columns());
+    assertFalse(getTableConfig(tableName).containsKey("key"));
+  }
+
+  @Test
+  public void testAddColumnsAppliesFutureColumnProperties() {
+    String fullName = catalogName + ".default." + generateTableName("add_vector");
+    spark.sql("CREATE TABLE " + fullName + " (id INT)");
+    spark.sql("INSERT INTO " + fullName + " VALUES (1)");
+    spark.sql(
+        "ALTER TABLE "
+            + fullName
+            + " SET TBLPROPERTIES ('features.arrow.fixed-size-list.size' = '3')");
+    spark.sql("ALTER TABLE " + fullName + " ADD COLUMNS (features ARRAY<FLOAT>)");
+
+    Dataset<Row> table = spark.table(fullName);
+    assertEquals(
+        3L,
+        table
+            .schema()
+            .apply("features")
+            .metadata()
+            .getLong(VectorUtils.ARROW_FIXED_SIZE_LIST_SIZE_KEY));
+    assertTrue(table.head().isNullAt(1));
+    spark.sql(
+        "INSERT INTO "
+            + fullName
+            + " VALUES (2, ARRAY(CAST(1 AS FLOAT), CAST(2 AS FLOAT), CAST(3 AS FLOAT)))");
+    Row inserted = spark.sql("SELECT features FROM " + fullName + " WHERE id = 2").head();
+    assertEquals(List.of(1.0f, 2.0f, 3.0f), inserted.getList(0));
+  }
+
+  @Test
+  public void testAddColumnsWithDuplicateDoesNotPartiallyCommit() throws Exception {
+    String tableName = generateTableName("add_duplicate");
+    String fullName = catalogName + ".default." + tableName;
+    spark.sql("CREATE TABLE " + fullName + " (id INT)");
+    Identifier ident = Identifier.of(new String[] {"default"}, tableName);
+    long version = getLatestVersion(tableName).getId();
+    assertThrows(
+        RuntimeException.class,
+        () ->
+            catalog.alterTable(
+                ident,
+                TableChange.addColumn(new String[] {"new_col"}, DataTypes.StringType),
+                TableChange.addColumn(new String[] {"id"}, DataTypes.StringType)));
+    assertEquals(version, getLatestVersion(tableName).getId());
+    assertArrayEquals(new String[] {"id"}, spark.table(fullName).columns());
   }
 
   @Test

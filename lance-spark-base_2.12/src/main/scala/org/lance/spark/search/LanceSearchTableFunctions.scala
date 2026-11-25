@@ -14,10 +14,10 @@
 package org.lance.spark.search
 
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.{CatalystCompat, InternalRow}
 import org.apache.spark.sql.catalyst.analysis.{UnresolvedAttribute, UnresolvedStar}
 import org.apache.spark.sql.catalyst.expressions.{Ascending, CreateArray, Descending, Expression, Literal, NamedExpression, SortOrder}
-import org.apache.spark.sql.catalyst.plans.logical.{Filter, GlobalLimit, Limit, LocalLimit, LogicalPlan, Offset, Project, Sort}
+import org.apache.spark.sql.catalyst.plans.logical.{Filter, GlobalLimit, Limit, LocalLimit, LogicalPlan, Offset, Project}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.types.{DataTypes, StructField, StructType}
@@ -149,7 +149,7 @@ object LanceSearchTableFunctions {
       .getOrElse(relation)
     val projected = Project(searchProjectList(outputColumns, withRowId), filtered)
     val ordered =
-      Sort(
+      CatalystCompat.sort(
         Seq(SortOrder(UnresolvedAttribute(FtsScoreColumn), Descending)),
         global = true,
         projected)
@@ -326,7 +326,7 @@ object LanceSearchTableFunctions {
       Seq(
         SortOrder(internalColumn(DistanceMetricColumn), Ascending),
         SortOrder(internalColumn(RowIdColumn), Ascending))
-    val sorted = Sort(sortOrder, global = true, rel)
+    val sorted = CatalystCompat.sort(sortOrder, global = true, rel)
     val totalCandidates = query.getK
     val effectiveOffset =
       if (query.getOffset != null) query.getOffset.intValue() else 0
