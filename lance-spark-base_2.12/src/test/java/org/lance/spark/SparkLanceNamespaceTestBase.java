@@ -51,6 +51,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -846,6 +847,56 @@ public abstract class SparkLanceNamespaceTestBase {
     assertTrue(ex.getMessage().contains("can only be set at table creation"));
   }
 
+  @ParameterizedTest(name = "pathBased={0}")
+  @CsvSource({"false", "true"})
+  public void testAlterFiltersProperties(boolean pathBased) throws Exception {
+    String tableName = generateTableName("alter_filter");
+    String path = tempDir.resolve(tableName + ".lance").toString();
+    Identifier ident =
+        Identifier.of(
+            pathBased ? new String[0] : new String[] {"default"}, pathBased ? path : tableName);
+    String fullName = catalogName + (pathBased ? ".`" + path + "`" : ".default." + tableName);
+    spark.sql("CREATE TABLE " + fullName + " (id INT) USING lance");
+    List<String> excluded =
+        List.of(
+            "storage.secret_access_key",
+            "OPTION.option.Storage.session_token",
+            "transaction_properties",
+            "OPTION.Transaction_Properties.request",
+            "OPTION.Provider");
+    List<TableChange> changes = new ArrayList<>();
+    excluded.forEach(key -> changes.add(TableChange.setProperty(key, "ignored")));
+    changes.add(TableChange.setProperty("App.Owner", "analytics"));
+    changes.add(TableChange.setProperty("Content.lance.encoding", "blob"));
+    changes.add(TableChange.setProperty("max_row_per_file", "2"));
+    catalog.alterTable(ident, changes.toArray(new TableChange[0]));
+
+    LanceDataset loaded = (LanceDataset) catalog.loadTable(ident);
+    try (org.lance.Dataset dataset = Utils.openDatasetBuilder(loaded.readOptions()).build()) {
+      Map<String, String> config = dataset.getConfig();
+      excluded.forEach(key -> assertFalse(config.containsKey(key), key));
+      assertEquals("analytics", config.get("App.Owner"));
+      assertEquals("blob", config.get("Content.lance.encoding"));
+      assertEquals("2", config.get("max_row_per_file"));
+      assertFalse(config.containsKey("app.owner"));
+      assertFalse(config.containsKey("content.lance.encoding"));
+      assertEquals(2, dataset.version());
+    }
+    catalog.alterTable(ident, TableChange.setProperty("storage.secret_access_key", "ignored"));
+    try (org.lance.Dataset dataset = Utils.openDatasetBuilder(loaded.readOptions()).build()) {
+      assertEquals(2, dataset.version());
+      // Simulate an old manifest written before property filtering.
+      Map<String, String> legacyConfig = new HashMap<>(dataset.getConfig());
+      legacyConfig.put("option.storage.secret_access_key", "old");
+      dataset.updateConfig(legacyConfig);
+    }
+    catalog.alterTable(ident, TableChange.removeProperty("option.storage.secret_access_key"));
+    try (org.lance.Dataset dataset = Utils.openDatasetBuilder(loaded.readOptions()).build()) {
+      assertFalse(dataset.getConfig().containsKey("option.storage.secret_access_key"));
+      assertEquals("analytics", dataset.getConfig().get("App.Owner"));
+    }
+  }
+
   @Test
   public void testUnsetTableProperties() throws Exception {
     String tableName = generateTableName("unset_props");
@@ -1279,6 +1330,7 @@ public abstract class SparkLanceNamespaceTestBase {
             + " 'transaction_properties.request' = 'create-test', 'max_row_per_file' = '2',"
             + " 'max_rows_per_group' = '2', 'max_bytes_per_file' = '1048576', 'batch_size' = '2')"
             + " TBLPROPERTIES ('app.owner' = 'analytics',"
+            + " 'App.Label' = 'MixedCase', 'OPTION.Provider' = 'ignored',"
             + " 'OPTION.Storage.session_token' = 'test-token')"
             + (ordinaryCreate ? "" : " AS SELECT 1 AS id"));
 
@@ -1289,6 +1341,8 @@ public abstract class SparkLanceNamespaceTestBase {
     try (org.lance.Dataset dataset = Utils.openDatasetBuilder(loaded.readOptions()).build()) {
       assertEquals("analytics", dataset.getConfig().get("app.owner"));
       assertEquals("from-options", dataset.getConfig().get("app.option"));
+      assertEquals("MixedCase", dataset.getConfig().get("App.Label"));
+      assertFalse(dataset.getConfig().containsKey("app.label"));
       assertEquals("2", dataset.getConfig().get("max_row_per_file"));
       assertEquals("2", dataset.getConfig().get("max_rows_per_group"));
       assertEquals("1048576", dataset.getConfig().get("max_bytes_per_file"));
@@ -1299,6 +1353,7 @@ public abstract class SparkLanceNamespaceTestBase {
               "option.storage.secret_access_key",
               "transaction_properties.request",
               "option.transaction_properties.request",
+              "OPTION.Provider",
               "OPTION.Storage.session_token")) {
         assertFalse(dataset.getConfig().containsKey(key), key);
       }
@@ -1347,7 +1402,8 @@ public abstract class SparkLanceNamespaceTestBase {
             + fullName
             + " USING lance OPTIONS ('storage.secret_access_key' = 'test-secret',"
             + " 'transaction_properties' = '{\"request\":\"replace-test\"}')"
-            + " TBLPROPERTIES ('app.owner' = 'new', 'app.added' = 'yes')"
+            + " TBLPROPERTIES ('app.owner' = 'new', 'app.added' = 'yes',"
+            + " 'OPTION.Provider' = 'ignored')"
             + " AS SELECT 2 AS id");
     spark.sql("REFRESH TABLE " + fullName);
     LanceDataset loaded = (LanceDataset) catalog.loadTable(ident);
@@ -1360,6 +1416,7 @@ public abstract class SparkLanceNamespaceTestBase {
           List.of(
               "storage.secret_access_key",
               "option.storage.secret_access_key",
+              "OPTION.Provider",
               "transaction_properties",
               "option.transaction_properties")) {
         assertFalse(dataset.getConfig().containsKey(key), key);

@@ -29,6 +29,11 @@ If a property already exists, its value is overwritten:
 ALTER TABLE users SET TBLPROPERTIES ('env' = 'staging');
 ```
 
+SET uses the same [property filtering rules as CREATE](create-table.md#table-properties):
+storage settings and transaction metadata are ignored, including `option.*` aliases.
+If all supplied properties are filtered out, no new version is created. User property
+keys retain their original spelling. UNSET can still remove previously stored keys.
+
 ## UNSET TBLPROPERTIES
 
 Remove properties from a table:

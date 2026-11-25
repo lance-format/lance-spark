@@ -898,6 +898,10 @@ public abstract class BaseLanceNamespaceSparkCatalog
       Set<String> keysToRemove,
       boolean managedVersioning,
       List<String> tableIdList) {
+    propsToSet = copyUserTableProperties(propsToSet);
+    if (propsToSet.isEmpty() && keysToRemove.isEmpty()) {
+      return;
+    }
     rejectSchemaPropertiesForExistingColumns(dataset.getSchema(), propsToSet);
     Map<String, String> merged = new HashMap<>(dataset.getConfig());
     merged.putAll(propsToSet);
@@ -1582,9 +1586,10 @@ public abstract class BaseLanceNamespaceSparkCatalog
       while (key.startsWith(TableCatalog.OPTION_PREFIX)) {
         key = key.substring(TableCatalog.OPTION_PREFIX.length());
       }
-      if (!SPARK_RESERVED_TABLE_PROPERTIES.contains(entry.getKey())
+      if (!SPARK_RESERVED_TABLE_PROPERTIES.contains(key)
           && !key.startsWith("storage.")
           && !TransactionProperties.isOption(key)) {
+        // Normalize only for classification; user keys and column names retain their case.
         userProperties.put(entry.getKey(), entry.getValue());
       }
     }

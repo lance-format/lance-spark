@@ -639,6 +639,7 @@ class TestDDLAlterTableProperties:
             "arrow.fixed-size-list.size"
         ] == 756
 
+    @pytest.mark.rest_dir_compatible
     def test_set_tblproperties(self, spark):
         """SET TBLPROPERTIES stores properties visible via SHOW TBLPROPERTIES."""
         spark.sql("""
@@ -646,7 +647,11 @@ class TestDDLAlterTableProperties:
         """)
         spark.sql("""
             ALTER TABLE default.test_table
-            SET TBLPROPERTIES ('team' = 'data-eng', 'version' = '2.0')
+            SET TBLPROPERTIES (
+                'team' = 'data-eng', 'version' = '2.0', 'App.Owner' = 'analytics',
+                'storage.secret_access_key' = 'test-secret',
+                'OPTION.Transaction_Properties.request' = 'ignored'
+            )
         """)
 
         rows = spark.sql("SHOW TBLPROPERTIES default.test_table").collect()
@@ -654,6 +659,9 @@ class TestDDLAlterTableProperties:
 
         assert props["team"] == "data-eng"
         assert props["version"] == "2.0"
+        assert props["App.Owner"] == "analytics"
+        assert "storage.secret_access_key" not in props
+        assert "OPTION.Transaction_Properties.request" not in props
 
     def test_unset_tblproperties(self, spark):
         """UNSET TBLPROPERTIES removes a previously set property."""

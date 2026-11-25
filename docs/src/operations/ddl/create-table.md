@@ -87,7 +87,7 @@ SHOW TBLPROPERTIES events;
 With DataFrame V2, use `.tableProperty("app.owner", "analytics")` to save a property;
 `.option(...)` applies only to the current operation.
 
-Creation and replacement exclude `storage.*`, `transaction_properties`, and
+CREATE, REPLACE, and ALTER SET exclude `storage.*`, `transaction_properties`, and
 `transaction_properties.*` from persisted properties, including their `option.*` aliases.
 Reusable tuning settings such as `max_row_per_file` and `batch_size` are retained;
 their use as read/write defaults is implemented separately in [#907](https://github.com/lance-format/lance-spark/pull/907).
