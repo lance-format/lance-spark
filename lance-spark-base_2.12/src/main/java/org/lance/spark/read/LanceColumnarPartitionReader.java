@@ -19,11 +19,14 @@ import org.lance.spark.internal.LanceFragmentColumnarBatchScanner;
 import org.lance.spark.read.metric.LanceReadMetricsTracker;
 
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.spark.TaskContext;
 import org.apache.spark.sql.connector.metric.CustomTaskMetric;
 import org.apache.spark.sql.connector.read.PartitionReader;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
+import org.apache.spark.util.TaskCompletionListener;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 
 public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBatch> {
   private final LanceInputPartition inputPartition;
@@ -33,21 +36,39 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
   private final LanceReadMetricsTracker metricsTracker = new LanceReadMetricsTracker();
   private boolean currentScanStatsAdded = false;
   private ExecutorNamespace executorNamespace;
-
-  /**
-   * The allocator of this reader's Arrow batches, taken when the reader is created. Spark registers
-   * the reader's close for the end of the task after that, so it runs the close before any clean-up
-   * the allocator's provider registered for the end of the task.
-   */
   private final BufferAllocator arrowBatchAllocator;
 
   public LanceColumnarPartitionReader(LanceInputPartition inputPartition) {
     this.inputPartition = inputPartition;
     this.fragmentIndex = 0;
-    this.arrowBatchAllocator =
-        inputPartition.getReadOptions().isArrowBatchReadsEnabled()
-            ? LanceRuntime.arrowBatchReadAllocator()
-            : null;
+    if (inputPartition.getReadOptions().isArrowBatchReadsEnabled()) {
+      this.arrowBatchAllocator = LanceRuntime.arrowBatchReadAllocator();
+      if (arrowBatchAllocator != LanceRuntime.arrowBatchAllocator()) {
+        closeAtTaskEnd();
+      }
+    } else {
+      this.arrowBatchAllocator = null;
+    }
+  }
+
+  /**
+   * Closes the reader at the end of the task before any clean-up that the provider of its allocator
+   * registered while supplying it. Spark runs task completion listeners in reverse order of
+   * registration, and from Spark 4.1 it registers its own close of the reader before creating it.
+   */
+  private void closeAtTaskEnd() {
+    TaskContext task = TaskContext.get();
+    if (task != null) {
+      task.addTaskCompletionListener(
+          (TaskCompletionListener)
+              context -> {
+                try {
+                  close();
+                } catch (IOException e) {
+                  throw new UncheckedIOException(e);
+                }
+              });
+    }
   }
 
   @Override

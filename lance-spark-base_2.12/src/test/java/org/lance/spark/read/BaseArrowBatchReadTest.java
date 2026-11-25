@@ -45,6 +45,7 @@ import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.arrow.vector.util.TransferPair;
+import org.apache.spark.TaskContext;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
@@ -63,6 +64,7 @@ import org.apache.spark.sql.util.ArrowUtils;
 import org.apache.spark.sql.vectorized.ArrowColumnVector;
 import org.apache.spark.sql.vectorized.ColumnVector;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
+import org.apache.spark.util.TaskCompletionListener;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -78,9 +80,11 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -804,7 +808,6 @@ public abstract class BaseArrowBatchReadTest {
     assertEquals(before, root.getAllocatedMemory());
   }
 
-  /** Counts the bytes an allocator reports to its listener: reserved, and released again. */
   private static final class CountingListener implements AllocationListener {
     final AtomicLong reserved = new AtomicLong();
     final AtomicLong released = new AtomicLong();
@@ -820,12 +823,6 @@ public abstract class BaseArrowBatchReadTest {
     }
   }
 
-  /**
-   * A reader takes its allocator from the provider once, when it is created, and builds every batch
-   * there, both the vectors of the native scan and the ones it adds. A consumer that keeps vectors
-   * in that allocator holds them past the reader, and the allocator's listener sees every byte
-   * reserved and released again, as no memory moves between allocators.
-   */
   @Test
   public void providedAllocatorHoldsTheArrowBatches() throws Exception {
     String uri = writeSparkDataset("provided");
@@ -886,7 +883,6 @@ public abstract class BaseArrowBatchReadTest {
     assertEquals(listener.reserved.get(), listener.released.get());
   }
 
-  /** A provider that has no allocator for a reader leaves it on the Arrow batch allocator. */
   @Test
   public void providerWithoutAnAllocatorLeavesTheArrowBatchAllocator() throws Exception {
     String uri = writeSparkDataset("unprovided");
@@ -900,10 +896,26 @@ public abstract class BaseArrowBatchReadTest {
     }
   }
 
-  /**
-   * Spark jobs over Arrow batch reads, one of them stopped early by a limit, build their batches in
-   * the provided allocator and release them all when their tasks end.
-   */
+  @Test
+  public void aDifferentProviderIsRejected() {
+    try (BufferAllocator consumer =
+        ArrowUtils.rootAllocator().newChildAllocator("consumer", 0, Long.MAX_VALUE)) {
+      Supplier<BufferAllocator> provider = () -> consumer;
+      Supplier<BufferAllocator> other = () -> null;
+      LanceRuntime.setArrowBatchAllocatorProvider(provider);
+      try {
+        LanceRuntime.setArrowBatchAllocatorProvider(provider);
+        assertThrows(
+            IllegalStateException.class, () -> LanceRuntime.setArrowBatchAllocatorProvider(other));
+        assertSame(consumer, LanceRuntime.arrowBatchReadAllocator());
+      } finally {
+        LanceRuntime.setArrowBatchAllocatorProvider(null);
+      }
+      LanceRuntime.setArrowBatchAllocatorProvider(other);
+      LanceRuntime.setArrowBatchAllocatorProvider(null);
+    }
+  }
+
   @Test
   public void sparkJobsReleaseTheProvidedAllocator() throws Exception {
     String uri = writeSparkDataset("provided-jobs");
@@ -919,21 +931,35 @@ public abstract class BaseArrowBatchReadTest {
     List<Row> expected = scan.apply(false).orderBy("id").collectAsList();
     CountingListener listener = new CountingListener();
     try (BufferAllocator consumer =
-        ArrowUtils.rootAllocator().newChildAllocator("consumer", listener, 0, Long.MAX_VALUE)) {
-      LanceRuntime.setArrowBatchAllocatorProvider(() -> consumer);
+        ArrowUtils.rootAllocator().newChildAllocator("consumer", 0, Long.MAX_VALUE)) {
+      // Like an engine's per-task allocator, each task's is closed at the end of the task, which
+      // fails the task if a reader still holds memory in it. The limit leaves a reader open.
+      Map<Long, BufferAllocator> taskAllocators = new ConcurrentHashMap<>();
+      LanceRuntime.setArrowBatchAllocatorProvider(
+          () -> {
+            TaskContext task = TaskContext.get();
+            return taskAllocators.computeIfAbsent(
+                task.taskAttemptId(),
+                id -> {
+                  BufferAllocator allocator =
+                      consumer.newChildAllocator("task-" + id, listener, 0, Long.MAX_VALUE);
+                  task.addTaskCompletionListener(
+                      (TaskCompletionListener) context -> allocator.close());
+                  return allocator;
+                });
+          });
       try {
         assertEquals(expected, scan.apply(true).orderBy("id").collectAsList());
-        assertEquals(3, scan.apply(true).limit(3).collectAsList().size());
+        assertEquals(1, scan.apply(true).limit(1).collectAsList().size());
       } finally {
         LanceRuntime.setArrowBatchAllocatorProvider(null);
       }
-      assertTrue(listener.reserved.get() > 0, "no batch was built in the provided allocator");
-      assertEquals(0, consumer.getAllocatedMemory());
+      assertTrue(listener.reserved.get() > 0, "no batch was built in a task's allocator");
+      assertTrue(consumer.getChildAllocators().isEmpty(), "a task's allocator was not closed");
     }
     assertEquals(listener.reserved.get(), listener.released.get());
   }
 
-  /** Reads without Arrow batches, including a pushed-down count, never ask the provider. */
   @Test
   public void readsWithoutArrowBatchesNeverAskTheProvider() throws Exception {
     String uri = writeSparkDataset("unasked");

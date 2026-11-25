@@ -236,19 +236,40 @@ public final class LanceRuntime {
    * keeps them in an allocator of its own, such as a query engine that accounts for the memory it
    * holds. A reader asks {@code provider} for its allocator once, on the task's thread, when it is
    * created, and builds every batch in it: the imported Lance data and the vectors the reader adds.
-   * The consumer then owns the batches without copying or transferring them. The allocator must
-   * stay open until the reader is closed and the consumer has released the batches.
+   * The consumer then takes the vectors without copying them or moving their memory between
+   * allocators.
    *
-   * <p>If the allocator refuses memory, the read fails. Arrow Java up to 19.0.0 then leaks the
+   * <p>How long a batch is valid does not change: the reader may reuse or release its vectors on
+   * the next {@code next()} and on {@code close()}, so a consumer that keeps them longer still
+   * transfers them, within the same allocator. The allocator must stay open until the reader is
+   * closed and the consumer has released what it kept. In a task, the reader is closed before any
+   * clean-up that the provider registers for the end of the task while it supplies the allocator.
+   *
+   * <p>The provider is per JVM, so set it on each executor, e.g. from an executor plugin. Readers
+   * of concurrent tasks call it at the same time, so it must be thread safe. Setting a provider
+   * while a different one is set fails. Setting the same one again does nothing, and null clears
+   * it.
+   *
+   * <p>If the allocator refuses memory, the read fails. Arrow Java before 20.0.0 then leaks the
    * batch being imported when the refusal comes while importing its buffers
-   * (apache/arrow-java#1239, fixed after 19.0.0) or the struct the batch moves into
-   * (apache/arrow-java#1491).
+   * (apache/arrow-java#1239). A refusal while allocating the struct the batch moves into leaks it
+   * too (apache/arrow-java#1491). This holds for {@link #arrowBatchAllocator()} as well when {@link
+   * #ENV_ALLOCATOR_SIZE} caps it.
    *
    * <p>With no provider, or one that returns null, readers use {@link #arrowBatchAllocator()}.
    *
-   * @param provider the allocator of the current task's Arrow batch reads, or null
+   * @param provider the allocator of the current task's Arrow batch reads, or null to clear it
+   * @throws IllegalStateException if a different provider is set
    */
-  public static void setArrowBatchAllocatorProvider(Supplier<BufferAllocator> provider) {
+  public static synchronized void setArrowBatchAllocatorProvider(
+      Supplier<BufferAllocator> provider) {
+    Supplier<BufferAllocator> current = arrowBatchAllocatorProvider;
+    if (provider != null && current != null && current != provider) {
+      throw new IllegalStateException(
+          "A different Arrow batch allocator provider is already set: "
+              + current
+              + ". Clear it with setArrowBatchAllocatorProvider(null) first.");
+    }
     arrowBatchAllocatorProvider = provider;
   }
 

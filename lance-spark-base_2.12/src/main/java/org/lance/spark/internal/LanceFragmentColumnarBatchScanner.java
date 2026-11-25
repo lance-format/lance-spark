@@ -52,9 +52,6 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
   private final LanceFragmentScanner fragmentScanner;
   private final ArrowReader arrowReader;
 
-  private final boolean arrowBatchReadsEnabled;
-
-  /** The allocator of the Arrow batches, when Arrow batch reads are enabled. */
   private final BufferAllocator arrowBatchAllocator;
 
   /** Vectors this scanner built for the current Arrow batch; the reader owns the others. */
@@ -74,7 +71,6 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
       BufferAllocator arrowBatchAllocator) {
     this.fragmentScanner = fragmentScanner;
     this.arrowReader = arrowReader;
-    this.arrowBatchReadsEnabled = arrowBatchAllocator != null;
     this.arrowBatchAllocator = arrowBatchAllocator;
   }
 
@@ -125,11 +121,12 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
    * LanceRuntime#setArrowBatchAllocatorProvider}). Their memory, including the imported C structs,
    * is released with the last reference to it.
    *
-   * <p>A consumer's allocator may refuse memory part way. The exported stream is released if the
-   * import fails before taking it, and the schema is read before any batch, so that a refused
-   * schema struct does not strand a batch (apache/arrow-java#1491).
+   * <p>The allocator may refuse memory part way: a consumer's, or the default one when {@link
+   * LanceRuntime#ENV_ALLOCATOR_SIZE} caps it. The exported stream is released if the import fails
+   * before taking it, and the schema is read before any batch, so that a refused schema struct does
+   * not strand a batch (apache/arrow-java#1491).
    */
-  public static ArrowReader importArrowStream(BufferAllocator allocator, StreamExport export) {
+  static ArrowReader importArrowStream(BufferAllocator allocator, StreamExport export) {
     try (ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator)) {
       export.exportTo(stream.memoryAddress());
       ArrowReader reader;
@@ -164,14 +161,14 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
 
   /** Exports an Arrow C stream into the struct at an address, e.g. a native scan's. */
   @FunctionalInterface
-  public interface StreamExport {
+  interface StreamExport {
     void exportTo(long streamAddress) throws IOException;
   }
 
   public boolean loadNextBatch() throws IOException {
     long start = System.nanoTime();
     try {
-      if (arrowBatchReadsEnabled) {
+      if (arrowBatchAllocator != null) {
         // An Arrow batch is valid until the next one is requested.
         releaseOwnedVectors();
       }
@@ -181,7 +178,7 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
       VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
       LanceInputPartition inputPartition = fragmentScanner.getInputPartition();
       ColumnVector[] columns =
-          arrowBatchReadsEnabled
+          arrowBatchAllocator != null
               ? ArrowBatchAdapter.buildColumns(
                   root,
                   inputPartition.getSchema(),

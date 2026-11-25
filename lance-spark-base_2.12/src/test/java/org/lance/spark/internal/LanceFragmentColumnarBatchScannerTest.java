@@ -11,10 +11,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.lance.spark.read;
+package org.lance.spark.internal;
 
 import org.lance.spark.TestUtils;
-import org.lance.spark.internal.LanceFragmentColumnarBatchScanner;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
@@ -77,7 +76,6 @@ public class LanceFragmentColumnarBatchScannerTest {
     assertEquals(4, rowIndex);
   }
 
-  /** Refuses the {@code refused}-th allocation and every later one. */
   private static final class RefusingListener implements AllocationListener {
     private final int refused;
     private int allocations;
@@ -94,15 +92,11 @@ public class LanceFragmentColumnarBatchScannerTest {
     }
   }
 
-  /**
-   * An allocator that refuses memory before the first batch is moved out of its C array fails the
-   * import and leaves nothing behind: the exported stream and its batch are released, whether the
-   * refusal hits the stream struct, the importer's struct, the schema or the first array. The
-   * producer exports a Java stream, so it holds whatever batch is not released.
-   */
   @Test
   public void refusedImportReleasesTheExportedStream() throws Exception {
     byte[] ipc = oneBatchStream();
+    // Refuses the stream struct, the importer's struct, the schema or the first batch's array. The
+    // producer exports a Java stream, so its allocator holds whatever the import leaks.
     for (int refused = 1; refused <= 4; refused++) {
       try (BufferAllocator producer = new RootAllocator();
           BufferAllocator consumer =
@@ -161,7 +155,6 @@ public class LanceFragmentColumnarBatchScannerTest {
     return false;
   }
 
-  /** An Arrow IPC stream of one batch of 1024 ints. */
   private static byte[] oneBatchStream() throws IOException {
     try (BufferAllocator allocator = new RootAllocator();
         IntVector ids = new IntVector("id", allocator)) {
