@@ -22,6 +22,7 @@ import org.lance.spark.utils.BlobUtils;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
+import org.apache.arrow.memory.AllocationListener;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.FieldVector;
@@ -44,6 +45,7 @@ import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.arrow.vector.util.TransferPair;
+import org.apache.spark.TaskContext;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
@@ -62,6 +64,7 @@ import org.apache.spark.sql.util.ArrowUtils;
 import org.apache.spark.sql.vectorized.ArrowColumnVector;
 import org.apache.spark.sql.vectorized.ColumnVector;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
+import org.apache.spark.util.TaskCompletionListener;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -77,8 +80,11 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -800,5 +806,176 @@ public abstract class BaseArrowBatchReadTest {
       }
     }
     assertEquals(before, root.getAllocatedMemory());
+  }
+
+  private static final class CountingListener implements AllocationListener {
+    final AtomicLong reserved = new AtomicLong();
+    final AtomicLong released = new AtomicLong();
+
+    @Override
+    public void onPreAllocation(long size) {
+      reserved.addAndGet(size);
+    }
+
+    @Override
+    public void onRelease(long size) {
+      released.addAndGet(size);
+    }
+  }
+
+  @Test
+  public void providedAllocatorHoldsTheArrowBatches() throws Exception {
+    String uri = writeSparkDataset("provided");
+    LanceScan scan = lanceScan(read(uri, true).select("id", "vec", "_fragid"));
+    InputPartition partition = scan.planInputPartitions()[0];
+    BufferAllocator lanceAllocator = LanceRuntime.arrowBatchAllocator();
+    long lanceBefore = lanceAllocator.getAllocatedMemory();
+    CountingListener listener = new CountingListener();
+    try (BufferAllocator consumer =
+        ArrowUtils.rootAllocator().newChildAllocator("consumer", listener, 0, Long.MAX_VALUE)) {
+      List<FieldVector> retained = new ArrayList<>();
+      List<List<Object>> expected = new ArrayList<>();
+      LanceRuntime.setArrowBatchAllocatorProvider(() -> consumer);
+      PartitionReader<ColumnarBatch> reader;
+      try {
+        reader = scan.createReaderFactory().createColumnarReader(partition);
+      } finally {
+        LanceRuntime.setArrowBatchAllocatorProvider(null);
+      }
+      try {
+        int batches = 0;
+        while (reader.next()) {
+          ColumnarBatch batch = reader.get();
+          for (int c = 0; c < batch.numCols(); c++) {
+            FieldVector vector =
+                (FieldVector) ((ArrowColumnVector) batch.column(c)).getValueVector();
+            assertSame(consumer, vector.getAllocator());
+            if (batches == 0) {
+              List<Object> values = new ArrayList<>();
+              for (int i = 0; i < vector.getValueCount(); i++) {
+                values.add(vector.getObject(i));
+              }
+              expected.add(values);
+              TransferPair pair = vector.getTransferPair(consumer);
+              pair.transfer();
+              retained.add((FieldVector) pair.getTo());
+            }
+          }
+          batches++;
+        }
+        assertTrue(batches > 0);
+        assertTrue(consumer.getAllocatedMemory() > 0);
+      } finally {
+        reader.close();
+      }
+      assertEquals(lanceBefore, lanceAllocator.getAllocatedMemory());
+      assertEquals(3, retained.size());
+      for (int c = 0; c < retained.size(); c++) {
+        FieldVector kept = retained.get(c);
+        for (int i = 0; i < kept.getValueCount(); i++) {
+          assertEquals(expected.get(c).get(i), kept.getObject(i));
+        }
+        kept.close();
+      }
+      assertEquals(0, consumer.getAllocatedMemory());
+    }
+    assertTrue(listener.reserved.get() > 0);
+    assertEquals(listener.reserved.get(), listener.released.get());
+  }
+
+  @Test
+  public void providerWithoutAnAllocatorLeavesTheArrowBatchAllocator() throws Exception {
+    String uri = writeSparkDataset("unprovided");
+    LanceScan scan = lanceScan(read(uri, true).select("id", "vec"));
+    LanceRuntime.setArrowBatchAllocatorProvider(() -> null);
+    try {
+      assertSame(LanceRuntime.arrowBatchAllocator(), LanceRuntime.arrowBatchReadAllocator());
+      assertTrue(forEachArrowBatch(scan, vectors -> {}) > 0);
+    } finally {
+      LanceRuntime.setArrowBatchAllocatorProvider(null);
+    }
+  }
+
+  @Test
+  public void aDifferentProviderIsRejected() {
+    try (BufferAllocator consumer =
+        ArrowUtils.rootAllocator().newChildAllocator("consumer", 0, Long.MAX_VALUE)) {
+      Supplier<BufferAllocator> provider = () -> consumer;
+      Supplier<BufferAllocator> other = () -> null;
+      LanceRuntime.setArrowBatchAllocatorProvider(provider);
+      try {
+        LanceRuntime.setArrowBatchAllocatorProvider(provider);
+        assertThrows(
+            IllegalStateException.class, () -> LanceRuntime.setArrowBatchAllocatorProvider(other));
+        assertSame(consumer, LanceRuntime.arrowBatchReadAllocator());
+      } finally {
+        LanceRuntime.setArrowBatchAllocatorProvider(null);
+      }
+      LanceRuntime.setArrowBatchAllocatorProvider(other);
+      LanceRuntime.setArrowBatchAllocatorProvider(null);
+    }
+  }
+
+  @Test
+  public void sparkJobsReleaseTheProvidedAllocator() throws Exception {
+    String uri = writeSparkDataset("provided-jobs");
+    Function<Boolean, Dataset<Row>> scan =
+        arrowBatches ->
+            spark
+                .read()
+                .format(LanceDataSource.name)
+                .option(LanceSparkReadOptions.CONFIG_ARROW_BATCH_READS, arrowBatches.toString())
+                .option(LanceSparkReadOptions.CONFIG_BATCH_SIZE, "4")
+                .load(uri)
+                .select("id", "vec", "_fragid");
+    List<Row> expected = scan.apply(false).orderBy("id").collectAsList();
+    CountingListener listener = new CountingListener();
+    try (BufferAllocator consumer =
+        ArrowUtils.rootAllocator().newChildAllocator("consumer", 0, Long.MAX_VALUE)) {
+      // Like an engine's per-task allocator, each task's is closed at the end of the task, which
+      // fails the task if a reader still holds memory in it. The limit leaves a reader open.
+      Map<Long, BufferAllocator> taskAllocators = new ConcurrentHashMap<>();
+      LanceRuntime.setArrowBatchAllocatorProvider(
+          () -> {
+            TaskContext task = TaskContext.get();
+            return taskAllocators.computeIfAbsent(
+                task.taskAttemptId(),
+                id -> {
+                  BufferAllocator allocator =
+                      consumer.newChildAllocator("task-" + id, listener, 0, Long.MAX_VALUE);
+                  task.addTaskCompletionListener(
+                      (TaskCompletionListener) context -> allocator.close());
+                  return allocator;
+                });
+          });
+      try {
+        assertEquals(expected, scan.apply(true).orderBy("id").collectAsList());
+        assertEquals(1, scan.apply(true).limit(1).collectAsList().size());
+      } finally {
+        LanceRuntime.setArrowBatchAllocatorProvider(null);
+      }
+      assertTrue(listener.reserved.get() > 0, "no batch was built in a task's allocator");
+      assertTrue(consumer.getChildAllocators().isEmpty(), "a task's allocator was not closed");
+    }
+    assertEquals(listener.reserved.get(), listener.released.get());
+  }
+
+  @Test
+  public void readsWithoutArrowBatchesNeverAskTheProvider() throws Exception {
+    String uri = writeSparkDataset("unasked");
+    AtomicLong asked = new AtomicLong();
+    LanceRuntime.setArrowBatchAllocatorProvider(
+        () -> {
+          asked.incrementAndGet();
+          throw new IllegalStateException("the provider was asked");
+        });
+    try {
+      assertEquals(20, read(uri, false).select("id", "vec").collectAsList().size());
+      assertEquals(20, read(uri, false).count());
+      assertEquals(20, read(uri, true).count());
+    } finally {
+      LanceRuntime.setArrowBatchAllocatorProvider(null);
+    }
+    assertEquals(0, asked.get());
   }
 }

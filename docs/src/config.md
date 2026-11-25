@@ -726,6 +726,22 @@ version columns are exposed as signed 64-bit integers.
 Native vectors may be reused on `next()`, while converted vectors are released. Consumers must
 copy or transfer data they need to keep before advancing.
 
+By default the batches are allocated under Spark's root allocator. An engine that accounts for the
+Arrow memory it holds can have them allocated from its own allocator instead with
+`LanceRuntime.setArrowBatchAllocatorProvider`: a reader asks the provider for its allocator on the
+task's thread when it is created, and builds every batch there, so the engine takes the vectors
+without copying or moving their memory between allocators. How long a batch is valid does not
+change: the engine still transfers the vectors it keeps past `next()` or `close()`, within that
+allocator. The provider is per JVM, so the engine sets it on each executor, and it must be thread
+safe. Setting a provider while a different one is set fails.
+
+If the allocator of the batches refuses memory, the read fails. Arrow Java before 20.0.0 can then
+leak the batch being imported
+([apache/arrow-java#1239](https://github.com/apache/arrow-java/issues/1239)), and so can a refusal
+while allocating the struct the batch moves into
+([apache/arrow-java#1491](https://github.com/apache/arrow-java/issues/1491)). The default allocator
+refuses memory only when `LANCE_ALLOCATOR_SIZE` caps it.
+
 ## Memory Configuration
 
 Lance Spark uses Arrow for data transfer between native code and Spark, and maintains caches for improved performance.
@@ -737,7 +753,7 @@ Set via environment variable `LANCE_ALLOCATOR_SIZE` (default: unlimited).
 Controls the maximum memory allocation for Arrow buffers used in data transfer between Lance native code and Spark.
 [Arrow batch reads](#arrow-batch-reads) allocate their buffers from a child of Spark's root allocator instead, so
 that a consumer under that root can take them without copying. `LANCE_ALLOCATOR_SIZE` caps that allocator too, as a
-separate budget.
+separate budget, but not an allocator a consumer supplies with `LanceRuntime.setArrowBatchAllocatorProvider`.
 
 | Environment Variable   | Default          | Description                              |
 |------------------------|------------------|------------------------------------------|
