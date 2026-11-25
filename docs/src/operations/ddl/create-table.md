@@ -71,35 +71,28 @@ Create new Lance tables with SQL DDL statements or DataFrames.
 
 ## Table Properties
 
-Set table properties with `TBLPROPERTIES` or SQL `OPTIONS`. Both clauses save user
-properties on the table, including in `CREATE TABLE ... AS SELECT` (CTAS):
+SQL `OPTIONS` and `TBLPROPERTIES` persist configuration with the table, including in CTAS.
+Spark's `option.` aliases are stored under the unprefixed key, preserving its case;
+the prefixed value takes precedence if both forms are supplied.
+Supported settings can be reused across sessions and engines:
 
 ```sql
-CREATE TABLE events USING lance
-OPTIONS ('app.source' = 'events')
-TBLPROPERTIES ('app.owner' = 'analytics')
-AS SELECT 1 AS id;
-
-SHOW TBLPROPERTIES events;
--- app.source = events; app.owner = analytics
+CREATE TABLE documents (id BIGINT, content BINARY) USING lance
+OPTIONS ('lance.compaction.batch_size' = '64')
+TBLPROPERTIES ('lance.compaction.max_bytes_per_file' = '536870912');
 ```
 
-With DataFrame V2, use `.tableProperty("app.owner", "analytics")` to save a property;
-`.option(...)` applies only to the current operation.
-
-CREATE, REPLACE, and ALTER SET exclude `storage.*`, `transaction_properties`, and
-`transaction_properties.*` from persisted properties, including their `option.*` aliases.
-Reusable tuning settings such as `max_row_per_file` and `batch_size` are retained;
-their use as read/write defaults is implemented separately in [#907](https://github.com/lance-format/lance-spark/pull/907).
+Use `SHOW TBLPROPERTIES` to inspect saved properties and [ALTER TABLE](alter-table.md)
+to update or remove them. See [OPTIMIZE](optimize.md) for the compaction settings above.
 
 `REPLACE TABLE` and `CREATE OR REPLACE TABLE` update supplied properties and retain
-unspecified ones. CTAS does not inherit properties from its source tables.
-Use [ALTER TABLE](alter-table.md) to update or remove properties. See
-[Configuration](../../config.md) for settings that affect table behavior.
+unspecified ones. Registering an existing dataset with `LOCATION` leaves its config unchanged.
 
-!!! note
-    CREATE commits schema and properties together, including data for CTAS and replacements.
-    Registering an existing dataset with `LOCATION` leaves its configuration unchanged.
+CREATE, REPLACE, and ALTER SET do not persist `storage.*`, `transaction_properties`, or
+`transaction_properties.*`, including their `option.*` aliases.
+
+With DataFrame V2, `.tableProperty(...)` persists configuration;
+`.option(...)` applies only to the current operation.
 
 ## Complex Data Types
 

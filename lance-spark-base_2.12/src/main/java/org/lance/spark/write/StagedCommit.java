@@ -173,10 +173,22 @@ public class StagedCommit {
 
   /** Performs the actual commit using the stored dataset and fragments. */
   public void commit() {
-    if (dataset.isEmpty()) {
-      commitNewTable();
-    } else {
-      commitExistingTable();
+    try {
+      if (dataset.isEmpty()) {
+        commitNewTable();
+      } else {
+        commitExistingTable();
+      }
+    } catch (IllegalArgumentException e) {
+      if (fileFormatVersion == null) {
+        throw e;
+      }
+      throw new IllegalArgumentException(
+          "Failed to commit table with file_format_version '"
+              + fileFormatVersion
+              + "': "
+              + e.getMessage(),
+          e);
     }
   }
 
@@ -188,10 +200,7 @@ public class StagedCommit {
             .configUpsertValues(tableProperties)
             .build();
     final CommitBuilder builder =
-        new CommitBuilder(datasetUri, LanceRuntime.allocator())
-            .writeParams(storageOptions)
-            // A concurrent creator must cause a conflict, never an overwrite of its table.
-            .maxRetries(0);
+        new CommitBuilder(datasetUri, LanceRuntime.allocator()).writeParams(storageOptions);
     if (enableStableRowIds) {
       builder.useStableRowIds(true);
     }
@@ -201,7 +210,6 @@ public class StagedCommit {
     applyManagedVersioning(builder);
     try (Transaction txn =
             new Transaction.Builder()
-                .readVersion(0)
                 .operation(operation)
                 .transactionProperties(transactionProperties)
                 .build();

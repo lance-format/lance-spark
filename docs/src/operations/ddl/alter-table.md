@@ -29,10 +29,7 @@ If a property already exists, its value is overwritten:
 ALTER TABLE users SET TBLPROPERTIES ('env' = 'staging');
 ```
 
-SET uses the same [property filtering rules as CREATE](create-table.md#table-properties):
-storage settings and transaction metadata are ignored, including `option.*` aliases.
-If all supplied properties are filtered out, no new version is created. User property
-keys retain their original spelling. UNSET can still remove previously stored keys.
+SET follows the [same property rules as CREATE](create-table.md#table-properties).
 
 ## UNSET TBLPROPERTIES
 
@@ -52,8 +49,8 @@ Unsetting a property that does not exist is a no-op (no error is raised).
 
 ## Limitations
 
-Set schema and encoding properties before the column exists, using `CREATE TABLE` or
-`SET TBLPROPERTIES` before [ADD COLUMNS](../dml/add-columns.md#adding-a-blob-v2-column).
+Schema and encoding properties must be configured before the column exists: in `CREATE TABLE`
+for initial columns, or with `SET TBLPROPERTIES` before `ADD COLUMNS` for future columns.
 Once the column exists, SET rejects these keys, even when setting the current value:
 
 - `<column>.arrow.fixed-size-list.size`, `<column>.arrow.float16`,

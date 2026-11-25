@@ -18,6 +18,10 @@ Over time, as data is appended to Lance tables, the number of fragments (data fi
 
 ## Options
 
+Save defaults such as `lance.compaction.batch_size` and `lance.compaction.max_bytes_per_file`
+as [table properties](create-table.md#table-properties) to reuse them across runs.
+Explicit `WITH (...)` arguments override the corresponding table defaults for that operation.
+
 The `OPTIMIZE` command supports several options to control compaction behavior:
 
 | Option | Type | Description |

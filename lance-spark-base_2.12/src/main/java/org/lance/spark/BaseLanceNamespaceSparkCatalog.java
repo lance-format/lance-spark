@@ -674,7 +674,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       throw new IllegalStateException(
           "Namespace not configured. Use 'impl' config for namespace-based access.");
     }
-    if (tableExists(ident)) {
+    if (!pathBased && tableExists(ident)) {
       throw new TableAlreadyExistsException(ident);
     }
 
@@ -846,13 +846,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
           "Adding columns and changing table properties in one operation is not supported.");
     }
 
-    if (propsToSet.containsKey(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS)
-        || keysToRemove.contains(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS)) {
-      throw new UnsupportedOperationException(
-          LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS
-              + " can only be set at table creation.");
-    }
-
     if (columnsToAdd.isEmpty() && propsToSet.isEmpty() && keysToRemove.isEmpty()) {
       // No changes to apply, just return the current table
       return loadTable(ident);
@@ -899,6 +892,12 @@ public abstract class BaseLanceNamespaceSparkCatalog
       boolean managedVersioning,
       List<String> tableIdList) {
     propsToSet = copyUserTableProperties(propsToSet);
+    if (propsToSet.containsKey(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS)
+        || keysToRemove.contains(LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS)) {
+      throw new UnsupportedOperationException(
+          LanceSparkCatalogConfig.TABLE_OPT_ENABLE_STABLE_ROW_IDS
+              + " can only be set at table creation.");
+    }
     if (propsToSet.isEmpty() && keysToRemove.isEmpty()) {
       return;
     }
@@ -1579,21 +1578,44 @@ public abstract class BaseLanceNamespaceSparkCatalog
       return Collections.emptyMap();
     }
 
-    Map<String, String> userProperties = new HashMap<>();
+    Map<String, String> normalizedProperties = new HashMap<>();
+    Map<String, String> optionProperties = new HashMap<>();
+
     for (Map.Entry<String, String> entry : properties.entrySet()) {
-      String key = entry.getKey().toLowerCase(Locale.ROOT);
-      // Spark also includes SQL OPTIONS under option.* aliases in the catalog properties.
-      while (key.startsWith(TableCatalog.OPTION_PREFIX)) {
-        key = key.substring(TableCatalog.OPTION_PREFIX.length());
+      String propertyName = entry.getKey();
+
+      if (!propertyName.regionMatches(
+          true, 0, TableCatalog.OPTION_PREFIX, 0, TableCatalog.OPTION_PREFIX.length())) {
+        normalizedProperties.put(propertyName, entry.getValue());
+        continue;
       }
-      if (!SPARK_RESERVED_TABLE_PROPERTIES.contains(key)
-          && !key.startsWith("storage.")
-          && !TransactionProperties.isOption(key)) {
-        // Normalize only for classification; user keys and column names retain their case.
-        userProperties.put(entry.getKey(), entry.getValue());
-      }
+
+      // Strip repeated aliases so reserved properties cannot bypass filtering.
+      String normalizedPropertyName = propertyName;
+      do {
+        normalizedPropertyName =
+            normalizedPropertyName.substring(TableCatalog.OPTION_PREFIX.length());
+      } while (normalizedPropertyName.regionMatches(
+          true, 0, TableCatalog.OPTION_PREFIX, 0, TableCatalog.OPTION_PREFIX.length()));
+
+      optionProperties.put(normalizedPropertyName, entry.getValue());
     }
-    return userProperties.isEmpty() ? Collections.emptyMap() : userProperties;
+
+    // OPTIONS override bare properties with the same normalized name.
+    normalizedProperties.putAll(optionProperties);
+
+    // Classify case-insensitively without changing stored property names.
+    normalizedProperties
+        .entrySet()
+        .removeIf(
+            entry -> {
+              String lowerCasePropertyName = entry.getKey().toLowerCase(Locale.ROOT);
+              return SPARK_RESERVED_TABLE_PROPERTIES.contains(lowerCasePropertyName)
+                  || lowerCasePropertyName.startsWith(LanceSparkCatalogConfig.STORAGE_PREFIX)
+                  || TransactionProperties.isOption(lowerCasePropertyName);
+            });
+
+    return normalizedProperties.isEmpty() ? Collections.emptyMap() : normalizedProperties;
   }
 
   private void updateDatasetConfig(

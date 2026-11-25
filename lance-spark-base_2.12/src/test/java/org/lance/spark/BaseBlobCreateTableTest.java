@@ -1205,7 +1205,9 @@ public abstract class BaseBlobCreateTableTest {
                         + " (id INT, data BINARY) USING lance TBLPROPERTIES ("
                         + "'data.lance.encoding' = 'blob', 'file_format_version' = '2.x')"));
     assertTrue(
-        ex.getMessage() != null && ex.getMessage().toLowerCase().contains("version"),
+        ex.getMessage() != null
+            && ex.getMessage().contains("file_format_version")
+            && ex.getMessage().contains("2.x"),
         "creating with a malformed file_format_version must fail mentioning the version, but got "
             + ex.getMessage());
   }

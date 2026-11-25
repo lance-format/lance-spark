@@ -125,7 +125,9 @@ public class StagedCommitTest {
             ARROW_SCHEMA,
             StagedCommitOptions.pathBased(Collections.emptyMap(), false, "invalid-format")
                 .withTableProperties(Collections.singletonMap("app.owner", "uncommitted")));
-    assertThrows(RuntimeException.class, commit::commit);
+    IllegalArgumentException error = assertThrows(IllegalArgumentException.class, commit::commit);
+    assertTrue(error.getMessage().contains("file_format_version 'invalid-format'"));
+    assertInstanceOf(IllegalArgumentException.class, error.getCause());
     try (Dataset reopened = Utils.openDatasetBuilder(readOptions).build()) {
       assertEquals(1, reopened.version());
       assertFalse(reopened.getConfig().containsKey("app.owner"));

@@ -375,6 +375,7 @@ class TestDDLStagingTable:
         props = dict(spark.sql("SHOW TBLPROPERTIES default.test_table").collect())
         assert props["app.owner"] == "old"
         assert props["app.option"] == "persisted"
+        assert "option.app.option" not in props
 
         spark.sql("INSERT INTO default.test_table VALUES (3)")
         assert [row.id for row in spark.table("default.test_table").orderBy("id").collect()] == (
@@ -390,6 +391,7 @@ class TestDDLStagingTable:
         assert props["app.owner"] == "new"
         assert props["app.retained"] == "keep"
         assert props["app.option"] == "persisted"
+        assert "option.app.option" not in props
         assert [row.id for row in spark.table("default.test_table").collect()] == [2]
 
     def test_replace_table_as_select(self, spark, test_table):
