@@ -82,7 +82,10 @@ public abstract class BaseTestLocationSupport extends BaseTestSparkDirectoryName
     // Produce a real Lance dataset by creating a managed table, then read back its absolute path.
     String src = generateTableName("loc_src");
     String srcFull = catalogName + ".default." + src;
-    spark.sql("CREATE TABLE " + srcFull + " (id INT, name STRING)");
+    spark.sql(
+        "CREATE TABLE "
+            + srcFull
+            + " (id INT, name STRING) TBLPROPERTIES ('app.owner' = 'original')");
     spark.sql("INSERT INTO " + srcFull + " VALUES (1, 'alice')");
     String existingLocation = locationOf(srcFull);
 
@@ -96,7 +99,10 @@ public abstract class BaseTestLocationSupport extends BaseTestSparkDirectoryName
             + regFull
             + " (id INT, name STRING) USING lance LOCATION '"
             + existingLocation
-            + "'");
+            + "' TBLPROPERTIES ('app.owner' = 'registration')");
+    assertEquals(
+        "original",
+        spark.sql("SHOW TBLPROPERTIES " + srcFull + " ('app.owner')").first().getString(1));
     assertThrows(Exception.class, () -> spark.sql("SELECT * FROM " + regFull).collectAsList());
   }
 

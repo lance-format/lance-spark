@@ -360,6 +360,40 @@ class TestDDLStagingTable:
         assert result[0].name == "Alice"
         assert result[2].id == 3
 
+    @pytest.mark.rest_dir_compatible
+    @pytest.mark.parametrize("create_as_select", [False, True], ids=["create", "ctas"])
+    def test_create_and_replace_table_properties(self, spark, create_as_select):
+        schema = "" if create_as_select else "(id INT)"
+        query = "AS SELECT 1 AS id" if create_as_select else ""
+        spark.sql(f"""
+            CREATE TABLE default.test_table {schema} USING lance
+            OPTIONS ('app.option' = 'persisted')
+            TBLPROPERTIES ('app.owner' = 'old', 'app.retained' = 'keep')
+            {query}
+        """)
+        spark.sql("REFRESH TABLE default.test_table")
+        props = dict(spark.sql("SHOW TBLPROPERTIES default.test_table").collect())
+        assert props["app.owner"] == "old"
+        assert props["app.option"] == "persisted"
+        assert "option.app.option" not in props
+
+        spark.sql("INSERT INTO default.test_table VALUES (3)")
+        assert [row.id for row in spark.table("default.test_table").orderBy("id").collect()] == (
+            [1, 3] if create_as_select else [3]
+        )
+
+        spark.sql("""
+            REPLACE TABLE default.test_table USING lance
+            TBLPROPERTIES ('app.owner' = 'new') AS SELECT 2 AS id
+        """)
+        spark.sql("REFRESH TABLE default.test_table")
+        props = dict(spark.sql("SHOW TBLPROPERTIES default.test_table").collect())
+        assert props["app.owner"] == "new"
+        assert props["app.retained"] == "keep"
+        assert props["app.option"] == "persisted"
+        assert "option.app.option" not in props
+        assert [row.id for row in spark.table("default.test_table").collect()] == [2]
+
     def test_replace_table_as_select(self, spark, test_table):
         """Test REPLACE TABLE AS SELECT (RTAS) replaces data."""
         # Create initial table with data
@@ -607,6 +641,7 @@ class TestDDLAlterTableProperties:
             "arrow.fixed-size-list.size"
         ] == 756
 
+    @pytest.mark.rest_dir_compatible
     def test_set_tblproperties(self, spark):
         """SET TBLPROPERTIES stores properties visible via SHOW TBLPROPERTIES."""
         spark.sql("""
@@ -614,7 +649,11 @@ class TestDDLAlterTableProperties:
         """)
         spark.sql("""
             ALTER TABLE default.test_table
-            SET TBLPROPERTIES ('team' = 'data-eng', 'version' = '2.0')
+            SET TBLPROPERTIES (
+                'team' = 'data-eng', 'version' = '2.0', 'App.Owner' = 'analytics',
+                'storage.secret_access_key' = 'test-secret',
+                'OPTION.Transaction_Properties.request' = 'ignored'
+            )
         """)
 
         rows = spark.sql("SHOW TBLPROPERTIES default.test_table").collect()
@@ -622,6 +661,9 @@ class TestDDLAlterTableProperties:
 
         assert props["team"] == "data-eng"
         assert props["version"] == "2.0"
+        assert props["App.Owner"] == "analytics"
+        assert "storage.secret_access_key" not in props
+        assert "OPTION.Transaction_Properties.request" not in props
 
     def test_unset_tblproperties(self, spark):
         """UNSET TBLPROPERTIES removes a previously set property."""
@@ -3793,12 +3835,12 @@ class TestStableRowIds:
         Simulates a CDC pipeline that tracks the last processed version and
         incrementally processes changes using version tracking columns.
         """
+        # Empty CTAS establishes a single-version baseline for the CDC checkpoints below.
         spark.sql("""
-            CREATE TABLE default.test_table (
-                id INT,
-                name STRING,
-                value INT
-            ) TBLPROPERTIES ('enable_stable_row_ids' = 'true')
+            CREATE TABLE default.test_table USING lance
+            TBLPROPERTIES ('enable_stable_row_ids' = 'true')
+            AS SELECT 0 AS id, CAST(NULL AS STRING) AS name, CAST(NULL AS INT) AS value
+            WHERE false
         """)
 
         # v2: Initial data load

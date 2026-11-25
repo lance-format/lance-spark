@@ -29,6 +29,8 @@ If a property already exists, its value is overwritten:
 ALTER TABLE users SET TBLPROPERTIES ('env' = 'staging');
 ```
 
+SET follows the [same property rules as CREATE](create-table.md#table-properties).
+
 ## UNSET TBLPROPERTIES
 
 Remove properties from a table:
@@ -55,10 +57,6 @@ Once the column exists, SET rejects these keys, even when setting the current va
   `<column>.arrow.fixed-size-binary.byte-width`, and `<column>.arrow.large_var_char`.
 - `<column>.lance.encoding` and the supported `<column>.lance.*` encoding keys:
   `compression`, `compression-level`, `structural-encoding`, `rle-threshold`, and `bss`.
-
-For directory-backed tables, use `ALTER TABLE` to persist future-column properties because
-`CREATE TABLE` does not persist user properties. See [ADD COLUMNS](../dml/add-columns.md)
-for a blob column example.
 
 `UNSET TBLPROPERTIES` can remove legacy config without changing the stored schema or encoding.
 If a SET names any protected existing column, the entire statement is rejected.

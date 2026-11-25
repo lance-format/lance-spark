@@ -69,6 +69,31 @@ Create new Lance tables with SQL DDL statements or DataFrames.
     df.writeTo("users").create();
     ```
 
+## Table Properties
+
+SQL `OPTIONS` and `TBLPROPERTIES` persist configuration with the table, including in CTAS.
+Spark's `option.` aliases are stored under the unprefixed key, preserving its case;
+the prefixed value takes precedence if both forms are supplied.
+Supported settings can be reused across sessions and engines:
+
+```sql
+CREATE TABLE documents (id BIGINT, content BINARY) USING lance
+OPTIONS ('lance.compaction.batch_size' = '64')
+TBLPROPERTIES ('lance.compaction.max_bytes_per_file' = '536870912');
+```
+
+Use `SHOW TBLPROPERTIES` to inspect saved properties and [ALTER TABLE](alter-table.md)
+to update or remove them. See [OPTIMIZE](optimize.md) for the compaction settings above.
+
+`REPLACE TABLE` and `CREATE OR REPLACE TABLE` update supplied properties and retain
+unspecified ones. Registering an existing dataset with `LOCATION` leaves its config unchanged.
+
+CREATE, REPLACE, and ALTER SET do not persist `storage.*`, `transaction_properties`, or
+`transaction_properties.*`, including their `option.*` aliases.
+
+With DataFrame V2, `.tableProperty(...)` persists configuration;
+`.option(...)` applies only to the current operation.
+
 ## Complex Data Types
 
 === "SQL"

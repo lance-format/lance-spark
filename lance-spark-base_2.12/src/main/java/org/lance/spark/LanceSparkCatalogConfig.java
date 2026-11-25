@@ -40,7 +40,7 @@ import java.util.Objects;
  */
 public class LanceSparkCatalogConfig {
 
-  private static final String STORAGE_PREFIX = "storage.";
+  public static final String STORAGE_PREFIX = "storage.";
 
   /** Known table option keys. */
   public static final String TABLE_OPT_ENABLE_STABLE_ROW_IDS = "enable_stable_row_ids";

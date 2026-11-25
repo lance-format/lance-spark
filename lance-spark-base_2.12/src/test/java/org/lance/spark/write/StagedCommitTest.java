@@ -15,7 +15,9 @@ package org.lance.spark.write;
 
 import org.lance.Dataset;
 import org.lance.spark.LanceRuntime;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
@@ -60,11 +62,14 @@ public class StagedCommitTest {
         StagedCommit.forNewTable(
             ARROW_SCHEMA,
             datasetUri,
-            StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
+            StagedCommitOptions.pathBased(Collections.emptyMap(), false, null)
+                .withTableProperties(Collections.singletonMap("app.owner", "analytics")));
     commit.commit();
     try (Dataset dataset =
         Dataset.open().uri(datasetUri).allocator(LanceRuntime.allocator()).build()) {
       assertEquals(0, dataset.countRows());
+      assertEquals(1, dataset.version());
+      assertEquals("analytics", dataset.getConfig().get("app.owner"));
     }
   }
 
@@ -106,6 +111,27 @@ public class StagedCommitTest {
             ARROW_SCHEMA,
             StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
     commit.abort();
+  }
+
+  @Test
+  public void testFailedCommitDoesNotPersistProperties(TestInfo testInfo) {
+    String datasetUri = createDataset(testInfo.getTestMethod().get().getName());
+    LanceSparkReadOptions readOptions =
+        LanceSparkReadOptions.builder().datasetUri(datasetUri).build();
+    Dataset dataset = Utils.openDatasetBuilder(readOptions).build();
+    StagedCommit commit =
+        StagedCommit.forExistingTable(
+            dataset,
+            ARROW_SCHEMA,
+            StagedCommitOptions.pathBased(Collections.emptyMap(), false, "invalid-format")
+                .withTableProperties(Collections.singletonMap("app.owner", "uncommitted")));
+    IllegalArgumentException error = assertThrows(IllegalArgumentException.class, commit::commit);
+    assertTrue(error.getMessage().contains("file_format_version 'invalid-format'"));
+    assertInstanceOf(IllegalArgumentException.class, error.getCause());
+    try (Dataset reopened = Utils.openDatasetBuilder(readOptions).build()) {
+      assertEquals(1, reopened.version());
+      assertFalse(reopened.getConfig().containsKey("app.owner"));
+    }
   }
 
   @Test
