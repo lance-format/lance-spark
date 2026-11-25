@@ -40,6 +40,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -48,6 +49,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 public class LanceScanTest {
 
   private static final StructType TEST_SCHEMA = TestUtils.TestTable1Config.schema;
+
+  private static final List<LanceSplit> TEST_SPLITS =
+      List.of(
+          new LanceSplit(List.of(FragmentSplit.full(0))),
+          new LanceSplit(List.of(FragmentSplit.full(1))));
+  private static final Map<Integer, Long> TEST_ROW_COUNTS = Map.of(0, 2L, 1, 2L);
 
   private LanceScan buildScan() {
     return (LanceScan)
@@ -135,18 +142,49 @@ public class LanceScanTest {
             Collections.emptyMap(),
             null,
             Collections.emptyMap());
-    builder.pushLimit(1);
+    // Each of the two fragments has two rows.
+    assertTrue(builder.pushLimit(2));
     LanceScan scan = (LanceScan) builder.build();
-    // With LIMIT 1 and test dataset having 2 rows per fragment,
-    // only 1 fragment should be planned
-    InputPartition[] partitions = scan.planInputPartitions();
-    assertTrue(partitions.length >= 1);
-    // Should be fewer than total fragments if limit pruning works
-    LanceScan scanNoLimit = buildScan();
-    InputPartition[] allPartitions = scanNoLimit.planInputPartitions();
-    assertTrue(
-        partitions.length <= allPartitions.length,
-        "Limit-pruned partitions should not exceed total partitions");
+    assertEquals(1, scan.planInputPartitions().length);
+  }
+
+  @Test
+  public void testLimitKeepsSlicedPartitions() {
+    // Each fragment has 100 rows, but each slice contributes only one row toward LIMIT 2.
+    List<LanceSplit> splits =
+        List.of(
+            new LanceSplit(List.of(FragmentSplit.slice(0, 10, 1))),
+            new LanceSplit(List.of(FragmentSplit.slice(1, 20, 1))));
+    Map<Integer, Long> rowCounts = Map.of(0, 100L, 1, 100L);
+
+    LanceScan scan =
+        new LanceScan(
+            TEST_SCHEMA,
+            TestUtils.TestTable1Config.readOptions,
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.of(2),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            new Predicate[0],
+            null,
+            null,
+            Collections.emptyMap(),
+            Collections.emptyMap(),
+            new org.apache.spark.sql.connector.expressions.NamedReference[0],
+            splits,
+            rowCounts,
+            null,
+            null,
+            null,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            false,
+            null,
+            null);
+
+    assertEquals(2, scan.planInputPartitions().length);
   }
 
   // --- outputPartitioning ---
@@ -201,7 +239,6 @@ public class LanceScanTest {
     fragKeys.put(1, "west");
     Expression partitionExpression = Expressions.column("region");
 
-    LanceSplit.ScanPlanResult plan = LanceSplit.planScan(TestUtils.TestTable1Config.readOptions);
     LanceScan scan =
         new LanceScan(
             TEST_SCHEMA,
@@ -217,8 +254,8 @@ public class LanceScanTest {
             Collections.emptyMap(),
             Collections.emptyMap(),
             new org.apache.spark.sql.connector.expressions.NamedReference[0],
-            plan.getSplits(),
-            plan.getFragmentRowCounts(),
+            TEST_SPLITS,
+            TEST_ROW_COUNTS,
             partitionExpression,
             "region",
             fragKeys,
@@ -256,9 +293,8 @@ public class LanceScanTest {
             .fields()
             .get(0);
     Expression partitionExpression = SparkLanceShardingUtils.toSparkExpression(field, null);
-    LanceSplit.ScanPlanResult plan = LanceSplit.planScan(TestUtils.TestTable1Config.readOptions);
     Map<Integer, Object> fragKeys = new HashMap<>();
-    for (LanceSplit split : plan.getSplits()) {
+    for (LanceSplit split : TEST_SPLITS) {
       int fragmentId = split.getFragments().get(0);
       fragKeys.put(fragmentId, 10L * (fragmentId + 1));
     }
@@ -278,8 +314,8 @@ public class LanceScanTest {
             Collections.emptyMap(),
             Collections.emptyMap(),
             new org.apache.spark.sql.connector.expressions.NamedReference[0],
-            plan.getSplits(),
-            plan.getFragmentRowCounts(),
+            TEST_SPLITS,
+            TEST_ROW_COUNTS,
             partitionExpression,
             "parent.child",
             fragKeys,
@@ -349,8 +385,6 @@ public class LanceScanTest {
     fragKeys.put(2, 2);
     Expression partitionExpression = Expressions.bucket(4, "region");
 
-    LanceSplit.ScanPlanResult bucketPlan =
-        LanceSplit.planScan(TestUtils.TestTable1Config.readOptions);
     LanceScan scan =
         new LanceScan(
             TEST_SCHEMA,
@@ -366,8 +400,8 @@ public class LanceScanTest {
             Collections.emptyMap(),
             Collections.emptyMap(),
             new org.apache.spark.sql.connector.expressions.NamedReference[0],
-            bucketPlan.getSplits(),
-            bucketPlan.getFragmentRowCounts(),
+            TEST_SPLITS,
+            TEST_ROW_COUNTS,
             partitionExpression,
             "region",
             fragKeys,

@@ -21,6 +21,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 
@@ -37,7 +38,9 @@ public class LanceFragmentColumnarBatchScannerTest {
     while (fragmentId <= 1) {
       try (LanceFragmentColumnarBatchScanner scanner =
           LanceFragmentColumnarBatchScanner.create(
-              fragmentId, TestUtils.TestTable1Config.inputPartition)) {
+              fragmentId,
+              Collections.singletonList(FragmentSplit.full(fragmentId)),
+              TestUtils.TestTable1Config.inputPartition)) {
         while (scanner.loadNextBatch()) {
           try (ColumnarBatch batch = scanner.getCurrentBatch()) {
             Iterator<InternalRow> rows = batch.rowIterator();

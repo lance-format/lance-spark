@@ -16,6 +16,7 @@ package org.lance.spark;
 import org.lance.Dataset;
 import org.lance.Transaction;
 import org.lance.namespace.LanceNamespace;
+import org.lance.spark.read.FragmentSplit;
 import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.read.LanceSplit;
 import org.lance.spark.utils.Optional;
@@ -100,7 +101,7 @@ public class TestUtils {
           new LanceInputPartition(
               schema,
               0 /* partitionId */,
-              new LanceSplit(Arrays.asList(0, 1)),
+              new LanceSplit(Arrays.asList(FragmentSplit.full(0), FragmentSplit.full(1))),
               readOptions,
               Optional.empty() /* whereCondition */,
               Optional.empty() /* limit */,

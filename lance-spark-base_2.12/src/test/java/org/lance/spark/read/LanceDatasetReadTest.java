@@ -114,10 +114,11 @@ public class LanceDatasetReadTest {
     try (LanceFragmentScanner scanner =
         LanceFragmentScanner.create(
             fragment,
+            Arrays.asList(FragmentSplit.full(fragment)),
             new LanceInputPartition(
                 schema,
                 0 /* partitionId */,
-                new LanceSplit(Arrays.asList(fragment)),
+                new LanceSplit(Arrays.asList(FragmentSplit.full(fragment))),
                 TestUtils.TestTable1Config.readOptions,
                 Optional.empty() /* whereCondition */,
                 Optional.empty() /* limit */,

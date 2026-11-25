@@ -13,6 +13,7 @@
  */
 package org.lance.spark.read;
 
+import org.lance.Dataset;
 import org.lance.ipc.FullTextQuery;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceDataset;
@@ -23,6 +24,7 @@ import org.lance.spark.search.LanceSearchInputPartition;
 import org.lance.spark.search.LanceSearchScan;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Optional;
+import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.catalyst.expressions.MetadataAttribute;
 import org.apache.spark.sql.connector.expressions.Expression;
@@ -36,6 +38,7 @@ import org.apache.spark.sql.connector.expressions.aggregate.Count;
 import org.apache.spark.sql.connector.expressions.aggregate.CountStar;
 import org.apache.spark.sql.connector.expressions.aggregate.Sum;
 import org.apache.spark.sql.connector.expressions.filter.Predicate;
+import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.PartitionReader;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.types.ArrayType;
@@ -50,6 +53,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -721,19 +725,15 @@ public class LanceScanBuilderTest {
     assertEquals(TEST_SCHEMA, scan.readSchema());
   }
 
-  /**
-   * Asserts the contract that splits planned during {@link LanceScanBuilder#build()} match what
-   * {@link LanceScan#planInputPartitions()} returns. This guarantees the second {@code
-   * Dataset.open()} that previously happened during {@code planInputPartitions()} is gone — the
-   * scan now consumes pre-computed splits instead of re-enumerating fragments.
-   */
   @Test
-  public void testBuildPrecomputesSplitsForPlanInputPartitions() {
-    int expectedSplits =
-        LanceSplit.planScan(TestUtils.TestTable1Config.readOptions).getSplits().size();
-    LanceScanBuilder builder = createBuilder();
-    LanceScan scan = (LanceScan) builder.build();
-    assertEquals(expectedSplits, scan.planInputPartitions().length);
+  public void testBuildPlansFullFragmentsInSnapshotOrder() {
+    InputPartition[] partitions = createBuilder().build().toBatch().planInputPartitions();
+    assertEquals(2, partitions.length);
+    for (int i = 0; i < partitions.length; i++) {
+      LanceSplit split = ((LanceInputPartition) partitions[i]).getLanceSplit();
+      assertEquals(List.of(i), split.getFragments());
+      assertFalse(split.hasFragmentSlices());
+    }
   }
 
   /**
@@ -745,12 +745,15 @@ public class LanceScanBuilderTest {
   public void testBuildPinsResolvedVersionOnReadOptions() {
     LanceScanBuilder builder = createBuilder();
     LanceScan scan = (LanceScan) builder.build();
-    org.apache.spark.sql.connector.read.InputPartition[] partitions = scan.planInputPartitions();
+    InputPartition[] partitions = scan.planInputPartitions();
     assertTrue(partitions.length > 0);
-    LanceInputPartition first = (LanceInputPartition) partitions[0];
-    LanceRef pinned = first.getReadOptions().getRef();
-    assertNotNull(pinned, "build() must pin the resolved version onto readOptions");
-    assertTrue(pinned.getVersionNumber().get() > 0);
+    try (Dataset dataset =
+        Utils.openDatasetBuilder(TestUtils.TestTable1Config.readOptions).build()) {
+      LanceRef expected = LanceRef.ofMain(dataset.getVersion().getId());
+      for (InputPartition partition : partitions) {
+        assertEquals(expected, ((LanceInputPartition) partition).getReadOptions().getRef());
+      }
+    }
   }
 
   @Test

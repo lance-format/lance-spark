@@ -355,6 +355,7 @@ These options control how data is read from Lance datasets. They can be set usin
 | Option                | Type    | Default | Description                                                                                                       |
 |-----------------------|---------|---------|-------------------------------------------------------------------------------------------------------------------|
 | `batch_size`          | Integer | `8192`  | Number of rows to read per batch during scanning. Larger values may improve throughput but increase memory usage. |
+| `use_zonemap_slices` | Boolean | `false` | Read matching zones within a fragment. Keep disabled for zonemaps built with Lance 0.39 or earlier. See [Zonemap Slice Pruning](../../config.md#zonemap-slice-pruning). |
 | `use_scalar_index`    | Boolean | `true`  | Whether to use scalar indices (e.g. btree) for filter acceleration during scanning.                               |
 | `version`             | Integer | Latest  | Specific dataset version to read. If not specified, reads the latest version.                                     |
 | `branch`              | String  | Main    | Named branch to read. Reads the current head. Do not set with `tag` or `version`.                                 |

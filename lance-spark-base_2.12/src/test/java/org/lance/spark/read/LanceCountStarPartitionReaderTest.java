@@ -35,6 +35,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -53,7 +54,7 @@ public class LanceCountStarPartitionReaderTest {
         new LanceInputPartition(
             TestUtils.TestTable1Config.schema,
             0,
-            new LanceSplit(Arrays.asList(0, 1)),
+            new LanceSplit(Arrays.asList(FragmentSplit.full(0), FragmentSplit.full(1))),
             TestUtils.TestTable1Config.readOptions,
             Optional.of("x > 0"),
             Optional.empty(),
@@ -165,7 +166,7 @@ public class LanceCountStarPartitionReaderTest {
     return new LanceInputPartition(
         new StructType(),
         0,
-        new LanceSplit(fragments),
+        new LanceSplit(fragments.stream().map(FragmentSplit::full).collect(Collectors.toList())),
         readOptions,
         Optional.empty(),
         Optional.empty(),

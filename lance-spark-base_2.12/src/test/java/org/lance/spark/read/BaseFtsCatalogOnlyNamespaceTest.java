@@ -238,6 +238,28 @@ public abstract class BaseFtsCatalogOnlyNamespaceTest {
         "count(*) must count only ids 15-19, which match both 'hello' and id >= 10");
   }
 
+  @Test
+  public void lanceMatchRespectsZonemapFilter() {
+    spark.sql(
+        String.format(
+            "ALTER TABLE %s CREATE INDEX id_zm USING zonemap (id) WITH (rows_per_zone=2)",
+            fullTable));
+
+    // IDs 0-9 match only the FTS query and 10-14 match only the scalar filter.
+    List<Row> rows =
+        spark
+            .read()
+            .option("use_zonemap_slices", true)
+            .table(fullTable)
+            .where("lance_match(body, 'hello') AND id >= 10")
+            .select("id")
+            .collectAsList();
+
+    assertEquals(
+        List.of(15, 16, 17, 18, 19),
+        rows.stream().map(row -> row.getInt(0)).sorted().collect(Collectors.toList()));
+  }
+
   /**
    * Delegates every operation the connector uses to a {@link DirectoryNamespace}, but deliberately
    * leaves {@code queryTable} unimplemented so it keeps the interface default that throws.

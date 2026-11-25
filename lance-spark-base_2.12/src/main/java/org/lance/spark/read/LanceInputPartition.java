@@ -14,16 +14,25 @@
 package org.lance.spark.read;
 
 import org.lance.ipc.ColumnOrdering;
+import org.lance.ipc.FragmentSlice;
+import org.lance.ipc.ScanOptions;
+import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Optional;
+import org.lance.spark.utils.Utils;
 
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation;
 import org.apache.spark.sql.connector.read.HasPartitionKey;
+import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 public class LanceInputPartition implements HasPartitionKey {
   private static final long serialVersionUID = 4723894723984723985L;
@@ -98,6 +107,88 @@ public class LanceInputPartition implements HasPartitionKey {
 
   public LanceSplit getLanceSplit() {
     return lanceSplit;
+  }
+
+  /** Scan options for all selected ranges of the fragment opened by the reader. */
+  public ScanOptions fragmentScanOptions(List<FragmentSplit> fragmentSplits) {
+    ScanOptions.Builder options = newScanOptions(fragmentSplits);
+    List<String> columns = projectedColumns();
+    if (readOptions.getFullTextQuery() != null) {
+      options.prefilter(true);
+      if (Arrays.stream(schema.fields()).anyMatch(Utils::isScoreMetadataColumn)) {
+        columns.add(LanceConstant.SCORE);
+      }
+    }
+    options.columns(columns);
+    options.batchSize(readOptions.getBatchSize());
+    options.withRowId(schema.isEmpty() || schema.getFieldIndex(LanceConstant.ROW_ID).isDefined());
+    // Blob references need the row address even when the user did not project it.
+    options.withRowAddress(
+        schema.getFieldIndex(LanceConstant.ROW_ADDRESS).isDefined()
+            || Arrays.stream(schema.fields()).anyMatch(BlobUtils::isBlobReadColumn));
+    limit.ifPresent(options::limit);
+    offset.ifPresent(options::offset);
+    topNSortOrders.ifPresent(options::setColumnOrderings);
+    return options.build();
+  }
+
+  /** Scan options for counting matching rows across all fragments in this partition. */
+  public ScanOptions countScanOptions() {
+    return newScanOptions(lanceSplit.getFragmentSplits())
+        .fragmentIds(lanceSplit.getFragments())
+        .columns(Collections.emptyList())
+        .withRowId(true)
+        .build();
+  }
+
+  private ScanOptions.Builder newScanOptions(List<FragmentSplit> splits) {
+    ScanOptions.Builder options = new ScanOptions.Builder();
+    options.useScalarIndex(readOptions.isUseScalarIndex());
+    whereCondition.ifPresent(options::filter);
+    options.collectStats(true);
+    if (readOptions.getFullTextQuery() != null) {
+      options.fullTextQuery(readOptions.getFullTextQuery());
+      options.disableScoringAutoprojection(true);
+    }
+    List<FragmentSlice> slices =
+        splits.stream().flatMap(split -> split.getSlice().stream()).collect(Collectors.toList());
+    if (!slices.isEmpty()) {
+      options.fragmentSlices(slices);
+    }
+    return options;
+  }
+
+  private List<String> projectedColumns() {
+    List<String> columns =
+        Arrays.stream(schema.fields())
+            .filter(field -> !Utils.isScoreMetadataColumn(field))
+            .map(StructField::name)
+            .filter(
+                name ->
+                    !name.equals(LanceConstant.FRAGMENT_ID)
+                        && !name.equals(LanceConstant.ROW_ID)
+                        && !name.equals(LanceConstant.ROW_ADDRESS)
+                        && !name.equals(LanceConstant.ROW_CREATED_AT_VERSION)
+                        && !name.equals(LanceConstant.ROW_LAST_UPDATED_AT_VERSION)
+                        && !name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)
+                        && !name.endsWith(LanceConstant.BLOB_SIZE_SUFFIX))
+            .collect(Collectors.toList());
+    // Blob v1 virtual columns are derived from their base blob column, so scan the base column even
+    // when the query only projects the virtual columns.
+    for (StructField field : schema.fields()) {
+      String baseName = BlobUtils.blobV1VirtualColumnBaseName(field.name());
+      if (baseName != null && !columns.contains(baseName)) {
+        columns.add(baseName);
+      }
+    }
+    if (schema.getFieldIndex(LanceConstant.ROW_LAST_UPDATED_AT_VERSION).isDefined()) {
+      columns.add(LanceConstant.ROW_LAST_UPDATED_AT_VERSION);
+    }
+    if (schema.getFieldIndex(LanceConstant.ROW_CREATED_AT_VERSION).isDefined()) {
+      columns.add(LanceConstant.ROW_CREATED_AT_VERSION);
+    }
+
+    return columns;
   }
 
   public LanceSparkReadOptions getReadOptions() {

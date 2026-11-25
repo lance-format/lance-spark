@@ -701,6 +701,20 @@ Select columns compatible with the snapshot; missing columns or incompatible typ
 including nested fields, fail during planning. Use SQL `VERSION AS OF 'release_candidate'`
 to analyze the query against the historical schema instead.
 
+## Zonemap Slice Pruning
+
+By default, zonemap pruning skips whole fragments. Set the per-read option
+`use_zonemap_slices` to `true` to also restrict reads to matching zones within a fragment.
+
+For zonemap indexes built with **Lance 0.39 or earlier**, keep `use_zonemap_slices=false`.
+See [Lance #4758](https://github.com/lance-format/lance/issues/4758#issuecomment-3309867474).
+
+```python
+spark.read.option("use_zonemap_slices", "true").table("lance.db.events").where("id = 42")
+```
+
+`use_scalar_index` independently controls native index lookups.
+
 ## Arrow Batch Reads
 
 Set `arrow_batch_reads` to `true` to expose supported scans as Spark `ArrowColumnVector`

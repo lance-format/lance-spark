@@ -23,7 +23,6 @@ import org.lance.spark.read.metric.LanceReadMetricsTracker;
 import org.lance.spark.utils.Utils;
 import org.lance.spark.vectorized.LanceArrowColumnVector;
 
-import com.google.common.collect.Lists;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -80,30 +79,15 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
                 .build()) {
       metricsTracker.addDatasetOpenTimeNs(System.nanoTime() - dsOpenStart);
 
-      List<Integer> fragmentIds = inputPartition.getLanceSplit().getFragments();
-      if (fragmentIds.isEmpty()) {
+      if (inputPartition.getLanceSplit().getFragmentSplits().isEmpty()) {
         return 0;
       }
+      ScanOptions scanOptions = inputPartition.countScanOptions();
+      List<Integer> fragmentIds = scanOptions.getFragmentIds().get();
       metricsTracker.addNumFragmentsScanned(fragmentIds.size());
 
-      ScanOptions.Builder scanOptionsBuilder = new ScanOptions.Builder();
-      scanOptionsBuilder.useScalarIndex(readOptions.isUseScalarIndex());
-      if (inputPartition.getWhereCondition().isPresent()) {
-        scanOptionsBuilder.filter(inputPartition.getWhereCondition().get());
-      }
-      if (readOptions.getFullTextQuery() != null) {
-        scanOptionsBuilder.fullTextQuery(readOptions.getFullTextQuery());
-        scanOptionsBuilder.disableScoringAutoprojection(true);
-      }
-      scanOptionsBuilder.withRowId(true);
-      scanOptionsBuilder.columns(Lists.newArrayList());
-      scanOptionsBuilder.fragmentIds(fragmentIds);
-
-      // Collect scan stats
-      scanOptionsBuilder.collectStats(true);
-
       long scanCreateStart = System.nanoTime();
-      try (LanceScanner scanner = dataset.newScan(scanOptionsBuilder.build())) {
+      try (LanceScanner scanner = dataset.newScan(scanOptions)) {
         metricsTracker.addScannerCreateTimeNs(System.nanoTime() - scanCreateStart);
         try (ArrowReader reader = scanner.scanBatches()) {
           while (true) {

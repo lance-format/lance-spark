@@ -13,17 +13,33 @@
  */
 package org.lance.spark.read;
 
+import org.lance.ipc.FragmentSlice;
+import org.lance.spark.utils.Optional;
+
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.connector.read.InputPartition;
+import org.apache.spark.sql.connector.read.PartitionReader;
+import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import scala.collection.JavaConverters;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -31,12 +47,13 @@ import static org.junit.jupiter.api.Assertions.*;
 public abstract class BaseZonemapIndexTest {
   protected String catalogName = "lance_zonemap_test";
   protected SparkSession spark;
+  protected Path rootPath;
 
   @TempDir Path tempDir;
 
   @BeforeEach
   public void setup() {
-    Path rootPath = tempDir.resolve(UUID.randomUUID().toString());
+    rootPath = tempDir.resolve(UUID.randomUUID().toString());
     rootPath.toFile().mkdirs();
     spark =
         SparkSession.builder()
@@ -137,5 +154,175 @@ public abstract class BaseZonemapIndexTest {
 
     assertEquals(2, spark.sql("SELECT * FROM " + t1).count());
     assertEquals(2, spark.sql("SELECT * FROM " + t2).count());
+  }
+
+  @Test
+  public void testZonemapReadsDisjointSlices() throws Exception {
+    String tableName = "zm_slice_" + UUID.randomUUID().toString().replace("-", "");
+    String table = catalogName + ".default." + tableName;
+
+    spark.sql(String.format("CREATE TABLE %s (id INT) USING lance", table));
+    spark.range(12).selectExpr("cast(id as int) AS id").coalesce(1).writeTo(table).append();
+    // A second fragment is fully pruned, while the first retains two disjoint physical slices.
+    spark.range(12, 16).selectExpr("cast(id as int) AS id").coalesce(1).writeTo(table).append();
+    spark.sql(
+        String.format(
+            "ALTER TABLE %s CREATE INDEX id_zm USING zonemap (id) WITH (rows_per_zone=4)", table));
+
+    // The default prunes the second fragment but reads the entire first fragment.
+    Dataset<Row> defaultRead = spark.table(table).where("id IN (1, 9)");
+    InputPartition[] full = LanceScanTestHelper.extractLanceScan(defaultRead).planInputPartitions();
+    assertEquals(1, full.length);
+    assertFalse(((LanceInputPartition) full[0]).getLanceSplit().hasFragmentSlices());
+
+    Dataset<Row> slicedRead =
+        spark.read().option("use_zonemap_slices", true).table(table).where("id IN (1, 9)");
+    LanceScan scan = LanceScanTestHelper.extractLanceScan(slicedRead);
+    // Statistics count all 12 rows in the retained fragment. Its two selected zones cover 8.
+    assertEquals(12L, scan.estimateStatistics().numRows().getAsLong());
+    InputPartition[] partitions = scan.planInputPartitions();
+    assertEquals(1, partitions.length);
+    assertEquals("1", JavaConverters.mapAsJavaMap(scan.getMetaData()).get("numPartitions"));
+    LanceSplit split = ((LanceInputPartition) partitions[0]).getLanceSplit();
+    assertEquals(1, split.getFragments().size());
+    int fragmentId = split.getFragments().get(0);
+    assertEquals(2, split.getFragmentSplits().size());
+    for (int i = 0; i < 2; i++) {
+      FragmentSplit range = split.getFragmentSplits().get(i);
+      assertEquals(new FragmentSlice(fragmentId, i * 8L, 4), range.getSlice().orElseThrow());
+    }
+
+    // Arrow consumers copy a planned scan. Preserve its physical slices through that copy,
+    // and verify both reader paths return only the selected rows.
+    for (LanceScan readerScan : Arrays.asList(scan, scan.withArrowBatches())) {
+      assertEquals(
+          "2", JavaConverters.mapAsJavaMap(readerScan.getMetaData()).get("originalFragmentCount"));
+      InputPartition[] readerPartitions = readerScan.planInputPartitions();
+      assertEquals(1, readerPartitions.length);
+      // Without the residual filter, a full-fragment read would return all 12 rows instead of 8.
+      LanceInputPartition unfilteredSlice =
+          withoutFilter((LanceInputPartition) readerPartitions[0]);
+      List<Integer> readIds = new ArrayList<>();
+      try (PartitionReader<ColumnarBatch> reader =
+          readerScan.createReaderFactory().createColumnarReader(unfilteredSlice)) {
+        while (reader.next()) {
+          ColumnarBatch batch = reader.get();
+          for (int row = 0; row < batch.numRows(); row++) {
+            readIds.add(batch.column(0).getInt(row));
+          }
+        }
+      }
+      assertEquals(Arrays.asList(0, 1, 2, 3, 8, 9, 10, 11), readIds);
+    }
+
+    LanceInputPartition unfilteredSlice = withoutFilter((LanceInputPartition) partitions[0]);
+    try (LanceCountStarPartitionReader reader =
+        new LanceCountStarPartitionReader(unfilteredSlice)) {
+      assertTrue(reader.next());
+      assertEquals(8L, reader.get().column(0).getLong(0));
+      assertFalse(reader.next());
+    }
+  }
+
+  private static LanceInputPartition withoutFilter(LanceInputPartition sliced) {
+    return new LanceInputPartition(
+        sliced.getSchema(),
+        sliced.getPartitionId(),
+        sliced.getLanceSplit(),
+        sliced.getReadOptions(),
+        Optional.empty(),
+        sliced.getLimit(),
+        sliced.getOffset(),
+        sliced.getTopNSortOrders(),
+        sliced.getPushedAggregation(),
+        sliced.getScanId(),
+        sliced.getInitialStorageOptions(),
+        sliced.getNamespaceImpl(),
+        sliced.getNamespaceProperties(),
+        null);
+  }
+
+  @Test
+  public void testLegacyReadsFullFragment() {
+    String tableName = "zm_legacy_" + UUID.randomUUID().toString().replace("-", "");
+    String table = catalogName + ".default." + tableName;
+    String uri = rootPath.resolve(tableName + ".lance").toString();
+    spark
+        .range(12)
+        .coalesce(1)
+        .write()
+        .format("lance")
+        .option("file_format_version", "0.1")
+        .save(uri);
+    spark.sql(
+        String.format(
+            "ALTER TABLE %s CREATE INDEX id_zm USING zonemap (id) WITH (rows_per_zone=4)", table));
+
+    Dataset<Row> matching =
+        spark.read().option("use_zonemap_slices", true).table(table).where("id >= 4 AND id < 8");
+    InputPartition[] partitions =
+        LanceScanTestHelper.extractLanceScan(matching).planInputPartitions();
+    assertEquals(1, partitions.length);
+    // Only the middle zone matches, but V1 must read the whole fragment and filter its rows.
+    assertFalse(((LanceInputPartition) partitions[0]).getLanceSplit().hasFragmentSlices());
+    assertEquals(
+        Arrays.asList(
+            RowFactory.create(4L),
+            RowFactory.create(5L),
+            RowFactory.create(6L),
+            RowFactory.create(7L)),
+        matching.collectAsList());
+    assertEquals(4L, matching.count());
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  public void testDeletesPreserveSliceOffsets(boolean stableRowIds) throws Exception {
+    String tableName = "zm_delete_" + UUID.randomUUID().toString().replace("-", "");
+    String table = catalogName + ".default." + tableName;
+
+    spark.sql(
+        String.format(
+            "CREATE TABLE %s (id INT) USING lance "
+                + "TBLPROPERTIES ('enable_stable_row_ids'='%s')",
+            table, stableRowIds));
+    // Put the target rows in the second fragment so stable row IDs differ from row addresses.
+    spark.range(-4, 0).selectExpr("cast(id as int) AS id").coalesce(1).writeTo(table).append();
+    spark.range(12).selectExpr("cast(id as int) AS id").coalesce(1).writeTo(table).append();
+    // Deleting the edges before indexing leaves valid gaps in the physical zone coverage.
+    spark.sql(String.format("DELETE FROM %s WHERE id IN (0, 11)", table));
+    spark.sql(
+        String.format(
+            "ALTER TABLE %s CREATE INDEX id_zm USING zonemap (id) WITH (rows_per_zone=4)", table));
+    // Delete before and within the selected zone. Its physical offsets must remain [5, 9).
+    spark.sql(String.format("DELETE FROM %s WHERE id IN (1, 6)", table));
+
+    Dataset<Row> matching =
+        spark
+            .read()
+            .option("use_zonemap_slices", true)
+            .table(table)
+            .selectExpr("id", "_rowid", "_rowaddr")
+            .where("id >= 5 AND id < 9");
+    InputPartition[] partitions =
+        LanceScanTestHelper.extractLanceScan(matching).planInputPartitions();
+    assertEquals(1, partitions.length);
+    LanceSplit split = ((LanceInputPartition) partitions[0]).getLanceSplit();
+    assertEquals(1, split.getFragmentSplits().size());
+    FragmentSplit range = split.getFragmentSplits().get(0);
+    assertEquals(new FragmentSlice(range.getFragmentId(), 5, 4), range.getSlice().orElseThrow());
+
+    List<Row> rows = matching.collectAsList();
+    // Collect before applying the predicate to obtain an independent full-scan reference.
+    List<Row> expected =
+        spark.table(table).selectExpr("id", "_rowid", "_rowaddr").collectAsList().stream()
+            .filter(row -> row.getInt(0) >= 5 && row.getInt(0) < 9)
+            .collect(Collectors.toList());
+    assertEquals(
+        Arrays.asList(5, 7, 8),
+        rows.stream().map(row -> row.getInt(0)).sorted().collect(Collectors.toList()));
+    assertEquals(new HashSet<>(expected), new HashSet<>(rows));
+    assertEquals(stableRowIds, rows.get(0).getLong(1) != rows.get(0).getLong(2));
+    assertEquals(3L, matching.count());
   }
 }

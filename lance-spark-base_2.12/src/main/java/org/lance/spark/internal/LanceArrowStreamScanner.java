@@ -14,6 +14,7 @@
 package org.lance.spark.internal;
 
 import org.lance.spark.LanceRuntime;
+import org.lance.spark.read.FragmentSplit;
 import org.lance.spark.read.LanceInputPartition;
 
 import org.apache.arrow.c.ArrowArrayStream;
@@ -22,7 +23,9 @@ import org.apache.spark.sql.util.LanceArrowUtils;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * Exports a Lance fragment scan as an Arrow C Data Interface stream ({@link ArrowArrayStream}) for
@@ -62,7 +65,8 @@ public final class LanceArrowStreamScanner {
    * exhaustion, then {@link LanceArrowStream#close() close} the handle. Closing before the consumer
    * has finished reading is a use-after-free on caller-owned native memory.
    *
-   * @param fragmentId the Lance fragment to scan
+   * @param fragmentId the Lance fragment to scan. If the partition has planned slices for this
+   *     fragment, export those slices. An ID absent from the partition selects the whole fragment.
    * @param inputPartition the planned partition (schema, filter, limit/offset, storage options)
    * @return an open Arrow C stream handle over the fragment scan
    * @throws UnsupportedOperationException if the partition needs execution this raw fragment scan
@@ -77,7 +81,16 @@ public final class LanceArrowStreamScanner {
     // e.g. a bounded allocator), and the dataset + scanner opened by create() must still be closed.
     ArrowArrayStream stream = null;
     try {
-      fragmentScanner = LanceFragmentScanner.create(fragmentId, inputPartition);
+      List<FragmentSplit> fragmentSplits =
+          inputPartition.getLanceSplit().getFragmentSplits().stream()
+              .filter(split -> split.getFragmentId() == fragmentId)
+              .collect(Collectors.toList());
+      // Preserve the export API's explicit fragment selection when the partition has no ranges
+      // for that fragment. Internal readers pass their planned selections directly instead.
+      if (fragmentSplits.isEmpty()) {
+        fragmentSplits = Collections.singletonList(FragmentSplit.full(fragmentId));
+      }
+      fragmentScanner = LanceFragmentScanner.create(fragmentId, fragmentSplits, inputPartition);
       checkNativeSchemaMatchesPartition(fragmentScanner, inputPartition);
       stream = ArrowArrayStream.allocateNew(LanceRuntime.allocator());
       // The Lance native core populates the caller-owned stream directly from the planned scan, so

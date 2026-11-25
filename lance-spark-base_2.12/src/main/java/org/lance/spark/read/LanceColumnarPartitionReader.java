@@ -22,10 +22,16 @@ import org.apache.spark.sql.connector.read.PartitionReader;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 
 import java.io.IOException;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.stream.Collectors;
 
 public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBatch> {
   private final LanceInputPartition inputPartition;
-  private int fragmentIndex;
+  private final Iterator<Entry<Integer, List<FragmentSplit>>> remainingSplits;
   private LanceFragmentColumnarBatchScanner fragmentReader;
   private ColumnarBatch currentBatch;
   private final LanceReadMetricsTracker metricsTracker = new LanceReadMetricsTracker();
@@ -34,7 +40,14 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
 
   public LanceColumnarPartitionReader(LanceInputPartition inputPartition) {
     this.inputPartition = inputPartition;
-    this.fragmentIndex = 0;
+    // Each scanner opens one fragment. Keep its disjoint ranges together and visit fragments in
+    // the order they first appear in this partition.
+    Map<Integer, List<FragmentSplit>> splitsByFragment =
+        inputPartition.getLanceSplit().getFragmentSplits().stream()
+            .collect(
+                Collectors.groupingBy(
+                    FragmentSplit::getFragmentId, LinkedHashMap::new, Collectors.toList()));
+    this.remainingSplits = splitsByFragment.entrySet().iterator();
   }
 
   @Override
@@ -50,7 +63,7 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
     if (loadNextBatchFromCurrentReader()) {
       return true;
     }
-    while (fragmentIndex < inputPartition.getLanceSplit().getFragments().size()) {
+    while (remainingSplits.hasNext()) {
       // Null-first so if create(...) below throws, the subsequent close() sees fragmentReader ==
       // null and short-circuits, rather than re-closing the already-closed previous scanner and
       // raising `ArrowArrayStream is already closed`.
@@ -60,10 +73,10 @@ public class LanceColumnarPartitionReader implements PartitionReader<ColumnarBat
         toClose.close();
       }
       initializeExecutorNamespace();
+      Entry<Integer, List<FragmentSplit>> entry = remainingSplits.next();
       fragmentReader =
           LanceFragmentColumnarBatchScanner.create(
-              inputPartition.getLanceSplit().getFragments().get(fragmentIndex), inputPartition);
-      fragmentIndex++;
+              entry.getKey(), entry.getValue(), inputPartition);
 
       currentScanStatsAdded = false;
       metricsTracker.addNumFragmentsScanned(1);

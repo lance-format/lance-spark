@@ -222,6 +222,52 @@ public abstract class BaseLanceRuntimeFilteringTest {
   }
 
   @Test
+  public void testRuntimeFilterPreservesSlices() {
+    LanceSplit selectedSplit =
+        new LanceSplit(Collections.singletonList(FragmentSplit.slice(0, 10, 10)));
+    List<LanceSplit> splits =
+        Arrays.asList(
+            selectedSplit,
+            new LanceSplit(Collections.singletonList(FragmentSplit.full(1))),
+            new LanceSplit(Collections.singletonList(FragmentSplit.full(2))));
+    LanceScan scan =
+        new LanceScan(
+            SCHEMA,
+            options(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            new Predicate[0],
+            null,
+            null,
+            defaultStats(),
+            Collections.emptyMap(),
+            new NamedReference[] {FieldReference.column("x")},
+            splits,
+            Map.of(0, 100L, 1, 100L, 2, 100L),
+            null,
+            null,
+            null,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap(),
+            true,
+            null,
+            null);
+    assertEquals(3, scan.planInputPartitions().length);
+
+    // Only fragment 0 can contain 15. Replanning must keep its original [10, 20) slice.
+    scan.filter(new Predicate[] {TestPredicates.in("x", 15)});
+    InputPartition[] partitions = scan.planInputPartitions();
+    assertArrayEquals(new int[] {0}, fragmentIds(partitions));
+    assertEquals(
+        selectedSplit.getFragmentSplits(),
+        ((LanceInputPartition) partitions[0]).getLanceSplit().getFragmentSplits());
+  }
+
+  @Test
   public void testPartialZonemapCoverageRetainsUncoveredFragments() {
     Map<String, List<ZoneStats>> stats = new HashMap<>();
     stats.put(
@@ -418,9 +464,9 @@ public abstract class BaseLanceRuntimeFilteringTest {
     Map<String, Set<Integer>> coverage = uncovered != null ? uncovered : Collections.emptyMap();
     List<LanceSplit> splits =
         Arrays.asList(
-            new LanceSplit(Collections.singletonList(0)),
-            new LanceSplit(Collections.singletonList(1)),
-            new LanceSplit(Collections.singletonList(2)));
+            new LanceSplit(Collections.singletonList(FragmentSplit.full(0))),
+            new LanceSplit(Collections.singletonList(FragmentSplit.full(1))),
+            new LanceSplit(Collections.singletonList(FragmentSplit.full(2))));
     Map<Integer, Long> rowCounts = Map.of(0, 100L, 1, 100L, 2, 100L);
     NamedReference[] attributes =
         Arrays.stream(runtimeColumns).map(FieldReference::column).toArray(NamedReference[]::new);

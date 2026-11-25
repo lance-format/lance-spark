@@ -17,6 +17,7 @@ import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.read.FragmentSplit;
 import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.read.LanceSplit;
 import org.lance.spark.utils.Optional;
@@ -210,7 +211,7 @@ public class LanceArrowStreamScannerTest {
     return new LanceInputPartition(
         TestUtils.TestTable1Config.inputPartition.getSchema(),
         0 /* partitionId */,
-        new LanceSplit(Arrays.asList(0, 1)),
+        new LanceSplit(Arrays.asList(FragmentSplit.full(0), FragmentSplit.full(1))),
         TestUtils.TestTable1Config.readOptions,
         Optional.empty() /* whereCondition */,
         Optional.empty() /* limit */,
@@ -233,7 +234,7 @@ public class LanceArrowStreamScannerTest {
     return new LanceInputPartition(
         schema,
         0,
-        new LanceSplit(Collections.singletonList(0)),
+        new LanceSplit(Collections.singletonList(FragmentSplit.full(0))),
         readOptions,
         Optional.empty(),
         Optional.empty(),
@@ -251,7 +252,7 @@ public class LanceArrowStreamScannerTest {
     return new LanceInputPartition(
         TestUtils.TestTable1Config.inputPartition.getSchema(),
         0 /* partitionId */,
-        new LanceSplit(Arrays.asList(0, 1)),
+        new LanceSplit(Arrays.asList(FragmentSplit.full(0), FragmentSplit.full(1))),
         TestUtils.TestTable1Config.readOptions,
         Optional.of("x < 0") /* whereCondition: matches no row */,
         Optional.empty() /* limit */,
@@ -277,7 +278,7 @@ public class LanceArrowStreamScannerTest {
     return new LanceInputPartition(
         schema,
         0 /* partitionId */,
-        new LanceSplit(Arrays.asList(0, 1)),
+        new LanceSplit(Arrays.asList(FragmentSplit.full(0), FragmentSplit.full(1))),
         TestUtils.TestTable1Config.readOptions,
         Optional.empty() /* whereCondition */,
         Optional.empty() /* limit */,

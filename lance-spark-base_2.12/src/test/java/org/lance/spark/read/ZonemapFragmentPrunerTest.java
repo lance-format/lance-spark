@@ -498,13 +498,20 @@ public class ZonemapFragmentPrunerTest {
         Arrays.asList(
             new ZoneStats(0, 0, 100, 0.0d, 9.9d, 0),
             new ZoneStats(1, 0, 100, 10.0d, 19.9d, 0),
-            new ZoneStats(2, 0, 100, 20.0d, 29.9d, 0)));
+            new ZoneStats(2, 0, 100, 20.0d, 29.9d, 0),
+            new ZoneStats(3, 0, 100, -0.0d, -0.0d, 0)));
 
     Predicate[] filters = new Predicate[] {TestPredicates.eq("f", 15.0f)};
 
     Optional<Set<Integer>> result = ZonemapFragmentPruner.pruneFragments(filters, stats);
     assertTrue(result.isPresent());
     assertEquals(Set.of(1), result.get());
+
+    // IN's binary search must normalize signed zeros in both literals and bounds.
+    assertEquals(
+        Set.of(0, 3),
+        ZonemapFragmentPruner.pruneFragments(new Predicate[] {TestPredicates.in("f", -0.0f)}, stats)
+            .orElseThrow(AssertionError::new));
   }
 
   @Test

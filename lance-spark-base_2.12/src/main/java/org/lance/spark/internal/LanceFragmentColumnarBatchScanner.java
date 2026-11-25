@@ -16,6 +16,7 @@ package org.lance.spark.internal;
 import org.lance.ipc.ScanStats;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRuntime;
+import org.lance.spark.read.FragmentSplit;
 import org.lance.spark.read.LanceInputPartition;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Utils;
@@ -75,8 +76,9 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
   }
 
   public static LanceFragmentColumnarBatchScanner create(
-      int fragmentId, LanceInputPartition inputPartition) {
-    LanceFragmentScanner fragmentScanner = LanceFragmentScanner.create(fragmentId, inputPartition);
+      int fragmentId, List<FragmentSplit> fragmentSplits, LanceInputPartition inputPartition) {
+    LanceFragmentScanner fragmentScanner =
+        LanceFragmentScanner.create(fragmentId, fragmentSplits, inputPartition);
     if (!inputPartition.getReadOptions().isArrowBatchReadsEnabled()) {
       return new LanceFragmentColumnarBatchScanner(
           fragmentScanner, fragmentScanner.getArrowReader());
