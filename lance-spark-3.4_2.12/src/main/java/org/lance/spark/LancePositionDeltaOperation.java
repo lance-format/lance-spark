@@ -13,7 +13,6 @@
  */
 package org.lance.spark;
 
-import org.lance.spark.read.LanceScanBuilder;
 import org.lance.spark.write.SparkPositionDeltaWriteBuilder;
 
 import org.apache.spark.sql.connector.expressions.Expressions;
@@ -27,7 +26,6 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.Map;
 
 public class LancePositionDeltaOperation
@@ -122,20 +120,26 @@ public class LancePositionDeltaOperation
 
   @Override
   public ScanBuilder newScanBuilder(CaseInsensitiveStringMap caseInsensitiveStringMap) {
-    return new LanceScanBuilder(
-        sparkSchema, readOptions, initialStorageOptions, namespaceImpl, namespaceProperties);
+    return new LanceDataset(
+            readOptions,
+            sparkSchema,
+            initialStorageOptions,
+            namespaceImpl,
+            namespaceProperties,
+            managedVersioning,
+            null,
+            fileFormatVersion,
+            tableProperties == null ? Collections.emptyMap() : tableProperties,
+            null)
+        .newScanBuilder(caseInsensitiveStringMap);
   }
 
   @Override
   public DeltaWriteBuilder newWriteBuilder(LogicalWriteInfo logicalWriteInfo) {
-    // Mirror LanceDataset#newWriteBuilder: the option map has to go through fromOptions so that
-    // catalog-level and per-write settings (max_row_per_file, use_large_var_types, batch_size, ...)
-    // reach their typed Builder fields. Passing it to storageOptions alone left every typed field
-    // at its default, so options that took effect on INSERT were dropped on UPDATE/DELETE/MERGE.
-    Map<String, String> mergedOptions = new HashMap<>(readOptions.getStorageOptions());
-    mergedOptions.putAll(logicalWriteInfo.options().asCaseSensitiveMap());
-    // Internal-only option (see LanceBlobSourceContextRule); never forward it as a storage option.
-    mergedOptions.remove(LanceConstant.BLOB_SOURCE_CONTEXTS_KEY);
+    // Mirror LanceDataset#newWriteBuilder: resolve catalog, table, and per-write options before
+    // constructing typed fields, so UPDATE/DELETE/MERGE use the same defaults as INSERT.
+    Map<String, String> tableDefaults =
+        tableProperties == null ? Collections.emptyMap() : tableProperties;
     LanceSparkWriteOptions.Builder writeOptionsBuilder =
         LanceSparkWriteOptions.builder()
             .datasetUri(readOptions.getDatasetUri())
@@ -144,7 +148,12 @@ public class LancePositionDeltaOperation
             .catalogName(readOptions.getCatalogName())
             .indexCacheBackend(readOptions.getIndexCacheBackend())
             .metadataCacheBackend(readOptions.getMetadataCacheBackend())
-            .fromOptions(mergedOptions);
+            .fromOptions(
+                readOptions.getStorageOptions(),
+                tableDefaults,
+                logicalWriteInfo.options().asCaseSensitiveMap());
+    CaseInsensitiveStringMap mergedOptions =
+        new CaseInsensitiveStringMap(writeOptionsBuilder.build().getStorageOptions());
     // Use the table's file format version unless the options set one explicitly.
     if (!mergedOptions.containsKey(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION)
         && fileFormatVersion != null) {

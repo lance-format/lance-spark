@@ -351,6 +351,8 @@ Use `TIMESTAMP AS OF` to query the table as it existed at a specific point in ti
 ## Read Options
 
 These options control how data is read from Lance datasets. They can be set using the `.option()` method when reading data.
+Supported tuning options can also be saved as
+[table defaults](../../config.md#table-defaults-and-operation-options).
 
 | Option                | Type    | Default | Description                                                                                                       |
 |-----------------------|---------|---------|-------------------------------------------------------------------------------------------------------------------|

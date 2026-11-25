@@ -145,6 +145,53 @@ and namespace-specific options:
 | `spark.sql.catalog.{name}.parent`           | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                             |
 | `spark.sql.catalog.{name}.parent_delimiter` | String | ✗        | Delimiter for parent prefix (default: `.`). See [Note on Namespace Levels](#note-on-namespace-levels).                           |
 
+## Table Defaults and Operation Options
+
+Parameter semantics are documented by Lance Format: [read parameters](https://docs.rs/lance/latest/lance/dataset/struct.ReadParams.html),
+[scan parameters](https://docs.rs/lance/latest/lance/dataset/scanner/struct.Scanner.html),
+[write parameters](https://docs.rs/lance/latest/lance/dataset/write/struct.WriteParams.html),
+and [object store configuration](https://lance.org/guide/object_store/).
+This section describes how Spark inherits and overrides supported settings.
+
+The Spark connector resolves supported read/write tuning options in this order,
+then passes native options to Lance:
+
+**Operation option > table property > catalog option > default**
+
+- DataFrame `.option(...)` overrides the current operation, including DataFrame V2 `.create()`.
+- SQL `CREATE TABLE ... OPTIONS (...)` / `TBLPROPERTIES (...)` and DataFrame V2
+  `.tableProperty(...)` save table defaults. These apply to the initial CTAS write and
+  subsequent reads, writes, and row-level DML after reloading the table.
+- Catalog settings (`spark.sql.catalog.<name>.<key>`) supply defaults when neither the
+  operation nor the table specifies a value.
+- Otherwise, Spark uses its connector default. Native parameters left unset are resolved
+  by the connector's bundled Lance version.
+
+```sql
+CREATE TABLE lance.default.events USING lance
+TBLPROPERTIES ('max_row_per_file' = '200000')
+AS SELECT * FROM source_events;
+```
+
+```python
+# This append uses 100000; subsequent writes still inherit 200000 from the table.
+more_events.writeTo("lance.default.events") \
+    .option("max_row_per_file", "100000") \
+    .append()
+```
+
+`ALTER TABLE SET TBLPROPERTIES` changes a table default; `UNSET TBLPROPERTIES` restores
+inheritance from the catalog or default. An operation override never changes the saved value.
+File limits apply per Spark writer task; they do not repartition or combine data across tasks.
+
+These rules apply to supported tuning options, not every Lance SDK parameter or arbitrary
+property. Storage credentials, snapshot/query selectors, write mode, and transaction properties
+retain their separate scopes. Custom properties such as `app.owner` are metadata only.
+See [CREATE TABLE](operations/ddl/create-table.md) for schema and file-format settings.
+
+Only the effective value is validated. Option names are case-insensitive when read;
+use the stored spelling for `SET/UNSET`.
+
 ## Distributed Vector Search
 
 Set `spark.sql.lance.search.distributed.enabled=true` to execute `VECTOR_SEARCH` with Spark tasks
