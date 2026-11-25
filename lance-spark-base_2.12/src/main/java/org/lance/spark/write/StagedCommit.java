@@ -188,7 +188,10 @@ public class StagedCommit {
             .configUpsertValues(tableProperties)
             .build();
     final CommitBuilder builder =
-        new CommitBuilder(datasetUri, LanceRuntime.allocator()).writeParams(storageOptions);
+        new CommitBuilder(datasetUri, LanceRuntime.allocator())
+            .writeParams(storageOptions)
+            // A concurrent creator must cause a conflict, never an overwrite of its table.
+            .maxRetries(0);
     if (enableStableRowIds) {
       builder.useStableRowIds(true);
     }
@@ -198,6 +201,7 @@ public class StagedCommit {
     applyManagedVersioning(builder);
     try (Transaction txn =
             new Transaction.Builder()
+                .readVersion(0)
                 .operation(operation)
                 .transactionProperties(transactionProperties)
                 .build();

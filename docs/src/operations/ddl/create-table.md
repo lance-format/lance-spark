@@ -98,8 +98,7 @@ Use [ALTER TABLE](alter-table.md) to update or remove properties. See
 [Configuration](../../config.md) for settings that affect table behavior.
 
 !!! note
-    CTAS and replacements commit properties together with data. Ordinary CREATE with
-    nonempty user properties adds a separate metadata version after creating the empty table.
+    CREATE commits schema and properties together, including data for CTAS and replacements.
     Registering an existing dataset with `LOCATION` leaves its configuration unchanged.
 
 ## Complex Data Types

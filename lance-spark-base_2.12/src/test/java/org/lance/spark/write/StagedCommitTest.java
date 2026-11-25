@@ -62,11 +62,14 @@ public class StagedCommitTest {
         StagedCommit.forNewTable(
             ARROW_SCHEMA,
             datasetUri,
-            StagedCommitOptions.pathBased(Collections.emptyMap(), false, null));
+            StagedCommitOptions.pathBased(Collections.emptyMap(), false, null)
+                .withTableProperties(Collections.singletonMap("app.owner", "analytics")));
     commit.commit();
     try (Dataset dataset =
         Dataset.open().uri(datasetUri).allocator(LanceRuntime.allocator()).build()) {
       assertEquals(0, dataset.countRows());
+      assertEquals(1, dataset.version());
+      assertEquals("analytics", dataset.getConfig().get("app.owner"));
     }
   }
 

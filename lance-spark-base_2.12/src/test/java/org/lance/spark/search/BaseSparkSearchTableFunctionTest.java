@@ -145,8 +145,7 @@ public abstract class BaseSparkSearchTableFunctionTest {
                 + "', "
                 + "query_vector => array(0.0, 0.0, 0.0, 0.0), "
                 + "num_results => 1, "
-                // CREATE writes schema (v1), properties (v2), then INSERT writes data (v3).
-                + "version => 3)");
+                + "version => 2)");
 
     assertEquals(
         java.util.Arrays.asList("id", "vector", "_distance"),

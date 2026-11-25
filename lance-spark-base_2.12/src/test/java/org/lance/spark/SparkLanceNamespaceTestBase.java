@@ -1304,10 +1304,11 @@ public abstract class SparkLanceNamespaceTestBase {
       }
       assertFalse(dataset.getConfig().containsKey(TableCatalog.PROP_PROVIDER));
       assertFalse(dataset.getConfig().containsKey(TableCatalog.PROP_LOCATION));
-      // The current Java write builder needs a separate config update for ordinary CREATE.
-      assertEquals(ordinaryCreate ? 2 : 1, dataset.version());
+      assertEquals(1, dataset.version());
       assertEquals(ordinaryCreate ? 0 : 1, dataset.countRows());
     }
+    spark.sql("INSERT INTO " + fullName + " VALUES (2)");
+    assertEquals(ordinaryCreate ? 1 : 2, spark.table(fullName).count());
   }
 
   @ParameterizedTest(name = "pathBased={0}, createOrReplace={1}")
@@ -1366,6 +1367,47 @@ public abstract class SparkLanceNamespaceTestBase {
       assertEquals(2, dataset.version());
     }
     assertEquals(List.of(RowFactory.create(2)), spark.table(fullName).collectAsList());
+  }
+
+  @Test
+  public void testConcurrentCreateDoesNotOverwrite() throws Exception {
+    String path = tempDir.resolve(generateTableName("concurrent_create") + ".lance").toString();
+    Identifier ident = Identifier.of(new String[0], path);
+    String fullName = catalogName + ".`" + path + "`";
+    StagedTable pending =
+        ((StagingTableCatalog) catalog)
+            .stageCreate(
+                ident,
+                new StructType().add("id", DataTypes.IntegerType),
+                new Transform[0],
+                Collections.singletonMap("app.owner", "loser"));
+    spark.sql(
+        "CREATE TABLE "
+            + fullName
+            + " USING lance TBLPROPERTIES ('app.owner' = 'winner') AS SELECT 7 AS id");
+    assertThrows(RuntimeException.class, pending::commitStagedChanges);
+    pending.abortStagedChanges();
+    LanceDataset loaded = (LanceDataset) catalog.loadTable(ident);
+    try (org.lance.Dataset dataset = Utils.openDatasetBuilder(loaded.readOptions()).build()) {
+      assertEquals(1, dataset.version());
+      assertEquals("winner", dataset.getConfig().get("app.owner"));
+    }
+    assertEquals(List.of(RowFactory.create(7)), spark.table(fullName).collectAsList());
+  }
+
+  @Test
+  public void testFailedCreateCleansUpDeclaration() {
+    String fullName = catalogName + ".default." + generateTableName("failed_create");
+    assertThrows(
+        RuntimeException.class,
+        () ->
+            spark.sql(
+                "CREATE TABLE "
+                    + fullName
+                    + " (id INT) USING lance TBLPROPERTIES ('file_format_version' = 'invalid-format')"));
+    spark.sql("CREATE TABLE " + fullName + " (id INT) USING lance");
+    spark.sql("INSERT INTO " + fullName + " VALUES (1), (2)");
+    assertEquals(2, spark.table(fullName).count());
   }
 
   @Test

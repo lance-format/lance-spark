@@ -117,11 +117,10 @@ public abstract class BaseCdfConfigTest {
                   + "TBLPROPERTIES ('enable_stable_row_ids' = 'true')",
               fqn));
 
-      // CREATE commits the schema at v1 and table properties at v2.
-      // v3: Insert
+      // v2: Insert
       spark.sql(String.format("INSERT INTO %s VALUES (1, 'Alice', 100), (2, 'Bob', 200)", fqn));
 
-      // v4: Update
+      // v3: Update
       spark.sql(String.format("UPDATE %s SET value = value + 10 WHERE id = 1", fqn));
 
       // Verify version columns are populated
@@ -136,19 +135,19 @@ public abstract class BaseCdfConfigTest {
 
       assertEquals(2, rows.size());
 
-      // Alice: updated in v4 — created tracks actual insert version (v3)
+      // Alice: updated in v3 — created tracks actual insert version (v2)
       Row alice = rows.get(0);
       assertEquals(1, alice.getInt(0));
       assertEquals(110, alice.getInt(2));
-      assertEquals(3L, alice.getLong(3)); // created
-      assertEquals(4L, alice.getLong(4)); // updated
+      assertEquals(2L, alice.getLong(3)); // created
+      assertEquals(3L, alice.getLong(4)); // updated
 
-      // Bob: untouched after fragment rewrite — reports actual insert version (v3)
+      // Bob: untouched after fragment rewrite — reports actual insert version (v2)
       Row bob = rows.get(1);
       assertEquals(2, bob.getInt(0));
       assertEquals(200, bob.getInt(2));
-      assertEquals(3L, bob.getLong(3)); // created
-      assertEquals(3L, bob.getLong(4)); // updated
+      assertEquals(2L, bob.getLong(3)); // created
+      assertEquals(2L, bob.getLong(4)); // updated
     } finally {
       spark.stop();
     }

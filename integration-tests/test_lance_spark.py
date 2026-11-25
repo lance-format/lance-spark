@@ -360,6 +360,7 @@ class TestDDLStagingTable:
         assert result[0].name == "Alice"
         assert result[2].id == 3
 
+    @pytest.mark.rest_dir_compatible
     @pytest.mark.parametrize("create_as_select", [False, True], ids=["create", "ctas"])
     def test_create_and_replace_table_properties(self, spark, create_as_select):
         schema = "" if create_as_select else "(id INT)"
@@ -374,6 +375,11 @@ class TestDDLStagingTable:
         props = dict(spark.sql("SHOW TBLPROPERTIES default.test_table").collect())
         assert props["app.owner"] == "old"
         assert props["app.option"] == "persisted"
+
+        spark.sql("INSERT INTO default.test_table VALUES (3)")
+        assert [row.id for row in spark.table("default.test_table").orderBy("id").collect()] == (
+            [1, 3] if create_as_select else [3]
+        )
 
         spark.sql("""
             REPLACE TABLE default.test_table USING lance
