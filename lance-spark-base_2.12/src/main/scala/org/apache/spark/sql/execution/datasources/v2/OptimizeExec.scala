@@ -18,10 +18,12 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, GenericInternalRow}
 import org.apache.spark.sql.catalyst.plans.logical.{LanceNamedArgument, OptimizeOutputType}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.util.LanceSerializeUtil.{decode, encode}
-import org.lance.Dataset
-import org.lance.compaction.{Compaction, CompactionOptions, CompactionTask, RewriteResult}
+import org.lance.{Dataset, DataStorageVersion}
+import org.lance.compaction.{Compaction, CompactionMode, CompactionOptions, CompactionTask, RewriteResult}
 import org.lance.spark.{BaseLanceNamespaceSparkCatalog, LanceDataset, LanceSparkReadOptions}
 import org.lance.spark.utils.{FileFormatVersionResolver, Utils}
+
+import java.util.Locale
 
 import scala.collection.JavaConverters._
 
@@ -31,6 +33,9 @@ case class OptimizeExec(
     args: Seq[LanceNamedArgument]) extends LeafV2CommandExec {
 
   override def output: Seq[Attribute] = OptimizeOutputType.SCHEMA
+
+  // Lance fragment IDs are unsigned 32-bit integers.
+  private val MaxFragmentId = 0xFFFFFFFFL
 
   private def buildOptions(dataset: Dataset): CompactionOptions = {
     val builder = CompactionOptions.builder()
@@ -48,8 +53,20 @@ case class OptimizeExec(
     argsMap.get("batch_size").map(t => builder.withBatchSize(longArg(t)))
     argsMap.get("defer_index_remap").map(t => builder.withDeferIndexRemap(booleanArg(t)))
     argsMap.get("max_source_fragments").map(t => builder.withMaxSourceFragments(longArg(t)))
-    FileFormatVersionResolver.resolveForCompaction(dataset).ifPresent(v =>
-      builder.withDataStorageVersion(v))
+    argsMap.get("compaction_mode").map(t => builder.withCompactionMode(compactionModeArg(t)))
+    argsMap.get("binary_copy_read_batch_bytes").map(t =>
+      builder.withBinaryCopyReadBatchBytes(positiveLongArg(t)))
+    argsMap.get("max_source_rows").map(t => builder.withMaxSourceRows(positiveLongArg(t)))
+    argsMap.get("max_source_bytes").map(t => builder.withMaxSourceBytes(positiveLongArg(t)))
+    argsMap.get("excluded_fragment_ids").map(t =>
+      builder.withExcludedFragmentIds(fragmentIdsArg(t)))
+    // An explicit data_storage_version wins over the version inferred from the dataset.
+    argsMap.get("data_storage_version") match {
+      case Some(t) => builder.withDataStorageVersion(dataStorageVersionArg(t))
+      case None =>
+        FileFormatVersionResolver.resolveForCompaction(dataset).ifPresent(v =>
+          builder.withDataStorageVersion(v))
+    }
 
     builder.build()
   }
@@ -67,6 +84,66 @@ case class OptimizeExec(
     case other =>
       throw new IllegalArgumentException(
         s"'${arg.name}' option must be an integer literal, got: $other")
+  }
+
+  private def positiveLongArg(arg: LanceNamedArgument): Long = {
+    val value = longArg(arg)
+    if (value <= 0) {
+      throw new IllegalArgumentException(
+        s"'${arg.name}' option must be greater than 0, got: $value")
+    }
+    value
+  }
+
+  private def stringArg(arg: LanceNamedArgument): String = arg.value match {
+    case s: String => s
+    case other =>
+      throw new IllegalArgumentException(
+        s"'${arg.name}' option must be a string literal, got: $other")
+  }
+
+  private def compactionModeArg(arg: LanceNamedArgument): CompactionMode = {
+    val raw = stringArg(arg)
+    val value = raw.trim.toLowerCase(Locale.ROOT)
+    CompactionMode.values().find(_.getValue == value).getOrElse(
+      throw new IllegalArgumentException(
+        s"'${arg.name}' option must be one of " +
+          CompactionMode.values().map(m => s"'${m.getValue}'").mkString(", ") +
+          s", got: '$raw'"))
+  }
+
+  // Accepted selectors come from the lance-core release on the classpath.
+  private def dataStorageVersionArg(arg: LanceNamedArgument): DataStorageVersion = {
+    val raw = stringArg(arg)
+    try DataStorageVersion.fromRustString(raw.trim.toLowerCase(Locale.ROOT))
+    catch {
+      case _: IllegalArgumentException =>
+        throw new IllegalArgumentException(
+          s"'${arg.name}' option must be one of " +
+            DataStorageVersion.values().map(v => s"'${v.toRustString}'").mkString(", ") +
+            s", got: '$raw'")
+    }
+  }
+
+  // Fragment IDs are given as a comma-separated string literal, e.g. '1,2,3', since the
+  // OPTIMIZE argument grammar only accepts scalar constants. A single integer is also accepted.
+  private def fragmentIdsArg(arg: LanceNamedArgument): java.util.List[java.lang.Long] = {
+    def invalid(): Nothing =
+      throw new IllegalArgumentException(
+        s"'${arg.name}' option must be a comma-separated list of non-negative fragment IDs " +
+          s"(e.g. '1,2,3'), got: ${arg.value}")
+    val ids = arg.value match {
+      case l: java.lang.Long => Seq(l.longValue())
+      case s: String =>
+        s.split(",", -1).toSeq.map(_.trim).map { id =>
+          if (id.isEmpty || !id.forall(Character.isDigit)) invalid()
+          try id.toLong
+          catch { case _: NumberFormatException => invalid() }
+        }
+      case _ => invalid()
+    }
+    if (ids.exists(id => id < 0 || id > MaxFragmentId)) invalid()
+    ids.map(java.lang.Long.valueOf).asJava
   }
 
   private def booleanArg(arg: LanceNamedArgument): Boolean = arg.value match {

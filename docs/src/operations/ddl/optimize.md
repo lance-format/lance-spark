@@ -30,7 +30,17 @@ The `OPTIMIZE` command supports several options to control compaction behavior:
 | `num_threads` | Long | Number of threads for compaction |
 | `batch_size` | Long | Batch size for processing |
 | `defer_index_remap` | Boolean | Whether to defer index remapping |
-| `max_source_fragments` | Long | Maximum number of source fragments to compact in a single task |
+| `compaction_mode` | String | How data is rewritten: `'reencode'` (default) decodes and re-encodes; `'try_binary_copy'` copies encoded pages of compatible fragments as-is and falls back to `'reencode'` otherwise; `'force_binary_copy'` fails if fragments are not compatible |
+| `binary_copy_read_batch_bytes` | Long | Read batch size in bytes used by binary-copy compaction |
+| `max_source_fragments` | Long | Maximum number of source fragments to compact in a single run (see [Incremental Compaction](#incremental-compaction)) |
+| `max_source_rows` | Long | Maximum number of live source rows to compact in a single run (see [Incremental Compaction](#incremental-compaction)) |
+| `max_source_bytes` | Long | Maximum number of source bytes (data and overlay files) to compact in a single run (see [Incremental Compaction](#incremental-compaction)) |
+| `excluded_fragment_ids` | String | Comma-separated fragment IDs to leave untouched, e.g. `'1,2,3'`. Excluded fragments act as boundaries: fragments on either side are never merged together |
+| `data_storage_version` | String | Data file format version of the rewritten files, e.g. `'stable'`, `'next'` or an exact version. Accepted values and what `'stable'` and `'next'` resolve to are defined by the Lance release in use. The table's default write version is unchanged. Defaults to `lance.compaction.data_storage_version` when configured, otherwise the table's version |
+
+### Incremental Compaction
+
+`max_source_fragments`, `max_source_rows` and `max_source_bytes` bound how much data one `OPTIMIZE` run rewrites, so a large table can be compacted incrementally over several runs. Compaction tasks are included oldest first until adding the next task would exceed any configured limit; the remaining fragments are left for a later run. Each limit must be greater than 0 and is unlimited when unset.
 
 ### Examples
 
@@ -51,6 +61,34 @@ Optimize with multiple options:
         materialize_deletions = TRUE,
         num_threads = 4
     );
+    ```
+
+Compact using binary copy where fragments are compatible, which skips decoding and re-encoding:
+
+=== "SQL"
+    ```sql
+    OPTIMIZE lance.db.users WITH (compaction_mode = 'try_binary_copy');
+    ```
+
+Compact incrementally, rewriting at most about one million rows per run:
+
+=== "SQL"
+    ```sql
+    OPTIMIZE lance.db.users WITH (max_source_rows = 1000000);
+    ```
+
+Compact while leaving specific fragments untouched:
+
+=== "SQL"
+    ```sql
+    OPTIMIZE lance.db.users WITH (excluded_fragment_ids = '3,7');
+    ```
+
+Rewrite compacted fragments with the current stable data file format:
+
+=== "SQL"
+    ```sql
+    OPTIMIZE lance.db.users WITH (data_storage_version = 'stable');
     ```
 
 ## Output
