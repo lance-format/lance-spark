@@ -30,9 +30,9 @@ The `OPTIMIZE` command supports several options to control compaction behavior:
 | `num_threads` | Long | Number of threads for compaction |
 | `batch_size` | Long | Batch size for processing |
 | `defer_index_remap` | Boolean | Whether to defer index remapping |
-| `max_source_fragments` | Long | Maximum number of source fragments to compact in a single run (see [Source limits](#source-limits)) |
 | `compaction_mode` | String | How data is rewritten: `'reencode'` (default) decodes and re-encodes; `'try_binary_copy'` copies encoded pages of compatible fragments as-is and falls back to `'reencode'` otherwise; `'force_binary_copy'` fails if fragments are not compatible |
 | `binary_copy_read_batch_bytes` | Long | Read batch size in bytes used by binary-copy compaction |
+| `max_source_fragments` | Long | Maximum number of source fragments to compact in a single run (see [Source limits](#source-limits)) |
 | `max_source_rows` | Long | Maximum number of live source rows to compact in a single run (see [Source limits](#source-limits)) |
 | `max_source_bytes` | Long | Maximum number of source bytes (data and overlay files) to compact in a single run (see [Source limits](#source-limits)) |
 | `excluded_fragment_ids` | String | Comma-separated fragment IDs to leave untouched, e.g. `'1,2,3'`. Excluded fragments act as boundaries: fragments on either side are never merged together |
