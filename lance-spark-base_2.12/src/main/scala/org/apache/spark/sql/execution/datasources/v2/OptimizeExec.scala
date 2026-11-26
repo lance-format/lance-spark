@@ -103,21 +103,26 @@ case class OptimizeExec(
   }
 
   private def compactionModeArg(arg: LanceNamedArgument): CompactionMode = {
-    val value = stringArg(arg).trim.toLowerCase(Locale.ROOT)
+    val raw = stringArg(arg)
+    val value = raw.trim.toLowerCase(Locale.ROOT)
     CompactionMode.values().find(_.getValue == value).getOrElse(
       throw new IllegalArgumentException(
         s"'${arg.name}' option must be one of " +
           CompactionMode.values().map(m => s"'${m.getValue}'").mkString(", ") +
-          s", got: '${stringArg(arg)}'"))
+          s", got: '$raw'"))
   }
 
+  // Accepted selectors come from the lance-core release on the classpath.
   private def dataStorageVersionArg(arg: LanceNamedArgument): DataStorageVersion = {
-    val value = stringArg(arg).trim.toLowerCase(Locale.ROOT)
-    DataStorageVersion.values().find(_.toRustString == value).getOrElse(
-      throw new IllegalArgumentException(
-        s"'${arg.name}' option must be one of " +
-          DataStorageVersion.values().map(v => s"'${v.toRustString}'").mkString(", ") +
-          s", got: '${stringArg(arg)}'"))
+    val raw = stringArg(arg)
+    try DataStorageVersion.fromRustString(raw.trim.toLowerCase(Locale.ROOT))
+    catch {
+      case _: IllegalArgumentException =>
+        throw new IllegalArgumentException(
+          s"'${arg.name}' option must be one of " +
+            DataStorageVersion.values().map(v => s"'${v.toRustString}'").mkString(", ") +
+            s", got: '$raw'")
+    }
   }
 
   // Fragment IDs are given as a comma-separated string literal, e.g. '1,2,3', since the
