@@ -31,6 +31,7 @@ import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRef;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.LanceSparkSQLProperties;
 import org.lance.spark.internal.ArrowBatchAdapter;
 import org.lance.spark.search.LanceSearchQuery;
 import org.lance.spark.search.LanceSearchScan;
@@ -215,9 +216,10 @@ public class LanceScanBuilder
       }
 
       // Namespace-configured full-text search executes server-side via queryTable (single
-      // partition). A full-text query without a namespace, or against a catalog-only namespace such
-      // as Glue that does not implement queryTable, falls through to the local per-fragment scan
-      // below. COUNT(*) is excluded because countTableRows has no full-text field.
+      // partition). A full-text query without a namespace, against a catalog-only namespace such
+      // as Glue that does not implement queryTable, or with the distributed-search flag set,
+      // falls through to the local per-fragment scan below. COUNT(*) is excluded because
+      // countTableRows has no full-text field.
       if (shouldNamespaceFtsScan()) {
         return buildNamespaceFtsScan();
       }
@@ -605,6 +607,7 @@ public class LanceScanBuilder
 
     return readOptions.getFullTextQuery() != null
         && LanceRuntime.supportsQueryTable(namespaceImpl)
+        && !LanceSparkSQLProperties.isSearchDistributedEnabled()
         && !pushedAggregation.isPresent();
   }
 

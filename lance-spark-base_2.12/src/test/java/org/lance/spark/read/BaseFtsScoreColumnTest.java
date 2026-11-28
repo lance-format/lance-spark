@@ -17,6 +17,7 @@ import org.lance.namespace.DirectoryNamespace;
 import org.lance.namespace.model.QueryTableRequest;
 import org.lance.namespace.model.QueryTableResponse;
 import org.lance.spark.LanceSparkReadOptions;
+import org.lance.spark.LanceSparkSQLProperties;
 import org.lance.spark.read.BaseFtsCatalogOnlyNamespaceTest.CatalogOnlyNamespace;
 
 import org.apache.spark.sql.Dataset;
@@ -24,6 +25,7 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -183,6 +185,59 @@ public abstract class BaseFtsScoreColumnTest {
   }
 
   @Test
+  public void testDistributedMatchScoreRankingMatchesNamespace() throws Exception {
+    // Distinct BM25 score per match: a wrong top-k or per-fragment merge reorders the ids, where
+    // a uniform-score fixture would accept any matching subset.
+    String table = createScoreTable("namespace", null);
+    String query =
+        "SELECT id, _score FROM "
+            + table
+            + " WHERE lance_match(body, 'hello') ORDER BY _score DESC, id LIMIT 3";
+    assertBothRoutesAgree(
+        query,
+        Arrays.asList(4, 1, 3),
+        "namespace ORDER BY _score DESC LIMIT 3 must rank by distinct score");
+  }
+
+  @Test
+  public void testDistributedSearchScoreRankingMatchesNamespace() throws Exception {
+    Assumptions.assumeFalse(
+        spark.version().startsWith("3.4."),
+        "Spark 3.4 table-valued functions do not support named arguments");
+    String table = createScoreTable("namespace", null);
+    String query =
+        "SELECT id, _score FROM SEARCH(table => '"
+            + table
+            + "', query => 'hello', search_columns => array('body'), limit => 3)";
+    assertBothRoutesAgree(
+        query, Arrays.asList(4, 1, 3), "SEARCH must rank by distinct score on both routes");
+  }
+
+  private void assertBothRoutesAgree(String query, List<Integer> expectedIds, String message) {
+    spark.conf().set(LanceSparkSQLProperties.SEARCH_DISTRIBUTED_ENABLED, "true");
+    List<Row> distributedRows = spark.sql(query).collectAsList();
+
+    spark.conf().set(LanceSparkSQLProperties.SEARCH_DISTRIBUTED_ENABLED, "false");
+    List<Row> namespaceRows = spark.sql(query).collectAsList();
+
+    assertEquals(
+        expectedIds,
+        namespaceRows.stream().map(row -> row.getInt(0)).collect(Collectors.toList()),
+        message);
+    assertEquals(
+        namespaceRows.stream().map(row -> row.getInt(0)).collect(Collectors.toList()),
+        distributedRows.stream().map(row -> row.getInt(0)).collect(Collectors.toList()),
+        "distributed route must return the same ids in the same order");
+    for (int i = 0; i < namespaceRows.size(); i++) {
+      assertEquals(
+          namespaceRows.get(i).getFloat(1),
+          distributedRows.get(i).getFloat(1),
+          1e-4f,
+          "score mismatch for row " + i);
+    }
+  }
+
+  @Test
   public void testNamespaceScoreTopNDeclinesUnsupportedOrdering() throws Exception {
     String table = createScoreTable("namespace", null);
     String query = "SELECT id, _score FROM " + table + " WHERE lance_match(body, 'hello')";
@@ -268,25 +323,18 @@ public abstract class BaseFtsScoreColumnTest {
                 : new String[] {
                   ", 'stored-one'", ", 'unmatched'", ", NULL", ", 'stored-four'", ", 'stored-five'"
                 };
-    spark.sql(
-        "INSERT INTO "
-            + table
-            + " VALUES "
-            + "(1, 'hello hello padding'"
-            + scores[0]
-            + "), "
-            + "(2, 'unmatched document'"
-            + scores[1]
-            + "), "
-            + "(3, 'hello padding'"
-            + scores[2]
-            + "), "
-            + "(4, 'hello hello hello padding'"
-            + scores[3]
-            + "), "
-            + "(5, 'hello world extra padding'"
-            + scores[4]
-            + ")");
+    // One INSERT per row: each insert commits its own fragment, so the distributed route has to
+    // merge per-fragment top-k candidates instead of sorting a single fragment.
+    String[] values = {
+      "(1, 'hello hello padding'" + scores[0] + ")",
+      "(2, 'unmatched document'" + scores[1] + ")",
+      "(3, 'hello padding'" + scores[2] + ")",
+      "(4, 'hello hello hello padding'" + scores[3] + ")",
+      "(5, 'hello world extra padding'" + scores[4] + ")",
+    };
+    for (String value : values) {
+      spark.sql("INSERT INTO " + table + " VALUES " + value);
+    }
     createFtsIndex(table);
     RecordingDirectoryNamespace.requests.clear();
     return table;

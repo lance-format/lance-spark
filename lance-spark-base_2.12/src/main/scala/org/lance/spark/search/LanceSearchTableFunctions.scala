@@ -23,7 +23,7 @@ import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.types.{DataTypes, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.lance.ipc.FullTextQuery
-import org.lance.spark.{LanceDataset, LanceSparkReadOptions}
+import org.lance.spark.{LanceDataset, LanceSparkReadOptions, LanceSparkSQLProperties}
 import org.lance.spark.search.LanceSearchQuery.SearchType
 import org.lance.spark.utils.{FullTextQueryUtils, Utils}
 
@@ -347,31 +347,26 @@ object LanceSearchTableFunctions {
   }
 
   private def shouldUseDistributed(query: LanceSearchQuery): Boolean = {
-    val spark = SparkSession.active
-    // Not String.toBoolean: it throws on anything but "true"/"false", and this runs for every
-    // VECTOR_SEARCH.
-    val enabled = java.lang.Boolean.parseBoolean(
-      spark.conf.get("spark.sql.lance.search.distributed.enabled", "false"))
-    if (!enabled) return false
+    if (!LanceSparkSQLProperties.isSearchDistributedEnabled) return false
     // A distributed plan can only prefilter, while namespace execution defaults to post-filtering
     // the top k, which returns a different set of rows. Make the user pick.
     val hasFilter = query.getFilter != null && !query.getFilter.isEmpty
     if (hasFilter && java.lang.Boolean.TRUE != query.getPrefilter) {
       throw new IllegalArgumentException(
         "Distributed VECTOR_SEARCH with a filter requires prefilter=true, which returns the true " +
-          "filtered top k; disable spark.sql.lance.search.distributed.enabled to keep namespace " +
-          "post-filter semantics, where the filter is applied after the top k is chosen")
+          s"filtered top k; disable ${LanceSparkSQLProperties.SEARCH_DISTRIBUTED_ENABLED} to keep " +
+          "namespace post-filter semantics, where the filter is applied after the top k is chosen")
     }
     if (java.lang.Boolean.FALSE == query.getPrefilter) {
       throw new IllegalArgumentException(
         "Distributed VECTOR_SEARCH does not support prefilter=false; disable " +
-          "spark.sql.lance.search.distributed.enabled to use namespace execution")
+          s"${LanceSparkSQLProperties.SEARCH_DISTRIBUTED_ENABLED} to use namespace execution")
     }
     // lance-core's Java scanner cannot apply distance bounds yet.
     if (query.getLowerBound != null || query.getUpperBound != null) {
       throw new IllegalArgumentException(
         "Distributed VECTOR_SEARCH does not support lower_bound or upper_bound; disable " +
-          "spark.sql.lance.search.distributed.enabled to use namespace execution")
+          s"${LanceSparkSQLProperties.SEARCH_DISTRIBUTED_ENABLED} to use namespace execution")
     }
     true
   }
