@@ -31,11 +31,17 @@ public final class LanceSparkSQLProperties {
 
   public static String getConf(String key, String defaultValue) {
     Option<SparkSession> session = SparkSession.getActiveSession();
-    if (session.isEmpty()) {
+    // Skip stopped sessions: Spark 3.4/3.5 still return them from both the active and the default
+    // lookups after close().
+    if (isUnusable(session)) {
       session = SparkSession.getDefaultSession();
     }
-    return session.isDefined()
-        ? session.get().conf().get(key, defaultValue)
-        : SQLConf.get().getConfString(key, defaultValue);
+    return isUnusable(session)
+        ? SQLConf.get().getConfString(key, defaultValue)
+        : session.get().conf().get(key, defaultValue);
+  }
+
+  private static boolean isUnusable(Option<SparkSession> session) {
+    return session.isEmpty() || session.get().sparkContext().isStopped();
   }
 }
